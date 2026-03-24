@@ -1,0 +1,13 @@
+[default]
+extend-ignore-identifiers-re = [
+]
+
+[default.extend-words]
+# builded = "built"
+
+[type.po]
+extend-glob = ["*.po"]
+check-file = false
+
+[files]
+extend-exclude = ["*.lock", "*.toml", "*.log", "eslint.config.js", "*.json"]

@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS generated files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs and local temp files
+*.log
+tmp/
+temp/
