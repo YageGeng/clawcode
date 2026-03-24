@@ -1,0 +1,55 @@
+# Commit title format:
+# <emoji> <type>(<scope>): <imperative summary>
+#
+# Examples:
+# :sparkles: feat(parser): add support for wildcard imports
+# :bug: fix(cli): handle empty input arguments
+# :books: docs(readme): document local development setup
+#
+# Description of changes:
+# - Summarize the concrete changes made.
+# - Explain the motivation when it is not obvious.
+# - Reference issues/PRs as #<issue-number> and GH-<PR-number> when relevant.
+#
+# Keep each commit focused on one category when possible.
+#
+# Common types:
+# feat     - new feature
+# fix      - bug fix
+# refactor - code restructuring without behavior change
+# docs     - documentation only
+# test     - tests added or updated
+# chore    - maintenance / tooling / housekeeping
+# ci       - CI configuration and automation
+# perf     - performance improvements
+# style    - formatting / style-only changes
+# build    - build system or dependency changes
+# revert   - revert a previous commit
+#
+# Common emojis:
+# :art:                    style / formatting / cosmetic
+# :sparkles:               new feature
+# :bug:                    bug fix
+# :recycle:                refactor
+# :books:                  documentation
+# :rotating_light:         tests
+# :racehorse:              performance
+# :scissors:               removal
+# :floppy_disk:            data
+# :bar_chart:              plots / metrics
+# :bookmark:               version tag / release
+# :wrench:                 tooling / config / chore
+# :construction_worker:    ci / automation
+#
+# Template:
+# <emoji> <type>(<scope>): <imperative summary>
+#
+# Description of changes:
+# - 
+# - 
+#
+# Motivation:
+# - 
+#
+# References:
+# - 
