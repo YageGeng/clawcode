@@ -1,0 +1,42 @@
+[package]
+name = "llm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+snafu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+
+http = "1"
+reqwest-eventsource = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+eventsource-stream = { workspace = true }
+reqwest-middleware = { version = "0.5", optional = true, features = [
+  "json",
+  "multipart",
+  "charset",
+  "http2",
+] }
+
+bytes = { workspace = true }
+
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+futures = { workspace = true }
+futures-util = { workspace = true }
+futures-timer = { version = "3" }
+async-stream = { workspace = true }
+pin-project-lite = { workspace = true }
+
+tracing = { workspace = true }
+tracing-futures = { version = "0.2", features = ["futures-03"] }
+
+nanoid = { workspace = true }
+mime = { workspace = true }
+mime_guess = { workspace = true }
+
+[features]
+default = ["reqwest-middleware-rustls"]
+reqwest-middleware = ["dep:reqwest-middleware"]
+reqwest-middleware-rustls = ["reqwest-middleware", "reqwest-middleware/rustls"]

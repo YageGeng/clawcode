@@ -4,3 +4,29 @@ members = ["crates/*"]
 exclude = ["crates/proxy"]
 
 [workspace.dependencies]
+# error handling
+snafu = { version = "0.9", features = ["backtrace"] }
+
+# json
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+schemars = { version = "1" }
+
+# http request
+reqwest-eventsource = { version = "0.6" }
+reqwest = { version = "0.13", features = ["json", "stream", "multipart"] }
+eventsource-stream = { version = "0.2" }
+
+# async
+tokio = "1"
+bytes = { version = "1" }
+futures = { version = "0.3" }
+futures-util = { version = "0.3" }
+async-stream = { version = "0.3" }
+pin-project-lite = "0.2"
+
+nanoid = "0.4"
+mime = "0.3"
+mime_guess = "2"
+
+tracing = "0.1"
