@@ -99,3 +99,14 @@ pub(crate) enum ApiResponse<T> {
     Ok(T),
     Err(ApiErrorResponse),
 }
+
+impl<H> Client<H>
+where
+    H: HttpClientExt + Clone + std::fmt::Debug + Default + Send + Sync + 'static,
+{
+    /// Create a Completions API client from this Responses API client.
+    /// Useful for switching to the traditional Chat Completions API.
+    pub fn completions_api(self) -> CompletionsClient<H> {
+        self.with_ext(OpenAICompletionsExt)
+    }
+}

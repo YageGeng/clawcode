@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snafu::Snafu;
 
@@ -111,7 +110,6 @@ pub struct CompletionResponse<T> {
     /// Used to pair reasoning input items with their output items in multi-turn.
     pub message_id: Option<String>,
 }
-
 
 pub struct CompletionRequestBuilder<M: CompletionModel> {
     model: M,

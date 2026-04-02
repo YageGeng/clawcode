@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 
 use crate::completion::request::ToolDefinition;
 
@@ -27,4 +28,22 @@ pub trait Tool: Sized {
     /// Both the arguments and return value are a String since these values are meant to
     /// be the output and input of LLM models (respectively)
     fn call(&self, args: Self::Args) -> impl Future<Output = Result<Self::Output, Self::Error>>;
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum ToolError {
+    #[snafu(whatever, display("Tool call error: {source:?}, message: {message}"))]
+    ToolCall {
+        message: String,
+        // Having a `source` is optional, but if it is present, it must
+        // have this specific attribute and type:
+        #[snafu(source(from(Box<dyn std::error::Error + 'static+Send+Sync>, Some)))]
+        source: Option<Box<dyn std::error::Error + 'static + Send + Sync>>,
+    },
+    /// Error caused by a de/serialization fail
+    Json {
+        source: serde_json::Error,
+        stage: String,
+    },
 }
