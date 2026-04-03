@@ -1,13 +1,13 @@
 use std::{env, io, sync::Arc};
 
-use agent_core::{
+use async_trait::async_trait;
+use kernel::{
     events::{AgentEvent, EventSink},
     model::LlmAgentModel,
     runtime::{AgentRunner, RunRequest},
     session::{InMemorySessionStore, SessionId, ThreadId},
     tools::{builtin::default_read_only_tools, registry::ToolRegistry},
 };
-use async_trait::async_trait;
 use llm::providers::openai;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -17,12 +17,12 @@ const DEFAULT_MODEL: &str = "gpt-5.4";
 /// Reads a required environment variable for the CLI adapter.
 fn require_env(name: &str) -> Result<String, io::Error> {
     env::var(name)
-        .map_err(|_| io::Error::other(format!("missing {name}; set it before running agent-cli")))
+        .map_err(|_| io::Error::other(format!("missing {name}; set it before running cli")))
 }
 
 /// Prints the CLI usage string expected by the integration test.
 fn usage_message() -> &'static str {
-    "usage: cargo run -p agent-cli -- \"your prompt\""
+    "usage: cargo run -p cli -- \"your prompt\""
 }
 
 /// Builds a short prompt preview so tracing stays readable for long requests.
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let prompt = env::args().skip(1).collect::<Vec<_>>().join(" ");
     if prompt.trim().is_empty() {
-        info!("agent-cli invoked without prompt");
+        info!("cli invoked without prompt");
         eprintln!("{}", usage_message());
         std::process::exit(2);
     }
@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = require_env("OPENAI_API_KEY")?;
     let model_name = env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
-    info!(base_url = %base_url, model = %model_name, prompt = %prompt_preview(&prompt), "starting agent-cli request");
+    info!(base_url = %base_url, model = %model_name, prompt = %prompt_preview(&prompt), "starting cli request");
 
     let client = openai::Client::builder()
         .base_url(base_url)

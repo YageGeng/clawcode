@@ -1,4 +1,4 @@
-use agent_core::{
+use kernel::{
     session::{SessionId, ThreadId},
     tools::{
         Tool, ToolCallRequest, ToolContext,

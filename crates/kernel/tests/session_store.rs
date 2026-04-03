@@ -1,4 +1,4 @@
-use agent_core::session::{InMemorySessionStore, SessionId, SessionStore, ThreadId, Turn};
+use kernel::session::{InMemorySessionStore, SessionId, SessionStore, ThreadId, Turn};
 use llm::{completion::Message, usage::Usage};
 
 #[tokio::test]

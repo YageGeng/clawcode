@@ -1,6 +1,6 @@
 use snafu::Snafu;
 
-/// Shared runtime error type for the first `agent-core` milestone.
+/// Shared runtime error type for the first `kernel` milestone.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {

@@ -1,4 +1,4 @@
-use agent_core::model::{ModelOutput, model_response_from_completion};
+use kernel::model::{ModelOutput, model_response_from_completion};
 use llm::{
     completion::{AssistantContent, CompletionResponse},
     one_or_many::OneOrMany,

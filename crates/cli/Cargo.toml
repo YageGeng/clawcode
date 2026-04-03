@@ -1,10 +1,10 @@
 [package]
-name = "agent-cli"
+name = "cli"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+kernel = { path = "../kernel" }
 async-trait = { workspace = true }
 llm = { path = "../llm" }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }

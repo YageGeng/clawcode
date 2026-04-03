@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use agent_core::{
+use async_trait::async_trait;
+use kernel::{
     Error, Result,
     events::{AgentEvent, RecordingEventSink},
     model::{AgentModel, ModelRequest, ModelResponse},
@@ -9,7 +10,6 @@ use agent_core::{
     session::{InMemorySessionStore, SessionId, SessionStore, ThreadId},
     tools::{ToolCallRequest, builtin::default_read_only_tools, registry::ToolRegistry},
 };
-use async_trait::async_trait;
 use llm::{completion::Message, usage::Usage};
 use tokio::sync::Mutex;
 
