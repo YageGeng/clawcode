@@ -1,0 +1,18 @@
+[package]
+name = "agent-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+llm = { path = "../llm" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+snafu = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
