@@ -6,5 +6,5 @@ pub mod session;
 pub mod tools;
 
 pub use error::{Error, Result};
-pub use runtime::{AgentLoopConfig, AgentRunner, RunRequest, RunResult};
+pub use runtime::{Agent, AgentConfig, AgentContext, AgentDeps, AgentLoopConfig, AgentRunRequest};
 pub use session::{InMemorySessionStore, SessionId, SessionStore, ThreadId, Turn};

@@ -2,12 +2,38 @@ use async_trait::async_trait;
 use llm::usage::Usage;
 use tokio::sync::Mutex;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentStage {
+    ModelRequesting,
+    Responding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolStage {
+    Calling,
+    Completed,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     RunStarted {
         session_id: String,
         thread_id: String,
         input: String,
+    },
+    StatusUpdated {
+        stage: AgentStage,
+        message: Option<String>,
+        iteration: Option<usize>,
+        tool_id: Option<String>,
+        tool_call_id: Option<String>,
+    },
+    ToolStatusUpdated {
+        stage: ToolStage,
+        name: String,
+        iteration: Option<usize>,
+        tool_id: String,
+        tool_call_id: String,
     },
     ModelRequested {
         message_count: usize,

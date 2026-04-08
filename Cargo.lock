@@ -193,8 +193,10 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "kernel",
  "llm",
+ "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -846,6 +848,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "llm",
  "serde",
  "serde_json",

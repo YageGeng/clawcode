@@ -9,6 +9,7 @@ use snafu::ensure;
 use crate::{
     Result,
     events::{AgentEvent, EventSink},
+    events::{AgentStage, ToolStage},
     model::{AgentModel, ModelOutput, ModelRequest, ModelResponse},
     session::{SessionId, ThreadId},
     tools::{ToolContext, executor::ToolExecutor, registry::ToolRegistry},
@@ -57,6 +58,7 @@ struct ToolCallBatch {
     total_tool_calls: usize,
     max_tool_calls: usize,
     tool_context: ToolContext,
+    iteration: usize,
 }
 
 /// Runs the first milestone's completion -> tool -> completion loop.
@@ -84,6 +86,15 @@ where
     for iteration in 1..=config.max_iterations {
         let tool_definitions = registry.definitions().await;
         events
+            .publish(AgentEvent::StatusUpdated {
+                stage: AgentStage::ModelRequesting,
+                message: None,
+                iteration: Some(iteration),
+                tool_id: None,
+                tool_call_id: None,
+            })
+            .await;
+        events
             .publish(AgentEvent::ModelRequested {
                 message_count: working_messages.len(),
                 tool_count: tool_definitions.len(),
@@ -108,6 +119,15 @@ where
 
         match output {
             ModelOutput::Text(text) => {
+                events
+                    .publish(AgentEvent::StatusUpdated {
+                        stage: AgentStage::Responding,
+                        message: Some(text.clone()),
+                        iteration: Some(iteration),
+                        tool_id: None,
+                        tool_call_id: None,
+                    })
+                    .await;
                 return finish_text_response(
                     events,
                     message_id,
@@ -129,6 +149,7 @@ where
                         total_tool_calls,
                         max_tool_calls: config.max_tool_calls,
                         tool_context: ToolContext::new(session_id.clone(), thread_id.clone()),
+                        iteration,
                     },
                     &mut working_messages,
                     &mut new_messages,
@@ -190,7 +211,9 @@ where
         total_tool_calls,
         max_tool_calls,
         tool_context,
+        iteration,
     } = batch;
+
     let call_count = calls.len();
 
     ensure!(
@@ -202,9 +225,27 @@ where
     );
 
     let mut assistant_content = Vec::new();
+    let primary_tool_name = calls.first().map(|call| call.name.clone());
+    let primary_tool_id = calls.first().map(|call| call.id.clone());
+
+    let primary_tool_call_id = calls
+        .first()
+        .map(|call| call.call_id.clone().unwrap_or_else(|| call.id.clone()));
+
     if let Some(text) = text {
         assistant_content.push(AssistantContent::text(text));
     }
+
+    events
+        .publish(AgentEvent::ToolStatusUpdated {
+            stage: ToolStage::Calling,
+            name: primary_tool_name.clone().unwrap_or_default(),
+            iteration: Some(iteration),
+            tool_id: primary_tool_id.clone().unwrap_or_default(),
+            tool_call_id: primary_tool_call_id.clone().unwrap_or_default(),
+        })
+        .await;
+
     for call in &calls {
         events
             .publish(AgentEvent::ToolCallRequested {
@@ -240,6 +281,16 @@ where
         working_messages.push(result.message.clone());
         new_messages.push(result.message);
     }
+
+    events
+        .publish(AgentEvent::ToolStatusUpdated {
+            stage: ToolStage::Completed,
+            name: primary_tool_name.unwrap_or_default(),
+            iteration: Some(iteration),
+            tool_id: primary_tool_id.unwrap_or_default(),
+            tool_call_id: primary_tool_call_id.unwrap_or_default(),
+        })
+        .await;
 
     Ok(total_tool_calls + call_count)
 }

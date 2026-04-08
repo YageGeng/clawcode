@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use llm::completion::message::ToolChoice;
 use llm::completion::{
     AssistantContent, CompletionModel, CompletionResponse, Message, ToolDefinition,
@@ -100,12 +101,42 @@ where
             builder = builder.preamble(system_prompt);
         }
 
-        let response = builder.send().await.context(ModelSnafu {
-            stage: "agent-model-send".to_string(),
+        let mut stream = builder.stream().await.context(ModelSnafu {
+            stage: "agent-model-stream".to_string(),
         })?;
 
-        model_response_from_completion(response)
+        while let Some(item) = stream.next().await {
+            item.context(ModelSnafu {
+                stage: "agent-model-stream-next".to_string(),
+            })?;
+        }
+
+        model_response_from_stream(stream)
     }
+}
+
+/// Normalizes a completed streaming response into the runtime's smaller output model.
+pub fn model_response_from_stream<T>(
+    response: llm::streaming::StreamingCompletionResponse<T>,
+) -> Result<ModelResponse>
+where
+    T: Clone + Unpin + llm::usage::GetTokenUsage,
+{
+    let message_id = response.message_id;
+    let usage = response
+        .response
+        .as_ref()
+        .and_then(|raw| raw.token_usage())
+        .unwrap_or_default();
+
+    let completion = CompletionResponse {
+        choice: response.choice,
+        usage,
+        raw_response: (),
+        message_id,
+    };
+
+    model_response_from_completion(completion)
 }
 
 /// Normalizes a raw `llm` completion response into the runtime's smaller output model.

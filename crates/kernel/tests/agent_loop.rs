@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kernel::{
-    Error, Result,
-    events::{AgentEvent, RecordingEventSink},
+    Agent, AgentContext, AgentDeps, AgentLoopConfig, AgentRunRequest, Error, Result,
+    events::{AgentEvent, AgentStage, RecordingEventSink, ToolStage},
     model::{AgentModel, ModelRequest, ModelResponse},
-    runtime::{AgentLoopConfig, AgentRunner, RunRequest},
+    runtime::{AgentRunner, RunRequest},
     session::{InMemorySessionStore, SessionId, SessionStore, ThreadId},
     tools::{ToolCallRequest, builtin::default_read_only_tools, registry::ToolRegistry},
 };
@@ -108,6 +108,72 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
     assert!(matches!(&events[0], AgentEvent::RunStarted { .. }));
     assert!(events.iter().any(|event| matches!(
         event,
+        AgentEvent::ToolStatusUpdated { stage, name, iteration, tool_id, tool_call_id } if *stage == ToolStage::Calling && name == "echo" && *iteration == Some(1) && tool_id == "call_1" && tool_call_id == "call_1"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStatusUpdated { stage, name, iteration, tool_id, tool_call_id } if *stage == ToolStage::Completed && name == "echo" && *iteration == Some(1) && tool_id == "call_1" && tool_call_id == "call_1"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
         AgentEvent::ToolCallCompleted { name, output } if name == "echo" && output == "hello"
     )));
+}
+
+#[tokio::test]
+async fn agent_runs_with_stable_context_and_persists_the_turn() {
+    let model = Arc::new(SequenceModel::new(vec![ModelResponse::text(
+        "hello from agent",
+        usage(8),
+    )]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let registry = Arc::new(ToolRegistry::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let session_id = SessionId::new();
+    let thread_id = ThreadId::new();
+
+    let agent = Agent::new(
+        AgentContext::new(session_id.clone(), thread_id.clone()),
+        AgentDeps::new(model, store.clone(), registry, sink.clone()),
+    )
+    .with_system_prompt("You are a helpful agent.");
+
+    let result = agent.run(AgentRunRequest::new("say hello")).await.unwrap();
+
+    assert_eq!(result.text, "hello from agent");
+    assert_eq!(result.usage.total_tokens, 8);
+
+    let messages = store
+        .load_messages(session_id, thread_id, 20)
+        .await
+        .unwrap();
+    assert_eq!(messages[0], Message::user("say hello"));
+    assert_eq!(messages[1], Message::assistant("hello from agent"));
+
+    let events = sink.snapshot().await;
+    assert!(matches!(&events[0], AgentEvent::RunStarted { .. }));
+    assert!(
+        matches!(&events[1], AgentEvent::StatusUpdated { stage, iteration, .. } if *stage == AgentStage::ModelRequesting && *iteration == Some(1))
+    );
+    assert!(matches!(&events[2], AgentEvent::ModelRequested { .. }));
+    assert!(
+        matches!(&events[3], AgentEvent::StatusUpdated { stage, iteration, .. } if *stage == AgentStage::Responding && *iteration == Some(1))
+    );
+    assert!(matches!(&events[4], AgentEvent::TextProduced { .. }));
+    assert!(matches!(&events[5], AgentEvent::RunFinished { .. }));
+}
+
+#[tokio::test]
+async fn agent_context_can_fork_child_identity_for_the_same_thread() {
+    let parent = AgentContext::new(SessionId::new(), ThreadId::new()).with_name("planner");
+    let child = parent.fork("reviewer");
+
+    assert_eq!(child.session_id, parent.session_id);
+    assert_eq!(child.thread_id, parent.thread_id);
+    assert_eq!(
+        child.parent_agent_id.as_deref(),
+        Some(parent.agent_id.as_str())
+    );
+    assert_eq!(child.name.as_deref(), Some("reviewer"));
+    assert_ne!(child.agent_id, parent.agent_id);
 }

@@ -10,3 +10,5 @@ llm = { path = "../llm" }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
