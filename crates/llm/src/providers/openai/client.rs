@@ -8,7 +8,7 @@ use crate::{
 // ================================================================
 // Main OpenAI Client
 // ================================================================
-const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
+pub const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 
 // ================================================================
 // OpenAI Responses API Extension
