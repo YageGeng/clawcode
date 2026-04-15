@@ -4,6 +4,7 @@ use crate::completion::message::ReasoningContent;
 use crate::completion::{ClientSnafu, CompletionError, ProviderSnafu, SerializeSnafu};
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::http_client::{HttpClientExt, HttpSnafu};
+use crate::providers::openai::codex::OPENAI_CODEX_API_BASE_URL;
 use crate::providers::openai::responses_api::{
     ReasoningSummary, ResponsesCompletionModel, ResponsesUsage,
 };
@@ -292,7 +293,10 @@ where
         // Build the request with proper headers for SSE
         let client = self.client.clone();
 
-        let mut event_source = GenericEventSource::new(client, req);
+        let is_cdx_api = self.client.base_url().trim_end_matches('/')
+            == OPENAI_CODEX_API_BASE_URL.trim_end_matches('/');
+        let mut event_source =
+            GenericEventSource::with_content_type_check(client, req, !is_cdx_api);
 
         let stream = stream! {
             let mut final_usage = ResponsesUsage::new();

@@ -2,6 +2,7 @@
 //!
 //! By default when creating a completion client, this is the API that gets used.
 use super::client::Client;
+use super::codex::OPENAI_CODEX_API_BASE_URL;
 use super::completion::{InputAudio, ToolChoice};
 use super::responses_api::streaming::StreamingCompletionResponse;
 use crate::completion::message::{
@@ -925,6 +926,46 @@ where
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<CompletionRequest, CompletionError> {
         let mut req = CompletionRequest::try_from((self.model.clone(), completion_request))?;
+
+        if self.client.base_url().trim_end_matches('/')
+            == OPENAI_CODEX_API_BASE_URL.trim_end_matches('/')
+        {
+            // Codex API requires responses to not be stored, otherwise it rejects the request.
+            req.additional_parameters.store = Some(false);
+
+            let mut instructions = Vec::new();
+            let mut non_system_messages = Vec::new();
+
+            for item in req.input.iter() {
+                match item {
+                    InputItem {
+                        role: Some(Role::System),
+                        input: InputContent::Message(Message::System { content, .. }),
+                        ..
+                    } => {
+                        instructions.extend(content.iter().map(
+                            |system_content| match system_content {
+                                SystemContent::InputText { text } => text.clone(),
+                            },
+                        ));
+                    }
+                    item => {
+                        non_system_messages.push(item.clone());
+                    }
+                }
+            }
+
+            if !instructions.is_empty() {
+                req.instructions = Some(instructions.join("\n\n"));
+                req.input =
+                    OneOrMany::many(non_system_messages).map_err(|_| CompletionError::Request {
+                        message: "OpenAI Responses request input must contain at least one item"
+                            .into(),
+                        source: None,
+                    })?;
+            }
+        }
+
         req.tools.extend(self.tools.clone());
 
         Ok(req)
@@ -1801,5 +1842,109 @@ impl FromStr for UserContent {
         Ok(UserContent::InputText {
             text: s.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion::{self, Message};
+    use crate::one_or_many::OneOrMany;
+
+    /// Builds a client bound to the Codex base URL for test coverage.
+    fn codex_client() -> super::super::client::Client {
+        super::super::client::Client::builder()
+            .base_url(OPENAI_CODEX_API_BASE_URL)
+            .api_key("test-token")
+            .build()
+            .expect("builder should create a codex responses client")
+    }
+
+    /// Verifies Codex mode moves system messages from input into top-level instructions.
+    #[test]
+    fn codex_request_moves_system_messages_to_instructions() {
+        let model = super::ResponsesCompletionModel::with_model(codex_client(), "codex-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: Some("Prompt preamble".to_string()),
+            chat_history: OneOrMany::many(vec![
+                Message::System {
+                    content: "History system".to_string(),
+                },
+                Message::User {
+                    content: OneOrMany::one(crate::completion::message::UserContent::from(
+                        "ask".to_string(),
+                    )),
+                },
+            ])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("codex request should be valid");
+
+        assert_eq!(
+            completion_request.instructions,
+            Some("Prompt preamble\n\nHistory system".to_string())
+        );
+        assert_eq!(completion_request.additional_parameters.store, Some(false));
+        assert!(
+            completion_request
+                .input
+                .iter()
+                .all(|item| !matches!(item.role, Some(Role::System)))
+        );
+        assert_eq!(completion_request.input.len(), 1);
+    }
+
+    /// Verifies non-Codex clients preserve legacy system messages in the input payload.
+    #[test]
+    fn codex_request_keeps_system_items_for_non_codex_client() {
+        let normal_client = super::super::client::Client::builder()
+            .base_url("https://api.openai.com/v1")
+            .api_key("test-token")
+            .build()
+            .expect("builder should create openai responses client");
+        let model = super::ResponsesCompletionModel::with_model(normal_client, "openai-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: Some("Prompt preamble".to_string()),
+            chat_history: OneOrMany::many(vec![
+                Message::System {
+                    content: "History system".to_string(),
+                },
+                Message::User {
+                    content: OneOrMany::one(crate::completion::message::UserContent::from(
+                        "ask".to_string(),
+                    )),
+                },
+            ])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("openai request should be valid");
+
+        assert!(completion_request.instructions.is_none());
+        assert_eq!(completion_request.additional_parameters.store, None);
+        assert_eq!(completion_request.input.len(), 3);
+        assert!(matches!(
+            completion_request.input.first_ref().role,
+            Some(Role::System)
+        ));
     }
 }
