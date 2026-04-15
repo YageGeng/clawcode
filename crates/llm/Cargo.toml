@@ -8,11 +8,14 @@ snafu = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
+chrono = { workspace = true }
 
 http = "1"
 reqwest-eventsource = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+reqwest = { workspace = true, features = ["json", "stream", "multipart", "charset"] }
 eventsource-stream = { workspace = true }
+base64 = "0.22"
+serde_urlencoded = "0.7"
 reqwest-middleware = { version = "0.5", optional = true, features = [
   "json",
   "multipart",
@@ -22,7 +25,7 @@ reqwest-middleware = { version = "0.5", optional = true, features = [
 
 bytes = { workspace = true }
 
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
 futures-timer = { version = "3" }
@@ -40,3 +43,6 @@ mime_guess = { workspace = true }
 default = ["reqwest-middleware-rustls"]
 reqwest-middleware = ["dep:reqwest-middleware"]
 reqwest-middleware-rustls = ["reqwest-middleware", "reqwest-middleware/rustls"]
+
+[dev-dependencies]
+tempfile = "3"

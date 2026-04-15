@@ -14,7 +14,7 @@ schemars = { version = "1" }
 
 # http request
 reqwest-eventsource = { version = "0.6" }
-reqwest = { version = "0.13", features = ["json", "stream", "multipart"] }
+reqwest = { version = "0.13", features = ["json", "stream", "multipart", "charset"] }
 eventsource-stream = { version = "0.2" }
 
 # async
@@ -26,7 +26,7 @@ async-stream = { version = "0.3" }
 pin-project-lite = "0.2"
 async-trait = "0.1"
 
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 nanoid = "0.4"
 mime = "0.3"
 mime_guess = "2"
