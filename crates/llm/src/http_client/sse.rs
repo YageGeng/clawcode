@@ -69,6 +69,8 @@ pin_project! {
     pub struct GenericEventSource<HttpClient, RequestBody, Retry = ExponentialBackoff> {
         client: HttpClient,
         req: Request<RequestBody>,
+        // Whether to enforce `Content-Type: text/event-stream` on the streaming response.
+        require_event_stream_content_type: bool,
         retry_policy: Retry,
         last_event_id: Option<String>,
         #[pin]
@@ -89,6 +91,26 @@ where
         Self {
             client,
             req,
+            require_event_stream_content_type: true,
+            retry_policy: DEFAULT_RETRY,
+            last_event_id: None,
+            state,
+        }
+    }
+
+    /// Create a new event source and configure the Content-Type check behavior for SSE responses.
+    pub fn with_content_type_check(
+        client: HttpClient,
+        req: Request<RequestBody>,
+        require_event_stream_content_type: bool,
+    ) -> Self {
+        let response_future = Self::create_response_future(&client, &req, None);
+        let state = SourceState::Connecting { response_future };
+
+        Self {
+            client,
+            req,
+            require_event_stream_content_type,
             retry_policy: DEFAULT_RETRY,
             last_event_id: None,
             state,
@@ -109,6 +131,7 @@ where
         GenericEventSource {
             client,
             req,
+            require_event_stream_content_type: true,
             retry_policy,
             last_event_id: None,
             state,
@@ -182,7 +205,8 @@ where
                     match response_future.poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(response)) => {
-                            match check_response(response) {
+                            match check_response(response, *this.require_event_stream_content_type)
+                            {
                                 Ok(response) => {
                                     // Transition: Connecting -> Open
                                     let mut event_stream = response.into_body().eventsource();
@@ -226,7 +250,8 @@ where
                     match response_future.poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(response)) => {
-                            match check_response(response) {
+                            match check_response(response, *this.require_event_stream_content_type)
+                            {
                                 Ok(response) => {
                                     // Transition: Reconnecting -> Open (retry cycle complete)
                                     let mut event_stream = response.into_body().eventsource();
@@ -342,13 +367,20 @@ where
     }
 }
 
-fn check_response<T>(response: Response<T>) -> Result<Response<T>, super::Error> {
+fn check_response<T>(
+    response: Response<T>,
+    require_event_stream_content_type: bool,
+) -> Result<Response<T>, super::Error> {
     let StatusCode::OK = response.status() else {
         return Err(InvalidCodeSnafu {
             status: response.status(),
         }
         .build());
     };
+
+    if !require_event_stream_content_type {
+        return Ok(response);
+    }
 
     let content_type =
         if let Some(content_type) = response.headers().get(&reqwest::header::CONTENT_TYPE) {
@@ -378,5 +410,46 @@ fn check_response<T>(response: Response<T>) -> Result<Response<T>, super::Error>
             header: content_type.clone(),
         }
         .build())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_response;
+    use crate::http_client::Error;
+    use http::{HeaderValue, Response, StatusCode};
+    use reqwest::header::CONTENT_TYPE;
+
+    #[test]
+    fn check_response_rejects_missing_content_type_when_required() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Vec::<u8>::new())
+            .expect("build ok");
+
+        let result = check_response(response, true);
+
+        assert!(matches!(result, Err(Error::InvalidContentType { .. })));
+    }
+
+    #[test]
+    fn check_response_accepts_missing_content_type_when_not_required() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Vec::<u8>::new())
+            .expect("build ok");
+
+        assert!(check_response(response, false).is_ok());
+    }
+
+    #[test]
+    fn check_response_accepts_event_stream_content_type() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))
+            .body(Vec::<u8>::new())
+            .expect("build ok");
+
+        assert!(check_response(response, true).is_ok());
     }
 }
