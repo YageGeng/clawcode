@@ -18,7 +18,7 @@ use crate::json_utils;
 use crate::one_or_many::{OneOrMany, string_or_one_or_many};
 
 use crate::completion;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use snafu::{OptionExt, ResultExt, whatever};
 use tracing::{Instrument, Level, enabled, info_span};
@@ -280,21 +280,31 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                                 ..
                             },
                         ) => {
+                            let call_id = call_id.ok_or_else(|| {
+                                ProviderSnafu {
+                                    msg:
+                                        "Tool result `call_id` is required for OpenAI Responses API"
+                                            .to_string(),
+                                }
+                                .build()
+                            })?;
                             for tool_result_content in tool_content {
-                                let crate::completion::message::ToolResultContent::Text(Text {
-                                    text,
-                                }) = tool_result_content
-                                else {
-                                    return Err(ProviderSnafu {
-                                        msg: "This thing only supports text!",
-                                    }
-                                    .build());
+                                let text = match tool_result_content {
+                                    crate::completion::message::ToolResultContent::Text(Text {
+                                        text,
+                                    }) => text,
+                                    other => serde_json::to_string(&other).map_err(|_| {
+                                        ProviderSnafu {
+                                            msg: "Tool result content could not be serialized"
+                                                .to_string(),
+                                        }
+                                        .build()
+                                    })?,
                                 };
-                                // let output = serde_json::from_str(&text)?;
                                 items.push(InputItem {
                                     role: None,
                                     input: InputContent::FunctionCallOutput(ToolResult {
-                                        call_id: require_call_id(call_id.clone(), "Tool result")?,
+                                        call_id: call_id.clone(),
                                         output: text,
                                         status: ToolStatus::Completed,
                                     }),
@@ -534,6 +544,151 @@ fn is_json_null(value: &Value) -> bool {
 
 fn is_false(value: &bool) -> bool {
     !value
+}
+
+/// Normalizes a tool name for providers that only allow `[A-Za-z0-9_-]`.
+///
+/// OpenAI/Codex rejects `/` and other characters for function tool names. We preserve
+/// valid identifier characters and replace all others with `_`.
+fn sanitize_openai_tool_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "tool".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn is_alias_only_any_of_variant(value: &Value) -> bool {
+    match value {
+        Value::Object(variant) => {
+            variant.contains_key("required")
+                && !variant.contains_key("type")
+                && variant.len() <= 2
+                && variant
+                    .keys()
+                    .all(|key| key == "required" || key == "additionalProperties")
+        }
+        _ => false,
+    }
+}
+
+/// Removes fields that Codex does not accept in function schemas while keeping the
+/// remaining schema as strict as OpenAI's requirements.
+fn sanitize_codex_tool_schema(schema: &mut Value) {
+    if let Value::Object(root) = schema {
+        // Codex rejects top-level schema combinators and enums.
+        if let Some(Value::Array(any_of)) = root.get("anyOf") {
+            // The tool schemas in this project intentionally model `session_id`/`sessionId`
+            // as alias variants here; we keep both properties in the object schema and
+            // drop those variants to satisfy strict Codex payload constraints.
+            if any_of.iter().all(is_alias_only_any_of_variant) {
+                root.remove("anyOf");
+
+                // ACP/MCP requires `sessionId` for compatibility, but Codex
+                // cannot validate alias-only variants in strict schema mode. Keep the
+                // canonical `session_id` key for callability and drop the alias form.
+                if let Some(Value::Object(properties)) = root.get_mut("properties") {
+                    properties.remove("sessionId");
+                }
+            }
+        }
+
+        // `_meta` is an ACP/MCP transport envelope field and should not be sent
+        // in tool arguments. Remove it from the public schema so strict Codex
+        // validation does not expect caller-provided metadata.
+        if let Some(Value::Object(properties)) = root.get_mut("properties") {
+            properties.remove("_meta");
+        }
+
+        root.remove("oneOf");
+        root.remove("allOf");
+        root.remove("enum");
+        root.remove("not");
+
+        // Ensure required stays consistent with the sanitized properties list.
+        let property_keys = match root.get("properties") {
+            Some(Value::Object(properties)) => properties
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+
+        if let Some(Value::Array(required)) = root.get_mut("required") {
+            required.retain(|required_key| {
+                required_key
+                    .as_str()
+                    .is_some_and(|k| property_keys.iter().any(|property_key| property_key == k))
+            });
+        }
+
+        // Recurse through nested schema objects to keep codex sanitization
+        // consistent for aliases in nested structures.
+        if let Some(Value::Object(nested)) = root.get_mut("properties") {
+            for (_, property_schema) in nested.iter_mut() {
+                sanitize_codex_tool_schema(property_schema);
+            }
+        }
+
+        if let Some(Value::Object(defs)) = root.get_mut("$defs") {
+            for (_, def_schema) in defs.iter_mut() {
+                sanitize_codex_tool_schema(def_schema);
+            }
+        }
+
+        if let Some(Value::Array(any_of)) = root.get_mut("anyOf") {
+            for schema in any_of.iter_mut() {
+                sanitize_codex_tool_schema(schema);
+            }
+        }
+
+        if let Some(Value::Array(one_of)) = root.get_mut("oneOf") {
+            for schema in one_of.iter_mut() {
+                sanitize_codex_tool_schema(schema);
+            }
+        }
+
+        if let Some(Value::Array(all_of)) = root.get_mut("allOf") {
+            for schema in all_of.iter_mut() {
+                sanitize_codex_tool_schema(schema);
+            }
+        }
+    }
+}
+
+/// Canonicalizes provider tool-call arguments so kernel/runtime code only sees the
+/// snake_case internal representation for fields that may arrive in multiple forms.
+fn normalize_provider_tool_arguments(mut arguments: Value) -> Value {
+    if let Value::Object(ref mut map) = arguments {
+        // Codex may emit both `session_id` and `sessionId` in the same tool call even
+        // when the public schema only exposes one canonical field. Keep the internal
+        // snake_case key so downstream serde alias handling does not trip on duplicates.
+        if map.contains_key("session_id") && map.contains_key("sessionId") {
+            map.remove("sessionId");
+        }
+    }
+
+    arguments
+}
+
+/// Deserializes stringified provider tool arguments and canonicalizes known aliases.
+fn deserialize_tool_call_arguments<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let arguments = json_utils::stringified_json::deserialize(deserializer)?;
+    Ok(normalize_provider_tool_arguments(arguments))
 }
 
 impl ResponsesToolDefinition {
@@ -927,9 +1082,12 @@ where
     ) -> Result<CompletionRequest, CompletionError> {
         let mut req = CompletionRequest::try_from((self.model.clone(), completion_request))?;
 
-        if self.client.base_url().trim_end_matches('/')
-            == OPENAI_CODEX_API_BASE_URL.trim_end_matches('/')
-        {
+        let is_codex = self.client.base_url().trim_end_matches('/')
+            == OPENAI_CODEX_API_BASE_URL.trim_end_matches('/');
+
+        // Codex requests require slightly different response handling and stricter
+        // payload constraints, so we apply Codex-specific normalization here.
+        if is_codex {
             // Codex API requires responses to not be stored, otherwise it rejects the request.
             req.additional_parameters.store = Some(false);
 
@@ -967,6 +1125,18 @@ where
         }
 
         req.tools.extend(self.tools.clone());
+
+        // OpenAI/Codex tool name validation does not allow `/`, so normalize function
+        // tool names to match the required character class while leaving hosted tool names
+        // unchanged.
+        if is_codex {
+            for tool in req.tools.iter_mut() {
+                if tool.kind == "function" {
+                    tool.name = sanitize_openai_tool_name(&tool.name);
+                    sanitize_codex_tool_schema(&mut tool.parameters);
+                }
+            }
+        }
 
         Ok(req)
     }
@@ -1267,7 +1437,10 @@ pub struct OutputReasoning {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OutputFunctionCall {
     pub id: String,
-    #[serde(with = "json_utils::stringified_json")]
+    #[serde(
+        serialize_with = "json_utils::stringified_json::serialize",
+        deserialize_with = "deserialize_tool_call_arguments"
+    )]
     pub arguments: serde_json::Value,
     pub call_id: String,
     pub name: String,
@@ -1631,32 +1804,39 @@ impl TryFrom<message::Message> for Vec<Message> {
                 // If there are messages with both tool results and user content, openai will only
                 //  handle tool results. It's unlikely that there will be both.
                 if !tool_results.is_empty() {
-                    tool_results
-                        .into_iter()
-                        .map(|content| match content {
-                            message::UserContent::ToolResult(message::ToolResult {
-                                call_id,
-                                content,
-                                ..
-                            }) => Ok::<_, message::MessageError>(Message::ToolResult {
-                                tool_call_id: call_id.ok_or_else(|| {
-                                    ConversionSnafu{
-                                        msg: "Tool result `call_id` is required for OpenAI Responses API",
-                                     }.build()
-                                })?,
-                                output: {
-                                    let res = content.first();
-                                    match res {
-                                        completion::message::ToolResultContent::Text(Text {
-                                            text,
-                                        }) => text,
-                                        _ => return  Err(ConversionSnafu{ msg: "This API only currently supports text tool results" }.build())
-                                    }
-                                },
-                            }),
-                            _ => unreachable!(),
-                        })
-                        .collect::<Result<Vec<_>, _>>()
+                    let mut outputs = Vec::new();
+
+                    for content in tool_results {
+                        let message::UserContent::ToolResult(tool_result) = content else {
+                            unreachable!();
+                        };
+
+                        let call_id = tool_result.call_id.ok_or_else(|| {
+                            ConversionSnafu {
+                                msg: "Tool result `call_id` is required for OpenAI Responses API",
+                            }
+                            .build()
+                        })?;
+
+                        for tool_result_content in tool_result.content {
+                            let output = match tool_result_content {
+                                completion::message::ToolResultContent::Text(Text { text }) => text,
+                                    other => serde_json::to_string(&other).map_err(|_| {
+                                        ConversionSnafu {
+                                            msg: "This API only currently supports serializable tool result parts",
+                                        }
+                                        .build()
+                                    })?,
+                                };
+
+                            outputs.push(Message::ToolResult {
+                                tool_call_id: call_id.clone(),
+                                output,
+                            });
+                        }
+                    }
+
+                    Ok(outputs)
                 } else {
                     let other_content = other_content
                         .into_iter()
@@ -1777,31 +1957,30 @@ impl TryFrom<message::Message> for Vec<Message> {
                     .build()
                 })?;
 
-                match content.first() {
-                    crate::completion::message::AssistantContent::Text(Text { text }) => {
-                        Ok(vec![Message::Assistant {
-                            id: assistant_message_id.clone(),
-                            status: ToolStatus::Completed,
-                            content: OneOrMany::one(AssistantContentType::Text(
+                let mut reasoning_items = Vec::new();
+                let mut visible_contents = Vec::new();
+
+                for assistant_content in content {
+                    match assistant_content {
+                        crate::completion::message::AssistantContent::Text(Text { text }) => {
+                            visible_contents.push(AssistantContentType::Text(
                                 AssistantContent::OutputText(Text { text }),
-                            )),
-                            name: None,
-                        }])
-                    }
-                    crate::completion::message::AssistantContent::ToolCall(
-                        crate::completion::message::ToolCall {
-                            id,
-                            call_id,
-                            function,
-                            ..
-                        },
-                    ) => Ok(vec![Message::Assistant {
-                        content: OneOrMany::one(AssistantContentType::ToolCall(
+                            ));
+                        }
+                        crate::completion::message::AssistantContent::ToolCall(
+                            crate::completion::message::ToolCall {
+                                id,
+                                call_id,
+                                function,
+                                ..
+                            },
+                        ) => visible_contents.push(AssistantContentType::ToolCall(
                             OutputFunctionCall {
                                 call_id: call_id.ok_or_else(|| {
-                                    ConversionSnafu{
-                                        msg: "Tool call `call_id` is required for OpenAI Responses API",
-                                     }.build()
+                                    ConversionSnafu {
+                                    msg: "Tool call `call_id` is required for OpenAI Responses API",
+                                }
+                                .build()
                                 })?,
                                 arguments: function.arguments,
                                 id,
@@ -1809,27 +1988,42 @@ impl TryFrom<message::Message> for Vec<Message> {
                                 status: ToolStatus::Completed,
                             },
                         )),
-                        id: assistant_message_id.clone(),
-                        name: None,
-                        status: ToolStatus::Completed,
-                    }]),
-                    crate::completion::message::AssistantContent::Reasoning(reasoning) => {
-                        let openai_reasoning = openai_reasoning_from_core(&reasoning)?;
-                        Ok(vec![Message::Assistant {
-                            content: OneOrMany::one(AssistantContentType::Reasoning(
-                                openai_reasoning,
-                            )),
-                            id: assistant_message_id,
-                            name: None,
-                            status: ToolStatus::Completed,
-                        }])
-                    }
-                    crate::completion::message::AssistantContent::Image(_) => {
-                        Err(ConversionSnafu {
-                            msg: "Assistant image content is not supported in OpenAI Responses API",
-                         }.build())
+                        crate::completion::message::AssistantContent::Reasoning(reasoning) => {
+                            reasoning_items.push(Message::Assistant {
+                                content: OneOrMany::one(AssistantContentType::Reasoning(
+                                    openai_reasoning_from_core(&reasoning)?,
+                                )),
+                                id: assistant_message_id.clone(),
+                                name: None,
+                                status: ToolStatus::Completed,
+                            });
+                        }
+                        crate::completion::message::AssistantContent::Image(_) => {
+                            return Err(ConversionSnafu {
+                                msg: "Assistant image content is not supported in OpenAI Responses API",
+                            }
+                            .build());
+                        }
                     }
                 }
+
+                let mut assistant_items = reasoning_items;
+
+                if !visible_contents.is_empty() {
+                    assistant_items.push(Message::Assistant {
+                        content: OneOrMany::many(visible_contents).map_err(|_| {
+                            ConversionSnafu {
+                                msg: "Assistant message did not contain OpenAI Responses-compatible content",
+                            }
+                            .build()
+                        })?,
+                        id: assistant_message_id,
+                        name: None,
+                        status: ToolStatus::Completed,
+                    });
+                }
+
+                Ok(assistant_items)
             }
         }
     }
@@ -1848,7 +2042,8 @@ impl FromStr for UserContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::completion::{self, Message};
+    use crate::completion;
+    use crate::completion::Message as CoreMessage;
     use crate::one_or_many::OneOrMany;
 
     /// Builds a client bound to the Codex base URL for test coverage.
@@ -1868,10 +2063,10 @@ mod tests {
             model: None,
             preamble: Some("Prompt preamble".to_string()),
             chat_history: OneOrMany::many(vec![
-                Message::System {
+                CoreMessage::System {
                     content: "History system".to_string(),
                 },
-                Message::User {
+                CoreMessage::User {
                     content: OneOrMany::one(crate::completion::message::UserContent::from(
                         "ask".to_string(),
                     )),
@@ -1904,6 +2099,399 @@ mod tests {
         assert_eq!(completion_request.input.len(), 1);
     }
 
+    /// Verifies Codex sanitizes function-tool names before sending them.
+    #[test]
+    fn codex_request_sanitizes_function_tool_names() {
+        let model = super::ResponsesCompletionModel::with_model(codex_client(), "codex-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![CoreMessage::User {
+                content: OneOrMany::one(crate::completion::message::UserContent::from(
+                    "test".to_string(),
+                )),
+            }])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![completion::ToolDefinition {
+                name: "fs/read_text_file".to_string(),
+                description: "namespaced read alias".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            tool_choice: None,
+            additional_params: Some(serde_json::json!({
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "write/text_file",
+                        "description": "namespaced write alias",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ]
+            })),
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("codex request should be valid");
+
+        let function_names = completion_request
+            .tools
+            .iter()
+            .filter(|tool| tool.kind == "function")
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(function_names.len(), 2);
+        assert!(function_names.contains(&"fs_read_text_file"));
+        assert!(function_names.contains(&"write_text_file"));
+        assert!(!function_names.contains(&"fs/read_text_file"));
+        assert!(!function_names.contains(&"write/text_file"));
+    }
+
+    #[test]
+    fn codex_request_sanitizes_function_schema_top_level_constraints() {
+        let model = super::ResponsesCompletionModel::with_model(codex_client(), "codex-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![CoreMessage::User {
+                content: OneOrMany::one(crate::completion::message::UserContent::from(
+                    "test".to_string(),
+                )),
+            }])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![completion::ToolDefinition {
+                name: "fs/read_text_file".to_string(),
+                description: "namespaced read alias".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "sessionId": { "type": "string" },
+                    },
+                    "required": ["path"],
+                    "anyOf": [
+                        { "required": ["session_id"] },
+                        { "required": ["sessionId"] }
+                    ]
+                }),
+            }],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("codex request should be valid");
+
+        let function_tool = completion_request
+            .tools
+            .into_iter()
+            .find(|tool| tool.kind == "function")
+            .expect("function tool should be present");
+
+        assert!(function_tool.parameters.get("anyOf").is_none());
+        assert!(function_tool.parameters.get("oneOf").is_none());
+        assert!(function_tool.parameters.get("allOf").is_none());
+        assert!(function_tool.parameters.get("enum").is_none());
+        assert!(function_tool.parameters.get("not").is_none());
+
+        let required = function_tool.parameters["required"]
+            .as_array()
+            .expect("parameters should include required array");
+        assert!(required.contains(&serde_json::json!("path")));
+        assert!(!required.contains(&serde_json::json!("_meta")));
+        assert!(!required.contains(&serde_json::json!("sessionId")));
+        assert!(!required.is_empty());
+
+        let properties = function_tool.parameters["properties"]
+            .as_object()
+            .expect("parameters should include properties object");
+        assert!(properties.contains_key("path"));
+        assert!(!properties.contains_key("_meta"));
+        assert!(!properties.contains_key("sessionId"));
+        assert!(properties.contains_key("session_id"));
+    }
+
+    /// Validates recursive `_meta` stripping and required-key pruning inside nested
+    /// tool schemas while preserving canonical `session_id` usage.
+    #[test]
+    fn codex_request_sanitizes_nested_schema_aliases() {
+        let model = super::ResponsesCompletionModel::with_model(codex_client(), "codex-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![CoreMessage::User {
+                content: OneOrMany::one(crate::completion::message::UserContent::from(
+                    "test nested schema".to_string(),
+                )),
+            }])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![
+                completion::ToolDefinition {
+                    name: "write/text_file".to_string(),
+                    description: "nested alias and _meta case".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "_meta": { "type": "object", "properties": { "mcp": {"type":"string"}}},
+                            "session_id": { "type": "string" },
+                            "sessionId": { "type": "string" },
+                            "options": {
+                                "type": "object",
+                                "properties": {
+                                    "_meta": { "type": "object", "properties": { "inner": {"type":"string"}}},
+                                    "recursive": { "type": "boolean" },
+                                },
+                                "required": ["_meta", "recursive"],
+                            },
+                        },
+                        "required": ["path", "_meta", "session_id", "sessionId", "options"],
+                        "anyOf": [
+                            { "required": ["session_id"] },
+                            { "required": ["sessionId"] }
+                        ]
+                    }),
+                },
+                completion::ToolDefinition {
+                    name: "fs/read_text_file".to_string(),
+                    description: "second namespaced tool alias case".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "sessionId": { "type": "string" },
+                            "session_id": { "type": "string" },
+                            "path": { "type": "string" },
+                            "_meta": { "type": "object", "properties": { "mcp": {"type":"string"}}},
+                        },
+                        "required": ["_meta", "sessionId", "session_id", "path"],
+                        "anyOf": [
+                            { "required": ["session_id"] },
+                            { "required": ["sessionId"] }
+                        ]
+                    }),
+                },
+            ],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("codex request should be valid");
+
+        let function_tools = completion_request
+            .tools
+            .into_iter()
+            .filter(|tool| tool.kind == "function")
+            .collect::<Vec<_>>();
+
+        assert_eq!(function_tools.len(), 2);
+
+        let mut function_names = function_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        function_names.sort_unstable();
+        assert_eq!(function_names, vec!["fs_read_text_file", "write_text_file"]);
+
+        for tool in function_tools {
+            let properties = tool.parameters["properties"]
+                .as_object()
+                .expect("parameters should include properties object");
+
+            assert!(!properties.contains_key("_meta"));
+            assert!(!properties.contains_key("sessionId"));
+            assert!(properties.contains_key("session_id"));
+
+            let required = tool.parameters["required"]
+                .as_array()
+                .expect("parameters should include required array");
+            assert!(!required.contains(&serde_json::json!("_meta")));
+            assert!(!required.contains(&serde_json::json!("sessionId")));
+            assert!(required.contains(&serde_json::json!("session_id")));
+
+            let options = properties.get("options").and_then(Value::as_object);
+            if let Some(options) = options {
+                let nested_properties = options
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .expect("options should include object properties");
+                assert!(!nested_properties.contains_key("_meta"));
+
+                let nested_required = options
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .expect("options should include required array when path uses nested schema");
+                assert!(!nested_required.contains(&serde_json::json!("_meta")));
+            }
+        }
+    }
+
+    /// Verifies provider tool-call decoding canonicalizes duplicate session aliases.
+    #[test]
+    fn output_function_call_deserialization_normalizes_duplicate_session_aliases() {
+        let output: Output = serde_json::from_value(serde_json::json!({
+            "type": "function_call",
+            "id": "fc_123",
+            "arguments": "{\"path\":\"/tmp/poem.txt\",\"session_id\":\"sess-1\",\"sessionId\":\"sess-1\"}",
+            "call_id": "call_123",
+            "name": "fs_write_text_file",
+            "status": "completed"
+        }))
+        .expect("function call output should deserialize");
+
+        let Output::FunctionCall(function_call) = output else {
+            panic!("expected function call output");
+        };
+
+        assert_eq!(
+            function_call.arguments["path"],
+            serde_json::json!("/tmp/poem.txt")
+        );
+        assert_eq!(
+            function_call.arguments["session_id"],
+            serde_json::json!("sess-1")
+        );
+        assert!(function_call.arguments.get("sessionId").is_none());
+    }
+
+    #[test]
+    fn user_tool_result_with_mixed_content_flattens_to_multiple_function_call_outputs() {
+        let tool_result_content = crate::one_or_many::OneOrMany::many(vec![
+            crate::completion::message::ToolResultContent::text("status: ok"),
+            crate::completion::message::ToolResultContent::image_url(
+                "https://example.com/diagram.svg",
+                Some(crate::completion::message::ImageMediaType::SVG),
+                Some(crate::completion::message::ImageDetail::High),
+            ),
+        ])
+        .expect("tool result content should be non-empty");
+
+        let user_message = crate::completion::message::Message::User {
+            content: OneOrMany::one(
+                crate::completion::message::UserContent::tool_result_with_call_id(
+                    "tool-msg-1",
+                    "tool-call-1".to_string(),
+                    tool_result_content,
+                ),
+            ),
+        };
+
+        let openai_items: Vec<super::Message> = user_message
+            .try_into()
+            .expect("tool-result user message conversion should succeed");
+
+        assert_eq!(openai_items.len(), 2);
+
+        assert!(matches!(
+            &openai_items[0],
+            Message::ToolResult {
+                tool_call_id,
+                output: _,
+            } if tool_call_id == "tool-call-1"
+        ));
+        assert!(matches!(
+            &openai_items[1],
+            Message::ToolResult {
+                tool_call_id,
+                output: _,
+            } if tool_call_id == "tool-call-1"
+        ));
+
+        if let Message::ToolResult { output, .. } = &openai_items[0] {
+            assert_eq!(output, "status: ok");
+        } else {
+            panic!("expected first tool result output")
+        }
+
+        let expected_image_output =
+            serde_json::to_string(&crate::completion::message::ToolResultContent::image_url(
+                "https://example.com/diagram.svg",
+                Some(crate::completion::message::ImageMediaType::SVG),
+                Some(crate::completion::message::ImageDetail::High),
+            ))
+            .expect("image tool result content should serialize");
+
+        if let Message::ToolResult { output, .. } = &openai_items[1] {
+            assert_eq!(output, &expected_image_output);
+        } else {
+            panic!("expected second tool result output")
+        }
+    }
+
+    #[test]
+    fn assistant_message_with_multiple_content_items_preserves_all_content() {
+        let assistant_message = crate::completion::message::Message::Assistant {
+            id: Some("assistant-message-1".to_string()),
+            content: OneOrMany::many(vec![
+                crate::completion::message::AssistantContent::text("hello"),
+                crate::completion::message::AssistantContent::tool_call_with_call_id(
+                    "tool-1",
+                    "assistant-call-1".to_string(),
+                    "calculator",
+                    serde_json::json!({"expression": "2+2"}),
+                ),
+            ])
+            .expect("assistant content should be non-empty"),
+        };
+
+        let openai_items: Vec<super::Message> = assistant_message
+            .try_into()
+            .expect("assistant message conversion should succeed");
+
+        assert_eq!(openai_items.len(), 1);
+
+        match &openai_items[0] {
+            Message::Assistant {
+                content,
+                id,
+                status: _,
+                ..
+            } => {
+                assert_eq!(id, "assistant-message-1");
+                assert_eq!(content.len(), 2);
+                match content.first_ref() {
+                    AssistantContentType::Text(AssistantContent::OutputText(Text { text })) => {
+                        assert_eq!(text, "hello");
+                    }
+                    _ => panic!("expected assistant text content as first item"),
+                }
+
+                let rest_content = content.rest();
+                let tool_call = rest_content
+                    .first()
+                    .expect("assistant content should include tool call as second item");
+
+                match tool_call {
+                    AssistantContentType::ToolCall(OutputFunctionCall {
+                        id: tool_id,
+                        arguments,
+                        name: tool_name,
+                        ..
+                    }) => {
+                        assert_eq!(tool_id, "tool-1");
+                        assert_eq!(tool_name, "calculator");
+                        assert_eq!(arguments, &serde_json::json!({"expression": "2+2"}));
+                    }
+                    _ => panic!("expected assistant tool call content as second item"),
+                }
+            }
+            _ => panic!("expected assistant message"),
+        }
+    }
+
     /// Verifies non-Codex clients preserve legacy system messages in the input payload.
     #[test]
     fn codex_request_keeps_system_items_for_non_codex_client() {
@@ -1917,10 +2505,10 @@ mod tests {
             model: None,
             preamble: Some("Prompt preamble".to_string()),
             chat_history: OneOrMany::many(vec![
-                Message::System {
+                CoreMessage::System {
                     content: "History system".to_string(),
                 },
-                Message::User {
+                CoreMessage::User {
                     content: OneOrMany::one(crate::completion::message::UserContent::from(
                         "ask".to_string(),
                     )),
@@ -1946,5 +2534,118 @@ mod tests {
             completion_request.input.first_ref().role,
             Some(Role::System)
         ));
+    }
+
+    /// Verifies non-Codex responses clients keep function-tool names as-is.
+    #[test]
+    fn non_codex_request_keeps_unsanitized_function_tool_names() {
+        let normal_client = super::super::client::Client::builder()
+            .base_url("https://api.openai.com/v1")
+            .api_key("test-token")
+            .build()
+            .expect("builder should create openai responses client");
+        let model = super::ResponsesCompletionModel::with_model(normal_client, "openai-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![CoreMessage::User {
+                content: OneOrMany::one(crate::completion::message::UserContent::from(
+                    "test".to_string(),
+                )),
+            }])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![completion::ToolDefinition {
+                name: "fs/read_text_file".to_string(),
+                description: "namespaced read alias".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("openai request should be valid");
+
+        let function_names = completion_request
+            .tools
+            .iter()
+            .filter(|tool| tool.kind == "function")
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(function_names.len(), 1);
+        assert!(function_names.contains(&"fs/read_text_file"));
+        assert!(!function_names.contains(&"fs_read_text_file"));
+    }
+
+    /// Verifies non-Codex responses requests keep canonical namespaced session schema
+    /// without alias-only combinators that would become unsatisfiable under sanitization.
+    #[test]
+    fn non_codex_request_keeps_canonical_namespaced_session_schema() {
+        let normal_client = super::super::client::Client::builder()
+            .base_url("https://api.openai.com/v1")
+            .api_key("test-token")
+            .build()
+            .expect("builder should create openai responses client");
+        let model = super::ResponsesCompletionModel::with_model(normal_client, "openai-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![CoreMessage::User {
+                content: OneOrMany::one(crate::completion::message::UserContent::from(
+                    "test schema".to_string(),
+                )),
+            }])
+            .expect("chat history should contain at least one message"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![completion::ToolDefinition {
+                name: "fs/read_text_file".to_string(),
+                description: "namespaced read alias".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "line": { "type": "integer", "minimum": 1 },
+                        "limit": { "type": "integer", "minimum": 1 },
+                        "session_id": { "type": "string" }
+                    },
+                    "required": ["path", "session_id"]
+                }),
+            }],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("openai request should be valid");
+
+        let function_tool = completion_request
+            .tools
+            .into_iter()
+            .find(|tool| tool.kind == "function")
+            .expect("function tool should be present");
+
+        let properties = function_tool.parameters["properties"]
+            .as_object()
+            .expect("parameters should include properties object");
+        assert!(properties.contains_key("path"));
+        assert!(properties.contains_key("session_id"));
+        assert!(!properties.contains_key("sessionId"));
+        assert!(!properties.contains_key("_meta"));
+        assert!(function_tool.parameters.get("anyOf").is_none());
+
+        let required = function_tool.parameters["required"]
+            .as_array()
+            .expect("parameters should include required array");
+        assert!(required.contains(&serde_json::json!("path")));
+        assert!(required.contains(&serde_json::json!("session_id")));
+        assert!(!required.contains(&serde_json::json!("sessionId")));
     }
 }

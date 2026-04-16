@@ -1,5 +1,7 @@
 use snafu::Snafu;
 
+use std::io;
+
 /// Shared runtime error type for the first `kernel` milestone.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -40,6 +42,16 @@ pub enum Error {
         tool: String,
         message: String,
         stage: String,
+    },
+
+    #[snafu(display("tool `{tool}` requires approval before execution on `{stage}`",))]
+    ToolApprovalRequired { tool: String, stage: String },
+
+    #[snafu(display("tool `{tool}` IO error on `{stage}`: {source}"))]
+    ToolIo {
+        tool: String,
+        stage: String,
+        source: io::Error,
     },
 }
 

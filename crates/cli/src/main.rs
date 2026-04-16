@@ -6,7 +6,10 @@ use std::{env, io};
 use kernel::{
     model::LlmAgentModel,
     session::InMemorySessionStore,
-    tools::{builtin::default_read_only_tools, registry::ToolRegistry},
+    tools::{
+        builtin::{default_file_tools, default_read_only_tools},
+        registry::ToolRegistry,
+    },
 };
 use llm::providers::openai;
 use llm::providers::openai::{OpenAiCodexConfig, OpenAiCodexSessionManager, build_codex_headers};
@@ -146,13 +149,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Arc::new(LlmAgentModel::new(llm_model));
     let store = Arc::new(InMemorySessionStore::default());
     let registry = Arc::new(ToolRegistry::default());
+
+    // Register read-only and filesystem tools for the CLI model session.
     for tool in default_read_only_tools() {
+        registry.register_arc(tool).await;
+    }
+    for tool in default_file_tools() {
         registry.register_arc(tool).await;
     }
 
     info!(
         tool_count = registry.definitions().await.len(),
-        "registered read-only tools"
+        "registered read-only and file tools"
     );
 
     let result = runtime::run_cli_prompt(model, store, registry, prompt).await?;

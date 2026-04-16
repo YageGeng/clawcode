@@ -333,14 +333,14 @@ impl TryFrom<message::ToolResult> for Message {
         let text = value
             .content
             .into_iter()
-            .map(|content| {
-                match content {
+            .map(|content| match content {
                 message::ToolResultContent::Text(message::Text { text }) => Ok(text),
-                message::ToolResultContent::Image(_) => Err(message::ConversionSnafu {
-                    msg:
-                        "OpenAI does not support images in tool results. Tool results must be text."
-                }.build()),
-            }
+                other => serde_json::to_string(&other).map_err(|_| {
+                    message::ConversionSnafu {
+                        msg: "Tool result content could not be serialized for OpenAI conversion",
+                    }
+                    .build()
+                }),
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("\n");
@@ -1289,6 +1289,51 @@ mod tests {
             serde_json::to_value(openai_request).expect("serialization should succeed");
 
         assert_eq!(serialized["model"], "gpt-4o-mini");
+    }
+
+    #[test]
+    fn tool_result_with_mixed_content_is_stringified_for_completion_api() {
+        let tool_result = crate::completion::message::ToolResult {
+            id: "tool_call_123".to_string(),
+            call_id: None,
+            content: crate::one_or_many::OneOrMany::many(vec![
+                crate::completion::message::ToolResultContent::text("plain text"),
+                crate::completion::message::ToolResultContent::image_url(
+                    "https://example.com/logo.png",
+                    Some(crate::completion::message::ImageMediaType::PNG),
+                    Some(crate::completion::message::ImageDetail::Low),
+                ),
+            ])
+            .expect("tool result content should be non-empty"),
+        };
+
+        let openai_message: Message = tool_result.try_into().expect("tool result conversion");
+        let Message::ToolResult {
+            tool_call_id,
+            content,
+        } = openai_message
+        else {
+            panic!("expected OpenAI tool result message")
+        };
+
+        assert_eq!(tool_call_id, "tool_call_123");
+
+        let ToolResultContentValue::String(output) = content else {
+            panic!("expected string-valued tool result content")
+        };
+
+        let expected_output = format!(
+            "{}\n{}",
+            "plain text",
+            serde_json::to_string(&crate::completion::message::ToolResultContent::image_url(
+                "https://example.com/logo.png",
+                Some(crate::completion::message::ImageMediaType::PNG),
+                Some(crate::completion::message::ImageDetail::Low),
+            ))
+            .expect("image tool result content should serialize")
+        );
+
+        assert_eq!(output, expected_output);
     }
 
     #[test]

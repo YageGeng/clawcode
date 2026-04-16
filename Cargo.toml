@@ -6,6 +6,7 @@ exclude = ["crates/proxy"]
 [workspace.dependencies]
 # error handling
 snafu = { version = "0.9", features = ["backtrace"] }
+libc = { version = "0.2" }
 
 # json
 serde = { version = "1", features = ["derive"] }

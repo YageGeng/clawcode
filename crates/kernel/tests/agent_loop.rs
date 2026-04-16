@@ -8,9 +8,10 @@ use kernel::{
     model::{AgentModel, ModelRequest, ModelResponse},
     runtime::{AgentRunner, RunRequest},
     session::{InMemorySessionStore, SessionId, SessionStore, ThreadId},
-    tools::{ToolCallRequest, builtin::default_read_only_tools, registry::ToolRegistry},
+    tools::{Tool, ToolCallRequest, ToolContext, ToolMetadata, ToolOutput, registry::ToolRegistry},
 };
 use llm::{completion::Message, usage::Usage};
+use serde_json::json;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -50,6 +51,52 @@ fn usage(total_tokens: u64) -> Usage {
     }
 }
 
+/// Minimal echo tool used to keep the agent-loop test independent from removed demo tools.
+struct TestEchoTool;
+
+#[async_trait]
+impl Tool for TestEchoTool {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+
+    fn description(&self) -> &'static str {
+        "Echoes the provided text for agent-loop tests."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to echo back in the tool output."
+                }
+            },
+            "required": ["text"]
+        })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+
+    async fn execute(&self, args: serde_json::Value, _context: ToolContext) -> Result<ToolOutput> {
+        let text = args
+            .get("text")
+            .and_then(|value| value.as_str())
+            .ok_or(Error::Runtime {
+                message: "missing text argument".to_string(),
+                stage: "test-echo-parse-args".to_string(),
+            })?;
+
+        Ok(ToolOutput {
+            text: text.to_string(),
+            structured: json!({"text": text}),
+        })
+    }
+}
+
 #[tokio::test]
 async fn runner_executes_tool_calls_and_persists_the_turn() {
     let model = Arc::new(SequenceModel::new(vec![
@@ -67,9 +114,7 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
 
     let store = Arc::new(InMemorySessionStore::default());
     let registry = Arc::new(ToolRegistry::default());
-    for tool in default_read_only_tools() {
-        registry.register_arc(tool).await;
-    }
+    registry.register_arc(Arc::new(TestEchoTool)).await;
     let sink = Arc::new(RecordingEventSink::default());
 
     let runner = AgentRunner::new(model, store.clone(), registry, sink.clone())
@@ -79,6 +124,7 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
             max_tool_calls: 4,
             recent_message_limit: 20,
             tool_choice: llm::completion::message::ToolChoice::Auto,
+            ..AgentLoopConfig::default()
         });
 
     let session_id = SessionId::new();
@@ -114,10 +160,18 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
         event,
         AgentEvent::ToolStatusUpdated { stage, name, iteration, tool_id, tool_call_id } if *stage == ToolStage::Completed && name == "echo" && *iteration == Some(1) && tool_id == "call_1" && tool_call_id == "call_1"
     )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::ToolCallCompleted { name, output } if name == "echo" && output == "hello"
-    )));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ToolCallCompleted {
+                name,
+                output,
+                structured_output
+            } if name == "echo"
+                && output == "hello"
+                && structured_output.as_ref() == Some(&json!({"text": "hello"}))
+        )
+    }));
 }
 
 #[tokio::test]

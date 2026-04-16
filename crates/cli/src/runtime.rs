@@ -60,8 +60,21 @@ impl EventSink for TracingEventSink {
             AgentEvent::ToolCallRequested { name, arguments } => {
                 info!(tool = %name, arguments = %arguments, "tool requested");
             }
-            AgentEvent::ToolCallCompleted { name, output } => {
-                info!(tool = %name, output = %output, "tool completed");
+            AgentEvent::ToolCallCompleted {
+                name,
+                output,
+                structured_output,
+            } => {
+                if let Some(structured_output) = structured_output {
+                    info!(
+                        tool = %name,
+                        output = %output,
+                        structured_output = %structured_output,
+                        "tool completed"
+                    );
+                } else {
+                    info!(tool = %name, output = %output, "tool completed");
+                }
             }
             AgentEvent::TextProduced { text } => {
                 info!(text = %text, "model produced final text");
@@ -95,7 +108,7 @@ where
         AgentDeps::new(model, store, registry, Arc::new(TracingEventSink)),
     )
     .with_system_prompt(
-        "You are a helpful agent. Use tools when they are useful, and answer directly when they are not.",
+        "You are a helpful agent. Use tools whenever the user explicitly asks to read or write files. For file writes, call the write tool directly instead of asking for confirmation. Relative nested paths such as `./doc/example.md` are allowed under the tool root, and missing parent directories are created automatically. Paths containing `..` are not allowed. Answer directly only when no tool action is needed.",
     );
 
     let result = agent.run(AgentRunRequest::new(prompt)).await?;

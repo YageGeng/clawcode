@@ -19,8 +19,11 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value) {
             return;
         }
 
-        let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
-            || obj.contains_key("properties");
+        // OpenAI Responses schemas for strict mode require `additionalProperties: false`
+        // on actual object schemas. Pure `required`-only variants are combinator helpers,
+        // not standalone objects, and adding `additionalProperties: false` makes them
+        // impossible to satisfy.
+        let is_object_schema = obj.contains_key("type") || obj.contains_key("properties");
 
         // This is required by OpenAI's Responses API when using strict mode.
         // Source: https://platform.openai.com/docs/guides/structured-outputs#additionalproperties-false-must-always-be-set-in-objects
@@ -192,5 +195,27 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(inner_required.contains(&json!("value")));
+    }
+
+    #[test]
+    fn test_sanitize_does_not_add_additional_properties_to_requirement_only_variants() {
+        let mut schema = json!({
+            "anyOf": [
+                {
+                    "required": ["session_id"]
+                },
+                {
+                    "required": ["sessionId"]
+                }
+            ]
+        });
+
+        sanitize_schema(&mut schema);
+
+        let first_variant = &schema["anyOf"][0];
+        assert!(first_variant.get("additionalProperties").is_none());
+
+        let second_variant = &schema["anyOf"][1];
+        assert!(second_variant.get("additionalProperties").is_none());
     }
 }

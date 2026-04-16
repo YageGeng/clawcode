@@ -2,7 +2,7 @@ pub mod builtin;
 pub mod executor;
 pub mod registry;
 
-use std::time::Duration;
+use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,22 @@ pub enum ApprovalRequirement {
     Always,
 }
 
+/// Immutable context for evaluating whether a tool call should be allowed to run.
+#[derive(Debug, Clone)]
+pub struct ToolApprovalRequest {
+    pub tool: String,
+    pub call_id: Option<String>,
+    pub session_id: SessionId,
+    pub thread_id: ThreadId,
+    pub arguments: serde_json::Value,
+}
+
+/// A runtime hook that decides whether a specific tool call is authorized.
+///
+/// Returning `true` means the tool is allowed to execute; returning `false`
+/// causes execution to fail with `ToolApprovalRequired`.
+pub type ToolApprovalHandler = Arc<dyn Fn(&ToolApprovalRequest) -> bool + Send + Sync>;
+
 #[derive(Debug, Clone)]
 pub struct ToolMetadata {
     pub risk_level: RiskLevel,
@@ -42,10 +58,28 @@ impl Default for ToolMetadata {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub session_id: SessionId,
     pub thread_id: ThreadId,
+    /// Whether the executor must reject tools that require explicit approval.
+    pub enforce_tool_approvals: bool,
+    /// Optional callback for interactive/programmable approval decisions.
+    pub tool_approval_handler: Option<ToolApprovalHandler>,
+}
+
+impl fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("session_id", &self.session_id)
+            .field("thread_id", &self.thread_id)
+            .field("enforce_tool_approvals", &self.enforce_tool_approvals)
+            .field(
+                "tool_approval_handler",
+                &self.tool_approval_handler.as_ref().map(|_| "<function>"),
+            )
+            .finish()
+    }
 }
 
 impl ToolContext {
@@ -54,7 +88,33 @@ impl ToolContext {
         Self {
             session_id,
             thread_id,
+            enforce_tool_approvals: false,
+            tool_approval_handler: None,
         }
+    }
+
+    /// Returns a context that also carries an explicit approval-enforcement policy.
+    pub fn with_tool_approval_enforcement(mut self, enforce_tool_approvals: bool) -> Self {
+        self.enforce_tool_approvals = enforce_tool_approvals;
+        self
+    }
+
+    /// Adds a callback used when a tool call requires explicit approval.
+    pub fn with_tool_approval_handler(
+        mut self,
+        handler: impl Fn(&ToolApprovalRequest) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.tool_approval_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Applies an optional approval handler without constructing a no-op closure.
+    pub fn with_tool_approval_handler_if_needed(
+        mut self,
+        handler: Option<ToolApprovalHandler>,
+    ) -> Self {
+        self.tool_approval_handler = handler;
+        self
     }
 }
 

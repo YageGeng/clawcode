@@ -46,6 +46,7 @@ pub enum AgentEvent {
     ToolCallCompleted {
         name: String,
         output: String,
+        structured_output: Option<serde_json::Value>,
     },
     TextProduced {
         text: String,

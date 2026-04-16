@@ -6,21 +6,41 @@ use llm::{
 };
 use snafu::ensure;
 
+use std::fmt;
+
 use crate::{
     Result,
     events::{AgentEvent, EventSink},
     events::{AgentStage, ToolStage},
     model::{AgentModel, ModelOutput, ModelRequest, ModelResponse},
     session::{SessionId, ThreadId},
-    tools::{ToolContext, executor::ToolExecutor, registry::ToolRegistry},
+    tools::{ToolApprovalHandler, ToolContext, executor::ToolExecutor, registry::ToolRegistry},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentLoopConfig {
     pub max_iterations: usize,
     pub max_tool_calls: usize,
     pub recent_message_limit: usize,
     pub tool_choice: ToolChoice,
+    pub enforce_tool_approvals: bool,
+    pub tool_approval_handler: Option<ToolApprovalHandler>,
+}
+
+impl fmt::Debug for AgentLoopConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentLoopConfig")
+            .field("max_iterations", &self.max_iterations)
+            .field("max_tool_calls", &self.max_tool_calls)
+            .field("recent_message_limit", &self.recent_message_limit)
+            .field("tool_choice", &self.tool_choice)
+            .field("enforce_tool_approvals", &self.enforce_tool_approvals)
+            .field(
+                "tool_approval_handler",
+                &self.tool_approval_handler.as_ref().map(|_| "<function>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for AgentLoopConfig {
@@ -30,7 +50,26 @@ impl Default for AgentLoopConfig {
             max_tool_calls: 16,
             recent_message_limit: 24,
             tool_choice: ToolChoice::Auto,
+            enforce_tool_approvals: false,
+            tool_approval_handler: None,
         }
+    }
+}
+
+impl AgentLoopConfig {
+    /// Sets whether tools marked as `ApprovalRequirement::Always` must pass approval.
+    pub fn with_tool_approvals(mut self, enforce_tool_approvals: bool) -> Self {
+        self.enforce_tool_approvals = enforce_tool_approvals;
+        self
+    }
+
+    /// Installs an approval hook for tools requiring explicit user confirmation.
+    pub fn with_tool_approval_handler(
+        mut self,
+        handler: impl Fn(&crate::tools::ToolApprovalRequest) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.tool_approval_handler = Some(std::sync::Arc::new(handler));
+        self
     }
 }
 
@@ -148,7 +187,11 @@ where
                         calls,
                         total_tool_calls,
                         max_tool_calls: config.max_tool_calls,
-                        tool_context: ToolContext::new(session_id.clone(), thread_id.clone()),
+                        tool_context: ToolContext::new(session_id.clone(), thread_id.clone())
+                            .with_tool_approval_enforcement(config.enforce_tool_approvals)
+                            .with_tool_approval_handler_if_needed(
+                                config.tool_approval_handler.clone(),
+                            ),
                         iteration,
                     },
                     &mut working_messages,
@@ -276,6 +319,7 @@ where
             .publish(AgentEvent::ToolCallCompleted {
                 name: result.call.name.clone(),
                 output: result.output.text.clone(),
+                structured_output: Some(result.output.structured.clone()),
             })
             .await;
         working_messages.push(result.message.clone());
