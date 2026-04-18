@@ -1,12 +1,6 @@
-use snafu::{OptionExt, ResultExt};
-
 use crate::{
     Result,
-    error::{MissingToolSnafu, ToolApprovalRequiredSnafu, ToolTimeoutSnafu},
-    tools::{
-        ApprovalRequirement, ToolApprovalRequest, ToolCallRequest, ToolContext, ToolOutput,
-        registry::ToolRegistry,
-    },
+    tools::{ToolCallRequest, ToolContext, ToolOutput, router::ToolRouter},
 };
 
 #[derive(Debug, Clone)]
@@ -21,61 +15,27 @@ pub struct ToolExecutor;
 impl ToolExecutor {
     /// Executes all tool calls serially for the first milestone runtime.
     pub async fn execute_all(
-        registry: &ToolRegistry,
+        router: &ToolRouter,
         calls: Vec<ToolCallRequest>,
         context: ToolContext,
     ) -> Result<Vec<ToolExecutionResult>> {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
-            results.push(Self::execute_one(registry, call, context.clone()).await?);
+            results.push(Self::execute_one(router, call, context.clone()).await?);
         }
         Ok(results)
     }
 
     /// Executes one tool call and converts its output into a tool-result message.
     async fn execute_one(
-        registry: &ToolRegistry,
+        router: &ToolRouter,
         call: ToolCallRequest,
         context: ToolContext,
     ) -> Result<ToolExecutionResult> {
-        let tool = registry.get(&call.name).await.context(MissingToolSnafu {
-            tool: call.name.clone(),
-            stage: "tool-executor-lookup".to_string(),
-        })?;
-
-        if context.enforce_tool_approvals && tool.metadata().approval == ApprovalRequirement::Always
-        {
-            let approval_request = ToolApprovalRequest {
-                tool: call.name.clone(),
-                call_id: call.call_id.clone().or(Some(call.id.clone())),
-                session_id: context.session_id.clone(),
-                thread_id: context.thread_id.clone(),
-                arguments: call.arguments.clone(),
-            };
-
-            let approved = context
-                .tool_approval_handler
-                .as_ref()
-                .is_some_and(|handler| handler(&approval_request));
-
-            if !approved {
-                return ToolApprovalRequiredSnafu {
-                    tool: call.name.clone(),
-                    stage: "tool-executor-approval".to_string(),
-                }
-                .fail();
-            }
-        }
-
-        let output = tokio::time::timeout(
-            tool.metadata().timeout,
-            tool.execute(call.arguments.clone(), context),
-        )
-        .await
-        .context(ToolTimeoutSnafu {
-            tool: call.name.clone(),
-            stage: "tool-executor-timeout".to_string(),
-        })??;
+        let output = router
+            .dispatch(call.clone(), context)
+            .await
+            .map_err(map_tool_error)?;
 
         // Keep plain text output first, then optionally append structured payloads.
         // The structured payload is preserved when it carries additional information
@@ -112,5 +72,44 @@ impl ToolExecutor {
             output,
             message,
         })
+    }
+}
+
+/// Maps extracted tools errors back into the kernel error surface.
+fn map_tool_error(error: tools::Error) -> crate::Error {
+    match error {
+        tools::Error::Json { source, stage } => crate::Error::Json { source, stage },
+        tools::Error::ToolTimeout {
+            source,
+            tool,
+            stage,
+        } => crate::Error::ToolTimeout {
+            source,
+            tool,
+            stage,
+        },
+        tools::Error::MissingTool { tool, stage } => crate::Error::MissingTool { tool, stage },
+        tools::Error::Runtime { message, stage } => crate::Error::Runtime { message, stage },
+        tools::Error::ToolExecution {
+            tool,
+            message,
+            stage,
+        } => crate::Error::ToolExecution {
+            tool,
+            message,
+            stage,
+        },
+        tools::Error::ToolApprovalRequired { tool, stage } => {
+            crate::Error::ToolApprovalRequired { tool, stage }
+        }
+        tools::Error::ToolIo {
+            tool,
+            stage,
+            source,
+        } => crate::Error::ToolIo {
+            tool,
+            stage,
+            source,
+        },
     }
 }

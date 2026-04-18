@@ -3,16 +3,10 @@ mod runtime;
 use std::sync::Arc;
 use std::{env, io};
 
-use kernel::{
-    model::LlmAgentModel,
-    session::InMemorySessionStore,
-    tools::{
-        builtin::{default_file_tools, default_read_only_tools},
-        registry::ToolRegistry,
-    },
-};
+use kernel::{model::LlmAgentModel, session::InMemorySessionStore};
 use llm::providers::openai;
 use llm::providers::openai::{OpenAiCodexConfig, OpenAiCodexSessionManager, build_codex_headers};
+use tools::create::create_default_tool_router;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -148,22 +142,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         openai::responses_api::ResponsesCompletionModel::with_model(client, &config.model_name);
     let model = Arc::new(LlmAgentModel::new(llm_model));
     let store = Arc::new(InMemorySessionStore::default());
-    let registry = Arc::new(ToolRegistry::default());
-
-    // Register read-only and filesystem tools for the CLI model session.
-    for tool in default_read_only_tools() {
-        registry.register_arc(tool).await;
-    }
-    for tool in default_file_tools() {
-        registry.register_arc(tool).await;
-    }
+    let router = Arc::new(create_default_tool_router().await);
 
     info!(
-        tool_count = registry.definitions().await.len(),
-        "registered read-only and file tools"
+        tool_count = router.definitions().await.len(),
+        "registered default tools through the extracted tools crate"
     );
 
-    let result = runtime::run_cli_prompt(model, store, registry, prompt).await?;
+    let result = runtime::run_cli_prompt(model, store, router, prompt).await?;
 
     println!("{result}");
     Ok(())

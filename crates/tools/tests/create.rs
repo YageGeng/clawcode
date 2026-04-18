@@ -1,0 +1,439 @@
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
+use std::{
+    fs,
+    path::PathBuf,
+    process::id,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tools::create::create_file_tool_router_with_root;
+use tools::{
+    ToolCallRequest, ToolContext, ToolHandlerKind, build_default_tool_registry_plan,
+    create_default_tool_router,
+};
+
+/// Verifies the extracted tools crate exposes the default patch and shell tools.
+#[tokio::test]
+async fn default_router_exposes_file_tools() {
+    let router = create_default_tool_router().await;
+    let names = router
+        .definitions()
+        .await
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"apply_patch".to_string()));
+    assert!(names.contains(&"exec_command".to_string()));
+    assert!(names.contains(&"write_stdin".to_string()));
+}
+
+/// Verifies the default plan captures visible specs and dispatch handlers separately.
+#[test]
+fn default_tool_registry_plan_contains_specs_and_handlers() {
+    let plan = build_default_tool_registry_plan(temp_root("plan"));
+    let spec_names = plan
+        .specs
+        .iter()
+        .map(|configured| configured.name().to_string())
+        .collect::<Vec<_>>();
+    let handler_names = plan
+        .handlers
+        .iter()
+        .map(|handler| handler.name.clone())
+        .collect::<Vec<_>>();
+
+    assert!(spec_names.contains(&"apply_patch".to_string()));
+    assert!(handler_names.contains(&"apply_patch".to_string()));
+    assert!(
+        plan.handlers
+            .iter()
+            .any(|handler| handler.kind == ToolHandlerKind::ApplyPatch)
+    );
+    assert!(
+        plan.handlers
+            .iter()
+            .any(|handler| handler.kind == ToolHandlerKind::ExecCommand)
+    );
+    assert!(
+        plan.handlers
+            .iter()
+            .any(|handler| handler.kind == ToolHandlerKind::WriteStdin)
+    );
+}
+
+/// Verifies the built-in shell tool can run a one-shot command.
+#[tokio::test]
+async fn exec_command_runs_a_one_shot_shell_command() {
+    let root = temp_root("exec-command-one-shot");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-exec",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "printf hello-shell",
+                    "shell": "/bin/sh"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.structured["stdout"], "hello-shell");
+    assert_eq!(output.structured["running"], false);
+}
+
+/// Verifies exec-command intercepts simple shell-wrapped apply_patch invocations.
+#[tokio::test]
+async fn exec_command_intercepts_apply_patch_shell_command() {
+    let root = temp_root("exec-command-apply-patch");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-intercept",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: via-shell.txt\n+hello from shell interception\n*** End Patch\nEOF",
+                    "shell": "/bin/sh"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("added"));
+    assert_eq!(
+        fs::read_to_string(root.join("via-shell.txt")).unwrap(),
+        "hello from shell interception\n"
+    );
+}
+
+/// Verifies apply-patch interception does not swallow trailing shell commands.
+#[tokio::test]
+async fn exec_command_does_not_intercept_apply_patch_with_trailing_commands() {
+    let root = temp_root("exec-command-apply-patch-trailing");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-intercept-trailing",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: via-shell.txt\n+hello from shell interception\n*** End Patch\nEOF\nprintf trailing-command",
+                    "shell": "/bin/sh"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    let stdout = output.structured["stdout"].as_str().unwrap();
+    assert!(stdout.contains("trailing-command"));
+    assert_eq!(
+        fs::read_to_string(root.join("via-shell.txt")).unwrap(),
+        "hello from shell interception\n"
+    );
+}
+
+/// Verifies intercepted `cd <dir> && apply_patch` refuses symlinks that escape the workspace.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_command_rejects_apply_patch_cd_symlink_escaping_workspace() {
+    let root = temp_root("exec-command-apply-patch-symlink-escape");
+    let outside = temp_root("exec-command-apply-patch-symlink-outside");
+    unix_fs::symlink(&outside, root.join("escape")).unwrap();
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let error = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-intercept-symlink-escape",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "cd escape && apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: escaped.txt\n+outside\n*** End Patch\nEOF",
+                    "shell": "/bin/sh"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("must stay inside the workspace root")
+    );
+    assert!(!outside.join("escaped.txt").exists());
+}
+
+/// Verifies the shell tools can keep a process alive and continue it with stdin writes.
+#[tokio::test]
+async fn write_stdin_continues_a_shell_session() {
+    let root = temp_root("exec-command-session");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let exec_output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-session",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "read line; printf '%s' \"$line\"",
+                    "shell": "/bin/sh",
+                    "tty": true,
+                    "yield_time_ms": 10
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    let session_id = exec_output.structured["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let write_output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-write",
+                "write_stdin",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "chars": "hello-session\n",
+                    "yield_time_ms": 10
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(write_output.structured["stdout"], "hello-session");
+    assert_eq!(write_output.structured["running"], false);
+}
+
+/// Verifies completed sessions are removed from the process manager after exit.
+#[tokio::test]
+async fn write_stdin_rejects_completed_session_ids() {
+    let root = temp_root("exec-command-session-cleanup");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let exec_output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-session-cleanup",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "read line; printf '%s' \"$line\"",
+                    "shell": "/bin/sh",
+                    "tty": true,
+                    "yield_time_ms": 10
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    let session_id = exec_output.structured["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-write-cleanup",
+                "write_stdin",
+                serde_json::json!({
+                    "session_id": session_id.clone(),
+                    "chars": "done\n",
+                    "yield_time_ms": 10
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    let error = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-poll-cleanup",
+                "write_stdin",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "chars": "",
+                    "yield_time_ms": 10
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown session_id"));
+}
+
+/// Verifies the built-in apply-patch tool can create a new file.
+#[tokio::test]
+async fn apply_patch_adds_a_file() {
+    let root = temp_root("apply-patch-add");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-add",
+                "apply_patch",
+                serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Add File: note.txt\n+hello\n+tools\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("added"));
+    assert_eq!(
+        fs::read_to_string(root.join("note.txt")).unwrap(),
+        "hello\ntools\n"
+    );
+}
+
+/// Verifies the built-in apply-patch tool can update an existing file.
+#[tokio::test]
+async fn apply_patch_updates_a_file() {
+    let root = temp_root("apply-patch-update");
+    fs::write(root.join("note.txt"), "hello\ntools\n").unwrap();
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-update",
+                "apply_patch",
+                serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Update File: note.txt\n@@\n hello\n-tools\n+world\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("updated"));
+    assert_eq!(
+        fs::read_to_string(root.join("note.txt")).unwrap(),
+        "hello\nworld\n"
+    );
+}
+
+/// Verifies the built-in apply-patch tool can delete an existing file.
+#[tokio::test]
+async fn apply_patch_deletes_a_file() {
+    let root = temp_root("apply-patch-delete");
+    fs::write(root.join("note.txt"), "hello\ntools\n").unwrap();
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-delete",
+                "apply_patch",
+                serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Delete File: note.txt\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("deleted"));
+    assert!(!root.join("note.txt").exists());
+}
+
+/// Verifies the built-in apply-patch tool can rename an existing file.
+#[tokio::test]
+async fn apply_patch_moves_a_file() {
+    let root = temp_root("apply-patch-move");
+    fs::write(root.join("from.txt"), "hello\ntools\n").unwrap();
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-move",
+                "apply_patch",
+                serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Update File: from.txt\n*** Move to: to.txt\n@@\n hello\n tools\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("moved"));
+    assert!(!root.join("from.txt").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("to.txt")).unwrap(),
+        "hello\ntools\n"
+    );
+}
+
+/// Verifies a self-rename `Move to` header behaves like a normal in-place update.
+#[tokio::test]
+async fn apply_patch_ignores_move_to_when_source_equals_target() {
+    let root = temp_root("apply-patch-move-same-path");
+    fs::write(root.join("same.txt"), "hello\ntools\n").unwrap();
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-move-same-path",
+                "apply_patch",
+                serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Update File: same.txt\n*** Move to: same.txt\n@@\n hello\n-tools\n+world\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("updated"));
+    assert!(root.join("same.txt").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("same.txt")).unwrap(),
+        "hello\nworld\n"
+    );
+}
+
+/// Creates a unique temporary directory rooted under the OS temp directory.
+fn temp_root(prefix: &str) -> PathBuf {
+    let mut root = std::env::temp_dir();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_nanos();
+    root.push(format!(
+        "clawcode-tools-test-{prefix}-{pid}-{timestamp}",
+        pid = id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    root
+}

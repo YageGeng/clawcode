@@ -1,21 +1,18 @@
 [package]
-name = "kernel"
+name = "tools"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-trait = { workspace = true }
-chrono = { workspace = true }
-libc = { workspace = true }
 llm = { path = "../llm" }
+
+async-trait = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 snafu = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
 tracing = { workspace = true }
-tools = { path = "../tools" }
-uuid = { workspace = true }
-futures-util = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

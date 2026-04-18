@@ -8,11 +8,15 @@ use kernel::{
     model::{AgentModel, ModelRequest, ModelResponse},
     runtime::{AgentRunner, RunRequest},
     session::{InMemorySessionStore, SessionId, SessionStore, ThreadId},
-    tools::{Tool, ToolCallRequest, ToolContext, ToolMetadata, ToolOutput, registry::ToolRegistry},
+    tools::{
+        Tool, ToolCallRequest, ToolInvocation, ToolMetadata, ToolOutput, ToolRouter,
+        registry::ToolRegistryBuilder,
+    },
 };
 use llm::{completion::Message, usage::Usage};
 use serde_json::json;
 use tokio::sync::Mutex;
+use tools::{Error as ToolError, Result as ToolResult};
 
 #[derive(Clone)]
 struct SequenceModel {
@@ -81,11 +85,12 @@ impl Tool for TestEchoTool {
         ToolMetadata::default()
     }
 
-    async fn execute(&self, args: serde_json::Value, _context: ToolContext) -> Result<ToolOutput> {
-        let text = args
-            .get("text")
+    async fn handle(&self, invocation: ToolInvocation) -> ToolResult<ToolOutput> {
+        let text = invocation
+            .function_arguments()
+            .and_then(|arguments| arguments.get("text"))
             .and_then(|value| value.as_str())
-            .ok_or(Error::Runtime {
+            .ok_or(ToolError::Runtime {
                 message: "missing text argument".to_string(),
                 stage: "test-echo-parse-args".to_string(),
             })?;
@@ -113,11 +118,12 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
     ]));
 
     let store = Arc::new(InMemorySessionStore::default());
-    let registry = Arc::new(ToolRegistry::default());
-    registry.register_arc(Arc::new(TestEchoTool)).await;
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(TestEchoTool));
+    let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
 
-    let runner = AgentRunner::new(model, store.clone(), registry, sink.clone())
+    let runner = AgentRunner::new(model, store.clone(), router, sink.clone())
         .with_system_prompt("Use tools when they are helpful.")
         .with_config(AgentLoopConfig {
             max_iterations: 4,
@@ -175,20 +181,114 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
 }
 
 #[tokio::test]
+async fn runner_emits_tool_status_events_for_each_tool_call_in_a_batch() {
+    let model = Arc::new(SequenceModel::new(vec![
+        ModelResponse::tool_calls(
+            Some("calling echo twice".to_string()),
+            vec![
+                ToolCallRequest::new("call_1", "echo", serde_json::json!({"text": "hello"})),
+                ToolCallRequest::new("call_2", "echo", serde_json::json!({"text": "world"})),
+            ],
+            usage(10),
+        ),
+        ModelResponse::text("done", usage(6)),
+    ]));
+
+    let store = Arc::new(InMemorySessionStore::default());
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(TestEchoTool));
+    let router = Arc::new(builder.build_router());
+    let sink = Arc::new(RecordingEventSink::default());
+
+    let runner =
+        AgentRunner::new(model, store, router, sink.clone()).with_config(AgentLoopConfig {
+            max_iterations: 4,
+            max_tool_calls: 4,
+            recent_message_limit: 20,
+            tool_choice: llm::completion::message::ToolChoice::Auto,
+            ..AgentLoopConfig::default()
+        });
+
+    runner
+        .run(RunRequest::new(
+            SessionId::new(),
+            ThreadId::new(),
+            "say hello twice",
+        ))
+        .await
+        .unwrap();
+
+    let events = sink.snapshot().await;
+    let calling_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolStatusUpdated {
+                    stage,
+                    name,
+                    iteration,
+                    ..
+                } if *stage == ToolStage::Calling && name == "echo" && *iteration == Some(1)
+            )
+        })
+        .collect::<Vec<_>>();
+    let completed_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::ToolStatusUpdated {
+                    stage,
+                    name,
+                    iteration,
+                    ..
+                } if *stage == ToolStage::Completed && name == "echo" && *iteration == Some(1)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(calling_events.len(), 2);
+    assert!(calling_events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStatusUpdated { tool_id, tool_call_id, .. } if tool_id == "call_1" && tool_call_id == "call_1"
+    )));
+    assert!(calling_events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStatusUpdated { tool_id, tool_call_id, .. } if tool_id == "call_2" && tool_call_id == "call_2"
+    )));
+
+    assert_eq!(completed_events.len(), 2);
+    assert!(completed_events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStatusUpdated { tool_id, tool_call_id, .. } if tool_id == "call_1" && tool_call_id == "call_1"
+    )));
+    assert!(completed_events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolStatusUpdated { tool_id, tool_call_id, .. } if tool_id == "call_2" && tool_call_id == "call_2"
+    )));
+}
+
+#[tokio::test]
 async fn agent_runs_with_stable_context_and_persists_the_turn() {
     let model = Arc::new(SequenceModel::new(vec![ModelResponse::text(
         "hello from agent",
         usage(8),
     )]));
     let store = Arc::new(InMemorySessionStore::default());
-    let registry = Arc::new(ToolRegistry::default());
+    let registry = Arc::new(kernel::tools::ToolRegistry::default());
     let sink = Arc::new(RecordingEventSink::default());
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
 
     let agent = Agent::new(
         AgentContext::new(session_id.clone(), thread_id.clone()),
-        AgentDeps::new(model, store.clone(), registry, sink.clone()),
+        AgentDeps::new(
+            model,
+            store.clone(),
+            Arc::new(ToolRouter::new(registry, Vec::new())),
+            sink.clone(),
+        ),
     )
     .with_system_prompt("You are a helpful agent.");
 

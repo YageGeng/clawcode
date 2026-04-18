@@ -14,7 +14,7 @@ use crate::{
     events::{AgentStage, ToolStage},
     model::{AgentModel, ModelOutput, ModelRequest, ModelResponse},
     session::{SessionId, ThreadId},
-    tools::{ToolApprovalHandler, ToolContext, executor::ToolExecutor, registry::ToolRegistry},
+    tools::{ToolApprovalHandler, ToolContext, executor::ToolExecutor, router::ToolRouter},
 };
 
 #[derive(Clone)]
@@ -103,7 +103,7 @@ struct ToolCallBatch {
 /// Runs the first milestone's completion -> tool -> completion loop.
 pub async fn run_agent_loop<M, E>(
     model: &M,
-    registry: &ToolRegistry,
+    router: &ToolRouter,
     events: &E,
     config: &AgentLoopConfig,
     request: AgentLoopRequest,
@@ -123,7 +123,7 @@ where
     let mut total_tool_calls = 0usize;
 
     for iteration in 1..=config.max_iterations {
-        let tool_definitions = registry.definitions().await;
+        let tool_definitions = router.definitions().await;
         events
             .publish(AgentEvent::StatusUpdated {
                 stage: AgentStage::ModelRequesting,
@@ -179,7 +179,7 @@ where
             }
             ModelOutput::ToolCalls { text, calls } => {
                 total_tool_calls = apply_tool_calls(
-                    registry,
+                    router,
                     events,
                     ToolCallBatch {
                         message_id,
@@ -238,7 +238,7 @@ where
 
 /// Appends assistant tool calls, executes them, and records tool-result messages.
 async fn apply_tool_calls<E>(
-    registry: &ToolRegistry,
+    router: &ToolRouter,
     events: &E,
     batch: ToolCallBatch,
     working_messages: &mut Vec<Message>,
@@ -268,35 +268,27 @@ where
     );
 
     let mut assistant_content = Vec::new();
-    let primary_tool_name = calls.first().map(|call| call.name.clone());
-    let primary_tool_id = calls.first().map(|call| call.id.clone());
-
-    let primary_tool_call_id = calls
-        .first()
-        .map(|call| call.call_id.clone().unwrap_or_else(|| call.id.clone()));
-
     if let Some(text) = text {
         assistant_content.push(AssistantContent::text(text));
     }
 
-    events
-        .publish(AgentEvent::ToolStatusUpdated {
-            stage: ToolStage::Calling,
-            name: primary_tool_name.clone().unwrap_or_default(),
-            iteration: Some(iteration),
-            tool_id: primary_tool_id.clone().unwrap_or_default(),
-            tool_call_id: primary_tool_call_id.clone().unwrap_or_default(),
-        })
-        .await;
-
     for call in &calls {
+        let call_id = call.call_id.clone().unwrap_or_else(|| call.id.clone());
+        events
+            .publish(AgentEvent::ToolStatusUpdated {
+                stage: ToolStage::Calling,
+                name: call.name.clone(),
+                iteration: Some(iteration),
+                tool_id: call.id.clone(),
+                tool_call_id: call_id.clone(),
+            })
+            .await;
         events
             .publish(AgentEvent::ToolCallRequested {
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             })
             .await;
-        let call_id = call.call_id.clone().unwrap_or_else(|| call.id.clone());
         assistant_content.push(AssistantContent::tool_call_with_call_id(
             call.id.clone(),
             call_id,
@@ -313,8 +305,13 @@ where
     working_messages.push(assistant_message.clone());
     new_messages.push(assistant_message);
 
-    let results = ToolExecutor::execute_all(registry, calls, tool_context).await?;
+    let results = ToolExecutor::execute_all(router, calls, tool_context).await?;
     for result in results {
+        let tool_call_id = result
+            .call
+            .call_id
+            .clone()
+            .unwrap_or_else(|| result.call.id.clone());
         events
             .publish(AgentEvent::ToolCallCompleted {
                 name: result.call.name.clone(),
@@ -322,19 +319,18 @@ where
                 structured_output: Some(result.output.structured.clone()),
             })
             .await;
+        events
+            .publish(AgentEvent::ToolStatusUpdated {
+                stage: ToolStage::Completed,
+                name: result.call.name.clone(),
+                iteration: Some(iteration),
+                tool_id: result.call.id.clone(),
+                tool_call_id,
+            })
+            .await;
         working_messages.push(result.message.clone());
         new_messages.push(result.message);
     }
-
-    events
-        .publish(AgentEvent::ToolStatusUpdated {
-            stage: ToolStage::Completed,
-            name: primary_tool_name.unwrap_or_default(),
-            iteration: Some(iteration),
-            tool_id: primary_tool_id.unwrap_or_default(),
-            tool_call_id: primary_tool_call_id.unwrap_or_default(),
-        })
-        .await;
 
     Ok(total_tool_calls + call_count)
 }

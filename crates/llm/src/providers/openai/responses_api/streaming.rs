@@ -463,6 +463,7 @@ mod tests {
         tool::{Tool, ToolError},
     };
 
+    #[allow(dead_code)]
     struct ExampleTool;
 
     impl Tool for ExampleTool {

@@ -5,7 +5,7 @@ use kernel::{
     events::{AgentEvent, EventSink},
     model::AgentModel,
     session::{SessionId, SessionStore, ThreadId},
-    tools::registry::ToolRegistry,
+    tools::router::ToolRouter,
 };
 use tracing::info;
 
@@ -96,7 +96,7 @@ impl EventSink for TracingEventSink {
 pub async fn run_cli_prompt<M, S>(
     model: Arc<M>,
     store: Arc<S>,
-    registry: Arc<ToolRegistry>,
+    router: Arc<ToolRouter>,
     prompt: String,
 ) -> Result<String>
 where
@@ -105,10 +105,10 @@ where
 {
     let agent = Agent::new(
         AgentContext::new(SessionId::new(), ThreadId::new()),
-        AgentDeps::new(model, store, registry, Arc::new(TracingEventSink)),
+        AgentDeps::new(model, store, router, Arc::new(TracingEventSink)),
     )
     .with_system_prompt(
-        "You are a helpful agent. Use tools whenever the user explicitly asks to read or write files. For file writes, call the write tool directly instead of asking for confirmation. Relative nested paths such as `./doc/example.md` are allowed under the tool root, and missing parent directories are created automatically. Paths containing `..` are not allowed. Answer directly only when no tool action is needed.",
+        "You are a helpful agent. Use `apply_patch` for file edits and use `exec_command` or `write_stdin` only when command execution is required. Keep file changes inside the workspace, avoid paths containing `..`, and answer directly only when no tool action is needed.",
     );
 
     let result = agent.run(AgentRunRequest::new(prompt)).await?;
@@ -124,7 +124,7 @@ mod tests {
         Result,
         model::{AgentModel, ModelRequest, ModelResponse},
         session::InMemorySessionStore,
-        tools::registry::ToolRegistry,
+        tools::ToolRouter,
     };
     use llm::usage::Usage;
 
@@ -153,7 +153,10 @@ mod tests {
         let text = run_cli_prompt(
             Arc::new(StubAgentModel),
             Arc::new(InMemorySessionStore::default()),
-            Arc::new(ToolRegistry::default()),
+            Arc::new(ToolRouter::new(
+                Arc::new(kernel::tools::ToolRegistry::default()),
+                Vec::new(),
+            )),
             "say hello".to_string(),
         )
         .await

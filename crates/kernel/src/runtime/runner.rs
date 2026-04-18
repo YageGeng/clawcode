@@ -8,7 +8,7 @@ use crate::{
     events::{AgentEvent, EventSink},
     model::AgentModel,
     session::{SessionId, SessionStore, ThreadId, Turn},
-    tools::registry::ToolRegistry,
+    tools::router::ToolRouter,
 };
 
 use super::{AgentLoopConfig, AgentLoopRequest, run_agent_loop};
@@ -17,13 +17,13 @@ use super::{AgentLoopConfig, AgentLoopRequest, run_agent_loop};
 pub struct AgentDeps<M, S, E> {
     pub model: Arc<M>,
     pub store: Arc<S>,
-    pub tools: Arc<ToolRegistry>,
+    pub tools: Arc<ToolRouter>,
     pub events: Arc<E>,
 }
 
 impl<M, S, E> AgentDeps<M, S, E> {
     /// Builds the shared dependency bundle for an agent instance.
-    pub fn new(model: Arc<M>, store: Arc<S>, tools: Arc<ToolRegistry>, events: Arc<E>) -> Self {
+    pub fn new(model: Arc<M>, store: Arc<S>, tools: Arc<ToolRouter>, events: Arc<E>) -> Self {
         Self {
             model,
             store,
@@ -185,7 +185,7 @@ pub struct RunResult {
 pub struct AgentRunner<M, S, E> {
     model: Arc<M>,
     store: Arc<S>,
-    registry: Arc<ToolRegistry>,
+    router: Arc<ToolRouter>,
     events: Arc<E>,
     config: AgentLoopConfig,
     system_prompt: Option<String>,
@@ -198,11 +198,11 @@ where
     E: EventSink + 'static,
 {
     /// Builds a runner from the model, stores, registry, and event sink.
-    pub fn new(model: Arc<M>, store: Arc<S>, registry: Arc<ToolRegistry>, events: Arc<E>) -> Self {
+    pub fn new(model: Arc<M>, store: Arc<S>, router: Arc<ToolRouter>, events: Arc<E>) -> Self {
         Self {
             model,
             store,
-            registry,
+            router,
             events,
             config: AgentLoopConfig::default(),
             system_prompt: None,
@@ -226,7 +226,7 @@ where
         run_turn(
             self.model.as_ref(),
             self.store.as_ref(),
-            self.registry.as_ref(),
+            self.router.as_ref(),
             self.events.as_ref(),
             &self.config,
             self.system_prompt.clone(),
@@ -240,7 +240,7 @@ where
 async fn run_turn<M, S, E>(
     model: &M,
     store: &S,
-    registry: &ToolRegistry,
+    router: &ToolRouter,
     events: &E,
     config: &AgentLoopConfig,
     system_prompt: Option<String>,
@@ -272,7 +272,7 @@ where
 
     let loop_result = run_agent_loop(
         model,
-        registry,
+        router,
         events,
         config,
         AgentLoopRequest {
