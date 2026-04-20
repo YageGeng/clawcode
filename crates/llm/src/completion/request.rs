@@ -95,6 +95,11 @@ pub enum CompletionError {
         #[snafu(source(from(Box<dyn std::error::Error + 'static+Send+Sync>, Some)))]
         source: Option<Box<dyn std::error::Error + 'static + Send + Sync>>,
     },
+    #[snafu(display("Url error: {stage}: {source}"))]
+    Url {
+        source: url::ParseError,
+        stage: String,
+    },
 }
 
 #[derive(Debug)]

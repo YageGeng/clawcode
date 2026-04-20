@@ -30,6 +30,7 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 futures-timer = { version = "3" }
 async-stream = { workspace = true }
+tokio-tungstenite = "0.29"
 pin-project-lite = { workspace = true }
 
 tracing = { workspace = true }
@@ -38,6 +39,7 @@ tracing-futures = { version = "0.2", features = ["futures-03"] }
 nanoid = { workspace = true }
 mime = { workspace = true }
 mime_guess = { workspace = true }
+url = { workspace = true }
 
 [features]
 default = ["reqwest-middleware-rustls"]

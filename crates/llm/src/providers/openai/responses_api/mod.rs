@@ -28,6 +28,7 @@ use std::ops::Add;
 use std::str::FromStr;
 
 pub mod streaming;
+pub mod websocket;
 
 /// The completion request type for OpenAI's Response API: <https://platform.openai.com/docs/api-reference/responses/create>
 /// Intended to be derived from [`crate::completion::request::CompletionRequest`].
