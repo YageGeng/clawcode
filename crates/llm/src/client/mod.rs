@@ -245,6 +245,11 @@ impl<Ext, H> Client<Ext, H> {
         &self.ext
     }
 
+    /// Returns the shared HTTP backend so provider adapters can build derived clients.
+    pub fn http_client(&self) -> &H {
+        &self.http_client
+    }
+
     pub fn with_ext<NewExt>(self, new_ext: NewExt) -> Client<NewExt, H> {
         Client {
             base_url: self.base_url,

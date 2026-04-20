@@ -3,9 +3,18 @@ mod runtime;
 use std::sync::Arc;
 use std::{env, io};
 
-use kernel::{model::LlmAgentModel, session::InMemorySessionStore};
-use llm::providers::openai;
-use llm::providers::openai::{OpenAiCodexConfig, OpenAiCodexSessionManager, build_codex_headers};
+use kernel::{
+    model::{AgentModel, LlmAgentModel, ModelRequest},
+    session::InMemorySessionStore,
+};
+use llm::providers::{
+    chatgpt,
+    openai::{
+        self, codex::OPENAI_CODEX_DEFAULT_MODEL,
+        completion::CompletionModel as OpenAiCompletionsModel,
+        responses_api::ResponsesCompletionModel,
+    },
+};
 use tools::create::create_default_tool_router;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -17,8 +26,17 @@ const DEFAULT_MODEL: &str = "gpt-5.4";
 enum AuthMode {
     /// Standard OpenAI API-key authentication.
     ApiKey,
-    /// ChatGPT/Codex bearer-token authentication with optional device login.
+    /// ChatGPT/Codex provider authentication backed by llm provider OAuth handling.
     Codex,
+}
+
+/// Supported transport/link modes for the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkMode {
+    /// Use the Responses-style provider.
+    Response,
+    /// Use the traditional OpenAI Chat Completions API.
+    Completion,
 }
 
 /// Fully-resolved CLI configuration after environment parsing.
@@ -26,14 +44,12 @@ enum AuthMode {
 struct CliConfig {
     /// Selected authentication mode.
     auth_mode: AuthMode,
+    /// Selected provider link mode.
+    link_mode: LinkMode,
     /// Final base URL used to build the client.
     base_url: String,
-    /// Bearer token or API key passed into the HTTP client.
-    api_key: String,
     /// Model name used for the request.
     model_name: String,
-    /// Extra headers required by the chosen auth mode.
-    headers: llm::http_client::HeaderMap,
 }
 
 /// Reads a required environment variable for the CLI adapter.
@@ -67,38 +83,148 @@ fn resolve_auth_mode() -> Result<AuthMode, io::Error> {
     }
 }
 
-/// Resolves the final CLI configuration, including optional Codex device login.
-async fn resolve_cli_config() -> Result<CliConfig, Box<dyn std::error::Error>> {
-    match resolve_auth_mode()? {
+/// Parses the selected transport mode from environment variables.
+fn resolve_link_mode() -> Result<LinkMode, io::Error> {
+    match optional_env("OPENAI_LINK_MODE")
+        .unwrap_or_else(|| "response".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "response" => Ok(LinkMode::Response),
+        "completion" => Ok(LinkMode::Completion),
+        other => Err(io::Error::other(format!(
+            "invalid OPENAI_LINK_MODE `{other}`; expected `response` or `completion`"
+        ))),
+    }
+}
+
+/// Resolves the final CLI configuration without performing provider-side authentication.
+fn resolve_cli_config() -> Result<CliConfig, Box<dyn std::error::Error>> {
+    let auth_mode = resolve_auth_mode()?;
+    let link_mode = resolve_link_mode()?;
+
+    if matches!(auth_mode, AuthMode::Codex) && matches!(link_mode, LinkMode::Completion) {
+        return Err(io::Error::other(
+            "OPENAI_AUTH_MODE=codex only supports OPENAI_LINK_MODE=response",
+        )
+        .into());
+    }
+
+    match auth_mode {
         AuthMode::ApiKey => Ok(CliConfig {
-            auth_mode: AuthMode::ApiKey,
+            auth_mode,
+            link_mode,
             base_url: optional_env("OPENAI_BASE_URL")
                 .unwrap_or_else(|| openai::OPENAI_API_BASE_URL.to_string()),
-            api_key: require_env("OPENAI_API_KEY")?,
             model_name: optional_env("OPENAI_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            headers: Default::default(),
         }),
-        AuthMode::Codex => {
-            let codex_config = OpenAiCodexConfig::default();
-            let api_key = if let Some(token) = optional_env("OPENAI_API_KEY") {
-                token
-            } else {
-                let session_manager = OpenAiCodexSessionManager::new(codex_config.clone())?;
-                session_manager.get_access_token().await?
-            };
-            let headers = build_codex_headers(&api_key)?;
+        AuthMode::Codex => Ok(CliConfig {
+            auth_mode,
+            link_mode,
+            base_url: optional_env("OPENAI_BASE_URL")
+                .or_else(|| optional_env("CHATGPT_API_BASE"))
+                .or_else(|| optional_env("OPENAI_CHATGPT_API_BASE"))
+                .unwrap_or_else(|| openai::codex::OPENAI_CODEX_API_BASE_URL.to_string()),
+            model_name: optional_env("OPENAI_MODEL")
+                .unwrap_or_else(|| OPENAI_CODEX_DEFAULT_MODEL.to_string()),
+        }),
+    }
+}
 
-            Ok(CliConfig {
-                auth_mode: AuthMode::Codex,
-                base_url: optional_env("OPENAI_BASE_URL")
-                    .unwrap_or_else(|| codex_config.api_base_url.clone()),
-                api_key,
-                model_name: optional_env("OPENAI_MODEL")
-                    .unwrap_or_else(|| codex_config.model.clone()),
-                headers,
-            })
+/// CLI-local adapter that selects one of the supported provider/model combinations.
+#[derive(Clone)]
+enum CliAgentModel {
+    OpenAiResponse(LlmAgentModel<ResponsesCompletionModel>),
+    ChatGptResponse(Box<LlmAgentModel<chatgpt::ResponsesCompletionModel>>),
+    Completion(LlmAgentModel<OpenAiCompletionsModel>),
+}
+
+#[async_trait::async_trait(?Send)]
+impl AgentModel for CliAgentModel {
+    /// Delegates one compact completion request to the selected provider adapter.
+    async fn complete(
+        &self,
+        request: ModelRequest,
+    ) -> kernel::Result<kernel::model::ModelResponse> {
+        match self {
+            Self::OpenAiResponse(model) => model.complete(request).await,
+            Self::ChatGptResponse(model) => model.complete(request).await,
+            Self::Completion(model) => model.complete(request).await,
         }
     }
+
+    /// Preserves provider-native streaming for the selected provider adapter.
+    async fn stream(
+        &self,
+        request: ModelRequest,
+    ) -> kernel::Result<kernel::model::ResponseEventStream> {
+        match self {
+            Self::OpenAiResponse(model) => model.stream(request).await,
+            Self::ChatGptResponse(model) => model.stream(request).await,
+            Self::Completion(model) => model.stream(request).await,
+        }
+    }
+}
+
+impl CliAgentModel {
+    /// Releases transport resources held by the selected adapter.
+    async fn close(&self) -> kernel::Result<()> {
+        Ok(())
+    }
+}
+
+/// Builds the standard OpenAI client used for API-key based response/completion modes.
+fn build_openai_client(config: &CliConfig) -> Result<openai::Client, Box<dyn std::error::Error>> {
+    Ok(openai::Client::builder()
+        .base_url(config.base_url.clone())
+        .api_key(require_env("OPENAI_API_KEY")?)
+        .build()?)
+}
+
+/// Builds the ChatGPT client so OAuth and bearer-token handling stay inside `llm::providers`.
+fn build_chatgpt_client(config: &CliConfig) -> Result<chatgpt::Client, Box<dyn std::error::Error>> {
+    if let Some(access_token) =
+        optional_env("CHATGPT_ACCESS_TOKEN").or_else(|| optional_env("OPENAI_API_KEY"))
+    {
+        Ok(chatgpt::Client::builder()
+            .base_url(config.base_url.clone())
+            .api_key(chatgpt::ChatGPTAuth::AccessToken { access_token })
+            .build()?)
+    } else {
+        Ok(chatgpt::Client::builder()
+            .base_url(config.base_url.clone())
+            .oauth()
+            .build()?)
+    }
+}
+
+/// Builds the CLI model adapter selected by `OPENAI_AUTH_MODE` and `OPENAI_LINK_MODE`.
+fn build_agent_model(config: &CliConfig) -> Result<CliAgentModel, Box<dyn std::error::Error>> {
+    let model = match (config.auth_mode, config.link_mode) {
+        (AuthMode::ApiKey, LinkMode::Response) => {
+            let client = build_openai_client(config)?;
+            CliAgentModel::OpenAiResponse(LlmAgentModel::new(ResponsesCompletionModel::with_model(
+                client,
+                &config.model_name,
+            )))
+        }
+        (AuthMode::ApiKey, LinkMode::Completion) => {
+            let client = build_openai_client(config)?;
+            CliAgentModel::Completion(LlmAgentModel::new(OpenAiCompletionsModel::with_model(
+                client.completions_api(),
+                &config.model_name,
+            )))
+        }
+        (AuthMode::Codex, LinkMode::Response) => {
+            let client = build_chatgpt_client(config)?;
+            CliAgentModel::ChatGptResponse(Box::new(LlmAgentModel::new(
+                chatgpt::ResponsesCompletionModel::new(client, &config.model_name),
+            )))
+        }
+        (AuthMode::Codex, LinkMode::Completion) => unreachable!("validated in resolve_cli_config"),
+    };
+
+    Ok(model)
 }
 
 /// Initializes tracing output for the CLI when `RUST_LOG` is set.
@@ -123,24 +249,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
 
-    let config = resolve_cli_config().await?;
+    let config = resolve_cli_config()?;
 
     info!(
         base_url = %config.base_url,
         model = %config.model_name,
         auth_mode = ?config.auth_mode,
+        link_mode = ?config.link_mode,
         prompt = %runtime::prompt_preview(&prompt),
         "starting cli request"
     );
 
-    let client = openai::Client::builder()
-        .base_url(config.base_url)
-        .http_headers(config.headers)
-        .api_key(config.api_key)
-        .build()?;
-    let llm_model =
-        openai::responses_api::ResponsesCompletionModel::with_model(client, &config.model_name);
-    let model = Arc::new(LlmAgentModel::new(llm_model));
+    let model = Arc::new(build_agent_model(&config)?);
     let store = Arc::new(InMemorySessionStore::default());
     let router = Arc::new(create_default_tool_router().await);
 
@@ -149,7 +269,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "registered default tools through the extracted tools crate"
     );
 
-    let result = runtime::run_cli_prompt(model, store, router, prompt).await?;
+    let run_result = runtime::run_cli_prompt(Arc::clone(&model), store, router, prompt).await;
+    let close_result = model.close().await;
+    let result = run_result?;
+    close_result?;
 
     println!("{result}");
     Ok(())
@@ -210,5 +333,39 @@ mod tests {
         let _auth_guard = EnvVarGuard::set("OPENAI_AUTH_MODE", None);
 
         assert_eq!(resolve_auth_mode().unwrap(), AuthMode::ApiKey);
+    }
+
+    /// Verifies unsupported link mode values fail fast with a useful error.
+    #[test]
+    fn rejects_unknown_link_modes() {
+        let _env_guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _link_guard = EnvVarGuard::set("OPENAI_LINK_MODE", Some("mystery"));
+
+        let error = resolve_link_mode().unwrap_err();
+        assert!(error.to_string().contains("invalid OPENAI_LINK_MODE"));
+    }
+
+    /// Verifies the default link mode remains Responses API based for existing callers.
+    #[test]
+    fn defaults_to_response_link_mode() {
+        let _env_guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _link_guard = EnvVarGuard::set("OPENAI_LINK_MODE", None);
+
+        assert_eq!(resolve_link_mode().unwrap(), LinkMode::Response);
+    }
+
+    /// Verifies Codex auth mode no longer accepts the removed completion-link fallback.
+    #[test]
+    fn rejects_codex_completion_mode() {
+        let _env_guard = ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _auth_guard = EnvVarGuard::set("OPENAI_AUTH_MODE", Some("codex"));
+        let _link_guard = EnvVarGuard::set("OPENAI_LINK_MODE", Some("completion"));
+
+        let error = resolve_cli_config().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("OPENAI_AUTH_MODE=codex only supports OPENAI_LINK_MODE=response")
+        );
     }
 }

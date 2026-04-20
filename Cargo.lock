@@ -207,6 +207,8 @@ dependencies = [
  "kernel",
  "llm",
  "serde",
+ "serde_json",
+ "snafu",
  "tokio",
  "tools",
  "tracing",
@@ -1984,7 +1986,11 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
 ]
 
@@ -2151,6 +2157,8 @@ dependencies = [
  "httparse",
  "log",
  "rand",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
 ]
