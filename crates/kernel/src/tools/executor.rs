@@ -2,6 +2,7 @@ use crate::{
     Result,
     tools::{ToolCallRequest, ToolContext, ToolOutput, router::ToolRouter},
 };
+use snafu::ResultExt;
 
 #[derive(Debug, Clone)]
 pub struct ToolExecutionResult {
@@ -32,10 +33,13 @@ impl ToolExecutor {
         call: ToolCallRequest,
         context: ToolContext,
     ) -> Result<ToolExecutionResult> {
-        let output = router
-            .dispatch(call.clone(), context)
-            .await
-            .map_err(map_tool_error)?;
+        let output =
+            router
+                .dispatch(call.clone(), context)
+                .await
+                .context(crate::error::ToolSnafu {
+                    stage: "dispatch-tool".to_string(),
+                })?;
 
         // Keep plain text output first, then optionally append structured payloads.
         // The structured payload is preserved when it carries additional information
@@ -72,44 +76,5 @@ impl ToolExecutor {
             output,
             message,
         })
-    }
-}
-
-/// Maps extracted tools errors back into the kernel error surface.
-fn map_tool_error(error: tools::Error) -> crate::Error {
-    match error {
-        tools::Error::Json { source, stage } => crate::Error::Json { source, stage },
-        tools::Error::ToolTimeout {
-            source,
-            tool,
-            stage,
-        } => crate::Error::ToolTimeout {
-            source,
-            tool,
-            stage,
-        },
-        tools::Error::MissingTool { tool, stage } => crate::Error::MissingTool { tool, stage },
-        tools::Error::Runtime { message, stage } => crate::Error::Runtime { message, stage },
-        tools::Error::ToolExecution {
-            tool,
-            message,
-            stage,
-        } => crate::Error::ToolExecution {
-            tool,
-            message,
-            stage,
-        },
-        tools::Error::ToolApprovalRequired { tool, stage } => {
-            crate::Error::ToolApprovalRequired { tool, stage }
-        }
-        tools::Error::ToolIo {
-            tool,
-            stage,
-            source,
-        } => crate::Error::ToolIo {
-            tool,
-            stage,
-            source,
-        },
     }
 }

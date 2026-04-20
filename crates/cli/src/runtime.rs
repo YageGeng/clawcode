@@ -7,7 +7,7 @@ use kernel::{
     session::{SessionId, SessionStore, ThreadId},
     tools::router::ToolRouter,
 };
-use tracing::info;
+use tracing::{info, trace};
 
 /// Builds a short prompt preview so tracing stays readable for long requests.
 pub fn prompt_preview(prompt: &str) -> String {
@@ -56,6 +56,85 @@ impl EventSink for TracingEventSink {
                 tool_count,
             } => {
                 info!(message_count, tool_count, "requesting model completion");
+            }
+            AgentEvent::ModelResponseCreated { iteration } => {
+                info!(iteration, "model response stream created");
+            }
+            AgentEvent::ModelTextDelta { text, iteration } => {
+                trace!(iteration, text = %text, "model text delta");
+            }
+            AgentEvent::ModelReasoningSummaryDelta {
+                id,
+                text,
+                summary_index,
+                iteration,
+            } => {
+                info!(iteration, id, summary_index, text = %text, "model reasoning summary delta");
+            }
+            AgentEvent::ModelReasoningContentDelta {
+                id,
+                text,
+                content_index,
+                iteration,
+            } => {
+                info!(iteration, id, content_index, text = %text, "model reasoning content delta");
+            }
+            AgentEvent::ModelToolCallNameDelta {
+                tool_id,
+                tool_call_id,
+                delta,
+                iteration,
+            } => {
+                info!(
+                    iteration,
+                    tool_id, tool_call_id, delta, "model tool call name delta"
+                );
+            }
+            AgentEvent::ModelToolCallArgumentsDelta {
+                tool_id,
+                tool_call_id,
+                delta,
+                iteration,
+            } => {
+                info!(
+                    iteration,
+                    tool_id, tool_call_id, delta, "model tool call arguments delta"
+                );
+            }
+            AgentEvent::ModelOutputItemAdded { item, iteration } => {
+                info!(
+                    iteration,
+                    item = ?item,
+                    "model output item added"
+                );
+            }
+            AgentEvent::ModelOutputItemUpdated { item, iteration } => {
+                info!(
+                    iteration,
+                    item = ?item,
+                    "model output item updated"
+                );
+            }
+            AgentEvent::ModelOutputItemDone { item, iteration } => {
+                info!(
+                    iteration,
+                    item = ?item,
+                    "model output item completed"
+                );
+            }
+            AgentEvent::ModelStreamCompleted {
+                message_id,
+                usage,
+                iteration,
+            } => {
+                info!(
+                    iteration,
+                    message_id,
+                    input_tokens = usage.input_tokens,
+                    output_tokens = usage.output_tokens,
+                    total_tokens = usage.total_tokens,
+                    "model stream completed"
+                );
             }
             AgentEvent::ToolCallRequested { name, arguments } => {
                 info!(tool = %name, arguments = %arguments, "tool requested");

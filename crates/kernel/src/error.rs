@@ -1,7 +1,5 @@
 use snafu::Snafu;
 
-use std::io;
-
 /// Shared runtime error type for the first `kernel` milestone.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -18,41 +16,14 @@ pub enum Error {
         stage: String,
     },
 
-    #[snafu(display("tool `{tool}` timed out on `{stage}`, {source}"))]
-    ToolTimeout {
-        source: tokio::time::error::Elapsed,
-        tool: String,
-        stage: String,
-    },
-
     #[snafu(display("missing prompt on `{stage}`"))]
     MissingPrompt { stage: String },
-
-    #[snafu(display("missing tool `{tool}` on `{stage}`"))]
-    MissingTool { tool: String, stage: String },
-
-    #[snafu(display("session error on `{stage}`: {message}"))]
-    Session { message: String, stage: String },
 
     #[snafu(display("runtime error on `{stage}`: {message}"))]
     Runtime { message: String, stage: String },
 
-    #[snafu(display("tool `{tool}` failed on `{stage}`: {message}"))]
-    ToolExecution {
-        tool: String,
-        message: String,
-        stage: String,
-    },
-
-    #[snafu(display("tool `{tool}` requires approval before execution on `{stage}`",))]
-    ToolApprovalRequired { tool: String, stage: String },
-
-    #[snafu(display("tool `{tool}` IO error on `{stage}`: {source}"))]
-    ToolIo {
-        tool: String,
-        stage: String,
-        source: io::Error,
-    },
+    #[snafu(display("tool dispatch failed on `{stage}`, {source}"))]
+    Tool { source: tools::Error, stage: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

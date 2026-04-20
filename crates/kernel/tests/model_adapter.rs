@@ -1,55 +1,18 @@
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use kernel::{
     Result,
-    model::{AgentModel, LlmAgentModel, ModelOutput, ModelRequest, model_response_from_completion},
+    model::{AgentModel, LlmAgentModel, ModelOutput, ModelRequest, ResponseEvent, ResponseItem},
 };
 use llm::{
     completion::{
-        AssistantContent, CompletionModel, CompletionResponse, Message, ToolDefinition,
+        CompletionModel, CompletionResponse, Message, ToolDefinition,
         message::ToolChoice,
         request::{CompletionError, CompletionRequest},
     },
-    one_or_many::OneOrMany,
     streaming::{RawStreamingChoice, StreamingCompletionResponse},
     usage::Usage,
 };
 use serde::{Deserialize, Serialize};
-
-#[test]
-fn parses_tool_calls_and_text_from_completion_response() {
-    let choice = OneOrMany::many(vec![
-        AssistantContent::text("running echo"),
-        AssistantContent::tool_call("call_1", "echo", serde_json::json!({"text": "hello"})),
-    ])
-    .unwrap();
-
-    let response = CompletionResponse {
-        choice,
-        usage: Usage {
-            input_tokens: 11,
-            output_tokens: 5,
-            total_tokens: 16,
-            cached_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        },
-        raw_response: (),
-        message_id: Some("msg_1".to_string()),
-    };
-
-    let parsed = model_response_from_completion(response).unwrap();
-    assert_eq!(parsed.message_id.as_deref(), Some("msg_1"));
-    assert_eq!(parsed.usage.total_tokens, 16);
-
-    match parsed.output {
-        ModelOutput::ToolCalls { text, calls } => {
-            assert_eq!(text.as_deref(), Some("running echo"));
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].name, "echo");
-            assert_eq!(calls[0].arguments["text"], "hello");
-        }
-        ModelOutput::Text(_) => panic!("expected tool calls"),
-    }
-}
 
 #[derive(Clone)]
 struct StubStreamingModel;
@@ -138,4 +101,74 @@ async fn llm_agent_model_aggregates_streaming_output_into_model_response() {
         }
         ModelOutput::Text(_) => panic!("expected tool-call output"),
     }
+}
+
+#[tokio::test]
+async fn llm_agent_model_exposes_streaming_events_before_completion() {
+    let model = LlmAgentModel::new(StubStreamingModel);
+    let mut stream = model
+        .stream(ModelRequest {
+            system_prompt: Some("system".to_string()),
+            messages: vec![Message::user("say hello")],
+            tools: vec![ToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo input".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+        })
+        .await
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.unwrap());
+    }
+
+    assert!(matches!(&events[0], ResponseEvent::Created));
+    assert!(matches!(
+        &events[1],
+        ResponseEvent::OutputItemAdded(ResponseItem::Message { text }) if text.is_empty()
+    ));
+    assert!(matches!(
+        &events[2],
+        ResponseEvent::OutputTextDelta(text) if text == "running echo"
+    ));
+    assert!(matches!(
+        &events[3],
+        ResponseEvent::OutputItemAdded(ResponseItem::ToolCall {
+            item_id,
+            name,
+            arguments,
+            ..
+        }) if item_id == "call_1" && name == "echo" && arguments.as_ref().is_some_and(|arguments| arguments["text"] == "hello")
+    ));
+    assert!(matches!(
+        &events[4],
+        ResponseEvent::OutputItemUpdated(ResponseItem::ToolCall {
+            item_id,
+            name,
+            arguments,
+            ..
+        }) if item_id == "call_1" && name == "echo" && arguments.as_ref().is_some_and(|arguments| arguments["text"] == "hello")
+    ));
+    assert!(matches!(
+        &events[5],
+        ResponseEvent::OutputItemDone(ResponseItem::ToolCall {
+            item_id,
+            name,
+            arguments,
+            ..
+        }) if item_id == "call_1" && name == "echo" && arguments.as_ref().is_some_and(|arguments| arguments["text"] == "hello")
+    ));
+    assert!(matches!(
+        &events[6],
+        ResponseEvent::OutputItemDone(ResponseItem::Message { text })
+            if text == "running echo"
+    ));
+    assert!(matches!(
+        &events[7],
+        ResponseEvent::Completed { usage, message_id }
+            if usage.total_tokens == 16 && message_id.as_deref() == Some("msg_stream")
+    ));
 }

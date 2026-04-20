@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use kernel::{
     Agent, AgentContext, AgentDeps, AgentLoopConfig, AgentRunRequest, Error, Result,
     events::{AgentEvent, AgentStage, RecordingEventSink, ToolStage},
-    model::{AgentModel, ModelRequest, ModelResponse},
+    model::{AgentModel, ModelRequest, ModelResponse, ResponseItem},
     runtime::{AgentRunner, RunRequest},
     session::{InMemorySessionStore, SessionId, SessionStore, ThreadId},
     tools::{
@@ -160,6 +160,54 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
     assert!(matches!(&events[0], AgentEvent::RunStarted { .. }));
     assert!(events.iter().any(|event| matches!(
         event,
+        AgentEvent::ModelResponseCreated { iteration } if *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemAdded {
+            item: ResponseItem::Message { text },
+            iteration,
+        } if text.is_empty() && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelTextDelta { text, iteration } if text == "calling echo" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemAdded {
+            item: ResponseItem::ToolCall { item_id, .. },
+            iteration,
+        } if item_id == "call_1" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemUpdated {
+            item: ResponseItem::ToolCall { item_id, name, .. },
+            iteration,
+        } if item_id == "call_1" && name == "echo" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemDone {
+            item: ResponseItem::ToolCall { item_id, name, .. },
+            iteration,
+        } if name == "echo" && item_id == "call_1" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemDone {
+            item: ResponseItem::Message { text },
+            iteration,
+        } if text == "calling echo" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelStreamCompleted { iteration, usage, .. }
+            if *iteration == Some(1) && usage.total_tokens == 10
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
         AgentEvent::ToolStatusUpdated { stage, name, iteration, tool_id, tool_call_id } if *stage == ToolStage::Calling && name == "echo" && *iteration == Some(1) && tool_id == "call_1" && tool_call_id == "call_1"
     )));
     assert!(events.iter().any(|event| matches!(
@@ -219,6 +267,63 @@ async fn runner_emits_tool_status_events_for_each_tool_call_in_a_batch() {
         .unwrap();
 
     let events = sink.snapshot().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelResponseCreated { iteration } if *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemAdded {
+            item: ResponseItem::Message { text },
+            iteration,
+        } if text.is_empty() && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelTextDelta { text, iteration } if text == "calling echo twice" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemAdded {
+            item: ResponseItem::ToolCall { item_id, .. },
+            iteration,
+        } if item_id == "call_1" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemUpdated {
+            item: ResponseItem::ToolCall { item_id, name, .. },
+            iteration,
+        } if item_id == "call_1" && name == "echo" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemDone {
+            item: ResponseItem::ToolCall { item_id, .. },
+            iteration,
+        } if item_id == "call_1" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemAdded {
+            item: ResponseItem::ToolCall { item_id, .. },
+            iteration,
+        } if item_id == "call_2" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemUpdated {
+            item: ResponseItem::ToolCall { item_id, name, .. },
+            iteration,
+        } if item_id == "call_2" && name == "echo" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemDone {
+            item: ResponseItem::ToolCall { item_id, .. },
+            iteration,
+        } if item_id == "call_2" && *iteration == Some(1)
+    )));
     let calling_events = events
         .iter()
         .filter(|event| {
@@ -310,11 +415,49 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
         matches!(&events[1], AgentEvent::StatusUpdated { stage, iteration, .. } if *stage == AgentStage::ModelRequesting && *iteration == Some(1))
     );
     assert!(matches!(&events[2], AgentEvent::ModelRequested { .. }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelResponseCreated { iteration } if *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemAdded {
+            item: ResponseItem::Message { text },
+            iteration,
+        } if text.is_empty() && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelTextDelta { text, iteration }
+            if text == "hello from agent" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelOutputItemDone {
+            item: ResponseItem::Message { text },
+            iteration,
+        } if text == "hello from agent" && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ModelStreamCompleted { usage, iteration, .. }
+            if usage.total_tokens == 8 && *iteration == Some(1)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::StatusUpdated { stage, iteration, .. }
+            if *stage == AgentStage::Responding && *iteration == Some(1)
+    )));
     assert!(
-        matches!(&events[3], AgentEvent::StatusUpdated { stage, iteration, .. } if *stage == AgentStage::Responding && *iteration == Some(1))
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextProduced { .. }))
     );
-    assert!(matches!(&events[4], AgentEvent::TextProduced { .. }));
-    assert!(matches!(&events[5], AgentEvent::RunFinished { .. }));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RunFinished { .. }))
+    );
 }
 
 #[tokio::test]

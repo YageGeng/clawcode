@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use llm::usage::Usage;
 use tokio::sync::Mutex;
 
+use crate::model::ResponseItem;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentStage {
     ModelRequesting,
@@ -38,6 +40,54 @@ pub enum AgentEvent {
     ModelRequested {
         message_count: usize,
         tool_count: usize,
+    },
+    ModelResponseCreated {
+        iteration: Option<usize>,
+    },
+    ModelTextDelta {
+        text: String,
+        iteration: Option<usize>,
+    },
+    ModelReasoningSummaryDelta {
+        id: Option<String>,
+        text: String,
+        summary_index: i64,
+        iteration: Option<usize>,
+    },
+    ModelReasoningContentDelta {
+        id: Option<String>,
+        text: String,
+        content_index: i64,
+        iteration: Option<usize>,
+    },
+    ModelToolCallNameDelta {
+        tool_id: String,
+        tool_call_id: Option<String>,
+        delta: String,
+        iteration: Option<usize>,
+    },
+    ModelToolCallArgumentsDelta {
+        tool_id: String,
+        tool_call_id: Option<String>,
+        delta: String,
+        iteration: Option<usize>,
+    },
+    ModelOutputItemAdded {
+        item: ResponseItem,
+        iteration: Option<usize>,
+    },
+    ModelOutputItemUpdated {
+        item: ResponseItem,
+        iteration: Option<usize>,
+    },
+    ModelOutputItemDone {
+        item: ResponseItem,
+        iteration: Option<usize>,
+    },
+    ModelStreamCompleted {
+        message_id: Option<String>,
+        usage: Usage,
+        iteration: Option<usize>,
     },
     ToolCallRequested {
         name: String,
