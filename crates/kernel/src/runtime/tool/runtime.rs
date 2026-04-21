@@ -5,18 +5,13 @@ use llm::{
 use snafu::ensure;
 use tokio_util::sync::CancellationToken;
 
-mod batching;
-mod publisher;
-
-use self::batching::build_tool_execution_batches;
-use self::publisher::InFlightEventPublisher;
-use super::{
-    AgentLoopConfig,
-    agent_loop::{ToolBatchSummary, ToolBatchSummaryEntry},
-    inflight::{CompletedToolCallQueue, InFlightToolCallRegistry, ToolCallRuntimeSnapshot},
-};
+use super::{ToolCallBatch, publisher::InFlightEventPublisher};
 use crate::{
     Result,
+    runtime::{
+        ToolBatchSummary, ToolBatchSummaryEntry,
+        inflight::{InFlightToolCallRegistry, ToolCallRuntimeSnapshot},
+    },
     session::{SessionId, SessionStore, ThreadId},
     tools::{
         ToolContext,
@@ -28,45 +23,8 @@ use crate::{
     },
 };
 
-/// Queue of completed tool calls ready to execute after one stream finishes.
-#[derive(Debug, Clone)]
-pub(crate) struct ToolExecutionPlan {
-    pub(crate) message_id: Option<String>,
-    pub(crate) text: Option<String>,
-    pub(crate) queue: CompletedToolCallQueue,
-    pub(crate) in_flight: InFlightToolCallRegistry,
-}
-
-/// Runtime input needed to execute one tool batch and fold its messages back into the turn state.
-#[derive(Debug, Clone)]
-struct ToolCallBatch {
-    message_id: Option<String>,
-    text: Option<String>,
-    calls: Vec<ToolExecutionRequest>,
-    total_tool_calls: usize,
-    max_tool_calls: usize,
-    tool_execution_mode: ToolExecutionMode,
-    cancellation_token: Option<CancellationToken>,
-    tool_context: ToolContext,
-}
-
-/// Stable runtime dependencies and mutable turn buffers shared across tool execution batches.
-pub(crate) struct ToolExecutionRuntimeInput<'a, S, E>
-where
-    S: SessionStore + ?Sized,
-    E: crate::events::EventSink + ?Sized,
-{
-    pub(crate) store: &'a S,
-    pub(crate) session_id: SessionId,
-    pub(crate) thread_id: ThreadId,
-    pub(crate) router: &'a ToolRouter,
-    pub(crate) events: &'a E,
-    pub(crate) working_messages: &'a mut Vec<Message>,
-    pub(crate) new_messages: &'a mut Vec<Message>,
-}
-
 /// Mutable turn state that tool execution appends to as batches complete.
-struct ToolRuntime<'a, S, E>
+pub(super) struct ToolRuntime<'a, S, E>
 where
     S: SessionStore + ?Sized,
     E: crate::events::EventSink + ?Sized,
@@ -89,21 +47,19 @@ where
     E: crate::events::EventSink + ?Sized,
 {
     /// Builds one runtime facade over the mutable turn state used while draining tool batches.
-    fn new(
-        input: ToolExecutionRuntimeInput<'a, S, E>,
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        store: &'a S,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        router: &'a ToolRouter,
+        events: &'a E,
         iteration: usize,
         in_flight_tool_calls: &'a mut InFlightToolCallRegistry,
+        working_messages: &'a mut Vec<Message>,
+        new_messages: &'a mut Vec<Message>,
         completed_batch_summary: &'a mut ToolBatchSummary,
     ) -> Self {
-        let ToolExecutionRuntimeInput {
-            store,
-            session_id,
-            thread_id,
-            router,
-            events,
-            working_messages,
-            new_messages,
-        } = input;
         Self {
             store,
             session_id,
@@ -139,7 +95,7 @@ where
     }
 
     /// Appends the assistant's tool-call message and drains the selected execution batch.
-    async fn apply_batch(&mut self, batch: ToolCallBatch) -> Result<usize> {
+    pub(super) async fn apply_batch(&mut self, batch: ToolCallBatch) -> Result<usize> {
         let ToolCallBatch {
             message_id,
             text,
@@ -384,95 +340,8 @@ where
     }
 }
 
-/// Executes the queue of completed tool calls collected during the last stream iteration.
-pub(crate) async fn execute_tool_execution_plan<E>(
-    input: ToolExecutionRuntimeInput<'_, impl SessionStore, E>,
-    config: &AgentLoopConfig,
-    plan: ToolExecutionPlan,
-    total_tool_calls: usize,
-    iteration: usize,
-) -> Result<(usize, ToolCallRuntimeSnapshot, ToolBatchSummary)>
-where
-    E: crate::events::EventSink,
-{
-    let ToolExecutionPlan {
-        message_id,
-        text,
-        queue,
-        mut in_flight,
-    } = plan;
-    let execution_requests = in_flight.execution_requests_for_calls(queue.into_calls())?;
-    let batches =
-        build_tool_execution_batches(input.router, config.tool_execution_mode, execution_requests);
-    let total_calls_in_plan = batches.iter().map(|batch| batch.queue.len()).sum::<usize>();
-    let mut total_tool_calls = total_tool_calls;
-
-    ensure!(
-        total_tool_calls + total_calls_in_plan <= config.max_tool_calls,
-        crate::error::RuntimeSnafu {
-            message: format!("tool call limit exceeded: {}", config.max_tool_calls),
-            stage: "agent-loop-max-tool-calls".to_string(),
-            inflight_snapshot: Some(in_flight.snapshot().into()),
-        }
-    );
-
-    let mut completed_batch_summary = ToolBatchSummary::default();
-    let mut runtime = ToolRuntime::new(
-        ToolExecutionRuntimeInput {
-            store: input.store,
-            session_id: input.session_id.clone(),
-            thread_id: input.thread_id.clone(),
-            router: input.router,
-            events: input.events,
-            working_messages: input.working_messages,
-            new_messages: input.new_messages,
-        },
-        iteration,
-        &mut in_flight,
-        &mut completed_batch_summary,
-    );
-    let mut first_batch = true;
-
-    for batch in batches {
-        total_tool_calls = runtime
-            .apply_batch(ToolCallBatch {
-                message_id: first_batch.then_some(message_id.clone()).flatten(),
-                text: if first_batch { text.clone() } else { None },
-                calls: batch.queue.into_requests(),
-                total_tool_calls,
-                max_tool_calls: config.max_tool_calls,
-                tool_execution_mode: batch.mode,
-                cancellation_token: config.cancellation_token.clone(),
-                tool_context: ToolContext::new(input.session_id.clone(), input.thread_id.clone())
-                    .with_tool_approval_enforcement(config.enforce_tool_approvals)
-                    .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
-            })
-            .await?;
-        first_batch = false;
-    }
-
-    debug_assert_eq!(
-        in_flight.len(),
-        total_calls_in_plan,
-        "each ready tool call should produce an in-flight registry entry",
-    );
-    debug_assert!(
-        in_flight
-            .entries
-            .iter()
-            .all(|entry| !matches!(entry.identity(), ("", _, _) | (_, "", _) | (_, _, ""))),
-        "in-flight registry entries should always retain stable tool identifiers",
-    );
-
-    Ok((
-        total_tool_calls,
-        in_flight.snapshot().into(),
-        completed_batch_summary,
-    ))
-}
-
 /// Returns true when the runtime error came from executor-level cancellation handling.
-fn is_tool_execution_cancelled(error: &crate::Error) -> bool {
+pub(super) fn is_tool_execution_cancelled(error: &crate::Error) -> bool {
     matches!(
         error,
         crate::Error::Runtime { stage, .. } if stage == "tool-executor-cancelled"

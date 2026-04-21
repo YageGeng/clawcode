@@ -1,16 +1,18 @@
-mod agent_loop;
+mod continuation;
 mod inflight;
-mod runner;
 mod sampling;
-mod tool_runtime;
+mod task;
+mod tool;
+mod turn;
 
-pub(crate) use agent_loop::AgentLoopRequest;
-pub use agent_loop::{
-    AgentLoopConfig, ContinuationHookContext, ContinuationHookDecision, ContinuationHookPhase,
-    LoopResult,
+pub use continuation::{
+    AgentLoopConfig, ContinuationDecisionHook, ContinuationHook, ContinuationHookContext,
+    ContinuationHookDecision, ContinuationHookPhase, ContinuationResolver,
 };
 pub use inflight::ToolCallRuntimeSnapshot;
-pub use runner::{
+pub use task::{
     Agent, AgentConfig, AgentContext, AgentDeps, AgentRunRequest, AgentRunner, RunFailure,
     RunOutcome, RunRequest, RunResult,
 };
+pub(crate) use turn::{FinalizeTextResponseRequest, finalize_text_response};
+pub use turn::{LoopResult, ToolBatchSummary, ToolBatchSummaryEntry};
