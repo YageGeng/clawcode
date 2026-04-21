@@ -1,5 +1,3 @@
-pub mod auth;
-
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,6 +21,11 @@ use crate::{
     },
     usage::Usage,
 };
+
+pub mod auth;
+pub mod ws;
+
+pub use ws::WsCompletionModel;
 
 const DEFAULT_ORIGINATOR: &str = "clawcode";
 const DEFAULT_INSTRUCTIONS: &str = "You are ChatGPT, a helpful AI assistant.";

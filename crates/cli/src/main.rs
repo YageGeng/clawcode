@@ -24,7 +24,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 enum CliAgentModel {
     OpenAiResponse(Box<LlmAgentModel<ResponsesCompletionModel>>),
-    ChatGptResponse(Box<LlmAgentModel<chatgpt::ResponsesCompletionModel>>),
+    ChatGptWsResponse(Box<LlmAgentModel<chatgpt::WsCompletionModel>>),
     Completion(Box<LlmAgentModel<OpenAiCompletionsModel>>),
 }
 
@@ -37,7 +37,7 @@ impl AgentModel for CliAgentModel {
     ) -> kernel::Result<kernel::model::ModelResponse> {
         match self {
             Self::OpenAiResponse(model) => model.complete(request).await,
-            Self::ChatGptResponse(model) => model.complete(request).await,
+            Self::ChatGptWsResponse(model) => model.complete(request).await,
             Self::Completion(model) => model.complete(request).await,
         }
     }
@@ -49,7 +49,7 @@ impl AgentModel for CliAgentModel {
     ) -> kernel::Result<kernel::model::ResponseEventStream> {
         match self {
             Self::OpenAiResponse(model) => model.stream(request).await,
-            Self::ChatGptResponse(model) => model.stream(request).await,
+            Self::ChatGptWsResponse(model) => model.stream(request).await,
             Self::Completion(model) => model.stream(request).await,
         }
     }
@@ -124,8 +124,11 @@ fn build_agent_model(config: &AppConfig) -> Result<CliAgentModel, Box<dyn std::e
         }
         (AuthMode::OAuth, LinkMode::Response) => {
             let client = build_chatgpt_client(config)?;
-            CliAgentModel::ChatGptResponse(Box::new(LlmAgentModel::new(
-                chatgpt::ResponsesCompletionModel::new(client, &config.chatgpt.model),
+            CliAgentModel::ChatGptWsResponse(Box::new(LlmAgentModel::new(
+                chatgpt::WsCompletionModel::new(chatgpt::ResponsesCompletionModel::new(
+                    client,
+                    &config.chatgpt.model,
+                )),
             )))
         }
         (AuthMode::OAuth, LinkMode::Completion) => unreachable!("validated in validate_config"),
