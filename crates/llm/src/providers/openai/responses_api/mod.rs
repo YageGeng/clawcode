@@ -782,6 +782,12 @@ pub struct ResponsesUsage {
     pub total_tokens: u64,
 }
 
+impl Default for ResponsesUsage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResponsesUsage {
     /// Create a new ResponsesUsage instance
     pub(crate) fn new() -> Self {
