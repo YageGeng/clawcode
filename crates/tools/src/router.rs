@@ -50,6 +50,14 @@ impl ToolRouter {
             .map(|configured| &configured.spec)
     }
 
+    /// Returns whether the named tool may participate in a parallel execution batch.
+    pub fn tool_supports_parallel(&self, name: &str) -> bool {
+        self.specs
+            .iter()
+            .find(|configured| configured.name() == name)
+            .is_some_and(|configured| configured.supports_parallel_tool_calls)
+    }
+
     /// Dispatches a single tool call through the registered handler set.
     pub async fn dispatch(
         &self,

@@ -24,6 +24,8 @@ pub struct ModelRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub tool_choice: ToolChoice,
+    /// Provider response identifier used to continue a prior streamed exchange.
+    pub previous_response_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -297,7 +299,14 @@ where
 
     /// Adapts `llm` streaming content into kernel-owned response events without touching `llm`.
     async fn stream(&self, request: ModelRequest) -> Result<ResponseEventStream> {
-        let mut messages = request.messages;
+        let ModelRequest {
+            system_prompt,
+            messages,
+            tools,
+            tool_choice,
+            previous_response_id,
+        } = request;
+        let mut messages = messages;
         let prompt = messages.pop().context(MissingPromptSnafu {
             stage: "agent-model-pop-prompt".to_string(),
         })?;
@@ -306,11 +315,17 @@ where
             .inner
             .completion_request(prompt)
             .messages(messages)
-            .tools(request.tools)
-            .tool_choice(request.tool_choice);
+            .tools(tools)
+            .tool_choice(tool_choice);
 
-        if let Some(system_prompt) = request.system_prompt {
+        if let Some(system_prompt) = system_prompt {
             builder = builder.preamble(system_prompt);
+        }
+        if let Some(previous_response_id) = previous_response_id {
+            // Responses-compatible providers will forward this field, while others safely ignore it.
+            builder = builder.additional_params(serde_json::json!({
+                "previous_response_id": previous_response_id,
+            }));
         }
 
         let mut stream = builder.stream().await.context(ModelSnafu {
@@ -362,6 +377,7 @@ where
 
 impl ResponseEventMapper {
     /// Converts one upstream stream item into response events or a kernel model error.
+    #[allow(clippy::result_large_err)]
     fn map_stream_item<R>(
         &mut self,
         item: std::result::Result<StreamedAssistantContent<R>, llm::completion::CompletionError>,

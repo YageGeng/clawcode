@@ -187,10 +187,14 @@ pub struct DeltaTextChunk {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeltaTextChunkWithItemId {
-    pub item_id: String,
-    pub content_index: u64,
+    #[serde(default)]
+    pub item_id: Option<String>,
+    #[serde(default)]
+    pub content_index: Option<u64>,
     pub sequence_number: u64,
     pub delta: String,
+    #[serde(default)]
+    pub obfuscation: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -209,9 +213,23 @@ pub struct RefusalTextChunk {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ArgsTextChunk {
-    pub content_index: u64,
+    #[serde(default)]
+    pub content_index: Option<u64>,
     pub sequence_number: u64,
+    #[serde(deserialize_with = "deserialize_stringified_json_value")]
     pub arguments: serde_json::Value,
+    #[serde(default)]
+    pub obfuscation: Option<String>,
+}
+
+/// Deserializes websocket argument payloads that arrive as stringified JSON.
+fn deserialize_stringified_json_value<'de, D>(
+    deserializer: D,
+) -> Result<serde_json::Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::json_utils::stringified_json::deserialize(deserializer)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -382,12 +400,17 @@ where
                                     yield Ok(streaming::RawStreamingChoice::Message(delta.delta.clone()))
                                 }
                                 ItemChunkKind::FunctionCallArgsDelta(delta) => {
+                                    let Some(item_id) =
+                                        delta.item_id.clone().or_else(|| chunk.item_id.clone())
+                                    else {
+                                        continue;
+                                    };
                                     let internal_call_id = tool_call_internal_ids
-                                        .entry(delta.item_id.clone())
+                                        .entry(item_id.clone())
                                         .or_insert_with(|| nanoid::nanoid!())
                                         .clone();
                                     yield Ok(streaming::RawStreamingChoice::ToolCallDelta {
-                                        id: delta.item_id.clone(),
+                                        id: item_id,
                                         internal_call_id,
                                         content: streaming::ToolCallDeltaContent::Delta(delta.delta.clone())
                                     })
@@ -452,7 +475,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ItemChunkKind, StreamingCompletionChunk, reasoning_choices_from_done_item};
+    use super::{
+        ArgsTextChunk, DeltaTextChunkWithItemId, ItemChunkKind, StreamingCompletionChunk,
+        reasoning_choices_from_done_item,
+    };
     use crate::completion::message::ReasoningContent;
     use crate::providers::openai::responses_api::ReasoningSummary;
     use crate::streaming::RawStreamingChoice;
@@ -639,6 +665,61 @@ mod tests {
                 if matches!(
                     chunk.data,
                     ItemChunkKind::ReasoningSummaryPartDone(_)
+                )
+        ));
+    }
+
+    #[test]
+    fn function_call_arguments_delta_deserializes_without_content_index() {
+        let chunk: StreamingCompletionChunk = serde_json::from_value(json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "sequence_number": 3,
+            "delta": "patch",
+            "obfuscation": "abc123",
+        }))
+        .expect("tool argument delta without content_index should deserialize");
+
+        assert!(matches!(
+            chunk,
+            StreamingCompletionChunk::Delta(chunk)
+                if matches!(
+                    &chunk.data,
+                    ItemChunkKind::FunctionCallArgsDelta(DeltaTextChunkWithItemId {
+                        item_id: None,
+                        content_index: None,
+                        delta,
+                        obfuscation: Some(_),
+                        ..
+                    }) if delta == "patch"
+                )
+        ));
+    }
+
+    #[test]
+    fn function_call_arguments_done_deserializes_stringified_json_without_content_index() {
+        let chunk: StreamingCompletionChunk = serde_json::from_value(json!({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "sequence_number": 4,
+            "arguments": "{\"patch\":\"*** Begin Patch\\n*** End Patch\"}",
+            "obfuscation": "abc123",
+        }))
+        .expect("tool argument done without content_index should deserialize");
+
+        assert!(matches!(
+            chunk,
+            StreamingCompletionChunk::Delta(chunk)
+                if matches!(
+                    &chunk.data,
+                    ItemChunkKind::FunctionCallArgsDone(ArgsTextChunk {
+                        content_index: None,
+                        obfuscation: Some(_),
+                        arguments,
+                        ..
+                    }) if arguments == &json!({"patch":"*** Begin Patch\n*** End Patch"})
                 )
         ));
     }

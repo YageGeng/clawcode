@@ -85,6 +85,7 @@ async fn llm_agent_model_aggregates_streaming_output_into_model_response() {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             tool_choice: ToolChoice::Auto,
+            previous_response_id: None,
         })
         .await
         .unwrap();
@@ -116,6 +117,7 @@ async fn llm_agent_model_exposes_streaming_events_before_completion() {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             tool_choice: ToolChoice::Auto,
+            previous_response_id: None,
         })
         .await
         .unwrap();

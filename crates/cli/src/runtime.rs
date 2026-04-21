@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use kernel::{
     Agent, AgentContext, AgentDeps, AgentRunRequest, Result,
-    events::{AgentEvent, EventSink},
+    events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::AgentModel,
     session::{SessionId, SessionStore, ThreadId},
     tools::router::ToolRouter,
@@ -19,12 +19,54 @@ pub fn prompt_preview(prompt: &str) -> String {
     preview
 }
 
+/// Formats the continuation decision trace as a compact CLI log field.
+fn format_continuation_decision_trace(
+    decision_trace: &[TaskContinuationDecisionTraceEntry],
+) -> String {
+    decision_trace
+        .iter()
+        .map(|entry| match &entry.source {
+            Some(source) => format!("{:?}:{:?}:{:?}", entry.stage, entry.decision, source),
+            None => format!("{:?}:{:?}", entry.stage, entry.decision),
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Formats the continuation decision trace as a multi-line CLI summary.
+fn format_continuation_decision_trace_multiline(
+    decision_trace: &[TaskContinuationDecisionTraceEntry],
+) -> String {
+    if decision_trace.is_empty() {
+        return "  (no continuation trace)".to_string();
+    }
+
+    decision_trace
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| match &entry.source {
+            Some(source) => format!(
+                "  {}. {:?} -> {:?} ({:?})",
+                index + 1,
+                entry.stage,
+                entry.decision,
+                source
+            ),
+            None => format!("  {}. {:?} -> {:?}", index + 1, entry.stage, entry.decision),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 struct TracingEventSink;
 
 #[async_trait::async_trait]
 impl EventSink for TracingEventSink {
     /// Emits runtime events into the CLI tracing stream for interactive debugging.
     async fn publish(&self, event: AgentEvent) {
+        // Emit the raw event first so `RUST_LOG` alone is enough to inspect the
+        // exact runtime protocol without adding a separate CLI mode or flag.
+        info!(event = ?event, "agent event");
         match event {
             AgentEvent::RunStarted {
                 session_id,
@@ -136,27 +178,109 @@ impl EventSink for TracingEventSink {
                     "model stream completed"
                 );
             }
-            AgentEvent::ToolCallRequested { name, arguments } => {
-                info!(tool = %name, arguments = %arguments, "tool requested");
+            AgentEvent::ToolCallQueued {
+                name,
+                iteration,
+                tool_id,
+                tool_call_id,
+            } => {
+                info!(name, iteration, tool_id, tool_call_id, "tool call queued");
+            }
+            AgentEvent::ToolCallInFlightRegistered {
+                name,
+                iteration,
+                tool_id,
+                tool_call_id,
+                handle_id,
+            } => {
+                info!(
+                    name,
+                    iteration, tool_id, tool_call_id, handle_id, "tool call registered in-flight"
+                );
+            }
+            AgentEvent::ToolCallInFlightStateUpdated {
+                name,
+                iteration,
+                tool_id,
+                tool_call_id,
+                handle_id,
+                state,
+                error_summary,
+            } => {
+                info!(
+                    name,
+                    iteration,
+                    tool_id,
+                    tool_call_id,
+                    handle_id,
+                    state = ?state,
+                    error_summary,
+                    "tool call in-flight state updated"
+                );
+            }
+            AgentEvent::ToolCallInFlightSnapshot {
+                iteration,
+                queued_handles,
+                running_handles,
+                completed_handles,
+                cancelled_handles,
+                failed_handles,
+            } => {
+                info!(
+                    iteration,
+                    queued = queued_handles.len(),
+                    running = running_handles.len(),
+                    completed = completed_handles.len(),
+                    cancelled = cancelled_handles.len(),
+                    failed = failed_handles.len(),
+                    "tool call in-flight snapshot"
+                );
+            }
+            AgentEvent::ToolCallRequested {
+                name,
+                handle_id,
+                arguments,
+            } => {
+                info!(tool = %name, handle_id, arguments = %arguments, "tool requested");
             }
             AgentEvent::ToolCallCompleted {
                 name,
+                handle_id,
                 output,
                 structured_output,
             } => {
                 if let Some(structured_output) = structured_output {
                     info!(
                         tool = %name,
+                        handle_id,
                         output = %output,
                         structured_output = %structured_output,
                         "tool completed"
                     );
                 } else {
-                    info!(tool = %name, output = %output, "tool completed");
+                    info!(tool = %name, handle_id, output = %output, "tool completed");
                 }
             }
             AgentEvent::TextProduced { text } => {
                 info!(text = %text, "model produced final text");
+            }
+            AgentEvent::TaskContinuationDecided {
+                turn_index,
+                action,
+                source,
+                decision_trace,
+            } => {
+                let trace = format_continuation_decision_trace(&decision_trace);
+                let trace_pretty = format_continuation_decision_trace_multiline(&decision_trace);
+                info!(
+                    turn_index,
+                    action = ?action,
+                    source = ?source,
+                    trace_len = decision_trace.len(),
+                    trace = %trace,
+                    trace_pretty = %trace_pretty,
+                    "task continuation decided"
+                );
             }
             AgentEvent::RunFinished { text, usage } => {
                 info!(
@@ -201,13 +325,20 @@ mod tests {
     use async_trait::async_trait;
     use kernel::{
         Result,
+        events::{
+            TaskContinuationDecisionKind, TaskContinuationDecisionStage,
+            TaskContinuationDecisionTraceEntry, TaskContinuationSource,
+        },
         model::{AgentModel, ModelRequest, ModelResponse},
         session::InMemorySessionStore,
         tools::ToolRouter,
     };
     use llm::usage::Usage;
 
-    use super::run_cli_prompt;
+    use super::{
+        format_continuation_decision_trace, format_continuation_decision_trace_multiline,
+        run_cli_prompt,
+    };
 
     struct StubAgentModel;
 
@@ -242,5 +373,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "hello from runtime");
+    }
+
+    #[test]
+    fn formats_continuation_decision_trace_for_cli_logs() {
+        let trace = format_continuation_decision_trace(&[
+            TaskContinuationDecisionTraceEntry {
+                stage: TaskContinuationDecisionStage::ToolBatchCompletedHook,
+                decision: TaskContinuationDecisionKind::Request,
+                source: Some(TaskContinuationSource::SystemFollowUp),
+            },
+            TaskContinuationDecisionTraceEntry {
+                stage: TaskContinuationDecisionStage::FinalDecision,
+                decision: TaskContinuationDecisionKind::Adopted,
+                source: Some(TaskContinuationSource::SystemFollowUp),
+            },
+        ]);
+
+        assert_eq!(
+            trace,
+            "ToolBatchCompletedHook:Request:SystemFollowUp | FinalDecision:Adopted:SystemFollowUp"
+        );
+    }
+
+    #[test]
+    fn formats_continuation_decision_trace_for_human_readable_cli_logs() {
+        let trace = format_continuation_decision_trace_multiline(&[
+            TaskContinuationDecisionTraceEntry {
+                stage: TaskContinuationDecisionStage::ToolBatchCompletedHook,
+                decision: TaskContinuationDecisionKind::Request,
+                source: Some(TaskContinuationSource::SystemFollowUp),
+            },
+            TaskContinuationDecisionTraceEntry {
+                stage: TaskContinuationDecisionStage::FinalDecision,
+                decision: TaskContinuationDecisionKind::Adopted,
+                source: Some(TaskContinuationSource::SystemFollowUp),
+            },
+        ]);
+
+        assert_eq!(
+            trace,
+            "  1. ToolBatchCompletedHook -> Request (SystemFollowUp)\n  2. FinalDecision -> Adopted (SystemFollowUp)"
+        );
     }
 }

@@ -675,6 +675,30 @@ fn is_known_streaming_event(kind: &str) -> bool {
     )
 }
 
+/// Returns whether a streaming event can be safely skipped when its payload shape drifts.
+///
+/// These events are informational deltas or auxiliary completion markers. The websocket
+/// session can still complete a turn because the canonical state is later reconstructed
+/// from `response.output_item.done` and terminal response events.
+fn is_skippable_streaming_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "response.content_part.added"
+            | "response.content_part.done"
+            | "response.output_text.done"
+            | "response.refusal.done"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+    )
+}
+
+/// Parses one websocket server event into the normalized session event model.
+///
+/// When OpenAI introduces a small payload drift for auxiliary delta events, we skip those
+/// specific events instead of aborting the whole websocket turn. Critical lifecycle and
+/// output-item events still fail fast so the session state machine remains trustworthy.
 fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
     #[derive(Deserialize)]
     struct EventType {
@@ -693,9 +717,24 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .with_whatever_context(|_| "response.done"),
         kind if is_known_streaming_event(kind) => {
-            match serde_json::from_str(payload).context(SerializeSnafu {
+            let chunk = match serde_json::from_str(payload).context(SerializeSnafu {
                 stage: "deserialize-payload",
-            })? {
+            }) {
+                Ok(chunk) => chunk,
+                Err(error) if is_skippable_streaming_event(kind) => {
+                    tracing::trace!(
+                        target: "rig::completions",
+                        event_type = kind,
+                        payload,
+                        error = %error,
+                        "Skipping OpenAI websocket streaming event with unsupported payload shape"
+                    );
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+
+            match chunk {
                 StreamingCompletionChunk::Response(response) => {
                     Ok(Some(ResponsesWebSocketEvent::Response(response)))
                 }
@@ -825,4 +864,44 @@ fn websocket_provider_error(error: tungstenite::Error) -> CompletionError {
         msg: error.to_string(),
     }
     .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_server_event;
+
+    /// Ensures payload drift on auxiliary tool-call argument deltas does not abort the turn.
+    #[test]
+    fn malformed_skippable_streaming_event_is_ignored() {
+        let event = parse_server_event(
+            r#"{
+                "type":"response.reasoning_summary_text.delta",
+                "output_index":0,
+                "sequence_number":1,
+                "summary_index":0,
+                "delta":{"unexpected":true}
+            }"#,
+        )
+        .expect("skippable events should not fail parsing");
+
+        assert!(event.is_none());
+    }
+
+    /// Ensures critical lifecycle events still fail fast when their payload is malformed.
+    #[test]
+    fn malformed_response_completed_event_still_errors() {
+        let error = parse_server_event(
+            r#"{
+                "type":"response.completed",
+                "sequence_number":1
+            }"#,
+        )
+        .expect_err("critical response events must keep failing");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("deserialize-payload"),
+            "expected deserialize-payload context, got {message}"
+        );
+    }
 }

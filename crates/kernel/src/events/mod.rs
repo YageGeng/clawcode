@@ -16,6 +16,54 @@ pub enum ToolStage {
     Completed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCallInFlightState {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskContinuationAction {
+    Continue,
+    Finish,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskContinuationSource {
+    PendingInput,
+    SystemFollowUp,
+    TaskCompleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskContinuationDecisionStage {
+    ToolBatchCompletedHook,
+    BeforeFinalResponseHook,
+    TurnCompletedHook,
+    Resolver,
+    SessionQueue,
+    FinalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskContinuationDecisionKind {
+    Continue,
+    Request,
+    Replace,
+    Adopted,
+    Finished,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskContinuationDecisionTraceEntry {
+    pub stage: TaskContinuationDecisionStage,
+    pub decision: TaskContinuationDecisionKind,
+    pub source: Option<TaskContinuationSource>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     RunStarted {
@@ -89,14 +137,52 @@ pub enum AgentEvent {
         usage: Usage,
         iteration: Option<usize>,
     },
+    ToolCallQueued {
+        name: String,
+        iteration: Option<usize>,
+        tool_id: String,
+        tool_call_id: String,
+    },
+    ToolCallInFlightRegistered {
+        name: String,
+        iteration: Option<usize>,
+        tool_id: String,
+        tool_call_id: String,
+        handle_id: String,
+    },
+    ToolCallInFlightStateUpdated {
+        name: String,
+        iteration: Option<usize>,
+        tool_id: String,
+        tool_call_id: String,
+        handle_id: String,
+        state: ToolCallInFlightState,
+        error_summary: Option<String>,
+    },
+    ToolCallInFlightSnapshot {
+        iteration: Option<usize>,
+        queued_handles: Vec<String>,
+        running_handles: Vec<String>,
+        completed_handles: Vec<String>,
+        cancelled_handles: Vec<String>,
+        failed_handles: Vec<String>,
+    },
     ToolCallRequested {
         name: String,
+        handle_id: String,
         arguments: serde_json::Value,
     },
     ToolCallCompleted {
         name: String,
+        handle_id: String,
         output: String,
         structured_output: Option<serde_json::Value>,
+    },
+    TaskContinuationDecided {
+        turn_index: usize,
+        action: TaskContinuationAction,
+        source: TaskContinuationSource,
+        decision_trace: Vec<TaskContinuationDecisionTraceEntry>,
     },
     TextProduced {
         text: String,

@@ -173,10 +173,10 @@ impl WebsocketItemMapper {
     /// Maps one websocket output-item chunk and records correlation metadata when needed.
     fn map_item(
         &mut self,
-        item: responses_api::streaming::ItemChunkKind,
+        item: responses_api::streaming::ItemChunk,
         terminal_message_id: &mut Option<String>,
     ) -> Vec<RawStreamingChoice<responses_api::streaming::StreamingCompletionResponse>> {
-        match item {
+        match item.data {
             responses_api::streaming::ItemChunkKind::OutputItemAdded(message) => {
                 if let responses_api::Output::FunctionCall(function_call) = message.item {
                     let internal_call_id = self.call_id(&function_call.id);
@@ -242,12 +242,15 @@ impl WebsocketItemMapper {
             responses_api::streaming::ItemChunkKind::RefusalDelta(delta) => {
                 vec![RawStreamingChoice::Message(delta.delta)]
             }
-            responses_api::streaming::ItemChunkKind::FunctionCallArgsDelta(delta) => {
-                let internal_call_id = self.call_id(&delta.item_id);
+            responses_api::streaming::ItemChunkKind::FunctionCallArgsDelta(ref delta) => {
+                let Some(item_id) = self.function_call_item_id(&item, delta) else {
+                    return Vec::new();
+                };
+                let internal_call_id = self.call_id(&item_id);
                 vec![RawStreamingChoice::ToolCallDelta {
-                    id: delta.item_id,
+                    id: item_id,
                     internal_call_id,
-                    content: ToolCallDeltaContent::Delta(delta.delta),
+                    content: ToolCallDeltaContent::Delta(delta.delta.clone()),
                 }]
             }
             responses_api::streaming::ItemChunkKind::ReasoningSummaryTextDelta(delta) => {
@@ -294,6 +297,15 @@ impl WebsocketItemMapper {
             .clone()
     }
 
+    /// Resolves the function-call item id from either the nested delta payload or outer item envelope.
+    fn function_call_item_id(
+        &self,
+        item: &responses_api::streaming::ItemChunk,
+        delta: &responses_api::streaming::DeltaTextChunkWithItemId,
+    ) -> Option<String> {
+        delta.item_id.clone().or_else(|| item.item_id.clone())
+    }
+
     /// Handles one websocket event and returns whether the stream loop should keep running.
     async fn handle_websocket_event(
         &mut self,
@@ -303,7 +315,7 @@ impl WebsocketItemMapper {
     ) -> Result<bool, CompletionError> {
         match event {
             responses_api::websocket::ResponsesWebSocketEvent::Item(item) => {
-                let choices = self.map_item(item.data, terminal_message_id);
+                let choices = self.map_item(item, terminal_message_id);
                 self.emit_choices(choices).await?;
 
                 Ok(true)
