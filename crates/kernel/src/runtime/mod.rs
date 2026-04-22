@@ -11,8 +11,8 @@ pub use continuation::{
 };
 pub use inflight::ToolCallRuntimeSnapshot;
 pub use task::{
-    Agent, AgentConfig, AgentDeps, AgentRunRequest, AgentRunner, RunFailure, RunOutcome,
-    RunRequest, RunResult,
+    RunFailure, RunOutcome, RunRequest, RunResult, ThreadConfig, ThreadHandle, ThreadRunRequest,
+    ThreadRuntime, ThreadRuntimeDeps,
 };
 pub(crate) use turn::{FinalizeTextResponseRequest, finalize_text_response};
 pub use turn::{LoopResult, ToolBatchSummary, ToolBatchSummaryEntry};

@@ -4,10 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream;
 use kernel::{
-    Agent, AgentDeps, AgentLoopConfig, AgentRunRequest, Error, Result, TurnContext,
+    AgentLoopConfig, Error, Result, ThreadHandle, ThreadRunRequest, ThreadRuntime, TurnContext,
     events::{AgentEvent, AgentStage, RecordingEventSink, ToolStage},
     model::{AgentModel, ModelRequest, ModelResponse, ResponseItem},
-    runtime::{AgentRunner, RunRequest},
+    runtime::RunRequest,
     session::{InMemorySessionStore, SessionContinuationRequest, SessionId, ThreadId},
     tools::{
         Tool, ToolCallRequest, ToolInvocation, ToolMetadata, ToolOutput, ToolRouter,
@@ -542,24 +542,22 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
 
-    let runner = AgentRunner::new(model, store.clone(), router, sink.clone())
-        .with_system_prompt("Use tools when they are helpful.")
-        .with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store.clone(), router, sink.clone()).with_config(
+        AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
             tool_choice: llm::completion::message::ToolChoice::Auto,
             ..AgentLoopConfig::default()
-        });
+        },
+    );
 
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
+    let thread = ThreadHandle::new(session_id.clone(), thread_id.clone())
+        .with_system_prompt("Use tools when they are helpful.");
     let result = runner
-        .run(RunRequest::new(
-            session_id.clone(),
-            thread_id.clone(),
-            "say hello",
-        ))
+        .run(&thread, ThreadRunRequest::new("say hello"))
         .await
         .unwrap();
 
@@ -714,7 +712,7 @@ async fn runner_keeps_completed_message_text_when_tool_calls_have_no_text_deltas
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -725,7 +723,7 @@ async fn runner_keeps_completed_message_text_when_tool_calls_have_no_text_deltas
     let thread_id = ThreadId::new();
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "say hello",
@@ -764,7 +762,7 @@ async fn runner_rejects_streams_that_end_without_completed_event() {
     let store = Arc::new(InMemorySessionStore::default());
     let registry = Arc::new(kernel::tools::ToolRegistry::default());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(
+    let runner = ThreadRuntime::new(
         model,
         Arc::clone(&store),
         Arc::new(ToolRouter::new(registry, Vec::new())),
@@ -774,7 +772,7 @@ async fn runner_rejects_streams_that_end_without_completed_event() {
     let thread_id = ThreadId::new();
 
     let error = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "say hello",
@@ -877,7 +875,7 @@ async fn runner_executes_tool_calls_in_output_completion_order() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -886,7 +884,7 @@ async fn runner_executes_tool_calls_in_output_completion_order() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -975,7 +973,7 @@ async fn runner_queues_completed_tool_calls_before_stream_completion() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -984,7 +982,7 @@ async fn runner_queues_completed_tool_calls_before_stream_completion() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1107,7 +1105,7 @@ async fn runner_registers_each_completed_tool_call_in_inflight_order() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1116,7 +1114,7 @@ async fn runner_registers_each_completed_tool_call_in_inflight_order() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1188,7 +1186,7 @@ async fn runner_tracks_inflight_tool_call_state_transitions_per_identity() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1197,7 +1195,7 @@ async fn runner_tracks_inflight_tool_call_state_transitions_per_identity() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1254,7 +1252,7 @@ async fn runner_reuses_the_same_execution_handle_across_inflight_state_updates()
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1263,7 +1261,7 @@ async fn runner_reuses_the_same_execution_handle_across_inflight_state_updates()
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1318,7 +1316,7 @@ async fn runner_reuses_registered_handle_for_tool_completion_events() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1327,7 +1325,7 @@ async fn runner_reuses_registered_handle_for_tool_completion_events() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1385,7 +1383,7 @@ async fn runner_reuses_registered_handle_for_tool_requested_events() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1394,7 +1392,7 @@ async fn runner_reuses_registered_handle_for_tool_requested_events() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1451,7 +1449,7 @@ async fn runner_emits_handle_level_inflight_snapshots_for_partial_completion() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1461,7 +1459,7 @@ async fn runner_emits_handle_level_inflight_snapshots_for_partial_completion() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello twice",
@@ -1513,7 +1511,7 @@ async fn runner_returns_final_inflight_snapshot_in_run_result() {
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 4,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -1523,7 +1521,7 @@ async fn runner_returns_final_inflight_snapshot_in_run_result() {
     });
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello twice",
@@ -1580,7 +1578,7 @@ async fn runner_persists_tool_call_message_before_tool_completion() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1591,7 +1589,7 @@ async fn runner_persists_tool_call_message_before_tool_completion() {
     let thread_id = ThreadId::new();
 
     let started_wait = started.notified();
-    let run_future = runner.run(RunRequest::new(
+    let run_future = runner.run_request(RunRequest::new(
         session_id.clone(),
         thread_id.clone(),
         "say hello",
@@ -1640,7 +1638,7 @@ async fn runner_cancels_in_flight_tool_batches_when_loop_token_is_triggered() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let cancellation = CancellationToken::new();
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, sink).with_config(
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, sink).with_config(
         AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
@@ -1654,7 +1652,7 @@ async fn runner_cancels_in_flight_tool_batches_when_loop_token_is_triggered() {
     let thread_id = ThreadId::new();
 
     let started_wait = started.notified();
-    let run_future = runner.run(RunRequest::new(
+    let run_future = runner.run_request(RunRequest::new(
         session_id.clone(),
         thread_id.clone(),
         "say hello",
@@ -1703,7 +1701,7 @@ async fn runner_marks_inflight_tool_calls_cancelled_when_loop_token_is_triggered
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let cancellation = CancellationToken::new();
-    let runner = AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(
+    let runner = ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(
         AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
@@ -1715,7 +1713,7 @@ async fn runner_marks_inflight_tool_calls_cancelled_when_loop_token_is_triggered
     );
 
     let started_wait = started.notified();
-    let run_future = runner.run(RunRequest::new(
+    let run_future = runner.run_request(RunRequest::new(
         SessionId::new(),
         ThreadId::new(),
         "say hello",
@@ -1777,7 +1775,7 @@ async fn runner_marks_inflight_tool_calls_failed_when_tool_execution_errors() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1786,7 +1784,7 @@ async fn runner_marks_inflight_tool_calls_failed_when_tool_execution_errors() {
         });
 
     let error = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1880,7 +1878,7 @@ async fn runner_can_return_structured_failure_outcome_with_snapshot() {
     builder.push_handler_spec(Arc::new(FailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 4,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -1889,7 +1887,7 @@ async fn runner_can_return_structured_failure_outcome_with_snapshot() {
     });
 
     let outcome = runner
-        .run_outcome(RunRequest::new(
+        .run_outcome_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -1930,7 +1928,7 @@ async fn runner_keeps_completed_tool_results_in_failure_snapshot_when_a_later_ca
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 4,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -1939,7 +1937,7 @@ async fn runner_keeps_completed_tool_results_in_failure_snapshot_when_a_later_ca
     });
 
     let outcome = runner
-        .run_outcome(RunRequest::new(
+        .run_outcome_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "run mixed tools",
@@ -2019,7 +2017,7 @@ async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 4,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -2028,7 +2026,7 @@ async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
     });
 
     let outcome = runner
-        .run_outcome(RunRequest::new(session_id, thread_id, "first input"))
+        .run_outcome_request(RunRequest::new(session_id, thread_id, "first input"))
         .await
         .expect("runner should return a structured failure outcome");
 
@@ -2087,10 +2085,10 @@ async fn runner_returns_structured_failure_and_discards_active_turn_when_continu
     let thread_id = ThreadId::new();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, sink);
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, sink);
 
     let outcome = runner
-        .run_outcome(RunRequest::new(
+        .run_outcome_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "first input",
@@ -2111,7 +2109,7 @@ async fn runner_returns_structured_failure_and_discards_active_turn_when_continu
     );
 
     let second_result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "second input",
@@ -2146,10 +2144,10 @@ async fn runner_preserves_primary_error_when_post_loop_cleanup_also_fails() {
     store.fail_next_discard_turn();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink);
+    let runner = ThreadRuntime::new(model, store, router, sink);
 
     let outcome = runner
-        .run_outcome(RunRequest::new(
+        .run_outcome_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "first input",
@@ -2199,10 +2197,10 @@ async fn runner_preserves_primary_error_when_turn_cleanup_also_fails() {
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink);
+    let runner = ThreadRuntime::new(model, store, router, sink);
 
     let outcome = runner
-        .run_outcome(RunRequest::new(
+        .run_outcome_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "first input",
@@ -2262,7 +2260,7 @@ async fn runner_accumulates_inflight_snapshot_entries_across_tool_iterations() {
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 5,
         max_tool_calls: 5,
         recent_message_limit: 20,
@@ -2271,7 +2269,7 @@ async fn runner_accumulates_inflight_snapshot_entries_across_tool_iterations() {
     });
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "run twice",
@@ -2330,7 +2328,7 @@ async fn runner_keeps_handle_ids_unique_across_tool_iterations() {
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 5,
         max_tool_calls: 5,
         recent_message_limit: 20,
@@ -2339,7 +2337,7 @@ async fn runner_keeps_handle_ids_unique_across_tool_iterations() {
     });
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "run twice",
@@ -2372,10 +2370,10 @@ async fn runner_emits_one_task_lifecycle_for_one_run_request() {
     let store = Arc::new(InMemorySessionStore::default());
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, Arc::clone(&sink));
+    let runner = ThreadRuntime::new(model, store, router, Arc::clone(&sink));
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -2417,10 +2415,10 @@ async fn runner_drains_pending_inputs_within_one_task_run() {
         .await;
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink));
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink));
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "first input",
@@ -2515,10 +2513,10 @@ async fn runner_drains_pending_inputs_enqueued_during_an_active_turn() {
     }));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink));
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink));
 
     let started_wait = started.notified();
-    let run_future = runner.run(RunRequest::new(
+    let run_future = runner.run_request(RunRequest::new(
         session_id.clone(),
         thread_id.clone(),
         "first input",
@@ -2614,10 +2612,10 @@ async fn runner_distinguishes_system_follow_up_continuations() {
         .await;
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink));
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink));
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "first input",
@@ -2713,7 +2711,7 @@ async fn runner_can_generate_system_follow_up_from_loop_result() {
     let thread_id = ThreadId::new();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(
             AgentLoopConfig::default().with_continuation_resolver(|loop_result| {
                 if loop_result.final_text == "first" {
@@ -2727,7 +2725,7 @@ async fn runner_can_generate_system_follow_up_from_loop_result() {
         );
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "first input",
@@ -2772,7 +2770,7 @@ async fn runner_can_generate_system_follow_up_from_turn_completion_hook() {
     let thread_id = ThreadId::new();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(AgentLoopConfig::default().with_continuation_hook(|hook| {
             if hook.phase == kernel::runtime::ContinuationHookPhase::TurnCompleted
                 && hook.loop_result.final_text == "first"
@@ -2786,7 +2784,7 @@ async fn runner_can_generate_system_follow_up_from_turn_completion_hook() {
         }));
 
     let result = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             session_id.clone(),
             thread_id.clone(),
             "first input",
@@ -2842,7 +2840,7 @@ async fn runner_can_generate_system_follow_up_from_tool_batch_completed_hook() {
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(AgentLoopConfig::default().with_continuation_hook(|hook| {
             if hook.phase == kernel::runtime::ContinuationHookPhase::ToolBatchCompleted
                 && hook.iteration == 1
@@ -2861,7 +2859,7 @@ async fn runner_can_generate_system_follow_up_from_tool_batch_completed_hook() {
         }));
 
     let result = runner
-        .run(RunRequest::new(session_id, thread_id, "first input"))
+        .run_request(RunRequest::new(session_id, thread_id, "first input"))
         .await
         .expect("runner should honor tool-batch-completed hook continuations");
 
@@ -2902,7 +2900,7 @@ async fn runner_can_generate_system_follow_up_from_before_final_response_hook() 
     let thread_id = ThreadId::new();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(AgentLoopConfig::default().with_continuation_hook(|hook| {
             if hook.phase == kernel::runtime::ContinuationHookPhase::BeforeFinalResponse
                 && hook.loop_result.final_text == "first"
@@ -2916,7 +2914,7 @@ async fn runner_can_generate_system_follow_up_from_before_final_response_hook() 
         }));
 
     let result = runner
-        .run(RunRequest::new(session_id, thread_id, "first input"))
+        .run_request(RunRequest::new(session_id, thread_id, "first input"))
         .await
         .expect("runner should honor before-final-response hook continuations");
 
@@ -2971,7 +2969,7 @@ async fn runner_exposes_existing_requested_continuation_to_later_hook_phases() {
     let sink = Arc::new(RecordingEventSink::default());
     let observations = Arc::new(std::sync::Mutex::new(Vec::<(String, bool, usize)>::new()));
     let observed_hook_state = Arc::clone(&observations);
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(
             AgentLoopConfig::default().with_continuation_hook(move |hook| {
                 if hook.phase == kernel::runtime::ContinuationHookPhase::ToolBatchCompleted {
@@ -2996,7 +2994,7 @@ async fn runner_exposes_existing_requested_continuation_to_later_hook_phases() {
         );
 
     let result = runner
-        .run(RunRequest::new(session_id, thread_id, "first input"))
+        .run_request(RunRequest::new(session_id, thread_id, "first input"))
         .await
         .expect("runner should preserve earlier hook continuations for later phases");
 
@@ -3033,7 +3031,7 @@ async fn runner_allows_later_hook_phases_to_replace_existing_continuations() {
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(
             AgentLoopConfig::default().with_continuation_decision_hook(|hook| {
                 if hook.phase == kernel::runtime::ContinuationHookPhase::ToolBatchCompleted {
@@ -3059,7 +3057,7 @@ async fn runner_allows_later_hook_phases_to_replace_existing_continuations() {
         );
 
     let result = runner
-        .run(RunRequest::new(session_id, thread_id, "first input"))
+        .run_request(RunRequest::new(session_id, thread_id, "first input"))
         .await
         .expect("later hook phases should be able to replace earlier continuations");
 
@@ -3112,7 +3110,7 @@ async fn runner_turn_completed_hook_can_replace_existing_requested_continuation(
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
         .with_config(
             AgentLoopConfig::default().with_continuation_decision_hook(|hook| {
                 if hook.phase == kernel::runtime::ContinuationHookPhase::ToolBatchCompleted {
@@ -3138,7 +3136,7 @@ async fn runner_turn_completed_hook_can_replace_existing_requested_continuation(
         );
 
     let result = runner
-        .run(RunRequest::new(session_id, thread_id, "first input"))
+        .run_request(RunRequest::new(session_id, thread_id, "first input"))
         .await
         .expect("turn-completed hook should be able to replace earlier continuations");
 
@@ -3185,7 +3183,7 @@ async fn runner_only_marks_the_active_serial_tool_call_running() {
     }));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, Arc::clone(&sink)).with_config(
+    let runner = ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(
         AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
@@ -3196,7 +3194,7 @@ async fn runner_only_marks_the_active_serial_tool_call_running() {
         .with_tool_execution_mode(kernel::tools::executor::ToolExecutionMode::Serial),
     );
 
-    let run_future = runner.run(RunRequest::new(
+    let run_future = runner.run_request(RunRequest::new(
         SessionId::new(),
         ThreadId::new(),
         "serial tools",
@@ -3249,7 +3247,7 @@ async fn runner_attaches_inflight_snapshot_to_max_iteration_errors() {
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 1,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -3258,7 +3256,7 @@ async fn runner_attaches_inflight_snapshot_to_max_iteration_errors() {
     });
 
     let error = runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "run once",
@@ -3303,7 +3301,7 @@ async fn runner_emits_tool_status_events_for_each_tool_call_in_a_batch() {
     let sink = Arc::new(RecordingEventSink::default());
 
     let runner =
-        AgentRunner::new(model, store, router, sink.clone()).with_config(AgentLoopConfig {
+        ThreadRuntime::new(model, store, router, sink.clone()).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -3312,7 +3310,7 @@ async fn runner_emits_tool_status_events_for_each_tool_call_in_a_batch() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello twice",
@@ -3454,7 +3452,7 @@ async fn runner_can_drain_tool_queue_in_parallel_when_configured() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
 
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 4,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -3465,7 +3463,7 @@ async fn runner_can_drain_tool_queue_in_parallel_when_configured() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        runner.run(RunRequest::new(
+        runner.run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello twice",
@@ -3531,7 +3529,7 @@ async fn runner_parallel_mode_only_parallelizes_tools_marked_safe() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
 
-    let runner = AgentRunner::new(model, store, router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
         max_iterations: 4,
         max_tool_calls: 4,
         recent_message_limit: 20,
@@ -3542,7 +3540,7 @@ async fn runner_parallel_mode_only_parallelizes_tools_marked_safe() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        runner.run(RunRequest::new(
+        runner.run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello twice",
@@ -3583,7 +3581,7 @@ async fn runner_passes_previous_response_id_to_follow_up_requests() {
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner =
-        AgentRunner::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
+        ThreadRuntime::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -3592,7 +3590,7 @@ async fn runner_passes_previous_response_id_to_follow_up_requests() {
         });
 
     runner
-        .run(RunRequest::new(
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
@@ -3617,19 +3615,19 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
     let sink = Arc::new(RecordingEventSink::default());
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
+    let thread = ThreadHandle::new(session_id.clone(), thread_id.clone())
+        .with_system_prompt("You are a helpful agent.");
+    let runtime = ThreadRuntime::new(
+        model,
+        store.clone(),
+        Arc::new(ToolRouter::new(registry, Vec::new())),
+        sink.clone(),
+    );
 
-    let agent = Agent::new(
-        TurnContext::new(session_id.clone(), thread_id.clone()),
-        AgentDeps::new(
-            model,
-            store.clone(),
-            Arc::new(ToolRouter::new(registry, Vec::new())),
-            sink.clone(),
-        ),
-    )
-    .with_system_prompt("You are a helpful agent.");
-
-    let result = agent.run(AgentRunRequest::new("say hello")).await.unwrap();
+    let result = runtime
+        .run(&thread, ThreadRunRequest::new("say hello"))
+        .await
+        .unwrap();
 
     assert_eq!(result.text, "hello from agent");
     assert_eq!(result.usage.total_tokens, 8);

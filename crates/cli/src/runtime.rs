@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use kernel::{
-    Agent, AgentDeps, AgentRunRequest, Result, SessionTaskContext, TurnContext,
+    Result, SessionTaskContext, ThreadHandle, ThreadRunRequest, ThreadRuntime,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::AgentModel,
     session::{SessionId, ThreadId},
@@ -305,15 +305,11 @@ pub async fn run_cli_prompt<M>(
 where
     M: AgentModel + 'static,
 {
-    let agent = Agent::new(
-        TurnContext::new(SessionId::new(), ThreadId::new()),
-        AgentDeps::new(model, store, router, Arc::new(TracingEventSink)),
-    )
-    .with_system_prompt(
+    let thread = ThreadHandle::new(SessionId::new(), ThreadId::new()).with_system_prompt(
         "You are a helpful agent. Use `apply_patch` for file edits and use `exec_command` or `write_stdin` only when command execution is required. Keep file changes inside the workspace, avoid paths containing `..`, and answer directly only when no tool action is needed.",
     );
-
-    let result = agent.run(AgentRunRequest::new(prompt)).await?;
+    let runtime = ThreadRuntime::new(model, store, router, Arc::new(TracingEventSink));
+    let result = runtime.run(&thread, ThreadRunRequest::new(prompt)).await?;
     Ok(result.text)
 }
 

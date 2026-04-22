@@ -4,7 +4,7 @@ use llm::usage::Usage;
 
 use crate::{
     Result,
-    context::{SessionTaskContext, TurnContext},
+    context::SessionTaskContext,
     events::EventSink,
     model::AgentModel,
     runtime::{ToolCallRuntimeSnapshot, continuation::AgentLoopConfig},
@@ -14,16 +14,16 @@ use crate::{
 
 use super::runner::run_task;
 
-/// Shared dependencies that stay stable for one agent lifecycle.
-pub struct AgentDeps<M, E> {
+/// Shared dependencies that stay stable for one thread runtime lifecycle.
+pub struct ThreadRuntimeDeps<M, E> {
     pub model: Arc<M>,
     pub store: Arc<SessionTaskContext>,
     pub tools: Arc<ToolRouter>,
     pub events: Arc<E>,
 }
 
-impl<M, E> AgentDeps<M, E> {
-    /// Builds the shared dependency bundle for an agent instance.
+impl<M, E> ThreadRuntimeDeps<M, E> {
+    /// Builds the shared dependency bundle for a thread runtime instance.
     pub fn new(
         model: Arc<M>,
         store: Arc<SessionTaskContext>,
@@ -39,22 +39,61 @@ impl<M, E> AgentDeps<M, E> {
     }
 }
 
-/// Default behavior for an agent across multiple turns.
+/// Thread-level defaults that apply to submissions routed through one handle.
 #[derive(Debug, Clone, Default)]
-pub struct AgentConfig {
+pub struct ThreadConfig {
     pub system_prompt: Option<String>,
-    pub loop_config: AgentLoopConfig,
 }
 
-/// One agent turn request with optional prompt overrides.
+/// Lightweight handle that identifies one session/thread binding.
 #[derive(Debug, Clone)]
-pub struct AgentRunRequest {
+pub struct ThreadHandle {
+    session_id: SessionId,
+    thread_id: ThreadId,
+    config: ThreadConfig,
+}
+
+impl ThreadHandle {
+    /// Builds a handle for one session/thread pair.
+    pub fn new(session_id: SessionId, thread_id: ThreadId) -> Self {
+        Self {
+            session_id,
+            thread_id,
+            config: ThreadConfig::default(),
+        }
+    }
+
+    /// Sets the default system prompt applied to submissions on this thread.
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.config.system_prompt = Some(system_prompt.into());
+        self
+    }
+
+    /// Returns the session identifier for this thread handle.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Returns the thread identifier for this thread handle.
+    pub fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the optional default system prompt carried by this handle.
+    pub fn system_prompt(&self) -> Option<&String> {
+        self.config.system_prompt.as_ref()
+    }
+}
+
+/// One thread submission with optional prompt overrides.
+#[derive(Debug, Clone)]
+pub struct ThreadRunRequest {
     pub input: String,
     pub system_prompt_override: Option<String>,
 }
 
-impl AgentRunRequest {
-    /// Builds a single-turn request for an existing agent instance.
+impl ThreadRunRequest {
+    /// Builds a single-turn request for an existing thread handle.
     pub fn new(input: impl Into<String>) -> Self {
         Self {
             input: input.into(),
@@ -63,66 +102,89 @@ impl AgentRunRequest {
     }
 }
 
-/// Long-lived agent object that owns stable context and shared dependencies.
-pub struct Agent<M, E> {
-    context: TurnContext,
-    config: AgentConfig,
-    deps: AgentDeps<M, E>,
+/// Runtime entrypoint that executes work against supplied thread handles.
+pub struct ThreadRuntime<M, E> {
+    deps: ThreadRuntimeDeps<M, E>,
+    config: AgentLoopConfig,
 }
 
-impl<M, E> Agent<M, E>
+impl<M, E> ThreadRuntime<M, E>
 where
     M: AgentModel + 'static,
     E: EventSink + 'static,
 {
-    /// Builds an agent bound to one session thread and dependency set.
-    pub fn new(context: TurnContext, deps: AgentDeps<M, E>) -> Self {
+    /// Builds a runtime from the model, session context, tool router, and event sink.
+    pub fn new(
+        model: Arc<M>,
+        store: Arc<SessionTaskContext>,
+        tools: Arc<ToolRouter>,
+        events: Arc<E>,
+    ) -> Self {
         Self {
-            context,
-            config: AgentConfig::default(),
-            deps,
+            deps: ThreadRuntimeDeps::new(model, store, tools, events),
+            config: AgentLoopConfig::default(),
         }
     }
 
-    /// Overrides the default runtime loop configuration for this agent.
+    /// Overrides the default runtime loop configuration for this thread runtime.
     pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
-        self.config.loop_config = config;
+        self.config = config;
         self
     }
 
-    /// Sets the default system prompt applied to each turn.
-    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
-        self.config.system_prompt = Some(system_prompt.into());
-        self
-    }
-
-    /// Runs one input turn inside the agent's stable session context.
-    pub async fn run(&self, request: AgentRunRequest) -> Result<RunResult> {
-        match self.run_outcome(request).await? {
+    /// Runs one input turn against the supplied thread and returns the final result.
+    pub async fn run(&self, thread: &ThreadHandle, request: ThreadRunRequest) -> Result<RunResult> {
+        match self.run_outcome(thread, request).await? {
             RunOutcome::Success(result) => Ok(result),
             RunOutcome::Failure(failure) => Err(failure.error),
         }
     }
 
     /// Runs one input turn and returns a structured success or failure payload.
-    pub async fn run_outcome(&self, request: AgentRunRequest) -> Result<RunOutcome> {
+    pub async fn run_outcome(
+        &self,
+        thread: &ThreadHandle,
+        request: ThreadRunRequest,
+    ) -> Result<RunOutcome> {
         let run_request = RunRequest::new(
-            self.context.session_id.clone(),
-            self.context.thread_id.clone(),
+            thread.session_id().clone(),
+            thread.thread_id().clone(),
             request.input,
         );
         let system_prompt = request
             .system_prompt_override
-            .or_else(|| self.config.system_prompt.clone());
+            .or_else(|| thread.system_prompt().cloned());
 
         run_task(
             self.deps.model.as_ref(),
             self.deps.store.as_ref(),
             self.deps.tools.as_ref(),
             self.deps.events.as_ref(),
-            &self.config.loop_config,
+            &self.config,
             system_prompt,
             run_request,
+        )
+        .await
+    }
+
+    /// Runs a prebuilt runtime request directly when the caller already owns the ids.
+    pub async fn run_request(&self, request: RunRequest) -> Result<RunResult> {
+        match self.run_outcome_request(request).await? {
+            RunOutcome::Success(result) => Ok(result),
+            RunOutcome::Failure(failure) => Err(failure.error),
+        }
+    }
+
+    /// Runs a prebuilt runtime request and returns a structured success or failure payload.
+    pub async fn run_outcome_request(&self, request: RunRequest) -> Result<RunOutcome> {
+        run_task(
+            self.deps.model.as_ref(),
+            self.deps.store.as_ref(),
+            self.deps.tools.as_ref(),
+            self.deps.events.as_ref(),
+            &self.config,
+            None,
+            request,
         )
         .await
     }
@@ -168,70 +230,4 @@ pub struct RunFailure {
 pub enum RunOutcome {
     Success(RunResult),
     Failure(RunFailure),
-}
-
-pub struct AgentRunner<M, E> {
-    model: Arc<M>,
-    store: Arc<SessionTaskContext>,
-    router: Arc<ToolRouter>,
-    events: Arc<E>,
-    config: AgentLoopConfig,
-    system_prompt: Option<String>,
-}
-
-impl<M, E> AgentRunner<M, E>
-where
-    M: AgentModel + 'static,
-    E: EventSink + 'static,
-{
-    /// Builds a runner from the model, stores, registry, and event sink.
-    pub fn new(
-        model: Arc<M>,
-        store: Arc<SessionTaskContext>,
-        router: Arc<ToolRouter>,
-        events: Arc<E>,
-    ) -> Self {
-        Self {
-            model,
-            store,
-            router,
-            events,
-            config: AgentLoopConfig::default(),
-            system_prompt: None,
-        }
-    }
-
-    /// Overrides the default runtime loop configuration.
-    pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
-        self.config = config;
-        self
-    }
-
-    /// Sets a system prompt injected into each model request.
-    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(system_prompt.into());
-        self
-    }
-
-    /// Runs one user input against the runtime and persists the resulting turn.
-    pub async fn run(&self, request: RunRequest) -> Result<RunResult> {
-        match self.run_outcome(request).await? {
-            RunOutcome::Success(result) => Ok(result),
-            RunOutcome::Failure(failure) => Err(failure.error),
-        }
-    }
-
-    /// Runs one user input and returns a structured success or failure payload.
-    pub async fn run_outcome(&self, request: RunRequest) -> Result<RunOutcome> {
-        run_task(
-            self.model.as_ref(),
-            self.store.as_ref(),
-            self.router.as_ref(),
-            self.events.as_ref(),
-            &self.config,
-            self.system_prompt.clone(),
-            request,
-        )
-        .await
-    }
 }
