@@ -2,12 +2,17 @@ mod config;
 mod runtime;
 
 use std::sync::Arc;
-use std::{env, io};
+use std::{
+    env, io,
+    io::{BufRead, Write},
+};
 
 use config::{AppConfig, AuthMode, LinkMode};
 use kernel::{
+    ThreadHandle, ThreadRuntime,
     model::{AgentModel, LlmAgentModel, ModelRequest},
     session::InMemorySessionStore,
+    tools::router::ToolRouter,
 };
 use llm::providers::{
     chatgpt,
@@ -60,11 +65,6 @@ impl CliAgentModel {
     async fn close(&self) -> kernel::Result<()> {
         Ok(())
     }
-}
-
-/// Prints the CLI usage string expected by the integration test.
-fn usage_message() -> &'static str {
-    "usage: cargo run -p cli -- \"your prompt\""
 }
 
 /// Validates the loaded config before a provider client is constructed.
@@ -148,17 +148,74 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Runs the interactive CLI loop on one in-memory thread until stdin closes or the user exits.
+async fn run_interactive_cli_loop<M, E, R, W>(
+    runtime: &ThreadRuntime<M, E>,
+    thread: &ThreadHandle,
+    input: &mut R,
+    output: &mut W,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    M: AgentModel + 'static,
+    E: kernel::events::EventSink + 'static,
+    R: BufRead,
+    W: Write,
+{
+    let mut line = String::new();
+
+    loop {
+        // Keep the prompt minimal so multi-turn mode behaves like a normal terminal REPL.
+        write!(output, "> ")?;
+        output.flush()?;
+
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+
+        let prompt = line.trim();
+        if prompt.eq_ignore_ascii_case("exit") || prompt.eq_ignore_ascii_case("quit") {
+            break;
+        }
+        if prompt.is_empty() {
+            continue;
+        }
+
+        match runtime::run_cli_turn(runtime, thread, prompt.to_string()).await {
+            Ok(_text) => {}
+            Err(err) => writeln!(output, "error: {err}")?,
+        }
+    }
+
+    Ok(())
+}
+
+/// Builds the CLI runtime stack once and reuses it for every interactive turn.
+async fn run_interactive_cli(
+    model: Arc<CliAgentModel>,
+    store: Arc<InMemorySessionStore>,
+    router: Arc<ToolRouter>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let thread = runtime::build_cli_thread_handle();
+    let runtime = ThreadRuntime::new(
+        model,
+        store,
+        router,
+        Arc::new(runtime::TracingEventSink::stdout()),
+    );
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+
+    run_interactive_cli_loop(&runtime, &thread, &mut input, &mut output).await
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let prompt = env::args().skip(1).collect::<Vec<_>>().join(" ");
-    if prompt.trim().is_empty() {
-        info!("cli invoked without prompt");
-        eprintln!("{}", usage_message());
-        std::process::exit(2);
-    }
-
     let config = config::app_config();
     validate_config(&config)?;
 
@@ -178,19 +235,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "registered default tools through the extracted tools crate"
     );
 
-    let run_result = runtime::run_cli_prompt(Arc::clone(&model), store, router, prompt).await;
+    if prompt.trim().is_empty() {
+        info!("starting interactive cli session");
+        run_interactive_cli(Arc::clone(&model), Arc::clone(&store), Arc::clone(&router)).await?;
+    } else {
+        let _ = runtime::run_cli_prompt(Arc::clone(&model), store, router, prompt).await?;
+    }
     let close_result = model.close().await;
-    let result = run_result?;
     close_result?;
-
-    println!("{result}");
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm::usage::Usage;
+    use std::collections::VecDeque;
     use std::sync::{Mutex, OnceLock};
+    use tokio::sync::Mutex as AsyncMutex;
+
+    #[derive(Clone)]
+    struct LoopTestModel {
+        responses: Arc<AsyncMutex<VecDeque<String>>>,
+    }
+
+    impl LoopTestModel {
+        /// Builds a test model that returns queued text responses for each interactive turn.
+        fn new(responses: &[&str]) -> Self {
+            Self {
+                responses: Arc::new(AsyncMutex::new(
+                    responses
+                        .iter()
+                        .map(|text| text.to_string())
+                        .collect::<VecDeque<_>>(),
+                )),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl AgentModel for LoopTestModel {
+        /// Returns queued test replies so the REPL loop can be exercised without external providers.
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+        ) -> kernel::Result<kernel::model::ModelResponse> {
+            let text = self
+                .responses
+                .lock()
+                .await
+                .pop_front()
+                .ok_or(kernel::Error::Runtime {
+                    message: "loop test model exhausted".to_string(),
+                    stage: "cli-loop-test-model".to_string(),
+                    inflight_snapshot: None,
+                })?;
+            Ok(kernel::model::ModelResponse::text(text, Usage::default()))
+        }
+    }
 
     /// Lock used to serialize tests that mutate environment variables.
     static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
@@ -284,5 +386,31 @@ mod tests {
                 .to_string()
                 .contains("codex auth only supports response link mode")
         );
+    }
+
+    /// Verifies the interactive loop skips blank input, prints replies, and exits on `quit`.
+    #[test]
+    fn interactive_loop_reuses_the_same_thread_until_quit() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+        let runtime = ThreadRuntime::new(
+            Arc::new(LoopTestModel::new(&["first reply"])),
+            Arc::new(InMemorySessionStore::default()),
+            Arc::new(rt.block_on(create_default_tool_router())),
+            Arc::new(runtime::TracingEventSink::stdout()),
+        );
+        let thread = runtime::build_cli_thread_handle();
+        let mut input = io::Cursor::new(b"\nhello\nquit\n".to_vec());
+        let mut output = Vec::new();
+
+        let result = rt.block_on(async {
+            run_interactive_cli_loop(&runtime, &thread, &mut input, &mut output).await
+        });
+
+        assert!(result.is_ok());
+        let rendered = String::from_utf8(output).expect("output should be utf8");
+        assert!(rendered.starts_with("> > "));
     }
 }

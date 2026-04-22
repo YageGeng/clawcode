@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 
 use kernel::{
     Result, SessionTaskContext, ThreadHandle, ThreadRunRequest, ThreadRuntime,
@@ -57,8 +60,86 @@ fn format_continuation_decision_trace_multiline(
         .collect::<Vec<_>>()
         .join("\n")
 }
+#[derive(Default)]
+struct CliPresentationState {
+    text_line_open: bool,
+}
 
-struct TracingEventSink;
+type SharedCliWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+impl TracingEventSink {
+    /// Builds the default sink that streams live output to stdout.
+    pub(crate) fn stdout() -> Self {
+        Self::with_writer(Arc::new(Mutex::new(Box::new(std::io::stdout()))))
+    }
+
+    /// Builds a sink backed by the provided writer so tests can capture rendered output.
+    pub(crate) fn with_writer(writer: SharedCliWriter) -> Self {
+        Self {
+            writer,
+            state: Mutex::new(CliPresentationState::default()),
+        }
+    }
+
+    /// Writes streamed assistant text directly to the terminal and keeps the line open.
+    fn write_text_delta(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = write!(writer, "{text}");
+        let _ = writer.flush();
+        state.text_line_open = true;
+    }
+
+    /// Writes a standalone status line, first closing any open streamed text line.
+    fn write_status_line(&self, line: &str) {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.text_line_open {
+            let _ = writeln!(writer);
+        }
+        let _ = writeln!(writer, "{line}");
+        let _ = writer.flush();
+        state.text_line_open = false;
+    }
+
+    /// Closes the current streamed text line so the next prompt starts on a clean line.
+    fn finish_text_line_if_needed(&self) {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.text_line_open {
+            let _ = writeln!(writer);
+            let _ = writer.flush();
+            state.text_line_open = false;
+        }
+    }
+}
+
+pub(crate) struct TracingEventSink {
+    writer: SharedCliWriter,
+    state: Mutex<CliPresentationState>,
+}
 
 #[async_trait::async_trait]
 impl EventSink for TracingEventSink {
@@ -104,6 +185,7 @@ impl EventSink for TracingEventSink {
             }
             AgentEvent::ModelTextDelta { text, iteration } => {
                 trace!(iteration, text = %text, "model text delta");
+                self.write_text_delta(&text);
             }
             AgentEvent::ModelReasoningSummaryDelta {
                 id,
@@ -242,6 +324,7 @@ impl EventSink for TracingEventSink {
                 arguments,
             } => {
                 info!(tool = %name, handle_id, arguments = %arguments, "tool requested");
+                self.write_status_line(&format!("[tool] {name} started"));
             }
             AgentEvent::ToolCallCompleted {
                 name,
@@ -260,6 +343,7 @@ impl EventSink for TracingEventSink {
                 } else {
                     info!(tool = %name, handle_id, output = %output, "tool completed");
                 }
+                self.write_status_line(&format!("[tool] {name} completed"));
             }
             AgentEvent::TextProduced { text } => {
                 info!(text = %text, "model produced final text");
@@ -283,6 +367,7 @@ impl EventSink for TracingEventSink {
                 );
             }
             AgentEvent::RunFinished { text, usage } => {
+                self.finish_text_line_if_needed();
                 info!(
                     text = %text,
                     input_tokens = usage.input_tokens,
@@ -295,6 +380,27 @@ impl EventSink for TracingEventSink {
     }
 }
 
+/// Builds the default CLI thread handle so one-shot and REPL modes share the same defaults.
+pub fn build_cli_thread_handle() -> ThreadHandle {
+    ThreadHandle::new(SessionId::new(), ThreadId::new()).with_system_prompt(
+        "You are a helpful agent. Use `apply_patch` for file edits and use `exec_command` or `write_stdin` only when command execution is required. Keep file changes inside the workspace, avoid paths containing `..`, and answer directly only when no tool action is needed.",
+    )
+}
+
+/// Runs one CLI turn through an existing thread/runtime pair.
+pub async fn run_cli_turn<M, E>(
+    runtime: &ThreadRuntime<M, E>,
+    thread: &ThreadHandle,
+    prompt: String,
+) -> Result<String>
+where
+    M: AgentModel + 'static,
+    E: EventSink + 'static,
+{
+    let result = runtime.run(thread, ThreadRunRequest::new(prompt)).await?;
+    Ok(result.text)
+}
+
 /// Runs one CLI prompt through the kernel runtime so CLI and kernel share the same path.
 pub async fn run_cli_prompt<M>(
     model: Arc<M>,
@@ -305,21 +411,23 @@ pub async fn run_cli_prompt<M>(
 where
     M: AgentModel + 'static,
 {
-    let thread = ThreadHandle::new(SessionId::new(), ThreadId::new()).with_system_prompt(
-        "You are a helpful agent. Use `apply_patch` for file edits and use `exec_command` or `write_stdin` only when command execution is required. Keep file changes inside the workspace, avoid paths containing `..`, and answer directly only when no tool action is needed.",
-    );
-    let runtime = ThreadRuntime::new(model, store, router, Arc::new(TracingEventSink));
-    let result = runtime.run(&thread, ThreadRunRequest::new(prompt)).await?;
-    Ok(result.text)
+    let thread = build_cli_thread_handle();
+    let runtime = ThreadRuntime::new(model, store, router, Arc::new(TracingEventSink::stdout()));
+    run_cli_turn(&runtime, &thread, prompt).await
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        collections::VecDeque,
+        io,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use async_trait::async_trait;
     use kernel::{
-        Result,
+        Result, ThreadRuntime,
+        events::{AgentEvent, EventSink},
         events::{
             TaskContinuationDecisionKind, TaskContinuationDecisionStage,
             TaskContinuationDecisionTraceEntry, TaskContinuationSource,
@@ -329,13 +437,74 @@ mod tests {
         tools::ToolRouter,
     };
     use llm::usage::Usage;
+    use serde_json::json;
+    use tokio::sync::Mutex;
 
     use super::{
-        format_continuation_decision_trace, format_continuation_decision_trace_multiline,
-        run_cli_prompt,
+        TracingEventSink, build_cli_thread_handle, format_continuation_decision_trace,
+        format_continuation_decision_trace_multiline, run_cli_prompt, run_cli_turn,
     };
 
+    #[derive(Clone, Default)]
+    struct SharedBufferWriter {
+        buffer: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl SharedBufferWriter {
+        /// Returns the captured UTF-8 text written through this shared writer.
+        fn rendered(&self) -> String {
+            String::from_utf8(
+                self.buffer
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("buffer should be utf8")
+        }
+    }
+
+    impl io::Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     struct StubAgentModel;
+
+    #[derive(Clone)]
+    struct RecordingTwoTurnModel {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+        responses: Arc<Mutex<VecDeque<ModelResponse>>>,
+    }
+
+    impl RecordingTwoTurnModel {
+        /// Builds a model double that records both turn requests and returns queued responses.
+        fn new() -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                responses: Arc::new(Mutex::new(
+                    vec![
+                        ModelResponse::text("first reply", Usage::default()),
+                        ModelResponse::text("second reply", Usage::default()),
+                    ]
+                    .into(),
+                )),
+            }
+        }
+
+        /// Returns the requests observed across both submitted CLI turns.
+        async fn requests(&self) -> Vec<ModelRequest> {
+            self.requests.lock().await.clone()
+        }
+    }
 
     #[async_trait(?Send)]
     impl AgentModel for StubAgentModel {
@@ -350,6 +519,22 @@ mod tests {
                     cache_creation_input_tokens: 0,
                 },
             ))
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl AgentModel for RecordingTwoTurnModel {
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            self.requests.lock().await.push(request);
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .ok_or_else(|| kernel::Error::Runtime {
+                    message: "recording two-turn model exhausted".to_string(),
+                    stage: "cli-two-turn-model-complete".to_string(),
+                    inflight_snapshot: None,
+                })
         }
     }
 
@@ -368,6 +553,94 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "hello from runtime");
+    }
+
+    #[tokio::test]
+    async fn reuses_one_thread_for_multiple_cli_turns() {
+        let model = Arc::new(RecordingTwoTurnModel::new());
+        let store = Arc::new(InMemorySessionStore::default());
+        let runtime = ThreadRuntime::new(
+            Arc::clone(&model),
+            Arc::clone(&store),
+            Arc::new(ToolRouter::new(
+                Arc::new(kernel::tools::ToolRegistry::default()),
+                Vec::new(),
+            )),
+            Arc::new(TracingEventSink::stdout()),
+        );
+        let thread = build_cli_thread_handle();
+
+        let first = run_cli_turn(&runtime, &thread, "hello".to_string())
+            .await
+            .unwrap();
+        let second = run_cli_turn(&runtime, &thread, "follow up".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(first, "first reply");
+        assert_eq!(second, "second reply");
+
+        let requests = model.requests().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn streams_text_deltas_without_waiting_for_run_finished() {
+        let writer = SharedBufferWriter::default();
+        let sink = TracingEventSink::with_writer(Arc::new(StdMutex::new(
+            Box::new(writer.clone()) as Box<dyn io::Write + Send>
+        )));
+
+        sink.publish(AgentEvent::ModelTextDelta {
+            text: "hel".to_string(),
+            iteration: Some(1),
+        })
+        .await;
+        sink.publish(AgentEvent::ModelTextDelta {
+            text: "lo".to_string(),
+            iteration: Some(1),
+        })
+        .await;
+        sink.publish(AgentEvent::RunFinished {
+            text: "hello".to_string(),
+            usage: Usage::default(),
+        })
+        .await;
+
+        assert_eq!(writer.rendered(), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn prints_tool_status_lines_on_separate_lines() {
+        let writer = SharedBufferWriter::default();
+        let sink = TracingEventSink::with_writer(Arc::new(StdMutex::new(
+            Box::new(writer.clone()) as Box<dyn io::Write + Send>
+        )));
+
+        sink.publish(AgentEvent::ModelTextDelta {
+            text: "answer".to_string(),
+            iteration: Some(1),
+        })
+        .await;
+        sink.publish(AgentEvent::ToolCallRequested {
+            name: "exec_command".to_string(),
+            handle_id: "h1".to_string(),
+            arguments: json!({}),
+        })
+        .await;
+        sink.publish(AgentEvent::ToolCallCompleted {
+            name: "exec_command".to_string(),
+            handle_id: "h1".to_string(),
+            output: "ok".to_string(),
+            structured_output: None,
+        })
+        .await;
+
+        assert_eq!(
+            writer.rendered(),
+            "answer\n[tool] exec_command started\n[tool] exec_command completed\n"
+        );
     }
 
     #[test]
