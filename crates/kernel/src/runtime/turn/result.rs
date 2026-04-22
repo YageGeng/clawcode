@@ -2,9 +2,10 @@ use llm::{completion::Message, usage::Usage};
 
 use crate::{
     Result,
+    context::SessionTaskContext,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     runtime::{inflight::ToolCallRuntimeSnapshot, turn::LoopResult},
-    session::{SessionContinuationRequest, SessionId, SessionStore, ThreadId},
+    session::{SessionContinuationRequest, SessionId, ThreadId},
 };
 
 /// Input required to persist the final assistant text and package one completed loop result.
@@ -25,7 +26,7 @@ pub(crate) struct FinalizeTextResponseRequest {
 
 /// Persists the final assistant message, publishes the terminal text event, and returns one loop result.
 pub(crate) async fn finalize_text_response<E>(
-    store: &impl SessionStore,
+    store: &SessionTaskContext,
     events: &E,
     request: FinalizeTextResponseRequest,
 ) -> Result<LoopResult>
@@ -53,7 +54,7 @@ where
         .map(|id| Message::assistant_with_id(id, text.clone()))
         .unwrap_or_else(|| Message::assistant(text.clone()));
     store
-        .append_message(session_id, thread_id, assistant.clone())
+        .append_message_state(session_id, thread_id, assistant.clone())
         .await?;
     new_messages.push(assistant);
 
@@ -76,7 +77,7 @@ mod tests {
     use super::{FinalizeTextResponseRequest, finalize_text_response};
     use crate::{
         events::{AgentEvent, RecordingEventSink},
-        session::{InMemorySessionStore, SessionId, SessionStore, ThreadId},
+        session::{InMemorySessionStore, SessionId, ThreadId},
     };
 
     /// Verifies the final text response finalizer persists the assistant message and reports text output.
@@ -96,7 +97,7 @@ mod tests {
         };
 
         store
-            .begin_turn(
+            .begin_turn_state(
                 session_id.clone(),
                 thread_id.clone(),
                 "hello".to_string(),
@@ -126,7 +127,7 @@ mod tests {
         .expect("finalizer should succeed");
 
         let messages = store
-            .load_messages(session_id, thread_id, 10)
+            .load_messages_state(session_id, thread_id, 10)
             .await
             .expect("messages should be readable");
         let recorded_events = events.snapshot().await;

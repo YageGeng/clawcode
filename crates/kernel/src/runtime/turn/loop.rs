@@ -2,6 +2,7 @@ use llm::{completion::Message, usage::Usage};
 
 use crate::{
     Result,
+    context::SessionTaskContext,
     events::AgentStage,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::{AgentModel, ModelRequest},
@@ -16,7 +17,7 @@ use crate::{
         sampling::{IterationOutcome, collect_stream_response},
         tool::{ToolExecutionRuntimeInput, execute_tool_execution_plan},
     },
-    session::{SessionContinuationRequest, SessionId, SessionStore, ThreadId},
+    session::{SessionContinuationRequest, SessionId, ThreadId},
     tools::router::ToolRouter,
 };
 
@@ -60,7 +61,7 @@ pub struct AgentLoopRequest {
 /// Runs one turn through repeated sampling iterations until the model can respond.
 pub(crate) async fn run_turn<M, E>(
     model: &M,
-    store: &impl SessionStore,
+    store: &SessionTaskContext,
     router: &ToolRouter,
     events: &E,
     config: &AgentLoopConfig,
@@ -77,6 +78,9 @@ where
         mut working_messages,
         mut next_tool_handle_sequence,
     } = request;
+
+    // Track turn-scoped state that accumulates across model iterations until
+    // the turn either produces a final response or exhausts the loop budget.
     let mut new_messages = Vec::new();
     let mut usage = Usage::new();
     let mut total_tool_calls = 0usize;
@@ -86,6 +90,8 @@ where
     let mut continuation_decision_trace = Vec::new();
 
     for iteration in 1..=config.max_iterations {
+        // Recompute tool definitions for each iteration so dynamic tool routing
+        // changes are reflected before the next model request is issued.
         let tool_definitions = router.definitions().await;
         events
             .publish(AgentEvent::StatusUpdated {
@@ -116,12 +122,16 @@ where
             collect_stream_response(events, iteration, next_tool_handle_sequence, &mut stream)
                 .await?;
 
+        // Fold the streamed response into turn-scoped accounting before deciding
+        // whether this iteration ends the turn or schedules tool execution.
         usage += iteration_result.usage;
         previous_response_id = iteration_result.message_id.clone();
         next_tool_handle_sequence = iteration_result.in_flight_tool_calls.next_handle_sequence();
 
         match IterationOutcome::from(iteration_result) {
             IterationOutcome::Respond { message_id, text } => {
+                // Let continuation hooks inspect the completed turn state before
+                // the final assistant text is persisted and returned.
                 let hook_decision = run_continuation_hook(
                     config,
                     ContinuationHookPhase::BeforeFinalResponse,
@@ -153,6 +163,7 @@ where
                         tool_call_id: None,
                     })
                     .await;
+
                 return finalize_text_response(
                     store,
                     events,
@@ -173,6 +184,8 @@ where
                 .await;
             }
             IterationOutcome::ContinueWithTools(plan) => {
+                // Execute the model-requested tool batch, append the resulting
+                // messages, and keep the loop alive for another sampling pass.
                 let (updated_total_tool_calls, inflight_snapshot, tool_batch_summary) =
                     execute_tool_execution_plan(
                         ToolExecutionRuntimeInput {
@@ -192,6 +205,9 @@ where
                     .await?;
                 total_tool_calls = updated_total_tool_calls;
                 final_inflight_snapshot.extend(inflight_snapshot);
+
+                // Hooks can request follow-up continuation after observing the
+                // completed batch and the updated turn transcript.
                 let hook_decision = run_continuation_hook(
                     config,
                     ContinuationHookPhase::ToolBatchCompleted,

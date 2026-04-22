@@ -2,8 +2,9 @@ use llm::completion::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    context::SessionTaskContext,
     runtime::inflight::{CompletedToolCallQueue, InFlightToolCallRegistry},
-    session::{SessionId, SessionStore, ThreadId},
+    session::{SessionId, ThreadId},
     tools::{
         ToolContext,
         executor::{ToolExecutionMode, ToolExecutionRequest},
@@ -21,12 +22,11 @@ pub(crate) struct ToolExecutionPlan {
 }
 
 /// Runtime input needed to execute one tool batch and fold its messages back into the turn state.
-pub(crate) struct ToolExecutionRuntimeInput<'a, S, E>
+pub(crate) struct ToolExecutionRuntimeInput<'a, E>
 where
-    S: SessionStore + ?Sized,
     E: crate::events::EventSink + ?Sized,
 {
-    pub(crate) store: &'a S,
+    pub(crate) store: &'a SessionTaskContext,
     pub(crate) session_id: SessionId,
     pub(crate) thread_id: ThreadId,
     pub(crate) router: &'a ToolRouter,

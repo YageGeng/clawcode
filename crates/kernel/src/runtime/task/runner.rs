@@ -2,6 +2,7 @@ use llm::usage::Usage;
 
 use crate::{
     Result,
+    context::SessionTaskContext,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::AgentModel,
     runtime::{
@@ -9,16 +10,15 @@ use crate::{
         continuation::{AgentLoopConfig, decide_task_continuation},
         turn::{TurnExecutionRequest, run_persisted_turn},
     },
-    session::SessionStore,
     tools::router::ToolRouter,
 };
 
 use super::{RunFailure, RunOutcome, RunRequest, RunResult};
 
 /// Executes one runtime task and wraps the inner turn result into the public outcome type.
-pub(crate) async fn run_task<M, S, E>(
+pub(crate) async fn run_task<M, E>(
     model: &M,
-    store: &S,
+    store: &SessionTaskContext,
     router: &ToolRouter,
     events: &E,
     config: &AgentLoopConfig,
@@ -27,7 +27,6 @@ pub(crate) async fn run_task<M, S, E>(
 ) -> Result<RunOutcome>
 where
     M: AgentModel + 'static,
-    S: SessionStore + 'static,
     E: EventSink + 'static,
 {
     events
@@ -38,15 +37,27 @@ where
         })
         .await;
 
+    // The outer task loop may execute multiple persisted turns when the runtime
+    // decides to continue with pending input or an internal follow-up request.
     let mut next_turn_request = Some(request);
+
+    // Aggregate task-level state so callers can inspect the whole run instead
+    // of only the final turn.
     let mut total_usage = Usage::new();
     let mut total_iterations = 0usize;
     let mut turn_index = 0usize;
     let mut task_inflight_snapshot = ToolCallRuntimeSnapshot::default();
     let mut task_continuation_decision_trace = Vec::new();
+
+    // Preserve tool handle numbering across turns so task-scoped tracing remains
+    // stable even when the task spans multiple persisted turns.
     let mut next_tool_handle_sequence = 0usize;
+
     while let Some(turn_request) = next_turn_request.take() {
         turn_index += 1;
+
+        // Execute exactly one persisted turn, including store lifecycle hooks
+        // such as begin_turn and cleanup on failure.
         let turn_result = run_persisted_turn(
             model,
             store,
@@ -71,6 +82,8 @@ where
             }
         };
 
+        // Merge the completed turn into the task-level aggregates that will be
+        // returned on success or attached to failures.
         total_usage += loop_result.usage;
         total_iterations += loop_result.iterations;
         next_tool_handle_sequence = loop_result.next_tool_handle_sequence;
@@ -105,14 +118,17 @@ where
             })
             .await;
 
+        // The continuation decision determines whether this task ends now or
+        // gets translated into the next persisted turn request.
         let next_request = continuation.into_run_request(
             turn_request.session_id.clone(),
             turn_request.thread_id.clone(),
         );
+
         match next_request {
             Some(next_request) => {
                 if let Err(error) = store
-                    .finalize_turn(
+                    .finalize_turn_by_id(
                         turn_request.session_id.clone(),
                         turn_request.thread_id.clone(),
                         loop_result.usage,
@@ -128,11 +144,13 @@ where
                         task_continuation_decision_trace,
                     ));
                 }
+
+                // Keep looping with the synthesized follow-up input.
                 next_turn_request = Some(next_request);
             }
             None => {
                 if let Err(error) = store
-                    .finalize_turn(
+                    .finalize_turn_by_id(
                         turn_request.session_id.clone(),
                         turn_request.thread_id.clone(),
                         loop_result.usage,
@@ -218,14 +236,11 @@ fn merge_continuation_traces(
 }
 
 /// Tries to discard the active turn after a post-loop task failure while preserving the primary error.
-pub(crate) async fn preserve_original_error_after_task_cleanup<S>(
-    store: &S,
+pub(crate) async fn preserve_original_error_after_task_cleanup(
+    store: &SessionTaskContext,
     request: &RunRequest,
     original_error: crate::Error,
-) -> crate::Error
-where
-    S: SessionStore + ?Sized,
-{
+) -> crate::Error {
     let inflight_snapshot = extract_inflight_snapshot(&original_error);
     match discard_active_turn_after_task_failure(store, request).await {
         Ok(()) => original_error,
@@ -255,11 +270,11 @@ fn extract_inflight_snapshot(error: &crate::Error) -> Option<ToolCallRuntimeSnap
 }
 
 /// Discards the still-active turn after a post-loop task failure so later runs can start cleanly.
-async fn discard_active_turn_after_task_failure<S>(store: &S, request: &RunRequest) -> Result<()>
-where
-    S: SessionStore + ?Sized,
-{
+async fn discard_active_turn_after_task_failure(
+    store: &SessionTaskContext,
+    request: &RunRequest,
+) -> Result<()> {
     store
-        .discard_turn(request.session_id.clone(), request.thread_id.clone())
+        .discard_turn_state(request.session_id.clone(), request.thread_id.clone())
         .await
 }

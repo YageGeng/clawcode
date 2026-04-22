@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 use super::{ToolCallBatch, publisher::InFlightEventPublisher};
 use crate::{
     Result,
+    context::SessionTaskContext,
     runtime::{
         ToolBatchSummary, ToolBatchSummaryEntry,
         inflight::{InFlightToolCallRegistry, ToolCallRuntimeSnapshot},
     },
-    session::{SessionId, SessionStore, ThreadId},
+    session::{SessionId, ThreadId},
     tools::{
         ToolContext,
         executor::{
@@ -24,12 +25,11 @@ use crate::{
 };
 
 /// Mutable turn state that tool execution appends to as batches complete.
-pub(super) struct ToolRuntime<'a, S, E>
+pub(super) struct ToolRuntime<'a, E>
 where
-    S: SessionStore + ?Sized,
     E: crate::events::EventSink + ?Sized,
 {
-    store: &'a S,
+    store: &'a SessionTaskContext,
     session_id: SessionId,
     thread_id: ThreadId,
     router: &'a ToolRouter,
@@ -41,15 +41,14 @@ where
     completed_batch_summary: &'a mut ToolBatchSummary,
 }
 
-impl<'a, S, E> ToolRuntime<'a, S, E>
+impl<'a, E> ToolRuntime<'a, E>
 where
-    S: SessionStore + ?Sized,
     E: crate::events::EventSink + ?Sized,
 {
     /// Builds one runtime facade over the mutable turn state used while draining tool batches.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        store: &'a S,
+        store: &'a SessionTaskContext,
         session_id: SessionId,
         thread_id: ThreadId,
         router: &'a ToolRouter,
@@ -166,7 +165,7 @@ where
             })?,
         };
         self.store
-            .append_message(
+            .append_message_state(
                 self.session_id.clone(),
                 self.thread_id.clone(),
                 assistant_message.clone(),
@@ -317,7 +316,7 @@ where
                 })
                 .await;
             self.store
-                .append_message(
+                .append_message_state(
                     self.session_id.clone(),
                     self.thread_id.clone(),
                     result.message.clone(),

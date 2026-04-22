@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use kernel::{
-    Agent, AgentContext, AgentDeps, AgentRunRequest, Result,
+    Agent, AgentDeps, AgentRunRequest, Result, SessionTaskContext, TurnContext,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::AgentModel,
-    session::{SessionId, SessionStore, ThreadId},
+    session::{SessionId, ThreadId},
     tools::router::ToolRouter,
 };
 use tracing::{info, trace};
@@ -296,18 +296,17 @@ impl EventSink for TracingEventSink {
 }
 
 /// Runs one CLI prompt through the kernel runtime so CLI and kernel share the same path.
-pub async fn run_cli_prompt<M, S>(
+pub async fn run_cli_prompt<M>(
     model: Arc<M>,
-    store: Arc<S>,
+    store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     prompt: String,
 ) -> Result<String>
 where
     M: AgentModel + 'static,
-    S: SessionStore + 'static,
 {
     let agent = Agent::new(
-        AgentContext::new(SessionId::new(), ThreadId::new()),
+        TurnContext::new(SessionId::new(), ThreadId::new()),
         AgentDeps::new(model, store, router, Arc::new(TracingEventSink)),
     )
     .with_system_prompt(

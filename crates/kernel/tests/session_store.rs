@@ -1,4 +1,4 @@
-use kernel::session::{InMemorySessionStore, SessionId, SessionStore, ThreadId, Turn};
+use kernel::{InMemorySessionStore, SessionId, ThreadId, Turn, TurnContext};
 use llm::{completion::Message, usage::Usage};
 
 #[tokio::test]
@@ -14,12 +14,12 @@ async fn in_memory_store_appends_and_reads_messages() {
     );
 
     store
-        .append_turn(session_id.clone(), thread_id.clone(), turn)
+        .append_turn_state(session_id.clone(), thread_id.clone(), turn)
         .await
         .unwrap();
 
     let messages = store
-        .load_messages(session_id, thread_id, 10)
+        .load_messages_state(session_id, thread_id, 10)
         .await
         .unwrap();
 
@@ -36,7 +36,7 @@ async fn in_memory_store_exposes_incremental_messages_before_turn_finalizes() {
     let thread_id = ThreadId::new();
 
     store
-        .begin_turn(
+        .begin_turn_state(
             session_id.clone(),
             thread_id.clone(),
             "hello".to_string(),
@@ -45,7 +45,7 @@ async fn in_memory_store_exposes_incremental_messages_before_turn_finalizes() {
         .await
         .unwrap();
     store
-        .append_message(
+        .append_message_state(
             session_id.clone(),
             thread_id.clone(),
             Message::assistant("thinking"),
@@ -54,7 +54,7 @@ async fn in_memory_store_exposes_incremental_messages_before_turn_finalizes() {
         .unwrap();
 
     let interim_messages = store
-        .load_messages(session_id.clone(), thread_id.clone(), 10)
+        .load_messages_state(session_id.clone(), thread_id.clone(), 10)
         .await
         .unwrap();
     assert_eq!(
@@ -62,13 +62,14 @@ async fn in_memory_store_exposes_incremental_messages_before_turn_finalizes() {
         vec![Message::user("hello"), Message::assistant("thinking")]
     );
 
+    let turn_context = TurnContext::new(session_id.clone(), thread_id.clone());
     store
-        .finalize_turn(session_id.clone(), thread_id.clone(), Usage::new())
+        .finalize_turn_state(&turn_context, Usage::new())
         .await
         .unwrap();
 
     let final_messages = store
-        .load_messages(session_id, thread_id, 10)
+        .load_messages_state(session_id, thread_id, 10)
         .await
         .unwrap();
     assert_eq!(
@@ -84,24 +85,23 @@ async fn in_memory_store_take_pending_input_keeps_non_pending_continuations_queu
     let thread_id = ThreadId::new();
 
     store
-        .enqueue_continuation(
+        .queue_continuation(
             session_id.clone(),
             thread_id.clone(),
             kernel::session::SessionContinuationRequest::SystemFollowUp {
                 input: "system follow up".to_string(),
             },
         )
-        .await
-        .unwrap();
+        .await;
 
     let error = store
-        .take_pending_input(session_id.clone(), thread_id.clone())
+        .drain_pending_input(session_id.clone(), thread_id.clone())
         .await
         .expect_err("non-pending continuations should not be consumed as pending input");
     assert!(matches!(error, kernel::Error::Runtime { .. }));
 
     let continuation = store
-        .take_continuation(session_id, thread_id)
+        .take_continuation_state(session_id, thread_id)
         .await
         .unwrap();
     assert_eq!(

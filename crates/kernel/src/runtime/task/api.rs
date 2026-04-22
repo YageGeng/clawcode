@@ -1,78 +1,41 @@
 use std::sync::Arc;
 
 use llm::usage::Usage;
-use uuid::Uuid;
 
 use crate::{
     Result,
+    context::{SessionTaskContext, TurnContext},
     events::EventSink,
     model::AgentModel,
     runtime::{ToolCallRuntimeSnapshot, continuation::AgentLoopConfig},
-    session::{SessionId, SessionStore, ThreadId},
+    session::{SessionId, ThreadId},
     tools::router::ToolRouter,
 };
 
 use super::runner::run_task;
 
 /// Shared dependencies that stay stable for one agent lifecycle.
-pub struct AgentDeps<M, S, E> {
+pub struct AgentDeps<M, E> {
     pub model: Arc<M>,
-    pub store: Arc<S>,
+    pub store: Arc<SessionTaskContext>,
     pub tools: Arc<ToolRouter>,
     pub events: Arc<E>,
 }
 
-impl<M, S, E> AgentDeps<M, S, E> {
+impl<M, E> AgentDeps<M, E> {
     /// Builds the shared dependency bundle for an agent instance.
-    pub fn new(model: Arc<M>, store: Arc<S>, tools: Arc<ToolRouter>, events: Arc<E>) -> Self {
+    pub fn new(
+        model: Arc<M>,
+        store: Arc<SessionTaskContext>,
+        tools: Arc<ToolRouter>,
+        events: Arc<E>,
+    ) -> Self {
         Self {
             model,
             store,
             tools,
             events,
         }
-    }
-}
-
-/// Stable identity and conversation scope for an agent instance.
-#[derive(Debug, Clone)]
-pub struct AgentContext {
-    pub agent_id: String,
-    pub session_id: SessionId,
-    pub thread_id: ThreadId,
-    pub parent_agent_id: Option<String>,
-    pub name: Option<String>,
-}
-
-impl AgentContext {
-    /// Creates a root agent context bound to a single session thread.
-    pub fn new(session_id: SessionId, thread_id: ThreadId) -> Self {
-        Self {
-            agent_id: Uuid::new_v4().to_string(),
-            session_id,
-            thread_id,
-            parent_agent_id: None,
-            name: None,
-        }
-    }
-
-    /// Attaches a human-readable name to the agent identity.
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    /// Records the parent agent identifier for a derived agent context.
-    pub fn with_parent_agent_id(mut self, parent_agent_id: impl Into<String>) -> Self {
-        self.parent_agent_id = Some(parent_agent_id.into());
-        self
-    }
-
-    /// Forks a child agent identity that stays on the same session thread.
-    pub fn fork(&self, name: impl Into<String>) -> Self {
-        Self::new(self.session_id.clone(), self.thread_id.clone())
-            .with_parent_agent_id(self.agent_id.clone())
-            .with_name(name)
     }
 }
 
@@ -101,20 +64,19 @@ impl AgentRunRequest {
 }
 
 /// Long-lived agent object that owns stable context and shared dependencies.
-pub struct Agent<M, S, E> {
-    context: AgentContext,
+pub struct Agent<M, E> {
+    context: TurnContext,
     config: AgentConfig,
-    deps: AgentDeps<M, S, E>,
+    deps: AgentDeps<M, E>,
 }
 
-impl<M, S, E> Agent<M, S, E>
+impl<M, E> Agent<M, E>
 where
     M: AgentModel + 'static,
-    S: SessionStore + 'static,
     E: EventSink + 'static,
 {
     /// Builds an agent bound to one session thread and dependency set.
-    pub fn new(context: AgentContext, deps: AgentDeps<M, S, E>) -> Self {
+    pub fn new(context: TurnContext, deps: AgentDeps<M, E>) -> Self {
         Self {
             context,
             config: AgentConfig::default(),
@@ -208,23 +170,27 @@ pub enum RunOutcome {
     Failure(RunFailure),
 }
 
-pub struct AgentRunner<M, S, E> {
+pub struct AgentRunner<M, E> {
     model: Arc<M>,
-    store: Arc<S>,
+    store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     events: Arc<E>,
     config: AgentLoopConfig,
     system_prompt: Option<String>,
 }
 
-impl<M, S, E> AgentRunner<M, S, E>
+impl<M, E> AgentRunner<M, E>
 where
     M: AgentModel + 'static,
-    S: SessionStore + 'static,
     E: EventSink + 'static,
 {
     /// Builds a runner from the model, stores, registry, and event sink.
-    pub fn new(model: Arc<M>, store: Arc<S>, router: Arc<ToolRouter>, events: Arc<E>) -> Self {
+    pub fn new(
+        model: Arc<M>,
+        store: Arc<SessionTaskContext>,
+        router: Arc<ToolRouter>,
+        events: Arc<E>,
+    ) -> Self {
         Self {
             model,
             store,

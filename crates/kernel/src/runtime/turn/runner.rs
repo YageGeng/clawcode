@@ -1,7 +1,9 @@
 use llm::completion::Message;
 
+use crate::events::EventSink;
 use crate::{
     Result,
+    context::SessionTaskContext,
     model::AgentModel,
     runtime::{
         continuation::AgentLoopConfig,
@@ -10,7 +12,6 @@ use crate::{
     },
     tools::router::ToolRouter,
 };
-use crate::{events::EventSink, session::SessionStore};
 
 /// Internal turn request that carries the persisted run request plus task-scoped loop state.
 #[derive(Debug, Clone)]
@@ -21,9 +22,9 @@ pub(crate) struct TurnExecutionRequest {
 }
 
 /// Executes one persisted turn using the supplied dependencies and runtime config.
-pub(crate) async fn run_persisted_turn<M, S, E>(
+pub(crate) async fn run_persisted_turn<M, E>(
     model: &M,
-    store: &S,
+    store: &SessionTaskContext,
     router: &ToolRouter,
     events: &E,
     config: &AgentLoopConfig,
@@ -31,7 +32,6 @@ pub(crate) async fn run_persisted_turn<M, S, E>(
 ) -> Result<LoopResult>
 where
     M: AgentModel + 'static,
-    S: SessionStore + 'static,
     E: EventSink + 'static,
 {
     let TurnExecutionRequest {
@@ -40,7 +40,7 @@ where
         next_tool_handle_sequence,
     } = turn_request;
     let mut history = store
-        .load_messages(
+        .load_messages_state(
             request.session_id.clone(),
             request.thread_id.clone(),
             config.recent_message_limit,
@@ -49,7 +49,7 @@ where
 
     let user_message = Message::user(request.input.clone());
     store
-        .begin_turn(
+        .begin_turn_state(
             request.session_id.clone(),
             request.thread_id.clone(),
             request.input.clone(),

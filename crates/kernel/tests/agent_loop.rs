@@ -4,13 +4,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream;
 use kernel::{
-    Agent, AgentContext, AgentDeps, AgentLoopConfig, AgentRunRequest, Error, Result,
+    Agent, AgentDeps, AgentLoopConfig, AgentRunRequest, Error, Result, TurnContext,
     events::{AgentEvent, AgentStage, RecordingEventSink, ToolStage},
     model::{AgentModel, ModelRequest, ModelResponse, ResponseItem},
     runtime::{AgentRunner, RunRequest},
-    session::{
-        InMemorySessionStore, SessionContinuationRequest, SessionId, SessionStore, ThreadId,
-    },
+    session::{InMemorySessionStore, SessionContinuationRequest, SessionId, ThreadId},
     tools::{
         Tool, ToolCallRequest, ToolInvocation, ToolMetadata, ToolOutput, ToolRouter,
         registry::ToolRegistryBuilder,
@@ -39,31 +37,6 @@ struct RecordingModel {
 #[derive(Clone)]
 struct EventSequenceModel {
     events: Arc<Mutex<VecDeque<Vec<kernel::Result<kernel::model::ResponseEvent>>>>>,
-}
-
-#[derive(Clone)]
-/// Session-store wrapper that can inject one continuation-drain failure after a turn finishes.
-struct ContinuationFailureStore {
-    inner: Arc<InMemorySessionStore>,
-    fail_take_continuation: Arc<std::sync::atomic::AtomicBool>,
-    fail_discard_turn: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl ContinuationFailureStore {
-    /// Builds a store that fails the first continuation-drain attempt and delegates everything else.
-    fn new(inner: Arc<InMemorySessionStore>) -> Self {
-        Self {
-            inner,
-            fail_take_continuation: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            fail_discard_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
-    }
-
-    /// Configures the store to fail the first discard-turn cleanup attempt as well.
-    fn with_failing_discard_turn(mut self) -> Self {
-        self.fail_discard_turn = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        self
-    }
 }
 
 impl EventSequenceModel {
@@ -142,121 +115,6 @@ impl AgentModel for EventSequenceModel {
             inflight_snapshot: None,
         })?;
         Ok(Box::pin(stream::iter(events)))
-    }
-}
-
-#[async_trait]
-impl SessionStore for ContinuationFailureStore {
-    /// Starts an active turn by delegating to the wrapped in-memory store.
-    async fn begin_turn(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        user_text: String,
-        user_message: Message,
-    ) -> Result<()> {
-        self.inner
-            .begin_turn(session_id, thread_id, user_text, user_message)
-            .await
-    }
-
-    /// Appends one in-progress turn message by delegating to the wrapped store.
-    async fn append_message(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        message: Message,
-    ) -> Result<()> {
-        self.inner
-            .append_message(session_id, thread_id, message)
-            .await
-    }
-
-    /// Finalizes one turn by delegating to the wrapped store.
-    async fn finalize_turn(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        usage: Usage,
-    ) -> Result<()> {
-        self.inner.finalize_turn(session_id, thread_id, usage).await
-    }
-
-    /// Discards one active turn by delegating to the wrapped store.
-    async fn discard_turn(&self, session_id: SessionId, thread_id: ThreadId) -> Result<()> {
-        if self
-            .fail_discard_turn
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(Error::Runtime {
-                message: "forced discard failure".to_string(),
-                stage: "test-discard-failure".to_string(),
-                inflight_snapshot: None,
-            });
-        }
-
-        self.inner.discard_turn(session_id, thread_id).await
-    }
-
-    /// Queues one continuation request by delegating to the wrapped store.
-    async fn enqueue_continuation(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        continuation: SessionContinuationRequest,
-    ) -> Result<()> {
-        self.inner
-            .enqueue_continuation(session_id, thread_id, continuation)
-            .await
-    }
-
-    /// Fails once so the runner's post-turn cleanup path can be exercised.
-    async fn take_continuation(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-    ) -> Result<Option<SessionContinuationRequest>> {
-        if self
-            .fail_take_continuation
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(Error::Runtime {
-                message: "forced continuation failure".to_string(),
-                stage: "test-continuation-failure".to_string(),
-                inflight_snapshot: None,
-            });
-        }
-
-        self.inner.take_continuation(session_id, thread_id).await
-    }
-
-    /// Delegates the atomic pending-input drain to the wrapped in-memory store.
-    async fn take_pending_input(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-    ) -> Result<Option<String>> {
-        self.inner.take_pending_input(session_id, thread_id).await
-    }
-
-    /// Appends one completed turn by delegating to the wrapped store.
-    async fn append_turn(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        turn: kernel::session::Turn,
-    ) -> Result<()> {
-        self.inner.append_turn(session_id, thread_id, turn).await
-    }
-
-    /// Loads thread messages by delegating to the wrapped store.
-    async fn load_messages(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        limit: usize,
-    ) -> Result<Vec<Message>> {
-        self.inner.load_messages(session_id, thread_id, limit).await
     }
 }
 
@@ -709,7 +567,7 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
     assert_eq!(result.usage.total_tokens, 16);
 
     let messages = store
-        .load_messages(session_id, thread_id, 20)
+        .load_messages_state(session_id, thread_id, 20)
         .await
         .unwrap();
     assert_eq!(messages[0], Message::user("say hello"));
@@ -876,7 +734,7 @@ async fn runner_keeps_completed_message_text_when_tool_calls_have_no_text_deltas
         .unwrap();
 
     let messages = store
-        .load_messages(session_id, thread_id, 20)
+        .load_messages_state(session_id, thread_id, 20)
         .await
         .unwrap();
     let Message::Assistant { content, .. } = &messages[1] else {
@@ -926,7 +784,7 @@ async fn runner_rejects_streams_that_end_without_completed_event() {
 
     assert!(error.to_string().contains("stream-completed"));
     let messages = store
-        .load_messages(session_id, thread_id, 20)
+        .load_messages_state(session_id, thread_id, 20)
         .await
         .unwrap();
     assert!(messages.is_empty());
@@ -1742,7 +1600,7 @@ async fn runner_persists_tool_call_message_before_tool_completion() {
         started_wait.await;
 
         let messages = store
-            .load_messages(session_id.clone(), thread_id.clone(), 20)
+            .load_messages_state(session_id.clone(), thread_id.clone(), 20)
             .await
             .unwrap();
         assert_eq!(messages[0], Message::user("say hello"));
@@ -1814,7 +1672,7 @@ async fn runner_cancels_in_flight_tool_batches_when_loop_token_is_triggered() {
     ));
 
     let messages = store
-        .load_messages(session_id, thread_id, 20)
+        .load_messages_state(session_id, thread_id, 20)
         .await
         .unwrap();
     assert!(messages.is_empty());
@@ -2148,15 +2006,14 @@ async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
     store
-        .enqueue_continuation(
+        .queue_continuation(
             session_id.clone(),
             thread_id.clone(),
             SessionContinuationRequest::PendingInput {
                 input: "follow up".to_string(),
             },
         )
-        .await
-        .expect("pending continuation should enqueue");
+        .await;
     let mut builder = ToolRegistryBuilder::new();
     builder.push_handler_spec(Arc::new(TestEchoTool));
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
@@ -2224,8 +2081,8 @@ async fn runner_returns_structured_failure_and_discards_active_turn_when_continu
         ModelResponse::text("first turn complete", usage(6)),
         ModelResponse::text("second turn complete", usage(4)),
     ]));
-    let inner_store = Arc::new(InMemorySessionStore::default());
-    let store = Arc::new(ContinuationFailureStore::new(Arc::clone(&inner_store)));
+    let store = Arc::new(InMemorySessionStore::default());
+    store.fail_next_take_continuation();
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
@@ -2263,10 +2120,10 @@ async fn runner_returns_structured_failure_and_discards_active_turn_when_continu
         .expect("the failed task should discard its active turn so the next run can begin");
     assert_eq!(second_result.text, "second turn complete");
 
-    let messages = inner_store
-        .load_messages(session_id, thread_id, 10)
+    let messages = store
+        .load_messages_state(session_id, thread_id, 10)
         .await
-        .expect("the inner store should remain readable after the failed task");
+        .expect("the store should remain readable after the failed task");
     assert_eq!(
         messages,
         vec![
@@ -2284,10 +2141,9 @@ async fn runner_preserves_primary_error_when_post_loop_cleanup_also_fails() {
         "first turn complete",
         usage(6),
     )]));
-    let inner_store = Arc::new(InMemorySessionStore::default());
-    let store = Arc::new(
-        ContinuationFailureStore::new(Arc::clone(&inner_store)).with_failing_discard_turn(),
-    );
+    let store = Arc::new(InMemorySessionStore::default());
+    store.fail_next_take_continuation();
+    store.fail_next_discard_turn();
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner = AgentRunner::new(model, store, router, sink);
@@ -2337,10 +2193,8 @@ async fn runner_preserves_primary_error_when_turn_cleanup_also_fails() {
         )],
         usage(8),
     )]));
-    let inner_store = Arc::new(InMemorySessionStore::default());
-    let store = Arc::new(
-        ContinuationFailureStore::new(Arc::clone(&inner_store)).with_failing_discard_turn(),
-    );
+    let store = Arc::new(InMemorySessionStore::default());
+    store.fail_next_discard_turn();
     let mut builder = ToolRegistryBuilder::new();
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
     let router = Arc::new(builder.build_router());
@@ -2553,15 +2407,14 @@ async fn runner_drains_pending_inputs_within_one_task_run() {
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
     store
-        .enqueue_continuation(
+        .queue_continuation(
             session_id.clone(),
             thread_id.clone(),
             SessionContinuationRequest::PendingInput {
                 input: "follow up".to_string(),
             },
         )
-        .await
-        .expect("continuation request should enqueue");
+        .await;
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink));
@@ -2578,7 +2431,7 @@ async fn runner_drains_pending_inputs_within_one_task_run() {
     assert_eq!(result.text, "second");
 
     let messages = store
-        .load_messages(session_id.clone(), thread_id.clone(), 20)
+        .load_messages_state(session_id.clone(), thread_id.clone(), 20)
         .await
         .expect("session messages should load");
     let user_messages = messages
@@ -2673,15 +2526,14 @@ async fn runner_drains_pending_inputs_enqueued_during_an_active_turn() {
     let enqueue_follow_up = async {
         started_wait.await;
         store
-            .enqueue_continuation(
+            .queue_continuation(
                 session_id.clone(),
                 thread_id.clone(),
                 SessionContinuationRequest::PendingInput {
                     input: "runtime follow up".to_string(),
                 },
             )
-            .await
-            .expect("continuation request should enqueue while the first turn is active");
+            .await;
         release.notify_waiters();
     };
 
@@ -2690,7 +2542,7 @@ async fn runner_drains_pending_inputs_enqueued_during_an_active_turn() {
     assert_eq!(result.text, "second turn complete");
 
     let messages = store
-        .load_messages(session_id.clone(), thread_id.clone(), 20)
+        .load_messages_state(session_id.clone(), thread_id.clone(), 20)
         .await
         .expect("session messages should load");
     let user_messages = messages
@@ -2752,15 +2604,14 @@ async fn runner_distinguishes_system_follow_up_continuations() {
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
     store
-        .enqueue_continuation(
+        .queue_continuation(
             session_id.clone(),
             thread_id.clone(),
             SessionContinuationRequest::SystemFollowUp {
                 input: "system asks for another turn".to_string(),
             },
         )
-        .await
-        .expect("system follow-up continuation should enqueue");
+        .await;
     let router = Arc::new(ToolRegistryBuilder::new().build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runner = AgentRunner::new(model, Arc::clone(&store), router, Arc::clone(&sink));
@@ -2777,7 +2628,7 @@ async fn runner_distinguishes_system_follow_up_continuations() {
     assert_eq!(result.text, "system follow up complete");
 
     let messages = store
-        .load_messages(session_id, thread_id, 20)
+        .load_messages_state(session_id, thread_id, 20)
         .await
         .expect("session messages should load");
     let user_messages = messages
@@ -3768,7 +3619,7 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
     let thread_id = ThreadId::new();
 
     let agent = Agent::new(
-        AgentContext::new(session_id.clone(), thread_id.clone()),
+        TurnContext::new(session_id.clone(), thread_id.clone()),
         AgentDeps::new(
             model,
             store.clone(),
@@ -3784,7 +3635,7 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
     assert_eq!(result.usage.total_tokens, 8);
 
     let messages = store
-        .load_messages(session_id, thread_id, 20)
+        .load_messages_state(session_id, thread_id, 20)
         .await
         .unwrap();
     assert_eq!(messages[0], Message::user("say hello"));
@@ -3843,7 +3694,7 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
 
 #[tokio::test]
 async fn agent_context_can_fork_child_identity_for_the_same_thread() {
-    let parent = AgentContext::new(SessionId::new(), ThreadId::new()).with_name("planner");
+    let parent = TurnContext::new(SessionId::new(), ThreadId::new()).with_name("planner");
     let child = parent.fork("reviewer");
 
     assert_eq!(child.session_id, parent.session_id);

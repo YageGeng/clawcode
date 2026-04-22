@@ -8,14 +8,17 @@ mod runtime;
 use self::batching::build_tool_execution_batches;
 pub(crate) use self::plan::{ToolExecutionPlan, ToolExecutionRuntimeInput};
 use self::{plan::ToolCallBatch, runtime::ToolRuntime};
-use crate::runtime::{
-    continuation::AgentLoopConfig, inflight::ToolCallRuntimeSnapshot, turn::ToolBatchSummary,
+use crate::{
+    Result,
+    runtime::{
+        continuation::AgentLoopConfig, inflight::ToolCallRuntimeSnapshot, turn::ToolBatchSummary,
+    },
+    tools::ToolContext,
 };
-use crate::{Result, session::SessionStore, tools::ToolContext};
 
 /// Executes the queue of completed tool calls collected during the last stream iteration.
 pub(crate) async fn execute_tool_execution_plan<E>(
-    input: ToolExecutionRuntimeInput<'_, impl SessionStore, E>,
+    input: ToolExecutionRuntimeInput<'_, E>,
     config: &AgentLoopConfig,
     plan: ToolExecutionPlan,
     total_tool_calls: usize,

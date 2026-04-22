@@ -1,10 +1,11 @@
 use crate::{
     Result,
+    context::SessionTaskContext,
     events::{
         TaskContinuationDecisionKind, TaskContinuationDecisionStage,
         TaskContinuationDecisionTraceEntry, TaskContinuationSource,
     },
-    session::{SessionContinuationRequest, SessionStore},
+    session::SessionContinuationRequest,
 };
 
 use super::{
@@ -78,15 +79,12 @@ impl From<&TaskContinuation> for TaskContinuationDecisionTraceEntry {
 }
 
 /// Decides whether the outer task loop should submit another turn after the current one.
-pub(crate) async fn decide_task_continuation<S>(
-    store: &S,
+pub(crate) async fn decide_task_continuation(
+    store: &SessionTaskContext,
     request: &RunRequest,
     loop_result: &LoopResult,
     config: &AgentLoopConfig,
-) -> Result<(TaskContinuation, Vec<TaskContinuationDecisionTraceEntry>)>
-where
-    S: SessionStore + ?Sized,
-{
+) -> Result<(TaskContinuation, Vec<TaskContinuationDecisionTraceEntry>)> {
     let mut continuation = loop_result.requested_continuation.clone();
     let mut trace = loop_result.continuation_decision_trace.clone();
 
@@ -157,7 +155,7 @@ where
     }
 
     let continuation = store
-        .take_continuation(request.session_id.clone(), request.thread_id.clone())
+        .take_continuation_state(request.session_id.clone(), request.thread_id.clone())
         .await?;
     Ok(match continuation {
         Some(continuation) => {
