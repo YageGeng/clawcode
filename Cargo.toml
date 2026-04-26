@@ -41,3 +41,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 url = "2.5"
 figment = { version = "0.10", features = ["env", "toml"] }
 arc-swap = "1"
+tempfile = "3"

@@ -53,6 +53,7 @@ pub struct AgentLoopConfig {
     pub max_iterations: usize,
     pub max_tool_calls: usize,
     pub recent_message_limit: usize,
+    pub skills: skills::SkillConfig,
     pub tool_choice: ToolChoice,
     pub tool_execution_mode: ToolExecutionMode,
     pub cancellation_token: Option<CancellationToken>,
@@ -70,6 +71,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             .field("max_iterations", &self.max_iterations)
             .field("max_tool_calls", &self.max_tool_calls)
             .field("recent_message_limit", &self.recent_message_limit)
+            .field("skills", &self.skills)
             .field("tool_choice", &self.tool_choice)
             .field("tool_execution_mode", &self.tool_execution_mode)
             .field(
@@ -107,6 +109,7 @@ impl Default for AgentLoopConfig {
             max_iterations: 8,
             max_tool_calls: 16,
             recent_message_limit: 24,
+            skills: skills::SkillConfig::default(),
             tool_choice: ToolChoice::Auto,
             tool_execution_mode: ToolExecutionMode::Serial,
             cancellation_token: None,

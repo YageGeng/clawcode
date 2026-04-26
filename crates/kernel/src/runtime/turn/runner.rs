@@ -1,9 +1,11 @@
 use llm::completion::Message;
+use snafu::ResultExt;
 
 use crate::events::EventSink;
 use crate::{
     Result,
     context::SessionTaskContext,
+    error::SkillsSnafu,
     model::AgentModel,
     runtime::{
         continuation::AgentLoopConfig,
@@ -56,6 +58,19 @@ where
             user_message.clone(),
         )
         .await?;
+
+    let skill_outcome = skills::SkillsManager::new(config.skills.clone())
+        .load()
+        .await;
+    let system_prompt = merge_skills_into_system_prompt(system_prompt, &skill_outcome.skills);
+    let selected_skills =
+        skills::collect_explicit_skill_mentions(&request.input, &skill_outcome.skills);
+    let skill_injections = skills::build_skill_injections(&selected_skills)
+        .await
+        .context(SkillsSnafu {
+            stage: "runner-build-skill-injections".to_string(),
+        })?;
+    history.extend(skill_injections);
     history.push(user_message);
 
     let loop_result = run_loop_turn(
@@ -78,4 +93,19 @@ where
         Ok(loop_result) => Ok(loop_result),
         Err(error) => Err(preserve_original_error_after_task_cleanup(store, &request, error).await),
     }
+}
+
+/// Appends the available-skills section to the system prompt when skills are discovered.
+fn merge_skills_into_system_prompt(
+    system_prompt: Option<String>,
+    skills: &[skills::SkillMetadata],
+) -> Option<String> {
+    let Some(skills_section) = skills::render_skills_section(skills) else {
+        return system_prompt;
+    };
+
+    Some(match system_prompt {
+        Some(prompt) if !prompt.trim().is_empty() => format!("{prompt}\n\n{skills_section}"),
+        _ => skills_section,
+    })
 }

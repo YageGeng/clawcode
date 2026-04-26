@@ -35,6 +35,12 @@ pub enum Error {
         inflight_snapshot: Option<ToolCallRuntimeSnapshot>,
     },
 
+    #[snafu(display("skill error on `{stage}`, {source}"))]
+    Skills {
+        source: skills::Error,
+        stage: String,
+    },
+
     #[snafu(display(
         "cleanup failed on `{stage}` after primary error `{source}`: {cleanup_error}"
     ))]

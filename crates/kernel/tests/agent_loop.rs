@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fs;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,7 +15,10 @@ use kernel::{
         registry::ToolRegistryBuilder,
     },
 };
-use llm::{completion::Message, usage::Usage};
+use llm::{
+    completion::{Message, message::UserContent},
+    usage::Usage,
+};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Barrier;
@@ -126,6 +130,30 @@ fn usage(total_tokens: u64) -> Usage {
         cached_input_tokens: 0,
         cache_creation_input_tokens: 0,
     }
+}
+
+/// Extracts plain text from a user message for assertions that inspect prompt context.
+fn first_user_text(message: &Message) -> &str {
+    let Message::User { content } = message else {
+        panic!("expected user message");
+    };
+    let UserContent::Text(text) = content.first_ref() else {
+        panic!("expected text user content");
+    };
+    text.text()
+}
+
+/// Creates a filesystem skill root with one SNAFU skill for runtime integration tests.
+fn write_test_skill_root() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let skill_dir = temp.path().join("rust-error-snafu");
+    fs::create_dir_all(&skill_dir).expect("skill dir should be created");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: rust-error-snafu\ndescription: Typed Rust errors.\n---\nUse SNAFU context.\n",
+    )
+    .expect("skill file should be written");
+    temp
 }
 
 /// Minimal echo tool used to keep the agent-loop test independent from removed demo tools.
@@ -3602,6 +3630,122 @@ async fn runner_passes_previous_response_id_to_follow_up_requests() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].previous_response_id, None);
     assert_eq!(requests[1].previous_response_id.as_deref(), Some("resp_1"));
+}
+
+/// Verifies explicit skill mentions append the skill list and inject selected skill contents.
+#[tokio::test]
+async fn runner_adds_available_skills_to_system_prompt_and_injects_explicit_mentions() {
+    let skill_root = write_test_skill_root();
+    let model = Arc::new(RecordingModel::new(vec![ModelResponse::text(
+        "done",
+        usage(4),
+    )]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let router = Arc::new(ToolRouter::new(
+        Arc::new(kernel::tools::ToolRegistry::default()),
+        Vec::new(),
+    ));
+    let sink = Arc::new(RecordingEventSink::default());
+    let runtime =
+        ThreadRuntime::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
+            skills: skills::SkillConfig {
+                roots: vec![skill_root.path().to_path_buf()],
+                cwd: None,
+                enabled: true,
+            },
+            ..AgentLoopConfig::default()
+        });
+
+    runtime
+        .run_request(RunRequest::new(
+            SessionId::new(),
+            ThreadId::new(),
+            "Use $rust-error-snafu for this error type",
+        ))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    let request = requests.first().expect("model should receive one request");
+    let system_prompt = request
+        .system_prompt
+        .as_ref()
+        .expect("skills should create a system prompt");
+
+    assert!(system_prompt.contains("## Skills"));
+    assert!(system_prompt.contains("- rust-error-snafu: Typed Rust errors."));
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("<skill_instructions"))
+    );
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("Use SNAFU context."))
+    );
+    assert_eq!(
+        request.messages.last(),
+        Some(&Message::user("Use $rust-error-snafu for this error type"))
+    );
+}
+
+/// Verifies unmentioned skills are listed but their full bodies are not injected.
+#[tokio::test]
+async fn runner_lists_available_skills_without_injecting_unmentioned_skill_bodies() {
+    let skill_root = write_test_skill_root();
+    let model = Arc::new(RecordingModel::new(vec![ModelResponse::text(
+        "done",
+        usage(4),
+    )]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let router = Arc::new(ToolRouter::new(
+        Arc::new(kernel::tools::ToolRegistry::default()),
+        Vec::new(),
+    ));
+    let sink = Arc::new(RecordingEventSink::default());
+    let runtime =
+        ThreadRuntime::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
+            skills: skills::SkillConfig {
+                roots: vec![skill_root.path().to_path_buf()],
+                cwd: None,
+                enabled: true,
+            },
+            ..AgentLoopConfig::default()
+        });
+
+    runtime
+        .run_request(RunRequest::new(
+            SessionId::new(),
+            ThreadId::new(),
+            "Explain a normal Rust error enum",
+        ))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    let request = requests.first().expect("model should receive one request");
+
+    assert!(
+        request
+            .system_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.contains("rust-error-snafu"))
+    );
+    assert!(
+        !request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("<skill_instructions"))
+    );
+    assert!(
+        !request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("Use SNAFU context."))
+    );
 }
 
 #[tokio::test]
