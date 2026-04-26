@@ -11,6 +11,7 @@ use reqwest::header::{
     CONTENT_TYPE, HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue, USER_AGENT,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use snafu::{OptionExt, ResultExt, Snafu};
 use tokio::sync::{Mutex, RwLock};
 
@@ -183,6 +184,25 @@ struct TokenResponse {
     /// Lifetime of the access token in seconds.
     #[serde(default)]
     expires_in: u64,
+}
+
+/// Token block used by the Codex CLI `~/.codex/auth.json` file.
+#[derive(Debug, Deserialize)]
+struct CodexCliAuthTokens {
+    /// Current bearer access token.
+    #[serde(default)]
+    access_token: Option<String>,
+    /// Long-lived refresh token used for silent renewal.
+    #[serde(default)]
+    refresh_token: Option<String>,
+}
+
+/// Top-level Codex CLI auth file shape, with unknown fields preserved separately by callers.
+#[derive(Debug, Deserialize)]
+struct CodexCliAuthFile {
+    /// OAuth token payload persisted by the Codex CLI.
+    #[serde(default)]
+    tokens: Option<CodexCliAuthTokens>,
 }
 
 /// Coordinates persisted Codex login state and silent token refresh.
@@ -372,9 +392,9 @@ impl OpenAiCodexSessionManager {
         let data = fs::read_to_string(&self.config.session_path).context(IoSnafu {
             stage: "read-session-file".to_string(),
         })?;
-        let session = serde_json::from_str::<OpenAiCodexSession>(&data).context(JsonSnafu {
-            stage: "parse-session-file".to_string(),
-        })?;
+        let Some(session) = parse_session_file(&data)? else {
+            return Ok(());
+        };
 
         if let Ok(mut guard) = self.session.try_write() {
             *guard = Some(session);
@@ -583,12 +603,12 @@ pub fn extract_chatgpt_account_id(token: &str) -> Result<String> {
         })
 }
 
-/// Produces the default local session path under `~/.clawcode/`.
+/// Produces the default Codex CLI auth path under `~/.codex/`.
 fn default_session_path() -> PathBuf {
     let home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".clawcode").join("openai_codex_session.json")
+    home.join(".codex").join("auth.json")
 }
 
 /// Returns the default browser verification URL when the API omits one.
@@ -688,6 +708,63 @@ fn build_session(
     }
 }
 
+/// Parses either the Codex CLI auth file shape or the legacy flat session shape.
+fn parse_session_file(data: &str) -> Result<Option<OpenAiCodexSession>> {
+    let value = serde_json::from_str::<Value>(data).context(JsonSnafu {
+        stage: "parse-session-json".to_string(),
+    })?;
+
+    if value.get("tokens").is_some() || value.get("auth_mode").is_some() {
+        return session_from_codex_cli_auth_value(value);
+    }
+
+    if value.get("access_token").is_none() && value.get("refresh_token").is_none() {
+        return Ok(None);
+    }
+
+    serde_json::from_value::<OpenAiCodexSession>(value)
+        .map(Some)
+        .context(JsonSnafu {
+            stage: "parse-legacy-session-json".to_string(),
+        })
+}
+
+/// Converts Codex CLI auth JSON into the internal session representation.
+fn session_from_codex_cli_auth_value(value: Value) -> Result<Option<OpenAiCodexSession>> {
+    let auth_file = serde_json::from_value::<CodexCliAuthFile>(value).context(JsonSnafu {
+        stage: "parse-codex-cli-auth-json".to_string(),
+    })?;
+    let Some(tokens) = auth_file.tokens else {
+        return Ok(None);
+    };
+
+    let access_token = tokens.access_token.unwrap_or_default().trim().to_string();
+    let refresh_token = tokens.refresh_token.unwrap_or_default().trim().to_string();
+
+    if access_token.is_empty() && refresh_token.is_empty() {
+        return Ok(None);
+    }
+
+    // Treat tokens without a readable expiry as stale so a refresh token can repair them.
+    let expires_at = extract_jwt_expiry(&access_token).unwrap_or_else(Utc::now);
+    Ok(Some(OpenAiCodexSession {
+        access_token,
+        refresh_token,
+        expires_at,
+        created_at: Utc::now(),
+    }))
+}
+
+/// Extracts the JWT `exp` claim without failing the broader auth loading path.
+fn extract_jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let decoded = engine.decode(payload_b64).ok()?;
+    let payload: Value = serde_json::from_slice(&decoded).ok()?;
+    let exp = payload.get("exp")?.as_i64()?;
+    DateTime::<Utc>::from_timestamp(exp, 0)
+}
+
 /// Keeps the previous refresh token when the server returns an empty token.
 fn resolve_refresh_token(new_refresh_token: String, previous_refresh_token: &str) -> String {
     if new_refresh_token.is_empty() {
@@ -705,7 +782,8 @@ fn save_session(path: &Path, session: &OpenAiCodexSession) -> Result<()> {
         })?;
     }
 
-    let json = serde_json::to_string_pretty(session).context(JsonSnafu {
+    let auth_json = codex_cli_auth_json_for_session(path, session)?;
+    let json = serde_json::to_string_pretty(&auth_json).context(JsonSnafu {
         stage: "serialize-session".to_string(),
     })?;
     fs::write(path, json).context(IoSnafu {
@@ -724,6 +802,60 @@ fn save_session(path: &Path, session: &OpenAiCodexSession) -> Result<()> {
     Ok(())
 }
 
+/// Builds the Codex CLI auth JSON to write, preserving unrelated existing fields.
+fn codex_cli_auth_json_for_session(path: &Path, session: &OpenAiCodexSession) -> Result<Value> {
+    let mut value = if path.exists() {
+        let data = fs::read_to_string(path).context(IoSnafu {
+            stage: "read-existing-auth-file".to_string(),
+        })?;
+        serde_json::from_str::<Value>(&data).context(JsonSnafu {
+            stage: "parse-existing-auth-file".to_string(),
+        })?
+    } else {
+        Value::Object(Map::new())
+    };
+
+    if !value.is_object() {
+        value = Value::Object(Map::new());
+    }
+
+    let root = value.as_object_mut().context(ProtocolSnafu {
+        stage: "prepare-auth-json-root".to_string(),
+        message: "auth JSON root is not an object".to_string(),
+    })?;
+    root.entry("auth_mode".to_string())
+        .or_insert_with(|| Value::String("chatgpt".to_string()));
+    root.insert(
+        "last_refresh".to_string(),
+        Value::String(Utc::now().to_rfc3339()),
+    );
+
+    let tokens = root
+        .entry("tokens".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !tokens.is_object() {
+        *tokens = Value::Object(Map::new());
+    }
+    let token_object = tokens.as_object_mut().context(ProtocolSnafu {
+        stage: "prepare-auth-json-tokens".to_string(),
+        message: "auth JSON tokens field is not an object".to_string(),
+    })?;
+
+    token_object.insert(
+        "access_token".to_string(),
+        Value::String(session.access_token.clone()),
+    );
+    token_object.insert(
+        "refresh_token".to_string(),
+        Value::String(session.refresh_token.clone()),
+    );
+    if let Ok(account_id) = extract_chatgpt_account_id(&session.access_token) {
+        token_object.insert("account_id".to_string(), Value::String(account_id));
+    }
+
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,6 +868,7 @@ mod tests {
         let payload = engine.encode(
             serde_json::json!({
                 "sub": "user123",
+                "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
                 "https://api.openai.com/auth": {
                     "chatgpt_account_id": account_id,
                 },
@@ -777,8 +910,9 @@ mod tests {
     async fn loads_persisted_session_from_disk() {
         let temp_dir = tempdir().unwrap();
         let session_path = temp_dir.path().join("session.json");
+        let access_token = make_test_jwt("acct_abc");
         let session = OpenAiCodexSession {
-            access_token: "access_abc".to_string(),
+            access_token: access_token.clone(),
             refresh_token: "refresh_xyz".to_string(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
             created_at: Utc::now(),
@@ -791,7 +925,111 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(manager.get_access_token().await.unwrap(), "access_abc");
+        assert_eq!(manager.get_access_token().await.unwrap(), access_token);
+    }
+
+    /// Verifies the manager can read the Codex CLI auth file shape without interactive login.
+    #[tokio::test]
+    async fn loads_codex_cli_auth_json_from_disk() {
+        let temp_dir = tempdir().unwrap();
+        let session_path = temp_dir.path().join("auth.json");
+        let access_token = make_test_jwt("acct_cli");
+        fs::write(
+            &session_path,
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "id_abc",
+                    "access_token": access_token,
+                    "refresh_token": "refresh_cli",
+                    "account_id": "acct_cli",
+                },
+                "last_refresh": "2026-04-26T10:00:00Z",
+                "unknown_field": {
+                    "keep": true,
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let manager = OpenAiCodexSessionManager::new(OpenAiCodexConfig {
+            session_path,
+            ..OpenAiCodexConfig::default()
+        })
+        .unwrap();
+
+        assert_eq!(manager.get_access_token().await.unwrap(), access_token);
+    }
+
+    /// Verifies an auth file without OAuth tokens does not block first-time browser auth.
+    #[tokio::test]
+    async fn ignores_codex_cli_auth_json_without_tokens() {
+        let temp_dir = tempdir().unwrap();
+        let session_path = temp_dir.path().join("auth.json");
+        fs::write(
+            &session_path,
+            serde_json::json!({
+                "auth_mode": "apikey",
+                "unknown_field": {
+                    "keep": true,
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let manager = OpenAiCodexSessionManager::new(OpenAiCodexConfig {
+            session_path,
+            ..OpenAiCodexConfig::default()
+        })
+        .expect("auth files without OAuth tokens should be treated as missing sessions");
+
+        assert!(manager.needs_refresh().await);
+    }
+
+    /// Verifies saving a session updates Codex CLI token fields without discarding unknown fields.
+    #[test]
+    fn save_session_preserves_codex_cli_auth_json_fields() {
+        let temp_dir = tempdir().unwrap();
+        let session_path = temp_dir.path().join("auth.json");
+        fs::write(
+            &session_path,
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "id_old",
+                    "access_token": "access_old",
+                    "refresh_token": "refresh_old",
+                    "account_id": "acct_old",
+                },
+                "last_refresh": "2026-04-26T10:00:00Z",
+                "unknown_field": {
+                    "keep": true,
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let access_token = make_test_jwt("acct_new");
+        let session = OpenAiCodexSession {
+            access_token: access_token.clone(),
+            refresh_token: "refresh_new".to_string(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            created_at: Utc::now(),
+        };
+
+        save_session(&session_path, &session).unwrap();
+
+        let updated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&session_path).unwrap()).unwrap();
+        assert_eq!(updated["auth_mode"], "chatgpt");
+        assert_eq!(updated["tokens"]["id_token"], "id_old");
+        assert_eq!(updated["tokens"]["access_token"], access_token);
+        assert_eq!(updated["tokens"]["refresh_token"], "refresh_new");
+        assert_eq!(updated["tokens"]["account_id"], "acct_new");
+        assert_eq!(updated["unknown_field"]["keep"], true);
+        assert!(updated["last_refresh"].as_str().is_some());
     }
 
     /// Verifies the refresh heuristic reports stale sessions correctly.

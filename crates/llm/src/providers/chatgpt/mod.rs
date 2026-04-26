@@ -635,7 +635,7 @@ fn default_auth_file() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".clawcode").join("chatgpt_session.json")
+    home.join(".codex").join("auth.json")
 }
 
 /// Merges provider-default instructions with an optional request-specific preamble.
