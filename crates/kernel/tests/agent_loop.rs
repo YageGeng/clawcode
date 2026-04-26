@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures_util::stream;
 use kernel::{
     AgentLoopConfig, Error, Result, ThreadHandle, ThreadRunRequest, ThreadRuntime, TurnContext,
+    UserInput,
     events::{AgentEvent, AgentStage, RecordingEventSink, ToolStage},
     model::{AgentModel, ModelRequest, ModelResponse, ResponseItem},
     runtime::RunRequest,
@@ -14,6 +15,7 @@ use kernel::{
         Tool, ToolCallRequest, ToolInvocation, ToolMetadata, ToolOutput, ToolRouter,
         registry::ToolRegistryBuilder,
     },
+    user_inputs_display_text, user_inputs_to_messages,
 };
 use llm::{
     completion::{Message, message::UserContent},
@@ -154,6 +156,23 @@ fn write_test_skill_root() -> tempfile::TempDir {
     )
     .expect("skill file should be written");
     temp
+}
+
+/// Verifies skill inputs are display metadata but not normal model messages.
+#[test]
+fn user_input_helpers_skip_skill_inputs_for_model_messages() {
+    let inputs = vec![
+        UserInput::skill("alpha-skill", "/tmp/alpha/SKILL.md"),
+        UserInput::text("hello"),
+    ];
+
+    let messages = user_inputs_to_messages(&inputs);
+
+    assert_eq!(
+        user_inputs_display_text(&inputs),
+        "[skill:alpha-skill](/tmp/alpha/SKILL.md)\nhello"
+    );
+    assert_eq!(messages, vec![Message::user("hello")]);
 }
 
 /// Minimal echo tool used to keep the agent-loop test independent from removed demo tools.
@@ -3745,6 +3764,70 @@ async fn runner_lists_available_skills_without_injecting_unmentioned_skill_bodie
             .messages
             .iter()
             .any(|message| first_user_text(message).contains("Use SNAFU context."))
+    );
+}
+
+/// Verifies structured skill input injects a skill without requiring `$skill-name` text.
+#[tokio::test]
+async fn runner_injects_structured_skill_input_without_text_mention() {
+    let skill_root = write_test_skill_root();
+    let model = Arc::new(RecordingModel::new(vec![ModelResponse::text(
+        "done",
+        usage(4),
+    )]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let router = Arc::new(ToolRouter::new(
+        Arc::new(kernel::tools::ToolRegistry::default()),
+        Vec::new(),
+    ));
+    let sink = Arc::new(RecordingEventSink::default());
+    let skill_path = skill_root.path().join("rust-error-snafu/SKILL.md");
+    let runtime =
+        ThreadRuntime::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
+            skills: skills::SkillConfig {
+                roots: vec![skill_root.path().to_path_buf()],
+                cwd: None,
+                enabled: true,
+            },
+            ..AgentLoopConfig::default()
+        });
+
+    runtime
+        .run_request(RunRequest::from_inputs(
+            SessionId::new(),
+            ThreadId::new(),
+            vec![
+                UserInput::skill("rust-error-snafu", skill_path),
+                UserInput::text("create an error enum"),
+            ],
+        ))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    let request = requests.first().expect("model should receive one request");
+
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("<skill_instructions"))
+    );
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("Use SNAFU context."))
+    );
+    assert_eq!(
+        request.messages.last(),
+        Some(&Message::user("create an error enum"))
+    );
+    assert!(
+        !request
+            .messages
+            .iter()
+            .any(|message| first_user_text(message).contains("[skill:rust-error-snafu]"))
     );
 }
 

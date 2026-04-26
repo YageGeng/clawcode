@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 /// Runtime configuration controlling where skill discovery looks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +34,39 @@ pub struct SkillMetadata {
     pub description: String,
     /// Absolute or caller-provided path to the source `SKILL.md` file.
     pub path: PathBuf,
+}
+
+/// Structured input used by skill mention selection without depending on the kernel crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillInput {
+    /// Plain text that can contain `$skill-name` or linked skill mentions.
+    Text { text: String },
+    /// Structured skill selection that resolves by exact skill path.
+    Skill { name: String, path: PathBuf },
+}
+
+impl SkillInput {
+    /// Builds a text input used for plain `$skill` mention scanning.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Builds a structured skill selection that resolves by exact path.
+    pub fn skill(name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self::Skill {
+            name: name.into(),
+            path: path.into(),
+        }
+    }
+}
+
+/// Extra selection context for Codex-compatible explicit skill mention rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillMentionOptions {
+    /// Skill paths that must not be selected.
+    pub disabled_paths: HashSet<PathBuf>,
+    /// Lowercase connector/app slug counts used to avoid plain-name ambiguity.
+    pub connector_slug_counts: HashMap<String, usize>,
 }
 
 /// Non-fatal load error for one candidate skill file.

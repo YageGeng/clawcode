@@ -1,6 +1,7 @@
 pub mod context;
 pub mod error;
 pub mod events;
+pub mod input;
 pub mod model;
 pub mod runtime;
 pub mod session;
@@ -10,6 +11,9 @@ pub use context::{
     CompletedTurn, ContextManager, SessionTaskContext, TurnContext, TurnContextItem,
 };
 pub use error::{Error, Result};
+pub use input::{
+    UserInput, user_inputs_display_text, user_inputs_to_messages, user_inputs_to_skill_inputs,
+};
 pub use runtime::{
     AgentLoopConfig, RunFailure, RunOutcome, RunRequest, RunResult, ThreadConfig, ThreadHandle,
     ThreadRunRequest, ThreadRuntime, ThreadRuntimeDeps,

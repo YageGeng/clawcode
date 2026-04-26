@@ -33,7 +33,7 @@ where
         .publish(AgentEvent::RunStarted {
             session_id: request.session_id.to_string(),
             thread_id: request.thread_id.to_string(),
-            input: request.input.clone(),
+            input: request.display_input.clone(),
         })
         .await;
 

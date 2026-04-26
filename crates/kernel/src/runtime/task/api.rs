@@ -6,6 +6,7 @@ use crate::{
     Result,
     context::SessionTaskContext,
     events::EventSink,
+    input::{UserInput, user_inputs_display_text},
     model::AgentModel,
     runtime::{ToolCallRuntimeSnapshot, continuation::AgentLoopConfig},
     session::{SessionId, ThreadId},
@@ -88,15 +89,22 @@ impl ThreadHandle {
 /// One thread submission with optional prompt overrides.
 #[derive(Debug, Clone)]
 pub struct ThreadRunRequest {
-    pub input: String,
+    /// Structured user inputs submitted for this turn.
+    pub inputs: Vec<UserInput>,
+    /// Optional system prompt override applied only to this submission.
     pub system_prompt_override: Option<String>,
 }
 
 impl ThreadRunRequest {
     /// Builds a single-turn request for an existing thread handle.
     pub fn new(input: impl Into<String>) -> Self {
+        Self::from_inputs(vec![UserInput::text(input)])
+    }
+
+    /// Builds a single-turn request from structured user inputs.
+    pub fn from_inputs(inputs: Vec<UserInput>) -> Self {
         Self {
-            input: input.into(),
+            inputs,
             system_prompt_override: None,
         }
     }
@@ -146,10 +154,10 @@ where
         thread: &ThreadHandle,
         request: ThreadRunRequest,
     ) -> Result<RunOutcome> {
-        let run_request = RunRequest::new(
+        let run_request = RunRequest::from_inputs(
             thread.session_id().clone(),
             thread.thread_id().clone(),
-            request.input,
+            request.inputs,
         );
         let system_prompt = request
             .system_prompt_override
@@ -192,18 +200,30 @@ where
 
 #[derive(Debug, Clone)]
 pub struct RunRequest {
+    /// Session identifier receiving this run.
     pub session_id: SessionId,
+    /// Thread identifier receiving this run.
     pub thread_id: ThreadId,
-    pub input: String,
+    /// Structured user inputs submitted for this run.
+    pub inputs: Vec<UserInput>,
+    /// Durable display string derived from structured inputs for events and history.
+    pub display_input: String,
 }
 
 impl RunRequest {
     /// Builds a runtime request from explicit identifiers and user input.
     pub fn new(session_id: SessionId, thread_id: ThreadId, input: impl Into<String>) -> Self {
+        Self::from_inputs(session_id, thread_id, vec![UserInput::text(input)])
+    }
+
+    /// Builds a runtime request from explicit identifiers and structured inputs.
+    pub fn from_inputs(session_id: SessionId, thread_id: ThreadId, inputs: Vec<UserInput>) -> Self {
+        let display_input = user_inputs_display_text(&inputs);
         Self {
             session_id,
             thread_id,
-            input: input.into(),
+            inputs,
+            display_input,
         }
     }
 }

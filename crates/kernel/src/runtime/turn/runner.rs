@@ -6,6 +6,7 @@ use crate::{
     Result,
     context::SessionTaskContext,
     error::SkillsSnafu,
+    input::{user_inputs_to_messages, user_inputs_to_skill_inputs},
     model::AgentModel,
     runtime::{
         continuation::AgentLoopConfig,
@@ -49,13 +50,17 @@ where
         )
         .await?;
 
-    let user_message = Message::user(request.input.clone());
+    let user_messages = user_inputs_to_messages(&request.inputs);
+    let persisted_user_message = user_messages
+        .last()
+        .cloned()
+        .unwrap_or_else(|| Message::user(request.display_input.clone()));
     store
         .begin_turn_state(
             request.session_id.clone(),
             request.thread_id.clone(),
-            request.input.clone(),
-            user_message.clone(),
+            request.display_input.clone(),
+            persisted_user_message,
         )
         .await?;
 
@@ -63,15 +68,20 @@ where
         .load()
         .await;
     let system_prompt = merge_skills_into_system_prompt(system_prompt, &skill_outcome.skills);
-    let selected_skills =
-        skills::collect_explicit_skill_mentions(&request.input, &skill_outcome.skills);
+    let skill_inputs = user_inputs_to_skill_inputs(&request.inputs);
+    let mention_options = skills::SkillMentionOptions::default();
+    let selected_skills = skills::collect_explicit_skill_mentions(
+        &skill_inputs,
+        &skill_outcome.skills,
+        &mention_options,
+    );
     let skill_injections = skills::build_skill_injections(&selected_skills)
         .await
         .context(SkillsSnafu {
             stage: "runner-build-skill-injections".to_string(),
         })?;
     history.extend(skill_injections);
-    history.push(user_message);
+    history.extend(user_messages);
 
     let loop_result = run_loop_turn(
         model,

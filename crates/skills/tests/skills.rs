@@ -1,10 +1,28 @@
-use std::fs;
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use llm::completion::{Message, message::UserContent};
 use skills::{
-    SkillConfig, SkillMetadata, SkillsManager, build_skill_injections,
-    collect_explicit_skill_mentions, render_skills_section,
+    SkillConfig, SkillInput, SkillMentionOptions, SkillMetadata, SkillsManager,
+    build_skill_injections, collect_explicit_skill_mentions, render_skills_section,
 };
+
+/// Builds default mention options for tests that do not need disabled paths or connector conflicts.
+fn mention_options() -> SkillMentionOptions {
+    SkillMentionOptions::default()
+}
+
+/// Builds skill metadata with predictable fields for mention-selection tests.
+fn test_skill(name: &str, path: &str) -> SkillMetadata {
+    SkillMetadata {
+        name: name.to_string(),
+        description: format!("{name} skill"),
+        path: PathBuf::from(path),
+    }
+}
 
 /// Verifies a valid `SKILL.md` frontmatter block loads into skill metadata.
 #[tokio::test]
@@ -96,12 +114,195 @@ fn explicit_mentions_select_unique_matching_skills() {
         path: "/tmp/skills/other/SKILL.md".into(),
     };
 
-    let selected = collect_explicit_skill_mentions(
+    let inputs = vec![SkillInput::text(
         "Use $rust-error-snafu and [$rust-error-snafu](skill:///tmp/skills/rust-error-snafu/SKILL.md)",
-        &[skill.clone(), other],
-    );
+    )];
+    let selected =
+        collect_explicit_skill_mentions(&inputs, &[skill.clone(), other], &mention_options());
 
     assert_eq!(selected, vec![skill]);
+}
+
+/// Verifies structured skill input selects by exact path without requiring text mention.
+#[test]
+fn structured_skill_input_selects_by_path() {
+    let alpha = test_skill("alpha-skill", "/tmp/alpha/SKILL.md");
+    let inputs = vec![SkillInput::skill("alpha-skill", "/tmp/alpha/SKILL.md")];
+
+    let selected =
+        collect_explicit_skill_mentions(&inputs, std::slice::from_ref(&alpha), &mention_options());
+
+    assert_eq!(selected, vec![alpha]);
+}
+
+/// Verifies missing structured path blocks same-name plain mention fallback.
+#[test]
+fn structured_missing_path_blocks_plain_name_fallback() {
+    let alpha = test_skill("alpha-skill", "/tmp/alpha/SKILL.md");
+    let inputs = vec![
+        SkillInput::skill("alpha-skill", "/tmp/missing/SKILL.md"),
+        SkillInput::text("use $alpha-skill"),
+    ];
+
+    let selected = collect_explicit_skill_mentions(&inputs, &[alpha], &mention_options());
+
+    assert!(selected.is_empty());
+}
+
+/// Verifies disabled structured path blocks same-name plain mention fallback.
+#[test]
+fn structured_disabled_path_blocks_plain_name_fallback() {
+    let alpha = test_skill("alpha-skill", "/tmp/alpha/SKILL.md");
+    let inputs = vec![
+        SkillInput::skill("alpha-skill", "/tmp/alpha/SKILL.md"),
+        SkillInput::text("use $alpha-skill"),
+    ];
+    let options = SkillMentionOptions {
+        disabled_paths: HashSet::from([PathBuf::from("/tmp/alpha/SKILL.md")]),
+        connector_slug_counts: HashMap::new(),
+    };
+
+    let selected = collect_explicit_skill_mentions(&inputs, &[alpha], &options);
+
+    assert!(selected.is_empty());
+}
+
+/// Verifies linked paths resolve ambiguous skill names by exact path.
+#[test]
+fn linked_path_selects_when_plain_name_is_ambiguous() {
+    let alpha = test_skill("demo-skill", "/tmp/alpha/SKILL.md");
+    let beta = test_skill("demo-skill", "/tmp/beta/SKILL.md");
+    let inputs = vec![SkillInput::text(
+        "use $demo-skill and [$demo-skill](skill:///tmp/beta/SKILL.md)",
+    )];
+
+    let selected =
+        collect_explicit_skill_mentions(&inputs, &[alpha, beta.clone()], &mention_options());
+
+    assert_eq!(selected, vec![beta]);
+}
+
+/// Verifies plain ambiguous names select nothing.
+#[test]
+fn plain_ambiguous_name_selects_nothing() {
+    let alpha = test_skill("demo-skill", "/tmp/alpha/SKILL.md");
+    let beta = test_skill("demo-skill", "/tmp/beta/SKILL.md");
+    let inputs = vec![SkillInput::text("use $demo-skill")];
+
+    let selected = collect_explicit_skill_mentions(&inputs, &[alpha, beta], &mention_options());
+
+    assert!(selected.is_empty());
+}
+
+/// Verifies connector slug conflicts suppress plain-name skill matching.
+#[test]
+fn connector_slug_conflict_suppresses_plain_name() {
+    let alpha = test_skill("alpha-skill", "/tmp/alpha/SKILL.md");
+    let inputs = vec![SkillInput::text("use $alpha-skill")];
+    let options = SkillMentionOptions {
+        disabled_paths: HashSet::new(),
+        connector_slug_counts: HashMap::from([("alpha-skill".to_string(), 1)]),
+    };
+
+    let selected = collect_explicit_skill_mentions(&inputs, &[alpha], &options);
+
+    assert!(selected.is_empty());
+}
+
+/// Verifies linked path wins even when connector slug conflicts with the skill name.
+#[test]
+fn linked_path_ignores_connector_slug_conflict() {
+    let alpha = test_skill("alpha-skill", "/tmp/alpha/SKILL.md");
+    let inputs = vec![SkillInput::text("use [$alpha-skill](/tmp/alpha/SKILL.md)")];
+    let options = SkillMentionOptions {
+        disabled_paths: HashSet::new(),
+        connector_slug_counts: HashMap::from([("alpha-skill".to_string(), 1)]),
+    };
+
+    let selected = collect_explicit_skill_mentions(&inputs, std::slice::from_ref(&alpha), &options);
+
+    assert_eq!(selected, vec![alpha]);
+}
+
+/// Verifies structured paths match skills when callers use an absolute spelling for a relative skill path.
+#[test]
+fn structured_path_matches_relative_loaded_skill_path() {
+    let relative_path = PathBuf::from("target/skill-test/alpha/SKILL.md");
+    let absolute_path = std::env::current_dir()
+        .expect("current dir should be readable")
+        .join(&relative_path);
+    let alpha = SkillMetadata {
+        name: "alpha-skill".to_string(),
+        description: "Alpha skill".to_string(),
+        path: relative_path,
+    };
+    let inputs = vec![SkillInput::skill("alpha-skill", absolute_path)];
+
+    let selected =
+        collect_explicit_skill_mentions(&inputs, std::slice::from_ref(&alpha), &mention_options());
+
+    assert_eq!(selected, vec![alpha]);
+}
+
+/// Verifies linked paths match skills when callers use an absolute spelling for a relative skill path.
+#[test]
+fn linked_path_matches_relative_loaded_skill_path() {
+    let relative_path = PathBuf::from("target/skill-test/beta/SKILL.md");
+    let absolute_path = std::env::current_dir()
+        .expect("current dir should be readable")
+        .join(&relative_path);
+    let beta = SkillMetadata {
+        name: "beta-skill".to_string(),
+        description: "Beta skill".to_string(),
+        path: relative_path,
+    };
+    let inputs = vec![SkillInput::text(format!(
+        "use [$beta-skill]({})",
+        absolute_path.display()
+    ))];
+
+    let selected =
+        collect_explicit_skill_mentions(&inputs, std::slice::from_ref(&beta), &mention_options());
+
+    assert_eq!(selected, vec![beta]);
+}
+
+/// Verifies disabled paths use the same normalization as structured and linked mention paths.
+#[test]
+fn disabled_path_matches_relative_loaded_skill_path() {
+    let relative_path = PathBuf::from("target/skill-test/gamma/SKILL.md");
+    let absolute_path = std::env::current_dir()
+        .expect("current dir should be readable")
+        .join(&relative_path);
+    let gamma = SkillMetadata {
+        name: "gamma-skill".to_string(),
+        description: "Gamma skill".to_string(),
+        path: relative_path,
+    };
+    let inputs = vec![SkillInput::text("use $gamma-skill")];
+    let options = SkillMentionOptions {
+        disabled_paths: HashSet::from([absolute_path]),
+        connector_slug_counts: HashMap::new(),
+    };
+
+    let selected = collect_explicit_skill_mentions(&inputs, &[gamma], &options);
+
+    assert!(selected.is_empty());
+}
+
+/// Verifies common shell environment variables are not treated as skill mentions.
+#[test]
+fn common_env_vars_are_ignored() {
+    let path_skill = test_skill("PATH", "/tmp/path/SKILL.md");
+    let alpha = test_skill("alpha-skill", "/tmp/alpha/SKILL.md");
+    let inputs = vec![SkillInput::text(
+        "use $PATH and $XDG_CONFIG_HOME and $alpha-skill",
+    )];
+
+    let selected =
+        collect_explicit_skill_mentions(&inputs, &[path_skill, alpha.clone()], &mention_options());
+
+    assert_eq!(selected, vec![alpha]);
 }
 
 /// Verifies selected skill files are wrapped as prompt-visible instruction messages.
