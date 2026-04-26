@@ -2,9 +2,11 @@ use std::{env, error::Error, io};
 
 use llm::{completion::AssistantContent, one_or_many::OneOrMany, providers::openai};
 
+#[allow(dead_code)]
 pub const MODEL: &str = "gpt-5.4";
 
 /// Reads a required environment variable for the OpenAI examples.
+#[allow(dead_code)]
 pub fn require_env(name: &str) -> Result<String, io::Error> {
     env::var(name).map_err(|_| {
         io::Error::other(format!(
@@ -14,6 +16,7 @@ pub fn require_env(name: &str) -> Result<String, io::Error> {
 }
 
 /// Builds an OpenAI client from the shared example environment variables.
+#[allow(dead_code)]
 pub fn openai_client() -> Result<openai::Client, Box<dyn Error>> {
     let base_url = require_env("OPENAI_BASE_URL")?;
     let api_key = require_env("OPENAI_API_KEY")?;
