@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     path::PathBuf,
@@ -119,6 +121,11 @@ async fn exec_command_intercepts_apply_patch_shell_command() {
 #[tokio::test]
 async fn exec_command_does_not_intercept_apply_patch_with_trailing_commands() {
     let root = temp_root("exec-command-apply-patch-trailing");
+    let shell = write_shell_with_local_path(&root);
+    write_executable_script(
+        &root.join("apply_patch"),
+        "#!/bin/sh\ncat >/dev/null\nprintf 'hello from shell interception\\n' > via-shell.txt\n",
+    );
     let router = create_file_tool_router_with_root(&root).await;
 
     let output = router
@@ -128,7 +135,7 @@ async fn exec_command_does_not_intercept_apply_patch_with_trailing_commands() {
                 "exec_command",
                 serde_json::json!({
                     "cmd": "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: via-shell.txt\n+hello from shell interception\n*** End Patch\nEOF\nprintf trailing-command",
-                    "shell": "/bin/sh"
+                    "shell": shell
                 }),
             ),
             ToolContext::new("session-1", "thread-1"),
@@ -436,4 +443,22 @@ fn temp_root(prefix: &str) -> PathBuf {
     ));
     fs::create_dir_all(&root).unwrap();
     root
+}
+
+/// Writes an executable shell script at `path` for tests that need deterministic shell commands.
+fn write_executable_script(path: &std::path::Path, contents: &str) {
+    fs::write(path, contents).unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+/// Creates a shell wrapper that prepends the test root to PATH before delegating to `/bin/sh`.
+fn write_shell_with_local_path(root: &std::path::Path) -> String {
+    let shell = root.join("test-shell");
+    write_executable_script(
+        &shell,
+        "#!/bin/sh\nPATH=\"$(pwd):$PATH\"\nexport PATH\nexec /bin/sh \"$@\"\n",
+    );
+    shell.to_string_lossy().into_owned()
 }

@@ -9,7 +9,7 @@ use std::{
 
 use config::{AppConfig, AuthMode, LinkMode};
 use kernel::{
-    ThreadHandle, ThreadRuntime,
+    AgentLoopConfig, ThreadHandle, ThreadRuntime,
     model::{AgentModel, LlmAgentModel, ModelRequest},
     session::InMemorySessionStore,
     tools::router::ToolRouter,
@@ -195,6 +195,7 @@ async fn run_interactive_cli(
     model: Arc<CliAgentModel>,
     store: Arc<InMemorySessionStore>,
     router: Arc<ToolRouter>,
+    skills: skills::SkillConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let thread = runtime::build_cli_thread_handle();
     let runtime = ThreadRuntime::new(
@@ -202,7 +203,11 @@ async fn run_interactive_cli(
         store,
         router,
         Arc::new(runtime::TracingEventSink::stdout()),
-    );
+    )
+    .with_config(AgentLoopConfig {
+        skills,
+        ..AgentLoopConfig::default()
+    });
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -229,6 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Arc::new(build_agent_model(&config)?);
     let store = Arc::new(InMemorySessionStore::default());
     let router = Arc::new(create_default_tool_router().await);
+    let skills = config.skills.to_skill_config();
 
     info!(
         tool_count = router.definitions().await.len(),
@@ -237,9 +243,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if prompt.trim().is_empty() {
         info!("starting interactive cli session");
-        run_interactive_cli(Arc::clone(&model), Arc::clone(&store), Arc::clone(&router)).await?;
+        run_interactive_cli(
+            Arc::clone(&model),
+            Arc::clone(&store),
+            Arc::clone(&router),
+            skills,
+        )
+        .await?;
     } else {
-        let _ = runtime::run_cli_prompt(Arc::clone(&model), store, router, prompt).await?;
+        let _ = runtime::run_cli_prompt(Arc::clone(&model), store, router, prompt, skills).await?;
     }
     let close_result = model.close().await;
     close_result?;
@@ -251,6 +263,7 @@ mod tests {
     use super::*;
     use llm::usage::Usage;
     use std::collections::VecDeque;
+    use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use tokio::sync::Mutex as AsyncMutex;
 
@@ -371,6 +384,22 @@ mod tests {
         let _link_guard = EnvVarGuard::set("APP_LINK_MODE", None);
 
         assert_eq!(config::load_config().unwrap().link_mode, LinkMode::Response);
+    }
+
+    /// Verifies the bundled config enables repo-local skill discovery for CLI requests.
+    #[test]
+    fn loads_default_skills_config_from_base_toml() {
+        let _env_guard = lock_env();
+        let _profile_guard = EnvVarGuard::set("APP_PROFILE", None);
+        let _skills_enabled_guard = EnvVarGuard::set("APP_SKILLS__ENABLED", None);
+        let _skills_cwd_guard = EnvVarGuard::set("APP_SKILLS__CWD", None);
+        let _skills_roots_guard = EnvVarGuard::set("APP_SKILLS__ROOTS", None);
+
+        let config = config::load_config().unwrap();
+
+        assert!(config.skills.enabled);
+        assert_eq!(config.skills.cwd, Some(PathBuf::from(".")));
+        assert!(config.skills.roots.is_empty());
     }
 
     /// Verifies OAuth auth rejects the unsupported completion transport combination.

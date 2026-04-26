@@ -8,3 +8,8 @@ model = "gpt-5.4"
 [chatgpt]
 base_url = "https://chatgpt.com/backend-api/codex"
 model = "gpt-5.3-codex"
+
+[skills]
+enabled = true
+cwd = "."
+roots = []

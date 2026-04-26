@@ -7,6 +7,7 @@ edition = "2024"
 kernel = { path = "../kernel" }
 tools = { path = "../tools" }
 llm = { path = "../llm" }
+skills = { path = "../skills" }
 
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
@@ -21,3 +22,6 @@ figment = { workspace = true }
 arc-swap = { workspace = true }
 
 snafu = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

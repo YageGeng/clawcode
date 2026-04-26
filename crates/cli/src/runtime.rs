@@ -4,7 +4,7 @@ use std::{
 };
 
 use kernel::{
-    Result, SessionTaskContext, ThreadHandle, ThreadRunRequest, ThreadRuntime,
+    AgentLoopConfig, Result, SessionTaskContext, ThreadHandle, ThreadRunRequest, ThreadRuntime,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::AgentModel,
     session::{SessionId, ThreadId},
@@ -407,12 +407,17 @@ pub async fn run_cli_prompt<M>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     prompt: String,
+    skills: skills::SkillConfig,
 ) -> Result<String>
 where
     M: AgentModel + 'static,
 {
     let thread = build_cli_thread_handle();
-    let runtime = ThreadRuntime::new(model, store, router, Arc::new(TracingEventSink::stdout()));
+    let runtime = ThreadRuntime::new(model, store, router, Arc::new(TracingEventSink::stdout()))
+        .with_config(AgentLoopConfig {
+            skills,
+            ..AgentLoopConfig::default()
+        });
     run_cli_turn(&runtime, &thread, prompt).await
 }
 
@@ -420,7 +425,7 @@ where
 mod tests {
     use std::{
         collections::VecDeque,
-        io,
+        fs, io,
         sync::{Arc, Mutex as StdMutex},
     };
 
@@ -506,6 +511,30 @@ mod tests {
         }
     }
 
+    /// Creates a filesystem skill root with one test skill for CLI integration checks.
+    fn write_cli_test_skill_root() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let skill_dir = temp.path().join("alpha-skill");
+        fs::create_dir_all(&skill_dir).expect("skill dir should be created");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: alpha-skill\ndescription: Alpha test skill.\n---\nUse alpha skill instructions.\n",
+        )
+        .expect("skill file should be written");
+        temp
+    }
+
+    /// Extracts the first text block from a user message so tests can inspect prompt context.
+    fn first_user_text(message: &llm::completion::Message) -> &str {
+        let llm::completion::Message::User { content } = message else {
+            panic!("expected user message");
+        };
+        let llm::completion::message::UserContent::Text(text) = content.first_ref() else {
+            panic!("expected text user content");
+        };
+        text.text()
+    }
+
     #[async_trait(?Send)]
     impl AgentModel for StubAgentModel {
         async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
@@ -548,11 +577,51 @@ mod tests {
                 Vec::new(),
             )),
             "say hello".to_string(),
+            skills::SkillConfig::default(),
         )
         .await
         .unwrap();
 
         assert_eq!(text, "hello from runtime");
+    }
+
+    #[tokio::test]
+    async fn run_cli_prompt_uses_configured_skill_roots() {
+        let skill_root = write_cli_test_skill_root();
+        let model = Arc::new(RecordingTwoTurnModel::new());
+
+        run_cli_prompt(
+            Arc::clone(&model),
+            Arc::new(InMemorySessionStore::default()),
+            Arc::new(ToolRouter::new(
+                Arc::new(kernel::tools::ToolRegistry::default()),
+                Vec::new(),
+            )),
+            "Use $alpha-skill".to_string(),
+            skills::SkillConfig {
+                roots: vec![skill_root.path().to_path_buf()],
+                cwd: None,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = model.requests().await;
+        let request = requests.first().expect("model should receive a request");
+
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| first_user_text(message).contains("<skill_instructions"))
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| first_user_text(message).contains("Use alpha skill instructions."))
+        );
     }
 
     #[tokio::test]

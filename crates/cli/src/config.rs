@@ -1,4 +1,7 @@
-use std::sync::{Arc, LazyLock};
+use std::{
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 
 use arc_swap::ArcSwap;
 use figment::{
@@ -20,6 +23,8 @@ pub struct AppConfig {
     pub openai: OpenAiConfig,
     /// ChatGPT/Codex provider configuration for OAuth-backed requests.
     pub chatgpt: ChatGptConfig,
+    /// Skill discovery configuration forwarded into the kernel runtime.
+    pub skills: CliSkillsConfig,
 }
 
 impl Default for AppConfig {
@@ -30,6 +35,7 @@ impl Default for AppConfig {
             link_mode: LinkMode::Response,
             openai: OpenAiConfig::default(),
             chatgpt: ChatGptConfig::default(),
+            skills: CliSkillsConfig::default(),
         }
     }
 }
@@ -87,6 +93,40 @@ pub struct ChatGptConfig {
     pub model: String,
     /// Optional bearer token sourced from config files or `APP_CHATGPT__ACCESS_TOKEN`.
     pub access_token: Option<String>,
+}
+
+/// CLI-owned skill configuration shape loaded from TOML and `APP_SKILLS__*` overrides.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CliSkillsConfig {
+    /// Explicit directories scanned recursively for `SKILL.md` files.
+    pub roots: Vec<PathBuf>,
+    /// Optional current working directory used to discover `.agents/skills`.
+    pub cwd: Option<PathBuf>,
+    /// Enables or disables skill discovery for CLI requests.
+    pub enabled: bool,
+}
+
+impl Default for CliSkillsConfig {
+    /// Builds the default CLI skill configuration before config-file overrides are merged.
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            cwd: None,
+            enabled: true,
+        }
+    }
+}
+
+impl CliSkillsConfig {
+    /// Converts CLI-loaded skill settings into the kernel skill discovery configuration.
+    pub fn to_skill_config(&self) -> skills::SkillConfig {
+        skills::SkillConfig {
+            roots: self.roots.clone(),
+            cwd: self.cwd.clone(),
+            enabled: self.enabled,
+        }
+    }
 }
 
 impl Default for ChatGptConfig {
