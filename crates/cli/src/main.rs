@@ -7,7 +7,7 @@ use std::{
     io::{BufRead, Write},
 };
 
-use config::{AppConfig, AuthMode, LinkMode};
+use config::AppConfig;
 use kernel::{
     AgentLoopConfig, ThreadHandle, ThreadRuntime,
     model::{AgentModel, FactoryLlmAgentModel},
@@ -19,25 +19,12 @@ use tools::create::create_default_tool_router;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Validates the loaded config before a provider client is constructed.
-fn validate_config(config: &AppConfig) -> Result<(), io::Error> {
-    if matches!(config.auth_mode, AuthMode::OAuth)
-        && matches!(config.link_mode, LinkMode::Completion)
-    {
-        return Err(io::Error::other(
-            "codex auth only supports response link mode",
-        ));
-    }
-
-    Ok(())
-}
-
 /// Builds the CLI model adapter selected by the loaded app config.
 fn build_agent_model(
     config: &AppConfig,
 ) -> Result<FactoryLlmAgentModel, Box<dyn std::error::Error>> {
-    let factory = LlmModelFactory::try_from_config(config.to_llm_config())?;
-    let model = factory.completion_model_ref(&config.llm_model_ref())?;
+    let factory = LlmModelFactory::try_from_config(config.llm.clone())?;
+    let model = factory.completion_model_ref(config.current_model_ref())?;
     Ok(FactoryLlmAgentModel::new(model))
 }
 
@@ -126,11 +113,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let prompt = env::args().skip(1).collect::<Vec<_>>().join(" ");
     let config = config::app_config();
-    validate_config(&config)?;
 
     info!(
-        auth_mode = ?config.auth_mode,
-        link_mode = ?config.link_mode,
+        current_model = %config.current_model_ref(),
+        provider_count = config.llm.providers.len(),
         prompt = %runtime::prompt_preview(&prompt),
         "starting cli request"
     );
@@ -251,44 +237,6 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Verifies unsupported auth mode values fail fast during config loading.
-    #[test]
-    fn rejects_unknown_auth_modes() {
-        let _env_guard = lock_env();
-        let _auth_guard = EnvVarGuard::set("APP_AUTH_MODE", Some("mystery"));
-
-        let error = config::load_config().unwrap_err();
-        assert!(error.to_string().contains("mystery"));
-    }
-
-    /// Verifies the default auth mode matches the bundled base config.
-    #[test]
-    fn defaults_to_api_key_auth_mode() {
-        let _env_guard = lock_env();
-        let _auth_guard = EnvVarGuard::set("APP_AUTH_MODE", None);
-
-        assert_eq!(config::load_config().unwrap().auth_mode, AuthMode::OAuth);
-    }
-
-    /// Verifies unsupported link mode values fail fast during config loading.
-    #[test]
-    fn rejects_unknown_link_modes() {
-        let _env_guard = lock_env();
-        let _link_guard = EnvVarGuard::set("APP_LINK_MODE", Some("mystery"));
-
-        let error = config::load_config().unwrap_err();
-        assert!(error.to_string().contains("mystery"));
-    }
-
-    /// Verifies the default link mode remains Responses API based for existing callers.
-    #[test]
-    fn defaults_to_response_link_mode() {
-        let _env_guard = lock_env();
-        let _link_guard = EnvVarGuard::set("APP_LINK_MODE", None);
-
-        assert_eq!(config::load_config().unwrap().link_mode, LinkMode::Response);
-    }
-
     /// Verifies the bundled config enables repo-local skill discovery for CLI requests.
     #[test]
     fn loads_default_skills_config_from_base_toml() {
@@ -305,43 +253,48 @@ mod tests {
         assert!(config.skills.roots.is_empty());
     }
 
-    /// Verifies OAuth auth rejects the unsupported completion transport combination.
+    /// Verifies the bundled CLI config exposes the provider factory config directly.
     #[test]
-    fn rejects_codex_completion_mode() {
+    fn loads_current_model_and_factory_providers_from_base_toml() {
         let _env_guard = lock_env();
-        let _auth_guard = EnvVarGuard::set("APP_AUTH_MODE", Some("o_auth"));
-        let _link_guard = EnvVarGuard::set("APP_LINK_MODE", Some("completion"));
+        let _profile_guard = EnvVarGuard::set("APP_PROFILE", None);
 
-        let error = validate_config(&config::load_config().unwrap()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("codex auth only supports response link mode")
+        let config = config::load_config().unwrap();
+
+        let (current_provider, current_model) = config
+            .current_model
+            .split_once('/')
+            .expect("current model should use provider/model format");
+        assert!(config.llm.providers.iter().any(|provider| {
+            provider.id == current_provider
+                && provider
+                    .models
+                    .iter()
+                    .any(|model| model.id == current_model)
+        }));
+
+        let deepseek = config
+            .llm
+            .providers
+            .iter()
+            .find(|provider| provider.id == "deepseek")
+            .expect("base config should include a DeepSeek provider");
+        assert_eq!(
+            deepseek.api_key,
+            llm::providers::ApiKeyConfig::Env {
+                name: "DEEPSEEK_API_KEY".to_string()
+            }
         );
     }
 
-    /// Verifies OAuth config is converted into an OpenAI protocol provider with managed auth.
+    /// Verifies CLI config cannot be constructed without explicit file or env values.
     #[test]
-    fn converts_oauth_config_into_openai_managed_auth_provider() {
-        let config = AppConfig {
-            auth_mode: AuthMode::OAuth,
-            link_mode: LinkMode::Response,
-            ..AppConfig::default()
-        };
+    fn rejects_missing_cli_config_fields_without_code_defaults() {
+        let error = figment::Figment::new()
+            .extract::<AppConfig>()
+            .expect_err("empty config should not fall back to code defaults");
 
-        let llm_config = config.to_llm_config();
-        let provider = llm_config
-            .providers
-            .first()
-            .expect("CLI config should create one provider");
-
-        assert_eq!(config.llm_model_ref(), "openai/gpt-5.3-codex");
-        assert_eq!(provider.id, "openai");
-        assert_eq!(
-            provider.protocols,
-            vec![llm::providers::ApiProtocol::OpenAI]
-        );
-        assert_eq!(provider.api_key, llm::providers::ApiKeyConfig::Auth);
+        assert!(error.to_string().contains("current_model"));
     }
 
     /// Verifies the interactive loop skips blank input, prints replies, and exits on `quit`.
