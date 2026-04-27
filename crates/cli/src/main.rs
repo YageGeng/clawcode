@@ -273,6 +273,27 @@ mod tests {
                     .any(|model| model.id == current_model)
         }));
 
+        let openai = config
+            .llm
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("base config should include an OpenAI provider");
+        let openai_model = openai
+            .models
+            .iter()
+            .find(|model| model.id == "gpt-5.4")
+            .expect("base config should include GPT 5.4");
+        assert_eq!(
+            openai_model.extra_param,
+            serde_json::json!({
+                "reasoning": {
+                    "effort": "xhigh",
+                    "summary": "auto"
+                }
+            })
+        );
+
         let deepseek = config
             .llm
             .providers
@@ -284,6 +305,20 @@ mod tests {
             llm::providers::ApiKeyConfig::Env {
                 name: "DEEPSEEK_API_KEY".to_string()
             }
+        );
+        let deepseek_model = deepseek
+            .models
+            .iter()
+            .find(|model| model.id == "deepseek-v4-pro")
+            .expect("base config should include DeepSeek V4 Pro");
+        assert_eq!(
+            deepseek_model.extra_param,
+            serde_json::json!({
+                "reasoning_effort": "max",
+                "thinking": {
+                    "type": "enabled"
+                }
+            })
         );
     }
 

@@ -63,6 +63,7 @@ fn format_continuation_decision_trace_multiline(
 #[derive(Default)]
 struct CliPresentationState {
     text_line_open: bool,
+    reasoning_line_open: bool,
 }
 
 type SharedCliWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -95,9 +96,41 @@ impl TracingEventSink {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.reasoning_line_open {
+            let _ = writeln!(writer);
+            let _ = writeln!(writer, "[think end]");
+            let _ = writeln!(writer, "[answer]");
+            state.reasoning_line_open = false;
+        }
         let _ = write!(writer, "{text}");
         let _ = writer.flush();
         state.text_line_open = true;
+    }
+
+    /// Writes streamed reasoning content before visible answer text.
+    fn write_reasoning_delta(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.text_line_open {
+            let _ = writeln!(writer);
+            state.text_line_open = false;
+        }
+        if !state.reasoning_line_open {
+            let _ = writeln!(writer, "[think]");
+        }
+        let _ = write!(writer, "{text}");
+        let _ = writer.flush();
+        state.reasoning_line_open = true;
     }
 
     /// Writes a standalone status line, first closing any open streamed text line.
@@ -110,12 +143,13 @@ impl TracingEventSink {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.text_line_open {
+        if state.text_line_open || state.reasoning_line_open {
             let _ = writeln!(writer);
         }
         let _ = writeln!(writer, "{line}");
         let _ = writer.flush();
         state.text_line_open = false;
+        state.reasoning_line_open = false;
     }
 
     /// Closes the current streamed text line so the next prompt starts on a clean line.
@@ -128,10 +162,11 @@ impl TracingEventSink {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.text_line_open {
+        if state.text_line_open || state.reasoning_line_open {
             let _ = writeln!(writer);
             let _ = writer.flush();
             state.text_line_open = false;
+            state.reasoning_line_open = false;
         }
     }
 }
@@ -202,6 +237,7 @@ impl EventSink for TracingEventSink {
                 iteration,
             } => {
                 info!(iteration, id, content_index, text = %text, "model reasoning content delta");
+                self.write_reasoning_delta(&text);
             }
             AgentEvent::ModelToolCallNameDelta {
                 tool_id,
@@ -678,6 +714,44 @@ mod tests {
         .await;
 
         assert_eq!(writer.rendered(), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn streams_reasoning_content_before_answer_text() {
+        let writer = SharedBufferWriter::default();
+        let sink = TracingEventSink::with_writer(Arc::new(StdMutex::new(
+            Box::new(writer.clone()) as Box<dyn io::Write + Send>
+        )));
+
+        sink.publish(AgentEvent::ModelReasoningContentDelta {
+            id: None,
+            text: "think".to_string(),
+            content_index: 0,
+            iteration: Some(1),
+        })
+        .await;
+        sink.publish(AgentEvent::ModelReasoningContentDelta {
+            id: None,
+            text: "ing".to_string(),
+            content_index: 0,
+            iteration: Some(1),
+        })
+        .await;
+        sink.publish(AgentEvent::ModelTextDelta {
+            text: "answer".to_string(),
+            iteration: Some(1),
+        })
+        .await;
+        sink.publish(AgentEvent::RunFinished {
+            text: "answer".to_string(),
+            usage: Usage::default(),
+        })
+        .await;
+
+        assert_eq!(
+            writer.rendered(),
+            "[think]\nthinking\n[think end]\n[answer]\nanswer\n"
+        );
     }
 
     #[tokio::test]

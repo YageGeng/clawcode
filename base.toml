@@ -1,4 +1,5 @@
 current_model = "openai/gpt-5.4"
+# current_model = "deepseek/deepseek-v4-pro"
 
 [[llm.providers]]
 id = "openai"
@@ -11,6 +12,10 @@ api_key = { type = "auth" }
 id = "gpt-5.4"
 display_name = "GPT 5.4 Codex"
 
+[llm.providers.models.extra_param.reasoning]
+effort = "xhigh"
+summary = "auto"
+
 [[llm.providers]]
 id = "deepseek"
 display_name = "DeepSeek"
@@ -21,6 +26,12 @@ api_key = { type = "env", name = "DEEPSEEK_API_KEY" }
 [[llm.providers.models]]
 id = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
+
+[llm.providers.models.extra_param]
+reasoning_effort = "max"
+
+[llm.providers.models.extra_param.thinking]
+type = "enabled"
 
 [skills]
 enabled = true
