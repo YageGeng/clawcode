@@ -10,62 +10,14 @@ use std::{
 use config::{AppConfig, AuthMode, LinkMode};
 use kernel::{
     AgentLoopConfig, ThreadHandle, ThreadRuntime,
-    model::{AgentModel, LlmAgentModel, ModelRequest},
+    model::{AgentModel, FactoryLlmAgentModel},
     session::InMemorySessionStore,
     tools::router::ToolRouter,
 };
-use llm::providers::{
-    chatgpt,
-    openai::{
-        self, completion::CompletionModel as OpenAiCompletionsModel,
-        responses_api::ResponsesCompletionModel,
-    },
-};
+use llm::providers::LlmModelFactory;
 use tools::create::create_default_tool_router;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-
-/// CLI-local adapter that selects one of the supported provider/model combinations.
-#[derive(Clone)]
-enum CliAgentModel {
-    OpenAiResponse(Box<LlmAgentModel<ResponsesCompletionModel>>),
-    ChatGptWsResponse(Box<LlmAgentModel<chatgpt::WsCompletionModel>>),
-    Completion(Box<LlmAgentModel<OpenAiCompletionsModel>>),
-}
-
-#[async_trait::async_trait(?Send)]
-impl AgentModel for CliAgentModel {
-    /// Delegates one compact completion request to the selected provider adapter.
-    async fn complete(
-        &self,
-        request: ModelRequest,
-    ) -> kernel::Result<kernel::model::ModelResponse> {
-        match self {
-            Self::OpenAiResponse(model) => model.complete(request).await,
-            Self::ChatGptWsResponse(model) => model.complete(request).await,
-            Self::Completion(model) => model.complete(request).await,
-        }
-    }
-
-    /// Preserves provider-native streaming for the selected provider adapter.
-    async fn stream(
-        &self,
-        request: ModelRequest,
-    ) -> kernel::Result<kernel::model::ResponseEventStream> {
-        match self {
-            Self::OpenAiResponse(model) => model.stream(request).await,
-            Self::ChatGptWsResponse(model) => model.stream(request).await,
-            Self::Completion(model) => model.stream(request).await,
-        }
-    }
-}
-
-impl CliAgentModel {
-    /// Releases transport resources held by the selected adapter.
-    async fn close(&self) -> kernel::Result<()> {
-        Ok(())
-    }
-}
 
 /// Validates the loaded config before a provider client is constructed.
 fn validate_config(config: &AppConfig) -> Result<(), io::Error> {
@@ -80,61 +32,13 @@ fn validate_config(config: &AppConfig) -> Result<(), io::Error> {
     Ok(())
 }
 
-/// Builds the standard OpenAI client used for API-key based response/completion modes.
-fn build_openai_client(config: &AppConfig) -> Result<openai::Client, Box<dyn std::error::Error>> {
-    let api_key = config.openai.api_key.clone().ok_or_else(|| {
-        io::Error::other("missing openai.api_key; set it in config or APP_OPENAI__API_KEY")
-    })?;
-
-    Ok(openai::Client::builder()
-        .base_url(config.openai.base_url.clone())
-        .api_key(api_key)
-        .build()?)
-}
-
-/// Builds the ChatGPT client so OAuth and bearer-token handling stay inside `llm::providers`.
-fn build_chatgpt_client(config: &AppConfig) -> Result<chatgpt::Client, Box<dyn std::error::Error>> {
-    if let Some(access_token) = config.chatgpt.access_token.clone() {
-        Ok(chatgpt::Client::builder()
-            .base_url(config.chatgpt.base_url.clone())
-            .api_key(chatgpt::ChatGPTAuth::AccessToken { access_token })
-            .build()?)
-    } else {
-        Ok(chatgpt::Client::builder()
-            .base_url(config.chatgpt.base_url.clone())
-            .oauth()
-            .build()?)
-    }
-}
-
 /// Builds the CLI model adapter selected by the loaded app config.
-fn build_agent_model(config: &AppConfig) -> Result<CliAgentModel, Box<dyn std::error::Error>> {
-    let model = match (config.auth_mode, config.link_mode) {
-        (AuthMode::ApiKey, LinkMode::Response) => {
-            let client = build_openai_client(config)?;
-            CliAgentModel::OpenAiResponse(Box::new(LlmAgentModel::new(
-                ResponsesCompletionModel::with_model(client, &config.openai.model),
-            )))
-        }
-        (AuthMode::ApiKey, LinkMode::Completion) => {
-            let client = build_openai_client(config)?;
-            CliAgentModel::Completion(Box::new(LlmAgentModel::new(
-                OpenAiCompletionsModel::with_model(client.completions_api(), &config.openai.model),
-            )))
-        }
-        (AuthMode::OAuth, LinkMode::Response) => {
-            let client = build_chatgpt_client(config)?;
-            CliAgentModel::ChatGptWsResponse(Box::new(LlmAgentModel::new(
-                chatgpt::WsCompletionModel::new(chatgpt::ResponsesCompletionModel::new(
-                    client,
-                    &config.chatgpt.model,
-                )),
-            )))
-        }
-        (AuthMode::OAuth, LinkMode::Completion) => unreachable!("validated in validate_config"),
-    };
-
-    Ok(model)
+fn build_agent_model(
+    config: &AppConfig,
+) -> Result<FactoryLlmAgentModel, Box<dyn std::error::Error>> {
+    let factory = LlmModelFactory::try_from_config(config.to_llm_config())?;
+    let model = factory.completion_model_ref(&config.llm_model_ref())?;
+    Ok(FactoryLlmAgentModel::new(model))
 }
 
 /// Initializes tracing output for the CLI when `RUST_LOG` is set.
@@ -192,7 +96,7 @@ where
 
 /// Builds the CLI runtime stack once and reuses it for every interactive turn.
 async fn run_interactive_cli(
-    model: Arc<CliAgentModel>,
+    model: Arc<FactoryLlmAgentModel>,
     store: Arc<InMemorySessionStore>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
@@ -253,14 +157,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let _ = runtime::run_cli_prompt(Arc::clone(&model), store, router, prompt, skills).await?;
     }
-    let close_result = model.close().await;
-    close_result?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel::model::ModelRequest;
     use llm::usage::Usage;
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -415,6 +318,30 @@ mod tests {
                 .to_string()
                 .contains("codex auth only supports response link mode")
         );
+    }
+
+    /// Verifies OAuth config is converted into an OpenAI protocol provider with managed auth.
+    #[test]
+    fn converts_oauth_config_into_openai_managed_auth_provider() {
+        let config = AppConfig {
+            auth_mode: AuthMode::OAuth,
+            link_mode: LinkMode::Response,
+            ..AppConfig::default()
+        };
+
+        let llm_config = config.to_llm_config();
+        let provider = llm_config
+            .providers
+            .first()
+            .expect("CLI config should create one provider");
+
+        assert_eq!(config.llm_model_ref(), "openai/gpt-5.3-codex");
+        assert_eq!(provider.id, "openai");
+        assert_eq!(
+            provider.protocols,
+            vec![llm::providers::ApiProtocol::OpenAI]
+        );
+        assert_eq!(provider.api_key, llm::providers::ApiKeyConfig::Auth);
     }
 
     /// Verifies the interactive loop skips blank input, prints replies, and exits on `quit`.

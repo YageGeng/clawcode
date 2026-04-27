@@ -272,6 +272,9 @@ pub struct LlmAgentModel<M> {
     inner: M,
 }
 
+/// Kernel model adapter backed by a config-driven LLM factory model.
+pub type FactoryLlmAgentModel = LlmAgentModel<llm::providers::LlmCompletionModel>;
+
 impl<M> LlmAgentModel<M> {
     /// Wraps a concrete `llm` completion model for runtime use.
     pub fn new(inner: M) -> Self {

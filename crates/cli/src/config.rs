@@ -8,7 +8,10 @@ use figment::{
     Figment, Profile,
     providers::{Env, Format, Toml},
 };
-use llm::providers::openai;
+use llm::providers::{
+    ApiKeyConfig, ApiProtocol, LlmConfig, LlmModel, LlmProvider,
+    openai::{self, codex::OPENAI_CODEX_API_BASE_URL},
+};
 use serde::Deserialize;
 
 /// Application-wide CLI configuration loaded from TOML files plus `APP_` overrides.
@@ -37,6 +40,77 @@ impl Default for AppConfig {
             chatgpt: ChatGptConfig::default(),
             skills: CliSkillsConfig::default(),
         }
+    }
+}
+
+impl AppConfig {
+    /// Converts CLI provider settings into the unified LLM factory configuration.
+    pub fn to_llm_config(&self) -> LlmConfig {
+        LlmConfig {
+            providers: vec![self.to_llm_provider()],
+        }
+    }
+
+    /// Returns the factory model reference selected by the current CLI auth mode.
+    pub fn llm_model_ref(&self) -> String {
+        let model_id = match self.auth_mode {
+            AuthMode::ApiKey => &self.openai.model,
+            AuthMode::OAuth => &self.chatgpt.model,
+        };
+        format!("openai/{model_id}")
+    }
+
+    /// Converts the active CLI provider branch into one factory provider entry.
+    fn to_llm_provider(&self) -> LlmProvider {
+        match self.auth_mode {
+            AuthMode::ApiKey => LlmProvider {
+                id: "openai".to_string(),
+                display_name: "OpenAI".to_string(),
+                protocols: vec![ApiProtocol::OpenAI],
+                base_url: self.openai.base_url.clone(),
+                api_key: self.openai_api_key_config(),
+                models: vec![llm_model(&self.openai.model, "OpenAI")],
+            },
+            AuthMode::OAuth => LlmProvider {
+                id: "openai".to_string(),
+                display_name: "Codex".to_string(),
+                protocols: vec![ApiProtocol::OpenAI],
+                base_url: self.chatgpt.base_url.clone(),
+                api_key: self.chatgpt_api_key_config(),
+                models: vec![llm_model(&self.chatgpt.model, "Codex")],
+            },
+        }
+    }
+
+    /// Converts optional OpenAI API-key config into a factory key source.
+    fn openai_api_key_config(&self) -> ApiKeyConfig {
+        self.openai
+            .api_key
+            .clone()
+            .map(|value| ApiKeyConfig::Key { value })
+            .unwrap_or_else(|| ApiKeyConfig::Env {
+                name: "OPENAI_API_KEY".to_string(),
+            })
+    }
+
+    /// Converts ChatGPT config into either static bearer-token auth or managed OAuth auth.
+    fn chatgpt_api_key_config(&self) -> ApiKeyConfig {
+        self.chatgpt
+            .access_token
+            .clone()
+            .map(|value| ApiKeyConfig::Key { value })
+            .unwrap_or(ApiKeyConfig::Auth)
+    }
+}
+
+/// Builds one model metadata entry for the active CLI-selected model.
+fn llm_model(model_id: &str, display_name: &str) -> LlmModel {
+    LlmModel {
+        id: model_id.to_string(),
+        display_name: Some(display_name.to_string()),
+        context_tokens: None,
+        max_output_tokens: None,
+        extra_param: serde_json::Value::Null,
     }
 }
 
@@ -133,7 +207,7 @@ impl Default for ChatGptConfig {
     /// Builds the default ChatGPT provider configuration used by the CLI.
     fn default() -> Self {
         Self {
-            base_url: openai::codex::OPENAI_CODEX_API_BASE_URL.to_string(),
+            base_url: OPENAI_CODEX_API_BASE_URL.to_string(),
             model: openai::codex::OPENAI_CODEX_DEFAULT_MODEL.to_string(),
             access_token: None,
         }
