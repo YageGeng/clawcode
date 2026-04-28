@@ -20,6 +20,38 @@ pub enum ApprovalRequirement {
     Always,
 }
 
+/// Runtime approval behavior selected for a tool dispatch context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolApprovalProfile {
+    /// Allows every tool call without consulting an approval handler.
+    TrustAll,
+    /// Asks for approval before every tool call.
+    AskAlways,
+    /// Follows each tool's static `ToolMetadata::approval` requirement.
+    Default,
+}
+
+impl ToolApprovalProfile {
+    /// Returns whether this profile requires approval for a tool requirement.
+    pub fn requires_approval(self, requirement: ApprovalRequirement) -> bool {
+        match self {
+            Self::TrustAll => false,
+            Self::AskAlways => true,
+            Self::Default => match requirement {
+                ApprovalRequirement::Never => false,
+                ApprovalRequirement::Always => true,
+            },
+        }
+    }
+}
+
+impl Default for ToolApprovalProfile {
+    /// Builds the low-friction default for direct tool dispatch contexts.
+    fn default() -> Self {
+        Self::TrustAll
+    }
+}
+
 /// Carries approval-time information for one tool invocation.
 #[derive(Debug, Clone)]
 pub struct ToolApprovalRequest {
@@ -76,7 +108,7 @@ impl Default for ToolMetadata {
 pub struct ToolContext {
     pub session_id: String,
     pub thread_id: String,
-    pub enforce_tool_approvals: bool,
+    pub approval_profile: ToolApprovalProfile,
     pub tool_approval_handler: Option<ToolApprovalHandler>,
 }
 
@@ -86,7 +118,7 @@ impl fmt::Debug for ToolContext {
         f.debug_struct("ToolContext")
             .field("session_id", &self.session_id)
             .field("thread_id", &self.thread_id)
-            .field("enforce_tool_approvals", &self.enforce_tool_approvals)
+            .field("approval_profile", &self.approval_profile)
             .field(
                 "tool_approval_handler",
                 &self.tool_approval_handler.as_ref().map(|_| "<function>"),
@@ -101,14 +133,14 @@ impl ToolContext {
         Self {
             session_id: session_id.to_string(),
             thread_id: thread_id.to_string(),
-            enforce_tool_approvals: false,
+            approval_profile: ToolApprovalProfile::TrustAll,
             tool_approval_handler: None,
         }
     }
 
-    /// Enables or disables mandatory approval enforcement for this call path.
-    pub fn with_tool_approval_enforcement(mut self, enforce_tool_approvals: bool) -> Self {
-        self.enforce_tool_approvals = enforce_tool_approvals;
+    /// Selects the runtime approval profile for this call path.
+    pub fn with_tool_approval_profile(mut self, approval_profile: ToolApprovalProfile) -> Self {
+        self.approval_profile = approval_profile;
         self
     }
 

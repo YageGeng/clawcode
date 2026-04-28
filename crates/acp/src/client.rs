@@ -10,7 +10,11 @@ use std::{
 use crate::agent::{self, AcpAgent};
 use agent_client_protocol::schema as official_acp;
 use agent_client_protocol::{Agent as OfficialAgent, Client as OfficialClient, ConnectionTo};
-use kernel::{SessionTaskContext, model::AgentModel, tools::router::ToolRouter};
+use kernel::{
+    SessionTaskContext,
+    model::AgentModel,
+    tools::{ToolApprovalProfile, router::ToolRouter},
+};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use tools::builtin::{read_text_file::ReadTextFileTool, write_text_file::WriteTextFileTool};
@@ -147,6 +151,7 @@ pub async fn run_interactive_cli_via_acp<M, R, W>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
+    tool_approval_profile: ToolApprovalProfile,
     input: &mut R,
     output: W,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -157,7 +162,14 @@ where
 {
     let services = CliClientServices::new(output);
     let (client_transport, agent_transport) = memory_transport_pair();
-    let mut agent_task = spawn_embedded_agent(model, store, router, skills, agent_transport);
+    let mut agent_task = spawn_embedded_agent(
+        model,
+        store,
+        router,
+        skills,
+        tool_approval_profile,
+        agent_transport,
+    );
     let client_result = run_cli_client(services, client_transport, input);
 
     let (result, should_abort_agent) = tokio::select! {
@@ -204,6 +216,7 @@ fn spawn_embedded_agent<M>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
+    tool_approval_profile: ToolApprovalProfile,
     transport: impl agent_client_protocol::ConnectTo<OfficialAgent> + 'static,
 ) -> tokio::task::JoinHandle<agent::Result<()>>
 where
@@ -216,7 +229,8 @@ where
         skills,
         agent::shared_writer(std::io::sink()),
         true,
-    );
+    )
+    .with_tool_approval_profile(tool_approval_profile);
     tokio::spawn(async move { agent.connect_sdk(transport).await })
 }
 

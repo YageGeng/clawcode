@@ -14,7 +14,10 @@ use kernel::{
     events::{AgentEvent, EventSink},
     model::AgentModel,
     session::{SessionId, ThreadId},
-    tools::{ToolApprovalFuture, ToolApprovalHandler, ToolApprovalRequest, router::ToolRouter},
+    tools::{
+        ToolApprovalFuture, ToolApprovalHandler, ToolApprovalProfile, ToolApprovalRequest,
+        router::ToolRouter,
+    },
 };
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
@@ -124,6 +127,8 @@ pub struct AcpAgent<M> {
     /// Indicates the active router already exposes ACP filesystem tools for the human client path.
     has_client_fs_tools: bool,
     skills: skills::SkillConfig,
+    tool_approval_profile: ToolApprovalProfile,
+    tool_approval_profile_configured: bool,
     tool_approval_handler: Option<ToolApprovalHandler>,
     writer: SharedAcpWriter,
     sessions: HashMap<String, AcpSession>,
@@ -148,6 +153,8 @@ where
             router,
             has_client_fs_tools,
             skills,
+            tool_approval_profile: ToolApprovalProfile::TrustAll,
+            tool_approval_profile_configured: false,
             tool_approval_handler: None,
             writer,
             sessions: HashMap::new(),
@@ -157,6 +164,16 @@ where
     /// Installs a tool approval handler used for tools marked as requiring approval.
     pub fn with_tool_approval_handler(mut self, handler: ToolApprovalHandler) -> Self {
         self.tool_approval_handler = Some(handler);
+        self
+    }
+
+    /// Selects the tool approval profile used for prompt turns.
+    pub fn with_tool_approval_profile(
+        mut self,
+        tool_approval_profile: ToolApprovalProfile,
+    ) -> Self {
+        self.tool_approval_profile = tool_approval_profile;
+        self.tool_approval_profile_configured = true;
         self
     }
 
@@ -425,6 +442,15 @@ where
     where
         E: EventSink + 'static,
     {
+        let tool_approval_profile =
+            if tool_approval_handler.is_some() && !self.tool_approval_profile_configured {
+                // A handler means this ACP agent can ask the client. Without an explicit profile,
+                // use tool metadata instead of silently bypassing approval through TrustAll.
+                ToolApprovalProfile::Default
+            } else {
+                self.tool_approval_profile
+            };
+
         let runtime = ThreadRuntime::new(
             Arc::clone(&self.model),
             Arc::clone(&self.store),
@@ -436,7 +462,7 @@ where
             // ACP itself does not impose a prompt-turn request budget here; tool limits still come
             // from the kernel defaults unless configured elsewhere.
             max_iterations: usize::MAX,
-            enforce_tool_approvals: tool_approval_handler.is_some(),
+            tool_approval_profile,
             tool_approval_handler,
             ..AgentLoopConfig::default()
         });
@@ -641,6 +667,7 @@ pub async fn run_sdk_stdio_agent<M>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
+    tool_approval_profile: ToolApprovalProfile,
 ) -> Result<()>
 where
     M: AgentModel + 'static,
@@ -654,7 +681,8 @@ where
         skills,
         shared_writer(std::io::sink()),
         false,
-    );
+    )
+    .with_tool_approval_profile(tool_approval_profile);
     agent
         .connect_sdk(agent_client_protocol::ByteStreams::new(
             tokio::io::stdout().compat_write(),

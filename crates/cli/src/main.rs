@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(InMemorySessionStore::default());
     let router = Arc::new(create_default_tool_router().await);
     let skills = config.skills.to_skill_config();
+    let tool_approval_profile = config.approval.to_tool_approval_profile();
 
     info!(
         tool_count = router.definitions().await.len(),
@@ -85,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&store),
                 Arc::clone(&router),
                 skills,
+                tool_approval_profile,
                 &mut input,
                 io::stdout(),
             )
@@ -96,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&store),
                 Arc::clone(&router),
                 skills,
+                tool_approval_profile,
             )
             .await?;
         }

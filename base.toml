@@ -35,3 +35,6 @@ thinking = { type = "enabled"}
 enabled = true
 cwd = "."
 roots = []
+
+[approval]
+profile = "trust_all"

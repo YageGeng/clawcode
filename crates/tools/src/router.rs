@@ -74,8 +74,10 @@ impl ToolRouter {
                 stage: "tool-router-lookup".to_string(),
             })?;
 
-        if invocation.context.enforce_tool_approvals
-            && tool.metadata().approval == crate::ApprovalRequirement::Always
+        if invocation
+            .context
+            .approval_profile
+            .requires_approval(tool.metadata().approval)
         {
             let approval_request = crate::ToolApprovalRequest {
                 tool: invocation.tool_name.clone(),

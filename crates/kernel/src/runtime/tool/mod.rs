@@ -80,7 +80,7 @@ where
                 tool_execution_mode: batch.mode,
                 cancellation_token: config.cancellation_token.clone(),
                 tool_context: ToolContext::new(input.session_id.clone(), input.thread_id.clone())
-                    .with_tool_approval_enforcement(config.enforce_tool_approvals)
+                    .with_tool_approval_profile(config.tool_approval_profile)
                     .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
             })
             .await?;

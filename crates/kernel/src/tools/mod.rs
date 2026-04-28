@@ -7,8 +7,8 @@ pub mod builtin {
 }
 pub use tools::{
     ApprovalRequirement, RiskLevel, ToolApproval, ToolApprovalFuture, ToolApprovalHandler,
-    ToolApprovalRequest, ToolCallRequest, ToolContext, ToolHandler as Tool, ToolInvocation,
-    ToolMetadata, ToolOutput, ToolPayload, create, plan, registry, router,
+    ToolApprovalProfile, ToolApprovalRequest, ToolCallRequest, ToolContext, ToolHandler as Tool,
+    ToolInvocation, ToolMetadata, ToolOutput, ToolPayload, create, plan, registry, router,
 };
 
 /// Re-exports the extracted tools crate for compatibility with existing callers.

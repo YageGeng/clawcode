@@ -8,6 +8,7 @@ use figment::{
     Figment, Profile,
     providers::{Env, Format, Toml},
 };
+use kernel::tools::ToolApprovalProfile;
 use llm::providers::LlmConfig;
 use serde::Deserialize;
 
@@ -20,12 +21,69 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     /// Skill discovery configuration forwarded into the kernel runtime.
     pub skills: CliSkillsConfig,
+    /// Tool approval behavior used when the CLI creates ACP approval handlers.
+    #[serde(default)]
+    pub approval: CliApprovalConfig,
 }
 
 impl AppConfig {
     /// Returns the configured factory model reference selected for CLI requests.
     pub fn current_model_ref(&self) -> &str {
         &self.current_model
+    }
+}
+
+/// CLI-owned approval configuration loaded from TOML and `APP_APPROVAL__*` overrides.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CliApprovalConfig {
+    /// Runtime approval profile applied to tool dispatch.
+    #[serde(default)]
+    pub profile: CliApprovalProfile,
+}
+
+impl Default for CliApprovalConfig {
+    /// Builds the default approval behavior for interactive CLI sessions.
+    fn default() -> Self {
+        Self {
+            profile: CliApprovalProfile::default(),
+        }
+    }
+}
+
+impl CliApprovalConfig {
+    /// Converts CLI-loaded approval settings into the runtime approval profile.
+    pub fn to_tool_approval_profile(&self) -> ToolApprovalProfile {
+        self.profile.into()
+    }
+}
+
+/// Serialized approval profile values accepted by CLI configuration.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CliApprovalProfile {
+    /// Allows every tool call without asking the client for permission.
+    TrustAll,
+    /// Asks the client for permission before every tool call.
+    AskAlways,
+    /// Uses each tool's metadata to decide whether permission is required.
+    Default,
+}
+
+impl Default for CliApprovalProfile {
+    /// Builds the default CLI approval profile.
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl From<CliApprovalProfile> for ToolApprovalProfile {
+    /// Converts CLI config profile names into the tools crate policy model.
+    fn from(value: CliApprovalProfile) -> Self {
+        match value {
+            CliApprovalProfile::TrustAll => Self::TrustAll,
+            CliApprovalProfile::AskAlways => Self::AskAlways,
+            CliApprovalProfile::Default => Self::Default,
+        }
     }
 }
 

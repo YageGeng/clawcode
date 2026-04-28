@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     runtime::{ToolBatchSummary, inflight::ToolCallRuntimeSnapshot, turn::LoopResult},
     session::SessionContinuationRequest,
-    tools::{ToolApprovalHandler, executor::ToolExecutionMode},
+    tools::{ToolApprovalHandler, ToolApprovalProfile, executor::ToolExecutionMode},
 };
 
 /// Computes an optional task-level continuation request from one completed loop result.
@@ -57,7 +57,7 @@ pub struct AgentLoopConfig {
     pub tool_choice: ToolChoice,
     pub tool_execution_mode: ToolExecutionMode,
     pub cancellation_token: Option<CancellationToken>,
-    pub enforce_tool_approvals: bool,
+    pub tool_approval_profile: ToolApprovalProfile,
     pub tool_approval_handler: Option<ToolApprovalHandler>,
     pub continuation_resolver: Option<ContinuationResolver>,
     pub continuation_hook: Option<ContinuationHook>,
@@ -78,7 +78,7 @@ impl std::fmt::Debug for AgentLoopConfig {
                 "cancellation_token",
                 &self.cancellation_token.as_ref().map(|_| "<token>"),
             )
-            .field("enforce_tool_approvals", &self.enforce_tool_approvals)
+            .field("tool_approval_profile", &self.tool_approval_profile)
             .field(
                 "tool_approval_handler",
                 &self.tool_approval_handler.as_ref().map(|_| "<function>"),
@@ -114,7 +114,7 @@ impl Default for AgentLoopConfig {
             tool_choice: ToolChoice::Auto,
             tool_execution_mode: ToolExecutionMode::Serial,
             cancellation_token: None,
-            enforce_tool_approvals: false,
+            tool_approval_profile: ToolApprovalProfile::TrustAll,
             tool_approval_handler: None,
             continuation_resolver: None,
             continuation_hook: None,
@@ -124,9 +124,12 @@ impl Default for AgentLoopConfig {
 }
 
 impl AgentLoopConfig {
-    /// Sets whether tools marked as `ApprovalRequirement::Always` must pass approval.
-    pub fn with_tool_approvals(mut self, enforce_tool_approvals: bool) -> Self {
-        self.enforce_tool_approvals = enforce_tool_approvals;
+    /// Selects the runtime tool approval profile.
+    pub fn with_tool_approval_profile(
+        mut self,
+        tool_approval_profile: ToolApprovalProfile,
+    ) -> Self {
+        self.tool_approval_profile = tool_approval_profile;
         self
     }
 
