@@ -2,19 +2,15 @@ use std::{
     collections::HashMap,
     env,
     io::{self, BufRead, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
 use agent_client_protocol::schema as official_acp;
 use agent_client_protocol::{JsonRpcMessage, JsonRpcRequest};
 use kernel::{SessionTaskContext, model::AgentModel, tools::router::ToolRouter};
-use serde::Deserialize;
 use serde_json::{Value, json};
-use tools::{
-    ConfiguredToolSpec, Error as ToolError, ToolHandler as Tool, ToolInvocation, ToolMetadata,
-    ToolOutput, ToolSpec,
-};
+use tools::builtin::{read_text_file::ReadTextFileTool, write_text_file::WriteTextFileTool};
 use tracing::{debug, info};
 
 use crate::{
@@ -47,7 +43,6 @@ where
         W: Write + Send + 'static,
     {
         let writer = AcpCliWriter::new(output);
-        let router = router_with_client_fs_tools(router, writer.clone()).await;
         let agent = AcpAgent::new(
             model,
             store,
@@ -208,7 +203,6 @@ impl AcpCliWriter {
             state: Arc::new(Mutex::new(AcpCliWriterState {
                 pending_line: Vec::new(),
                 responses: Vec::new(),
-                next_client_request_id: 1_000_000,
                 session_roots: HashMap::new(),
                 presentation: CliPresentationState::default(),
                 output: Box::new(output),
@@ -267,35 +261,6 @@ impl AcpCliWriter {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.finish_text_line_if_needed()
     }
-
-    /// Sends an agent-initiated typed ACP client request through the in-process transport.
-    fn call_client_request<R>(&self, request: &R) -> io::Result<Value>
-    where
-        R: JsonRpcRequest,
-    {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let id = state.next_client_request_id;
-        state.next_client_request_id += 1;
-        let request = SessionRpc::request(id, request);
-        info!(direction = "send", payload = %request, "acp protocol message");
-        state.handle_client_request(&request);
-        let index = state
-            .responses
-            .iter()
-            .position(|response| response.get("id") == Some(&json!(id)))
-            .ok_or_else(|| {
-                io::Error::other(format!("ACP client response `{id}` was not received"))
-            })?;
-        let response = state.responses.remove(index);
-        info!(direction = "recv", payload = %response, "acp protocol message");
-        if let Some(error) = response.get("error") {
-            return Err(io::Error::other(error.to_string()));
-        }
-        Ok(response.get("result").cloned().unwrap_or(Value::Null))
-    }
 }
 
 impl Write for AcpCliWriter {
@@ -333,7 +298,6 @@ impl Write for AcpCliWriter {
 struct AcpCliWriterState {
     pending_line: Vec<u8>,
     responses: Vec<Value>,
-    next_client_request_id: u64,
     session_roots: HashMap<String, PathBuf>,
     presentation: CliPresentationState,
     output: Box<dyn Write + Send>,
@@ -394,13 +358,14 @@ impl AcpCliWriterState {
         &self,
         request: official_acp::ReadTextFileRequest,
     ) -> Result<Value, Value> {
-        let request = ValidatedReadTextFileRequest::try_from(ClientFsReadValidation {
-            request,
-            session_roots: &self.session_roots,
+        let session_id = request.session_id.to_string();
+        let root = self.session_roots.get(&session_id).ok_or_else(|| {
+            json_rpc_client_error(-32602, format!("unknown sessionId `{session_id}`"))
         })?;
-        let content = std::fs::read_to_string(request.path)
+        let output = ReadTextFileTool::new(root.clone())
+            .read_text_file(request.path, request.line, request.limit)
             .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
-        let content = slice_text_lines(&content, request.line, request.limit);
+        let content = output.text;
 
         Ok(SessionRpc::value(&official_acp::ReadTextFileResponse::new(
             content,
@@ -412,11 +377,12 @@ impl AcpCliWriterState {
         &self,
         request: official_acp::WriteTextFileRequest,
     ) -> Result<Value, Value> {
-        let request = ValidatedWriteTextFileRequest::try_from(ClientFsWriteValidation {
-            request,
-            session_roots: &self.session_roots,
+        let session_id = request.session_id.to_string();
+        let root = self.session_roots.get(&session_id).ok_or_else(|| {
+            json_rpc_client_error(-32602, format!("unknown sessionId `{session_id}`"))
         })?;
-        std::fs::write(request.path, request.content)
+        WriteTextFileTool::new(root.clone())
+            .write_text_file(request.path, request.content)
             .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
 
         Ok(SessionRpc::value(
@@ -595,153 +561,9 @@ fn agent_notification(message: &Value) -> io::Result<Option<official_acp::Sessio
     }
 }
 
-/// Validation input for an ACP filesystem read request.
-struct ClientFsReadValidation<'a> {
-    request: official_acp::ReadTextFileRequest,
-    session_roots: &'a HashMap<String, PathBuf>,
-}
-
-/// Filesystem read request after ACP session and path validation.
-struct ValidatedReadTextFileRequest {
-    path: PathBuf,
-    line: Option<u32>,
-    limit: Option<u32>,
-}
-
-impl TryFrom<ClientFsReadValidation<'_>> for ValidatedReadTextFileRequest {
-    type Error = Value;
-
-    /// Converts a typed ACP read request into a root-checked local filesystem request.
-    fn try_from(value: ClientFsReadValidation<'_>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            path: resolve_session_path(
-                value.session_roots,
-                &value.request.session_id,
-                &value.request.path,
-                /*for_write*/ false,
-            )?,
-            line: value.request.line,
-            limit: value.request.limit,
-        })
-    }
-}
-
-/// Validation input for an ACP filesystem write request.
-struct ClientFsWriteValidation<'a> {
-    request: official_acp::WriteTextFileRequest,
-    session_roots: &'a HashMap<String, PathBuf>,
-}
-
-/// Filesystem write request after ACP session and path validation.
-struct ValidatedWriteTextFileRequest {
-    path: PathBuf,
-    content: String,
-}
-
-impl TryFrom<ClientFsWriteValidation<'_>> for ValidatedWriteTextFileRequest {
-    type Error = Value;
-
-    /// Converts a typed ACP write request into a root-checked local filesystem request.
-    fn try_from(value: ClientFsWriteValidation<'_>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            path: resolve_session_path(
-                value.session_roots,
-                &value.request.session_id,
-                &value.request.path,
-                /*for_write*/ true,
-            )?,
-            content: value.request.content,
-        })
-    }
-}
-
-/// Resolves and validates an ACP filesystem path against the session root.
-fn resolve_session_path(
-    session_roots: &HashMap<String, PathBuf>,
-    session_id: &official_acp::SessionId,
-    path: &Path,
-    for_write: bool,
-) -> Result<PathBuf, Value> {
-    let session_id = session_id.to_string();
-    let root = session_roots.get(&session_id).ok_or_else(|| {
-        json_rpc_client_error(-32602, format!("unknown sessionId `{session_id}`"))
-    })?;
-    // ACP clients expose a session root, so model-facing tools may send either
-    // absolute paths inside that root or paths relative to it.
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
-    };
-
-    if for_write {
-        return validate_write_path(root, &path);
-    }
-
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
-    if !canonical_path.starts_with(root) {
-        return Err(json_rpc_client_error(
-            -32602,
-            "filesystem path must stay inside the session root",
-        ));
-    }
-
-    Ok(canonical_path)
-}
-
-/// Validates a write target against a canonical session root.
-fn validate_write_path(root: &Path, path: &Path) -> Result<PathBuf, Value> {
-    if path.exists() {
-        let canonical_path = path
-            .canonicalize()
-            .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
-        if canonical_path.starts_with(root) {
-            return Ok(canonical_path);
-        }
-        return Err(json_rpc_client_error(
-            -32602,
-            "filesystem path must stay inside the session root",
-        ));
-    }
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| json_rpc_client_error(-32602, "filesystem path requires a parent"))?;
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
-    if !canonical_parent.starts_with(root) {
-        return Err(json_rpc_client_error(
-            -32602,
-            "filesystem path must stay inside the session root",
-        ));
-    }
-
-    Ok(canonical_parent
-        .join(path.file_name().ok_or_else(|| {
-            json_rpc_client_error(-32602, "filesystem path requires a file name")
-        })?))
-}
-
 /// Returns a canonical path when available, otherwise preserves the caller-provided path.
 fn canonicalize_best_effort(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
-}
-
-/// Applies ACP's optional 1-based `line` and maximum `limit` parameters to file content.
-fn slice_text_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
-    if line.is_none() && limit.is_none() {
-        return content.to_string();
-    }
-
-    let start = line.unwrap_or(1).saturating_sub(1) as usize;
-    let mut lines = content.split_inclusive('\n').skip(start);
-    match limit {
-        Some(limit) => lines.by_ref().take(limit as usize).collect(),
-        None => lines.collect(),
-    }
 }
 
 /// Returns the text carried by an ACP content chunk when it is text content.
@@ -765,213 +587,6 @@ fn json_rpc_client_error(code: i64, message: impl ToString) -> Value {
     })
 }
 
-/// Returns a router that exposes ACP-backed filesystem tools to the model.
-async fn router_with_client_fs_tools(
-    router: Arc<ToolRouter>,
-    writer: AcpCliWriter,
-) -> Arc<ToolRouter> {
-    let registry = router.registry();
-    let read_tool = Arc::new(AcpReadTextFileTool::new(writer.clone()));
-    let write_tool = Arc::new(AcpWriteTextFileTool::new(writer));
-    registry.register_arc(read_tool.clone()).await;
-    registry.register_arc(write_tool.clone()).await;
-
-    let mut specs = router.specs().to_vec();
-    specs.push(ConfiguredToolSpec::new(
-        ToolSpec::function(read_tool.definition()),
-        false,
-    ));
-    specs.push(ConfiguredToolSpec::new(
-        ToolSpec::function(write_tool.definition()),
-        false,
-    ));
-    Arc::new(ToolRouter::new(registry, specs))
-}
-
-/// Tool handler that forwards text-file reads to the ACP client filesystem method.
-struct AcpReadTextFileTool {
-    writer: AcpCliWriter,
-}
-
-impl AcpReadTextFileTool {
-    /// Builds a read tool backed by the in-process ACP client transport.
-    fn new(writer: AcpCliWriter) -> Self {
-        Self { writer }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for AcpReadTextFileTool {
-    /// Returns the ACP filesystem read method name exposed as a tool.
-    fn name(&self) -> &'static str {
-        "fs/read_text_file"
-    }
-
-    /// Returns a short model-facing description for ACP filesystem reads.
-    fn description(&self) -> &'static str {
-        "Read a UTF-8 text file through the ACP client filesystem API."
-    }
-
-    /// Returns the JSON schema for ACP filesystem read arguments.
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to read, relative to the ACP session root or absolute inside it." },
-                "line": { "type": "integer", "description": "Optional 1-based starting line." },
-                "limit": { "type": "integer", "description": "Optional maximum number of lines." }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })
-    }
-
-    /// Returns filesystem read tool runtime metadata.
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::default()
-    }
-
-    /// Executes one read by issuing `fs/read_text_file` to the ACP client.
-    async fn handle(&self, invocation: ToolInvocation) -> tools::Result<ToolOutput> {
-        let request = AcpReadTextFileClientRequest::try_from(&invocation)?.0;
-        let result =
-            self.writer
-                .call_client_request(&request)
-                .map_err(|error| ToolError::Runtime {
-                    message: error.to_string(),
-                    stage: "acp-fs-read-tool".to_string(),
-                })?;
-        let response: official_acp::ReadTextFileResponse =
-            serde_json::from_value(result).map_err(|source| ToolError::Json {
-                source,
-                stage: "acp-fs-read-tool-response".to_string(),
-            })?;
-        let content = response.content;
-        Ok(ToolOutput {
-            text: content.clone(),
-            structured: json!({ "content": content }),
-        })
-    }
-}
-
-/// Tool handler that forwards text-file writes to the ACP client filesystem method.
-struct AcpWriteTextFileTool {
-    writer: AcpCliWriter,
-}
-
-impl AcpWriteTextFileTool {
-    /// Builds a write tool backed by the in-process ACP client transport.
-    fn new(writer: AcpCliWriter) -> Self {
-        Self { writer }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for AcpWriteTextFileTool {
-    /// Returns the ACP filesystem write method name exposed as a tool.
-    fn name(&self) -> &'static str {
-        "fs/write_text_file"
-    }
-
-    /// Returns a short model-facing description for ACP filesystem writes.
-    fn description(&self) -> &'static str {
-        "Write a UTF-8 text file through the ACP client filesystem API."
-    }
-
-    /// Returns the JSON schema for ACP filesystem write arguments.
-    fn parameters(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to write, relative to the ACP session root or absolute inside it." },
-                "content": { "type": "string", "description": "Complete file content." }
-            },
-            "required": ["path", "content"],
-            "additionalProperties": false
-        })
-    }
-
-    /// Returns filesystem write tool runtime metadata.
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::default()
-    }
-
-    /// Executes one write by issuing `fs/write_text_file` to the ACP client.
-    async fn handle(&self, invocation: ToolInvocation) -> tools::Result<ToolOutput> {
-        let request = AcpWriteTextFileClientRequest::try_from(&invocation)?.0;
-        let result =
-            self.writer
-                .call_client_request(&request)
-                .map_err(|error| ToolError::Runtime {
-                    message: error.to_string(),
-                    stage: "acp-fs-write-tool".to_string(),
-                })?;
-        let _response: official_acp::WriteTextFileResponse = serde_json::from_value(result)
-            .map_err(|source| ToolError::Json {
-                source,
-                stage: "acp-fs-write-tool-response".to_string(),
-            })?;
-        Ok(ToolOutput {
-            text: "file written through ACP".to_string(),
-            structured: json!({ "ok": true }),
-        })
-    }
-}
-
-/// JSON arguments accepted by the ACP read-text-file tool.
-#[derive(Deserialize)]
-struct ReadTextFileToolArgs {
-    path: PathBuf,
-    line: Option<u32>,
-    limit: Option<u32>,
-}
-
-/// Typed ACP client request produced from a model read-file tool invocation.
-struct AcpReadTextFileClientRequest(official_acp::ReadTextFileRequest);
-
-impl TryFrom<&ToolInvocation> for AcpReadTextFileClientRequest {
-    type Error = ToolError;
-
-    /// Converts model tool arguments into an official ACP fs/read_text_file request.
-    fn try_from(invocation: &ToolInvocation) -> Result<Self, Self::Error> {
-        let args = invocation
-            .parse_function_arguments::<ReadTextFileToolArgs>("acp-fs-read-tool-arguments")?;
-        Ok(Self(
-            official_acp::ReadTextFileRequest::new(
-                invocation.context.session_id.clone(),
-                args.path,
-            )
-            .line(args.line)
-            .limit(args.limit),
-        ))
-    }
-}
-
-/// JSON arguments accepted by the ACP write-text-file tool.
-#[derive(Deserialize)]
-struct WriteTextFileToolArgs {
-    path: PathBuf,
-    content: String,
-}
-
-/// Typed ACP client request produced from a model write-file tool invocation.
-struct AcpWriteTextFileClientRequest(official_acp::WriteTextFileRequest);
-
-impl TryFrom<&ToolInvocation> for AcpWriteTextFileClientRequest {
-    type Error = ToolError;
-
-    /// Converts model tool arguments into an official ACP fs/write_text_file request.
-    fn try_from(invocation: &ToolInvocation) -> Result<Self, Self::Error> {
-        let args = invocation
-            .parse_function_arguments::<WriteTextFileToolArgs>("acp-fs-write-tool-arguments")?;
-        Ok(Self(official_acp::WriteTextFileRequest::new(
-            invocation.context.session_id.clone(),
-            args.path,
-            args.content,
-        )))
-    }
-}
-
 /// Tracks whether the human CLI renderer currently has an open streamed line.
 #[derive(Default)]
 struct CliPresentationState {
@@ -985,7 +600,6 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    use kernel::tools::router::ToolRouter;
     use serde_json::json;
     use tools::{ToolCallRequest, ToolContext};
 
@@ -1237,19 +851,13 @@ mod tests {
         assert_eq!(output.rendered(), "[think]\nthinking\n[answer]\nanswer");
     }
 
-    /// Verifies ACP filesystem tools are visible and write through the client filesystem RPC.
+    /// Verifies filesystem tools are visible through the default tool router.
     #[tokio::test]
     async fn router_exposes_acp_filesystem_tools() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         let file_path = workspace.path().join("tool-created.txt");
-        let writer = AcpCliWriter::new(Vec::<u8>::new());
-        writer.register_session_root("session-1", workspace.path().to_path_buf());
-        let router = Arc::new(ToolRouter::new(
-            Arc::new(kernel::tools::ToolRegistry::default()),
-            Vec::new(),
-        ));
+        let router = tools::create_file_tool_router_with_root(workspace.path()).await;
 
-        let router = super::router_with_client_fs_tools(router, writer).await;
         let definitions = router.definitions().await;
         let definition_names = definitions
             .iter()

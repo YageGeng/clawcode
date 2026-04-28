@@ -3,7 +3,9 @@ use std::{path::Path, sync::Arc};
 use crate::{
     builtin::{
         apply_patch::ApplyPatchTool,
+        read_text_file::ReadTextFileTool,
         shell::{ExecCommandTool, UnifiedExecRuntime, WriteStdinTool},
+        write_text_file::WriteTextFileTool,
     },
     handler::ToolHandler,
     registry::ToolRegistryBuilder,
@@ -15,6 +17,8 @@ use crate::{
 pub enum ToolHandlerKind {
     ApplyPatch,
     ExecCommand,
+    ReadTextFile,
+    WriteTextFile,
     WriteStdin,
 }
 
@@ -81,11 +85,17 @@ impl Default for ToolRegistryPlan {
     }
 }
 
-/// Builds the default local plan for `apply_patch` and shell tools.
+/// Builds the default local plan for file, patch, and shell tools.
 pub fn build_default_tool_registry_plan(root_dir: impl AsRef<Path>) -> ToolRegistryPlan {
     let root_dir = root_dir.as_ref();
     let mut plan = ToolRegistryPlan::new();
 
+    let read_text_file = ReadTextFileTool::new(root_dir);
+    plan.push_spec(ToolSpec::function(read_text_file.definition()), false);
+    plan.register_handler(read_text_file.name(), ToolHandlerKind::ReadTextFile);
+    let write_text_file = WriteTextFileTool::new(root_dir);
+    plan.push_spec(ToolSpec::function(write_text_file.definition()), false);
+    plan.register_handler(write_text_file.name(), ToolHandlerKind::WriteTextFile);
     let apply_patch = ApplyPatchTool::new(root_dir);
     plan.push_spec(ToolSpec::function(apply_patch.definition()), false);
     plan.register_handler(apply_patch.name(), ToolHandlerKind::ApplyPatch);
@@ -109,6 +119,8 @@ fn instantiate_handler(
     match kind {
         ToolHandlerKind::ApplyPatch => Arc::new(ApplyPatchTool::new(root_dir)),
         ToolHandlerKind::ExecCommand => Arc::new(ExecCommandTool::new(Arc::clone(shell_runtime))),
+        ToolHandlerKind::ReadTextFile => Arc::new(ReadTextFileTool::new(root_dir)),
+        ToolHandlerKind::WriteTextFile => Arc::new(WriteTextFileTool::new(root_dir)),
         ToolHandlerKind::WriteStdin => Arc::new(WriteStdinTool::new(Arc::clone(shell_runtime))),
     }
 }
