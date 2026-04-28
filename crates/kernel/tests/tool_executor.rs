@@ -119,6 +119,44 @@ struct BlockingEchoTool {
     started_notify: Arc<Notify>,
 }
 
+/// Tool that always fails so executor can produce a failure output payload.
+struct FailingEchoTool;
+
+#[async_trait]
+impl Tool for FailingEchoTool {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+
+    fn description(&self) -> &'static str {
+        "Always fails when invoked, to exercise failure responses."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Unused text argument."
+                }
+            },
+            "required": ["text"]
+        })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::default()
+    }
+
+    async fn handle(&self, _invocation: ToolInvocation) -> ToolResult<ToolOutput> {
+        Err(ToolError::Runtime {
+            message: "failing tool invocation".to_string(),
+            stage: "failing-echo-handle".to_string(),
+        })
+    }
+}
+
 #[async_trait]
 impl Tool for BlockingEchoTool {
     fn name(&self) -> &'static str {
@@ -353,4 +391,59 @@ async fn execute_queue_cancellation_aborts_parallel_queue_without_hanging() {
         kernel::Error::Runtime { ref stage, .. } if stage == "tool-executor-cancelled"
     ));
     assert_eq!(started.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn execute_queue_report_includes_failure_response_for_dispatch_failures() {
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(FailingEchoTool));
+    let router = builder.build_router();
+    let queue =
+        kernel::tools::executor::ToolExecutionQueue::from_calls(vec![ToolCallRequest::new(
+            "call_1",
+            "echo",
+            json!({ "text": "boom" }),
+        )]);
+    let cancellation = CancellationToken::new();
+    let report =
+        kernel::tools::executor::ToolExecutor::execute_queue_report_with_mode_and_cancellation(
+            &router,
+            queue,
+            ToolContext::new(
+                kernel::session::SessionId::new(),
+                kernel::session::ThreadId::new(),
+            ),
+            kernel::tools::executor::ToolExecutionMode::Serial,
+            cancellation,
+        )
+        .await
+        .expect("tool execution failure should still return a batch report");
+
+    let kernel::tools::executor::ToolExecutionBatchReport::Failed(failure) = report else {
+        panic!("expected failed batch report for failing tool execution");
+    };
+
+    let failure_result = failure
+        .completed_results
+        .into_iter()
+        .next()
+        .expect("failure report should include failed tool output");
+    assert!(
+        failure_result
+            .output
+            .structured
+            .get("success")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|value| !value)
+    );
+    assert_eq!(failure_result.output.text, "failing tool invocation");
+    assert_eq!(
+        failure_result
+            .output
+            .structured
+            .get("error")
+            .and_then(|error| error.get("source"))
+            .and_then(|source| source.as_str()),
+        Some("runtime:failing-echo-handle")
+    );
 }

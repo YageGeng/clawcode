@@ -3,6 +3,7 @@ use crate::{
     events::{AgentEvent, EventSink, ToolCallInFlightState, ToolStage},
     tools::executor::ToolExecutionRequest,
 };
+use tracing::info;
 
 use super::super::inflight::InFlightToolCallRegistry;
 
@@ -146,6 +147,13 @@ where
             None,
         )
         .await?;
+        // Log tool invocation arguments so local CLI/users can trace tool start parameters.
+        info!(
+            name = %call.call.name,
+            handle_id = %call.handle_id,
+            arguments = %call.call.arguments,
+            "tool call started"
+        );
         self.events
             .publish(AgentEvent::ToolStatusUpdated {
                 stage: ToolStage::Calling,

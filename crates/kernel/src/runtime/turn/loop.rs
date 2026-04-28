@@ -129,7 +129,11 @@ where
         next_tool_handle_sequence = iteration_result.in_flight_tool_calls.next_handle_sequence();
 
         match IterationOutcome::from(iteration_result) {
-            IterationOutcome::Respond { message_id, text } => {
+            IterationOutcome::Respond {
+                message_id,
+                text,
+                reasoning,
+            } => {
                 // Let continuation hooks inspect the completed turn state before
                 // the final assistant text is persisted and returned.
                 let hook_decision = run_continuation_hook(
@@ -172,6 +176,7 @@ where
                         thread_id: thread_id.clone(),
                         message_id,
                         text,
+                        reasoning,
                         usage,
                         new_messages,
                         iteration,

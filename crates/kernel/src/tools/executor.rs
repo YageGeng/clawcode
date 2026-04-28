@@ -4,7 +4,7 @@ use crate::{
 };
 use futures_util::future::join_all;
 use snafu::ResultExt;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, mem};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -79,7 +79,7 @@ impl ToolExecutionQueue {
         self.calls.is_empty()
     }
 
-    /// Consumes the queue and returns the queued calls in their preserved order.
+    /// Returns all queued calls in their preserved order.
     pub fn into_requests(self) -> Vec<ToolExecutionRequest> {
         self.calls.into_iter().collect()
     }
@@ -191,9 +191,12 @@ impl ToolExecutor {
                 }
                 result = Self::execute_one(router, call.clone(), context.clone()) => result,
             };
+
             match result {
                 Ok(result) => results.push(result),
                 Err(error) => {
+                    let failure_result = Self::failure_response(&call, &error);
+                    results.push(failure_result);
                     return Ok(ToolExecutionBatchReport::Failed(Box::new(
                         ToolExecutionFailure {
                             completed_results: results,
@@ -204,6 +207,7 @@ impl ToolExecutor {
                 }
             }
         }
+
         Ok(ToolExecutionBatchReport::Completed(results))
     }
 
@@ -237,8 +241,9 @@ impl ToolExecutor {
                     match report {
                         Ok(result) => completed_results.push(result),
                         Err((failed_request, error)) if failure.is_none() => {
+                            let failed_output = Self::failure_response(&failed_request, &error);
                             failure = Some(ToolExecutionFailure {
-                                completed_results: std::mem::take(&mut completed_results),
+                                completed_results: Vec::from([failed_output]),
                                 failed_request,
                                 error,
                             });
@@ -248,12 +253,66 @@ impl ToolExecutor {
                 }
 
                 if let Some(mut failure) = failure {
-                    failure.completed_results.extend(completed_results);
+                    failure
+                        .completed_results
+                        .extend(mem::take(&mut completed_results));
                     Ok(ToolExecutionBatchReport::Failed(Box::new(failure)))
                 } else {
                     Ok(ToolExecutionBatchReport::Completed(completed_results))
                 }
             },
+        }
+    }
+
+    /// Builds a model-visible failure output for one failed request.
+    ///
+    /// This keeps tool-call observability consistent with successful calls:
+    /// the error is still emitted as a tool-result message and can be included
+    /// in downstream history/snapshots.
+    fn failure_response(
+        request: &ToolExecutionRequest,
+        error: &crate::Error,
+    ) -> ToolExecutionResult {
+        let output = ToolOutput::failure(error.to_string());
+        ToolExecutionResult {
+            handle_id: request.handle_id.clone(),
+            call: request.call.clone(),
+            output: output.clone(),
+            message: Self::build_result_message(&request.call, &output),
+        }
+    }
+
+    /// Builds a tool-result message from one execution output.
+    fn build_result_message(
+        request: &ToolCallRequest,
+        output: &ToolOutput,
+    ) -> llm::completion::Message {
+        let mut content =
+            llm::completion::message::ToolResultContent::from_tool_output(output.text.clone());
+        if output.structured != serde_json::json!({ "text": output.text }) {
+            let structured_content = llm::completion::message::ToolResultContent::from_tool_output(
+                output.structured.to_string(),
+            )
+            .into_iter()
+            .collect::<Vec<_>>();
+
+            for item in structured_content {
+                content.push(item);
+            }
+        }
+
+        let call_id = request
+            .call_id
+            .clone()
+            .unwrap_or_else(|| request.id.clone());
+        llm::completion::Message::User {
+            content: llm::one_or_many::OneOrMany::one(
+                llm::completion::message::UserContent::tool_result_with_call_id(
+                    request.id.clone(),
+                    call_id,
+                    content,
+                ),
+            ),
         }
     }
 
@@ -273,35 +332,7 @@ impl ToolExecutor {
                     inflight_snapshot: None,
                 })?;
 
-        // Keep plain text output first, then optionally append structured payloads.
-        // The structured payload is preserved when it carries additional information
-        // beyond the default `{ "text": ... }` wrapper.
-        let mut content =
-            llm::completion::message::ToolResultContent::from_tool_output(output.text.clone());
-        if output.structured != serde_json::json!({ "text": output.text }) {
-            let structured_content = llm::completion::message::ToolResultContent::from_tool_output(
-                output.structured.to_string(),
-            )
-            .into_iter()
-            .collect::<Vec<_>>();
-
-            for item in structured_content {
-                content.push(item);
-            }
-        }
-
-        let call_id = call.call_id.clone().unwrap_or_else(|| call.id.clone());
-
-        // Build a tool result message with mixed output content when present.
-        let message = llm::completion::Message::User {
-            content: llm::one_or_many::OneOrMany::one(
-                llm::completion::message::UserContent::tool_result_with_call_id(
-                    call.id.clone(),
-                    call_id,
-                    content,
-                ),
-            ),
-        };
+        let message = Self::build_result_message(&call, &output);
 
         Ok(ToolExecutionResult {
             handle_id,

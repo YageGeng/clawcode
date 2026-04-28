@@ -107,7 +107,8 @@ impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
             max_iterations: 8,
-            max_tool_calls: 16,
+            // Keep tool-call cap disabled by default to avoid hard-baked execution ceilings.
+            max_tool_calls: usize::MAX,
             recent_message_limit: 24,
             skills: skills::SkillConfig::default(),
             tool_choice: ToolChoice::Auto,

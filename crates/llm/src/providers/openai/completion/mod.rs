@@ -344,9 +344,11 @@ impl TryFrom<message::ToolResult> for Message {
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("\n");
+        // Use the normalized call identifier first to keep tool result message and call history aligned.
+        let tool_call_id = value.call_id.unwrap_or(value.id);
 
         Ok(Message::ToolResult {
-            tool_call_id: value.id,
+            tool_call_id,
             content: ToolResultContentValue::String(text),
         })
     }

@@ -1,4 +1,10 @@
-use llm::{completion::Message, usage::Usage};
+use llm::{
+    completion::{
+        Message,
+        message::{AssistantContent, ToolCall, UserContent},
+    },
+    usage::Usage,
+};
 
 use crate::context::{TurnContext, TurnContextItem};
 
@@ -148,9 +154,180 @@ impl ContextManager {
             messages.extend(active_turn.transcript.clone());
         }
 
-        if messages.len() > limit {
-            messages = messages.split_off(messages.len() - limit);
+        if messages.len() <= limit {
+            return messages;
         }
-        messages
+
+        let split_index = messages.len() - limit;
+        let (dropped, kept) = messages.split_at(split_index);
+
+        let mut prompt_messages = dropped
+            .iter()
+            .filter(|message| {
+                Self::is_tool_turn_message(message)
+                    || Self::is_tool_result_for_calls(message, &messages)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        prompt_messages.extend_from_slice(kept);
+
+        prompt_messages
+    }
+
+    /// Collects all call IDs from one assistant tool-call message.
+    fn tool_call_ids_from_message(message: &Message) -> Vec<String> {
+        let Message::Assistant { content, .. } = message else {
+            return Vec::new();
+        };
+
+        content
+            .iter()
+            .filter_map(|item| match item {
+                AssistantContent::ToolCall(ToolCall {
+                    id: _,
+                    call_id: Some(call_id),
+                    ..
+                }) => Some(call_id),
+                AssistantContent::ToolCall(ToolCall {
+                    id, call_id: None, ..
+                }) => Some(id),
+                _ => None,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Returns true when this user message contains at least one matching tool result.
+    fn is_tool_result_for_calls(message: &Message, messages: &[Message]) -> bool {
+        let Message::User { content, .. } = message else {
+            return false;
+        };
+
+        content.iter().any(|item| match item {
+            UserContent::ToolResult(tool_result) => {
+                let tool_call_id = tool_result
+                    .call_id
+                    .as_deref()
+                    .unwrap_or(tool_result.id.as_str());
+                messages.iter().any(|message| {
+                    Self::tool_call_ids_from_message(message)
+                        .iter()
+                        .any(|id| id == tool_call_id)
+                })
+            }
+            _ => false,
+        })
+    }
+
+    /// Determines whether this assistant message must be preserved for DeepSeek thinking mode.
+    ///
+    /// DeepSeek tool-call rounds require the call + context replay even when older
+    /// turns are dropped by the prompt window.
+    fn is_tool_turn_message(message: &Message) -> bool {
+        let Message::Assistant { content, .. } = message else {
+            return false;
+        };
+
+        // Preserve only assistant turns that include at least one tool call payload.
+        content
+            .iter()
+            .any(|item| matches!(item, AssistantContent::ToolCall(_)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{SessionId, TurnContext};
+    use llm::{
+        completion::Message, completion::message::AssistantContent, one_or_many::OneOrMany,
+        usage::Usage,
+    };
+
+    use super::ContextManager;
+
+    /// Keeps a tool-call assistant message with reasoning when all earlier messages
+    /// are trimmed by the prompt window size.
+    #[test]
+    fn prompt_messages_keeps_tool_turn_reasoning_when_old_messages_are_truncated() {
+        let mut history = ContextManager::new();
+        let session_id = SessionId::new();
+        let thread_id = crate::ThreadId::new();
+        let context = TurnContext::new(session_id, thread_id).with_timezone("Asia/Shanghai");
+
+        history.begin_turn(
+            "older user question".to_string(),
+            Message::user("older user question"),
+        );
+        history.append_message(Message::Assistant {
+            id: Some("tool-turn-message".to_string()),
+            content: OneOrMany::many(vec![
+                AssistantContent::reasoning("old reasoning"),
+                AssistantContent::tool_call("call_1", "read_file", serde_json::json!({})),
+            ])
+            .expect("assistant content should be constructible"),
+        });
+        history.finalize_turn(Usage::new(), &context);
+
+        history.begin_turn(
+            "latest user question".to_string(),
+            Message::user("latest user question"),
+        );
+        history.append_message(Message::assistant("latest answer"));
+        history.finalize_turn(Usage::new(), &context);
+
+        let prompt = history.prompt_messages(1);
+
+        assert_eq!(prompt.len(), 2);
+        assert!(matches!(
+            prompt[0],
+            Message::Assistant {
+                id: Some(ref id),
+                ..
+            } if id == "tool-turn-message"
+        ));
+        assert_eq!(prompt[1], Message::assistant("latest answer"));
+    }
+
+    /// Keeps a tool-call-only assistant message when prompt messages are truncated.
+    #[test]
+    fn prompt_messages_keeps_tool_turn_without_reasoning_when_old_messages_are_truncated() {
+        let mut history = ContextManager::new();
+        let session_id = SessionId::new();
+        let thread_id = crate::ThreadId::new();
+        let context = TurnContext::new(session_id, thread_id).with_timezone("Asia/Shanghai");
+
+        history.begin_turn(
+            "older user question".to_string(),
+            Message::user("older user question"),
+        );
+        history.append_message(Message::Assistant {
+            id: Some("tool-turn-message".to_string()),
+            content: OneOrMany::many(vec![AssistantContent::tool_call(
+                "call_1",
+                "read_file",
+                serde_json::json!({"path": "cli.log"}),
+            )])
+            .expect("assistant content should be constructible"),
+        });
+        history.finalize_turn(Usage::new(), &context);
+
+        history.begin_turn(
+            "latest user question".to_string(),
+            Message::user("latest user question"),
+        );
+        history.append_message(Message::assistant("latest answer"));
+        history.finalize_turn(Usage::new(), &context);
+
+        let prompt = history.prompt_messages(1);
+
+        assert_eq!(prompt.len(), 2);
+        assert!(matches!(
+            prompt[0],
+            Message::Assistant {
+                id: Some(ref id),
+                ..
+            } if id == "tool-turn-message"
+        ));
+        assert_eq!(prompt[1], Message::assistant("latest answer"));
     }
 }

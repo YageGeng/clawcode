@@ -34,6 +34,7 @@ pub(crate) enum IterationOutcome {
     Respond {
         message_id: Option<String>,
         text: String,
+        reasoning: Vec<Reasoning>,
     },
     ContinueWithTools(ToolExecutionPlan),
 }
@@ -69,6 +70,7 @@ impl From<StreamIterationResult> for IterationOutcome {
             Self::Respond {
                 message_id: iteration_result.message_id,
                 text: iteration_result.text.unwrap_or_default(),
+                reasoning: iteration_result.reasoning,
             }
         } else {
             Self::ContinueWithTools(ToolExecutionPlan {

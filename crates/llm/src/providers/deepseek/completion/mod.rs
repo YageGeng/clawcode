@@ -189,9 +189,12 @@ impl TryFrom<message::ToolResult> for Message {
             })
             .collect::<Result<Vec<_>, _>>()?
             .join("\n");
+        // Use the tool-call's runtime identifier when available; fallback to the message id
+        // for compatibility with older tool-result producers.
+        let tool_call_id = value.call_id.unwrap_or(value.id);
 
         Ok(Message::ToolResult {
-            tool_call_id: value.id,
+            tool_call_id,
             content: text,
         })
     }
@@ -245,7 +248,7 @@ impl TryFrom<message::Message> for Vec<Message> {
             message::Message::Assistant { content, .. } => {
                 let mut text_content = Vec::new();
                 let mut tool_calls = Vec::new();
-                let mut reasoning_content = None;
+                let mut reasoning_content = Vec::new();
 
                 for content in content {
                     match content {
@@ -254,7 +257,10 @@ impl TryFrom<message::Message> for Vec<Message> {
                             tool_calls.push(tool_call)
                         }
                         message::AssistantContent::Reasoning(reasoning) => {
-                            reasoning_content = Some(reasoning.display_text());
+                            let rendered = reasoning.display_text();
+                            if !rendered.is_empty() {
+                                reasoning_content.push(rendered);
+                            }
                         }
                         message::AssistantContent::Image(_) => {
                             panic!(
@@ -263,6 +269,18 @@ impl TryFrom<message::Message> for Vec<Message> {
                         }
                     }
                 }
+
+                let reasoning_content = if reasoning_content.is_empty() {
+                    if !tool_calls.is_empty() {
+                        // Thinking mode requires reasoning context with tool-call messages,
+                        // even when serialized reasoning text is not available.
+                        Some(String::new())
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(reasoning_content.join("\n"))
+                };
 
                 if text_content.is_empty() && tool_calls.is_empty() && reasoning_content.is_none() {
                     return Ok(vec![]);
@@ -849,6 +867,100 @@ mod tests {
                 assert_eq!(
                     reasoning_content.as_deref(),
                     Some("hidden chain of thought")
+                );
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    /// Verifies tool-call-only assistant turns still emit empty reasoning_content in
+    /// thinking-mode-compatible requests.
+    #[test]
+    fn deepseek_request_keeps_empty_reasoning_for_tool_call_only_turn() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(CoreMessage::Assistant {
+                id: Some("tool-turn-message".to_string()),
+                content: OneOrMany::many(vec![AssistantContent::tool_call(
+                    "call_1",
+                    "fs/read_text_file",
+                    serde_json::json!({"path": "cli.log"}),
+                )])
+                .expect("assistant content"),
+            }),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: Some(serde_json::json!({
+                "thinking": { "type": "enabled" }
+            })),
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from((
+            DeepSeekRequestParams {
+                model: "deepseek-v4-pro".to_string(),
+                reasoning_effort: None,
+                thinking_enabled: None,
+            },
+            request,
+        ))
+        .expect("request conversion should succeed");
+
+        match &completion_request.messages[0] {
+            super::Message::Assistant {
+                reasoning_content,
+                tool_calls,
+                ..
+            } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(reasoning_content.as_deref(), Some(""));
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    /// Verifies every reasoning block from one assistant message is concatenated for API continuity.
+    #[test]
+    fn deepseek_request_keeps_all_reasoning_blocks() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(CoreMessage::Assistant {
+                id: None,
+                content: OneOrMany::many(vec![
+                    AssistantContent::reasoning("first thought"),
+                    AssistantContent::reasoning("second thought"),
+                ])
+                .expect("assistant content"),
+            }),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from((
+            DeepSeekRequestParams {
+                model: "deepseek-v4-pro".to_string(),
+                reasoning_effort: None,
+                thinking_enabled: None,
+            },
+            request,
+        ))
+        .expect("request conversion should succeed");
+
+        match &completion_request.messages[0] {
+            super::Message::Assistant {
+                reasoning_content, ..
+            } => {
+                assert_eq!(
+                    reasoning_content.as_deref(),
+                    Some("first thought\nsecond thought")
                 );
             }
             other => panic!("expected assistant message, got {other:?}"),

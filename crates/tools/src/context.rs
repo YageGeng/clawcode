@@ -128,6 +128,21 @@ impl ToolOutput {
             structured: serde_json::json!({ "text": text }),
         }
     }
+
+    /// Builds a failure-style output while preserving error details for model-visible
+    /// tool-result content.
+    pub fn failure(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            text: message.clone(),
+            structured: serde_json::json!({
+                "success": false,
+                "error": {
+                    "message": message,
+                },
+            }),
+        }
+    }
 }
 
 /// Represents the executable payload for one tool invocation.
