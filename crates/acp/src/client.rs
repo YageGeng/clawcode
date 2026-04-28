@@ -437,7 +437,15 @@ impl AcpCliWriterState {
                 self.render_text_chunk(&chunk, TextRenderKind::Answer)?;
             }
             official_acp::SessionUpdate::ToolCall(tool_call) => {
-                self.write_status_line(&format!("[tool] {} started", tool_call.title))?;
+                let arguments = tool_call
+                    .raw_input
+                    .as_ref()
+                    .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
+                    .unwrap_or_else(|| "{}".to_string());
+                self.write_status_line(&format!(
+                    "[tool] {} started args={arguments}",
+                    tool_call.title
+                ))?;
             }
             official_acp::SessionUpdate::ToolCallUpdate(tool_call_update) => {
                 if matches!(
