@@ -89,6 +89,62 @@ async fn exec_command_runs_a_one_shot_shell_command() {
     assert_eq!(output.structured["running"], false);
 }
 
+/// Verifies absolute workspace-root paths are accepted for `exec_command` workdir.
+#[tokio::test]
+async fn exec_command_accepts_workspace_absolute_workdir() {
+    let root = temp_root("exec-command-absolute-workdir");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-absolute-workdir",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "printf hello-absolute",
+                    "workdir": root.to_string_lossy(),
+                    "shell": "/bin/sh"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.structured["stdout"], "hello-absolute");
+    assert_eq!(output.structured["running"], false);
+}
+
+/// Verifies absolute paths outside the workspace are rejected by `exec_command`.
+#[tokio::test]
+async fn exec_command_rejects_workspace_absolute_workdir_outside_root() {
+    let root = temp_root("exec-command-absolute-workdir-inside");
+    let outside = temp_root("exec-command-absolute-workdir-outside");
+    let router = create_file_tool_router_with_root(&root).await;
+
+    let error = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-absolute-workdir-outside",
+                "exec_command",
+                serde_json::json!({
+                    "cmd": "pwd",
+                    "workdir": outside.to_string_lossy(),
+                    "shell": "/bin/sh"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("workdir must be relative to the workspace root")
+    );
+}
+
 /// Verifies exec-command intercepts simple shell-wrapped apply_patch invocations.
 #[tokio::test]
 async fn exec_command_intercepts_apply_patch_shell_command() {

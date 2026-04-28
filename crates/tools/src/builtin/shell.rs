@@ -337,7 +337,10 @@ impl UnifiedExecRuntime {
         self.manager.write_stdin(args, tool).await
     }
 
-    /// Resolves an optional relative working directory under the configured root.
+    /// Resolves an optional working directory under the configured root.
+    ///
+    /// Relative paths are interpreted from the workspace root, and workspace-absolute
+    /// paths are accepted when they stay within that root.
     fn resolve_workdir(
         &self,
         workdir: Option<&str>,
@@ -349,17 +352,29 @@ impl UnifiedExecRuntime {
             stage: format!("{stage}-root-canonicalize"),
         })?;
         let requested = workdir.unwrap_or(".");
-        let path = Path::new(requested);
+        let request_path = Path::new(requested);
+        let relative_path = if request_path.is_absolute() {
+            ensure!(
+                request_path.starts_with(&canonical_root),
+                ToolExecutionSnafu {
+                    tool: tool.to_string(),
+                    stage: stage.to_string(),
+                    message: "workdir must be relative to the workspace root".to_string(),
+                }
+            );
+            request_path.strip_prefix(&canonical_root).map_err(|_| {
+                ToolExecutionSnafu {
+                    tool: tool.to_string(),
+                    stage: stage.to_string(),
+                    message: "workdir must be relative to the workspace root".to_string(),
+                }
+                .build()
+            })?
+        } else {
+            request_path
+        };
         ensure!(
-            !path.is_absolute(),
-            ToolExecutionSnafu {
-                tool: tool.to_string(),
-                stage: stage.to_string(),
-                message: "workdir must be relative to the workspace root".to_string(),
-            }
-        );
-        ensure!(
-            !path
+            !relative_path
                 .components()
                 .any(|component| matches!(component, Component::ParentDir)),
             ToolExecutionSnafu {
@@ -369,7 +384,7 @@ impl UnifiedExecRuntime {
             }
         );
 
-        let resolved = canonical_root.join(path);
+        let resolved = canonical_root.join(relative_path);
         ensure!(
             resolved.starts_with(&canonical_root),
             ToolExecutionSnafu {
@@ -500,7 +515,7 @@ impl ToolHandler for ExecCommandTool {
                 },
                 "workdir": {
                     "type": "string",
-                    "description": "Optional relative working directory under the workspace root."
+                    "description": "Optional working directory for command execution. Must be relative to the workspace root, or an absolute path inside the workspace root."
                 },
                 "shell": {
                     "type": "string",
