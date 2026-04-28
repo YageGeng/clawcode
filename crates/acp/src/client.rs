@@ -1,148 +1,143 @@
 use std::{
     collections::HashMap,
     env,
+    fs::File,
     io::{self, BufRead, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
+use crate::agent::{self, AcpAgent};
 use agent_client_protocol::schema as official_acp;
-use agent_client_protocol::{JsonRpcMessage, JsonRpcRequest};
+use agent_client_protocol::{Agent as OfficialAgent, Client as OfficialClient, ConnectionTo};
 use kernel::{SessionTaskContext, model::AgentModel, tools::router::ToolRouter};
-use serde_json::{Value, json};
+use serde_json::Value;
+use snafu::{ResultExt, Snafu};
 use tools::builtin::{read_text_file::ReadTextFileTool, write_text_file::WriteTextFileTool};
-use tracing::{debug, info};
 
-use crate::{
-    agent::{self, AcpAgent},
-    message::SessionRpc,
-};
+/// Errors produced while serving ACP client-side requests in the human CLI.
+#[derive(Debug, Snafu)]
+enum ClientHandlerError {
+    #[snafu(display("ACP client request is invalid on `{stage}`: {message}"))]
+    InvalidParams { message: String, stage: String },
 
-/// Human-facing CLI client that talks to the in-process agent exclusively through ACP messages.
-pub struct HumanAcpClient<M> {
-    agent: AcpAgent<M>,
-    writer: AcpCliWriter,
-    next_id: u64,
+    #[snafu(display("ACP client I/O failed on `{stage}`, {source}"))]
+    Io { source: io::Error, stage: String },
+
+    #[snafu(display("ACP client tool failed on `{stage}`, {source}"))]
+    Tool { source: tools::Error, stage: String },
+
+    #[snafu(display("ACP client task failed on `{stage}`, {source}"))]
+    Join {
+        source: tokio::task::JoinError,
+        stage: String,
+    },
+}
+
+type ClientHandlerResult<T> = std::result::Result<T, ClientHandlerError>;
+
+impl From<ClientHandlerError> for official_acp::Error {
+    /// Converts client-side handler errors into ACP SDK errors for typed responders.
+    fn from(error: ClientHandlerError) -> Self {
+        let message = error.to_string();
+        match error {
+            ClientHandlerError::InvalidParams { .. } => {
+                official_acp::Error::invalid_params().data(message)
+            }
+            ClientHandlerError::Io { .. }
+            | ClientHandlerError::Tool { .. }
+            | ClientHandlerError::Join { .. } => {
+                official_acp::Error::internal_error().data(message)
+            }
+        }
+    }
+}
+
+/// Human-facing CLI client backed by a real ACP SDK connection to the agent.
+pub struct HumanAcpClient {
+    connection: ConnectionTo<OfficialAgent>,
+    services: CliClientServices,
     initialized: bool,
     session_id: Option<String>,
 }
 
-impl<M> HumanAcpClient<M>
-where
-    M: AgentModel + 'static,
-{
-    /// Builds a human CLI ACP client around an existing model, store, router, and output stream.
-    pub async fn new<W>(
-        model: Arc<M>,
-        store: Arc<SessionTaskContext>,
-        router: Arc<ToolRouter>,
-        skills: skills::SkillConfig,
-        output: W,
-    ) -> Self
-    where
-        W: Write + Send + 'static,
-    {
-        let writer = AcpCliWriter::new(output);
-        let agent = AcpAgent::new(
-            model,
-            store,
-            router,
-            skills,
-            agent::shared_writer(writer.clone()),
-            true,
-        );
-
+impl HumanAcpClient {
+    /// Builds a human CLI client around an established ACP SDK connection.
+    fn new(connection: ConnectionTo<OfficialAgent>, services: CliClientServices) -> Self {
         Self {
-            agent,
-            writer,
-            next_id: 1,
+            connection,
+            services,
             initialized: false,
             session_id: None,
         }
     }
 
     /// Runs one human prompt by sending ACP `initialize`, `session/new`, and `session/prompt`.
-    pub async fn run_prompt(&mut self, prompt: String) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run_prompt(
+        &mut self,
+        prompt: String,
+    ) -> std::result::Result<(), official_acp::Error> {
         self.ensure_session().await?;
         let session_id = self.session_id.clone().ok_or_else(|| {
-            io::Error::other("ACP session was not available after initialization")
+            official_acp::Error::internal_error()
+                .data("ACP session was not available after initialization")
         })?;
 
-        self.send_request(official_acp::PromptRequest::new(
-            session_id,
-            vec![official_acp::ContentBlock::from(prompt)],
-        ))
-        .await?;
-        self.writer.finish_turn()?;
+        self.connection
+            .send_request(official_acp::PromptRequest::new(
+                session_id,
+                vec![official_acp::ContentBlock::from(prompt)],
+            ))
+            .block_task()
+            .await?;
+        self.services.finish_turn().map_err(acp_io_error)?;
         Ok(())
     }
 
     /// Writes the interactive prompt marker through the same output stream used for ACP updates.
     pub fn write_prompt_marker(&self) -> io::Result<()> {
-        self.writer.write_human_text("> ")
+        self.services.write_human_text("> ")
     }
 
     /// Writes a user-visible error line through the human ACP output stream.
     pub fn write_error_line(&self, error: &dyn std::error::Error) -> io::Result<()> {
-        self.writer.write_human_line(&format!("error: {error}"))
+        self.services.write_human_line(&format!("error: {error}"))
     }
 
     /// Creates and caches the ACP session required before prompt turns can run.
-    async fn ensure_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn ensure_session(&mut self) -> std::result::Result<(), official_acp::Error> {
         if !self.initialized {
-            self.send_request(
-                official_acp::InitializeRequest::new(official_acp::ProtocolVersion::V1)
-                    .client_capabilities(client_capabilities())
-                    .client_info(
-                        official_acp::Implementation::new(
-                            "clawcode-cli",
-                            env!("CARGO_PKG_VERSION"),
-                        )
-                        .title("ClawCode CLI"),
-                    ),
-            )
-            .await?;
+            self.connection
+                .send_request(
+                    official_acp::InitializeRequest::new(official_acp::ProtocolVersion::V1)
+                        .client_capabilities(client_capabilities())
+                        .client_info(
+                            official_acp::Implementation::new(
+                                "clawcode-cli",
+                                env!("CARGO_PKG_VERSION"),
+                            )
+                            .title("ClawCode CLI"),
+                        ),
+                )
+                .block_task()
+                .await?;
             self.initialized = true;
         }
 
         if self.session_id.is_none() {
-            let cwd = env::current_dir()?;
-            let result = self
+            let cwd = env::current_dir().map_err(acp_io_error)?;
+            let response = self
+                .connection
                 .send_request(official_acp::NewSessionRequest::new(cwd.clone()))
+                .block_task()
                 .await?;
-            let response: official_acp::NewSessionResponse =
-                serde_json::from_value(result).map_err(io::Error::other)?;
             let session_id = response.session_id.to_string();
-            self.writer
-                .register_session_root(&session_id, cwd.canonicalize()?);
+            let root = cwd.canonicalize().map_err(acp_io_error)?;
+            self.services.register_session_root(&session_id, root);
             self.session_id = Some(session_id);
         }
 
         Ok(())
-    }
-
-    /// Sends one typed JSON-RPC request to the ACP agent and returns the dynamic result object.
-    async fn send_request<R>(&mut self, request: R) -> Result<Value, Box<dyn std::error::Error>>
-    where
-        R: JsonRpcRequest,
-    {
-        let id = self.next_id;
-        self.next_id += 1;
-        let request = SessionRpc::request(id, &request);
-
-        info!(direction = "send", payload = %request, "acp protocol message");
-        self.agent.handle_line(&request.to_string()).await?;
-        let response = self
-            .writer
-            .take_response(id)
-            .ok_or_else(|| io::Error::other(format!("ACP response `{id}` was not received")))?;
-        info!(direction = "recv", payload = %response, "acp protocol message");
-
-        if let Some(error) = response.get("error") {
-            return Err(io::Error::other(error.to_string()).into());
-        }
-
-        Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
 }
 
@@ -160,14 +155,164 @@ where
     R: BufRead,
     W: Write + Send + 'static,
 {
-    let mut client = HumanAcpClient::new(model, store, router, skills, output).await;
+    let services = CliClientServices::new(output);
+    let (client_transport, agent_transport) = memory_transport_pair();
+    let mut agent_task = spawn_embedded_agent(model, store, router, skills, agent_transport);
+    let client_result = run_cli_client(services, client_transport, input);
+
+    let (result, should_abort_agent) = tokio::select! {
+        result = client_result => (result, true),
+        agent_result = &mut agent_task => match agent_result {
+            Ok(Ok(())) => (Ok(()), false),
+            Ok(Err(error)) => (Err(acp_agent_error(error)), false),
+            Err(error) => (
+                Err(acp_join_to_official_error(
+                    error,
+                    "acp-client-embedded-agent-task",
+                )),
+                false,
+            ),
+        },
+    };
+    if should_abort_agent {
+        agent_task.abort();
+        let _ = agent_task.await;
+    }
+    result.map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })
+}
+
+/// Builds paired in-memory ACP byte-stream transports for the embedded client and agent.
+fn memory_transport_pair() -> (
+    impl agent_client_protocol::ConnectTo<OfficialClient>,
+    impl agent_client_protocol::ConnectTo<OfficialAgent>,
+) {
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    let (client_stream, agent_stream) = tokio::io::duplex(1024 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (agent_read, agent_write) = tokio::io::split(agent_stream);
+    let client_transport =
+        agent_client_protocol::ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let agent_transport =
+        agent_client_protocol::ByteStreams::new(agent_write.compat_write(), agent_read.compat());
+    (client_transport, agent_transport)
+}
+
+/// Spawns the embedded ACP agent connected to the in-memory transport.
+fn spawn_embedded_agent<M>(
+    model: Arc<M>,
+    store: Arc<SessionTaskContext>,
+    router: Arc<ToolRouter>,
+    skills: skills::SkillConfig,
+    transport: impl agent_client_protocol::ConnectTo<OfficialAgent> + 'static,
+) -> tokio::task::JoinHandle<agent::Result<()>>
+where
+    M: AgentModel + 'static,
+{
+    let agent = AcpAgent::new(
+        model,
+        store,
+        router,
+        skills,
+        agent::shared_writer(std::io::sink()),
+        true,
+    );
+    tokio::spawn(async move { agent.connect_sdk(transport).await })
+}
+
+/// Runs the ACP SDK client handlers used by the human CLI.
+async fn run_cli_client<R>(
+    services: CliClientServices,
+    transport: impl agent_client_protocol::ConnectTo<OfficialClient> + 'static,
+    input: &mut R,
+) -> std::result::Result<(), official_acp::Error>
+where
+    R: BufRead,
+{
+    let notification_services = services.clone();
+    let permission_services = services.clone();
+    let read_services = services.clone();
+    let write_services = services.clone();
+    let prompt_services = services;
+
+    OfficialClient
+        .builder()
+        .name("clawcode-cli")
+        .on_receive_notification(
+            async move |notification: official_acp::SessionNotification,
+                        _connection: ConnectionTo<OfficialAgent>| {
+                notification_services
+                    .render_session_update(notification)
+                    .map_err(acp_io_error)
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_request(
+            async move |request: official_acp::RequestPermissionRequest,
+                        responder,
+                        _connection: ConnectionTo<OfficialAgent>| {
+                // Permission prompts perform blocking terminal input, so run them off the SDK
+                // dispatch task to keep the ACP connection able to process the response path.
+                let services = permission_services.clone();
+                let response = tokio::task::spawn_blocking(move || {
+                    services.handle_request_permission_response(request)
+                })
+                .await
+                .context(JoinSnafu {
+                    stage: "acp-client-permission-blocking-task".to_string(),
+                })
+                .map_err(official_acp::Error::from)
+                .and_then(|response| response);
+                match response {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => responder.respond_with_error(error),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: official_acp::ReadTextFileRequest,
+                        responder,
+                        _connection: ConnectionTo<OfficialAgent>| {
+                match read_services.handle_fs_read_text_file_response(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => responder.respond_with_error(error),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: official_acp::WriteTextFileRequest,
+                        responder,
+                        _connection: ConnectionTo<OfficialAgent>| {
+                match write_services.handle_fs_write_text_file_response(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(error) => responder.respond_with_error(error),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(transport, async move |connection| {
+            run_prompt_loop(HumanAcpClient::new(connection, prompt_services), input).await
+        })
+        .await
+}
+
+/// Runs the terminal prompt loop over an established ACP client connection.
+async fn run_prompt_loop<R>(
+    mut client: HumanAcpClient,
+    input: &mut R,
+) -> std::result::Result<(), official_acp::Error>
+where
+    R: BufRead,
+{
     let mut line = String::new();
 
     loop {
-        client.write_prompt_marker()?;
+        client.write_prompt_marker().map_err(acp_io_error)?;
 
         line.clear();
-        if input.read_line(&mut line)? == 0 {
+        if input.read_line(&mut line).map_err(acp_io_error)? == 0 {
             break;
         }
 
@@ -180,216 +325,324 @@ where
         }
 
         if let Err(error) = client.run_prompt(prompt.to_string()).await {
-            client.write_error_line(error.as_ref())?;
+            client.write_error_line(&error).map_err(acp_io_error)?;
         }
     }
 
     Ok(())
 }
 
-/// Shared writer used by the in-process ACP client to render notifications and retain responses.
+/// Shared renderer used by the in-process ACP client for terminal output and local client tools.
 #[derive(Clone)]
-struct AcpCliWriter {
-    state: Arc<Mutex<AcpCliWriterState>>,
+struct CliClientServices {
+    session_roots: Arc<Mutex<SessionRoots>>,
+    renderer: Arc<Mutex<CliRenderer>>,
+    approval_input: Arc<dyn ApprovalInput>,
 }
 
-impl AcpCliWriter {
-    /// Builds a writer that renders ACP session updates into human-readable CLI output.
+impl CliClientServices {
+    /// Builds shared CLI client services for rendering, filesystem capabilities, and approval.
     fn new<W>(output: W) -> Self
     where
         W: Write + Send + 'static,
     {
         Self {
-            state: Arc::new(Mutex::new(AcpCliWriterState {
-                pending_line: Vec::new(),
-                responses: Vec::new(),
-                session_roots: HashMap::new(),
-                presentation: CliPresentationState::default(),
-                output: Box::new(output),
-            })),
+            session_roots: Arc::new(Mutex::new(SessionRoots::default())),
+            renderer: Arc::new(Mutex::new(CliRenderer::new(output))),
+            approval_input: Arc::new(TtyApprovalInput),
         }
     }
 
     /// Registers the filesystem root exposed for an ACP session.
     fn register_session_root(&self, session_id: &str, root: PathBuf) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state
+        let mut roots = self
             .session_roots
-            .insert(session_id.to_string(), canonicalize_best_effort(root));
-    }
-
-    /// Removes and returns a JSON-RPC response for the requested id.
-    fn take_response(&self, id: u64) -> Option<Value> {
-        let mut state = self
-            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let index = state
-            .responses
-            .iter()
-            .position(|response| response.get("id") == Some(&json!(id)))?;
-        Some(state.responses.remove(index))
+        roots.register(session_id, root);
     }
 
     /// Writes a raw human-facing text fragment to the underlying output stream.
     fn write_human_text(&self, text: &str) -> io::Result<()> {
-        let mut state = self
-            .state
+        let mut renderer = self
+            .renderer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.output.write_all(text.as_bytes())?;
-        state.output.flush()
+        renderer.write_human_text(text)
     }
 
     /// Writes a raw human-facing line to the underlying output stream.
     fn write_human_line(&self, text: &str) -> io::Result<()> {
-        let mut state = self
-            .state
+        let mut renderer = self
+            .renderer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.write_status_line(text)
+        renderer.write_status_line(text)
     }
 
     /// Closes any open streamed line after a prompt turn finishes.
     fn finish_turn(&self) -> io::Result<()> {
-        let mut state = self
-            .state
+        let mut renderer = self
+            .renderer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.finish_text_line_if_needed()
+        renderer.finish_text_line_if_needed()
+    }
+
+    /// Renders an ACP session notification received through the SDK client connection.
+    fn render_session_update(
+        &self,
+        notification: official_acp::SessionNotification,
+    ) -> io::Result<()> {
+        let mut renderer = self
+            .renderer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        renderer.render_session_update(notification)
+    }
+
+    /// Handles an ACP permission request and returns the typed SDK response.
+    fn handle_request_permission_response(
+        &self,
+        request: official_acp::RequestPermissionRequest,
+    ) -> std::result::Result<official_acp::RequestPermissionResponse, official_acp::Error> {
+        self.handle_request_permission_typed(request)
+            .map_err(official_acp::Error::from)
+    }
+
+    /// Handles an ACP read request and returns the typed SDK response.
+    fn handle_fs_read_text_file_response(
+        &self,
+        request: official_acp::ReadTextFileRequest,
+    ) -> std::result::Result<official_acp::ReadTextFileResponse, official_acp::Error> {
+        self.handle_fs_read_text_file_typed(request)
+            .map_err(official_acp::Error::from)
+    }
+
+    /// Handles an ACP write request and returns the typed SDK response.
+    fn handle_fs_write_text_file_response(
+        &self,
+        request: official_acp::WriteTextFileRequest,
+    ) -> std::result::Result<official_acp::WriteTextFileResponse, official_acp::Error> {
+        self.handle_fs_write_text_file_typed(request)
+            .map_err(official_acp::Error::from)
     }
 }
 
-impl Write for AcpCliWriter {
-    /// Accepts newline-delimited ACP JSON-RPC messages from the in-process agent.
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// Session root registry used by ACP client filesystem capabilities.
+#[derive(Default)]
+struct SessionRoots {
+    roots: HashMap<String, PathBuf>,
+}
 
-        for byte in buf {
-            if *byte == b'\n' {
-                let line = String::from_utf8(std::mem::take(&mut state.pending_line))
-                    .map_err(io::Error::other)?;
-                state.process_acp_line(&line)?;
-            } else {
-                state.pending_line.push(*byte);
-            }
-        }
-
-        Ok(buf.len())
+impl SessionRoots {
+    /// Registers the canonical filesystem root exposed for one ACP session.
+    fn register(&mut self, session_id: &str, root: PathBuf) {
+        self.roots
+            .insert(session_id.to_string(), canonicalize_best_effort(root));
     }
 
-    /// Flushes the wrapped human output stream.
-    fn flush(&mut self) -> io::Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.output.flush()
+    /// Returns the registered root for one session or a typed invalid-params error.
+    fn get(&self, session_id: &str, stage: &str) -> ClientHandlerResult<&PathBuf> {
+        self.roots
+            .get(session_id)
+            .ok_or_else(|| ClientHandlerError::InvalidParams {
+                message: format!("unknown sessionId `{session_id}`"),
+                stage: stage.to_string(),
+            })
     }
 }
 
-/// Mutable state shared by ACP writer clones.
-struct AcpCliWriterState {
-    pending_line: Vec<u8>,
-    responses: Vec<Value>,
-    session_roots: HashMap<String, PathBuf>,
+/// Terminal renderer for the human ACP client.
+struct CliRenderer {
     presentation: CliPresentationState,
     output: Box<dyn Write + Send>,
 }
 
-impl AcpCliWriterState {
-    /// Parses one ACP JSON-RPC line and either renders a notification or stores a response.
-    fn process_acp_line(&mut self, line: &str) -> io::Result<()> {
-        info!(direction = "recv", payload = %line, "acp protocol message");
-        let message: Value = serde_json::from_str(line).map_err(io::Error::other)?;
-        if let Some(notification) = agent_notification(&message)? {
-            self.render_session_update(notification)?;
-        } else if message.get("method").is_some() {
-            self.handle_client_request(&message);
-        } else if message.get("id").is_some() {
-            debug!(id = ?message.get("id"), "acp response buffered");
-            self.responses.push(message);
+impl CliRenderer {
+    /// Builds a terminal renderer around the provided output stream.
+    fn new<W>(output: W) -> Self
+    where
+        W: Write + Send + 'static,
+    {
+        Self {
+            presentation: CliPresentationState::default(),
+            output: Box::new(output),
         }
-        Ok(())
     }
 
-    /// Handles one agent-initiated ACP client request and buffers the JSON-RPC response.
-    fn handle_client_request(&mut self, message: &Value) {
-        let Some(id) = message.get("id").cloned() else {
-            return;
-        };
-        let method = message
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let params = message.get("params").cloned().unwrap_or(Value::Null);
-        let result = match official_acp::AgentRequest::parse_message(method, &params) {
-            Ok(official_acp::AgentRequest::ReadTextFileRequest(request)) => {
-                self.handle_fs_read_text_file(request)
-            }
-            Ok(official_acp::AgentRequest::WriteTextFileRequest(request)) => {
-                self.handle_fs_write_text_file(request)
-            }
-            Ok(_) => Err(json_rpc_client_error(
-                -32601,
-                format!("ACP client method `{method}` is not supported"),
-            )),
-            _ => Err(json_rpc_client_error(
-                -32601,
-                format!("ACP client method `{method}` is not supported"),
-            )),
-        };
-        let response = match result {
-            Ok(result) => SessionRpc::response(id, result),
-            Err(error) => SessionRpc::error(id, error),
-        };
-        info!(direction = "send", payload = %response, "acp protocol message");
-        self.responses.push(response);
+    /// Writes a raw human-facing text fragment to the terminal output stream.
+    fn write_human_text(&mut self, text: &str) -> io::Result<()> {
+        self.output.write_all(text.as_bytes())?;
+        self.output.flush()
     }
+}
 
-    /// Handles an ACP fs/read_text_file request from the agent.
-    fn handle_fs_read_text_file(
+/// Input source used for interactive approval prompts.
+trait ApprovalInput: Send + Sync {
+    /// Reads one approval answer line.
+    fn read_line(&self, answer: &mut String) -> io::Result<usize>;
+}
+
+/// Approval input backed by the controlling terminal.
+struct TtyApprovalInput;
+
+impl ApprovalInput for TtyApprovalInput {
+    /// Reads from the controlling terminal instead of the prompt loop's stdin lock.
+    fn read_line(&self, answer: &mut String) -> io::Result<usize> {
+        #[cfg(unix)]
+        {
+            let tty = File::open("/dev/tty")?;
+            let mut reader = io::BufReader::new(tty);
+            reader.read_line(answer)
+        }
+
+        #[cfg(windows)]
+        {
+            let tty = File::open("CONIN$")?;
+            let mut reader = io::BufReader::new(tty);
+            return reader.read_line(answer);
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = answer;
+            Err(io::Error::other(
+                "approval prompt input is not supported on this platform",
+            ))
+        }
+    }
+}
+
+impl CliClientServices {
+    /// Handles an ACP fs/read_text_file request and returns the typed SDK response.
+    fn handle_fs_read_text_file_typed(
         &self,
         request: official_acp::ReadTextFileRequest,
-    ) -> Result<Value, Value> {
+    ) -> ClientHandlerResult<official_acp::ReadTextFileResponse> {
         let session_id = request.session_id.to_string();
-        let root = self.session_roots.get(&session_id).ok_or_else(|| {
-            json_rpc_client_error(-32602, format!("unknown sessionId `{session_id}`"))
-        })?;
-        let output = ReadTextFileTool::new(root.clone())
+        let root = {
+            let roots = self
+                .session_roots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            roots
+                .get(&session_id, "acp-client-fs-read-session")?
+                .clone()
+        };
+        let output = ReadTextFileTool::new(root)
             .read_text_file(request.path, request.line, request.limit)
-            .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
+            .context(ToolSnafu {
+                stage: "acp-client-fs-read".to_string(),
+            })?;
         let content = output.text;
 
-        Ok(SessionRpc::value(&official_acp::ReadTextFileResponse::new(
-            content,
-        )))
+        Ok(official_acp::ReadTextFileResponse::new(content))
     }
 
-    /// Handles an ACP fs/write_text_file request from the agent.
-    fn handle_fs_write_text_file(
+    /// Handles an ACP fs/write_text_file request and returns the typed SDK response.
+    fn handle_fs_write_text_file_typed(
         &self,
         request: official_acp::WriteTextFileRequest,
-    ) -> Result<Value, Value> {
+    ) -> ClientHandlerResult<official_acp::WriteTextFileResponse> {
         let session_id = request.session_id.to_string();
-        let root = self.session_roots.get(&session_id).ok_or_else(|| {
-            json_rpc_client_error(-32602, format!("unknown sessionId `{session_id}`"))
-        })?;
-        WriteTextFileTool::new(root.clone())
+        let root = {
+            let roots = self
+                .session_roots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            roots
+                .get(&session_id, "acp-client-fs-write-session")?
+                .clone()
+        };
+        WriteTextFileTool::new(root)
             .write_text_file(request.path, request.content)
-            .map_err(|error| json_rpc_client_error(-32603, error.to_string()))?;
+            .context(ToolSnafu {
+                stage: "acp-client-fs-write".to_string(),
+            })?;
 
-        Ok(SessionRpc::value(
-            &official_acp::WriteTextFileResponse::new(),
-        ))
+        Ok(official_acp::WriteTextFileResponse::new())
     }
 
+    /// Handles an ACP session/request_permission request and returns the typed SDK response.
+    fn handle_request_permission_typed(
+        &self,
+        request: official_acp::RequestPermissionRequest,
+    ) -> ClientHandlerResult<official_acp::RequestPermissionResponse> {
+        let tool_name = request
+            .tool_call
+            .fields
+            .title
+            .as_deref()
+            .unwrap_or("tool call");
+        let raw_input = request
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .map(Value::to_string)
+            .unwrap_or_else(|| "{}".to_string());
+        self.renderer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .write_status_line(&format!(
+                "{tool_name} for session `{}` with args {raw_input}",
+                request.session_id
+            ))
+            .context(IoSnafu {
+                stage: "acp-client-permission-render-request".to_string(),
+            })?;
+
+        let allow_option = request.options.iter().find(|option| {
+            matches!(
+                option.kind,
+                official_acp::PermissionOptionKind::AllowOnce
+                    | official_acp::PermissionOptionKind::AllowAlways
+            )
+        });
+        let reject_option = request.options.iter().find(|option| {
+            matches!(
+                option.kind,
+                official_acp::PermissionOptionKind::RejectOnce
+                    | official_acp::PermissionOptionKind::RejectAlways
+            )
+        });
+
+        self.renderer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .write_status_line("Select permission: [y] allow once, [n] reject once")
+            .context(IoSnafu {
+                stage: "acp-client-permission-render-options".to_string(),
+            })?;
+        let mut answer = String::new();
+        self.approval_input
+            .read_line(&mut answer)
+            .context(IoSnafu {
+                stage: "acp-client-permission-read-answer".to_string(),
+            })?;
+
+        let selected = if matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+            allow_option.ok_or_else(|| ClientHandlerError::InvalidParams {
+                message: "permission request has no allow option".to_string(),
+                stage: "acp-client-permission-allow-option".to_string(),
+            })?
+        } else {
+            reject_option.ok_or_else(|| ClientHandlerError::InvalidParams {
+                message: "permission request has no reject option".to_string(),
+                stage: "acp-client-permission-reject-option".to_string(),
+            })?
+        };
+
+        Ok(official_acp::RequestPermissionResponse::new(
+            official_acp::RequestPermissionOutcome::Selected(
+                official_acp::SelectedPermissionOutcome::new(selected.option_id.clone()),
+            ),
+        ))
+    }
+}
+
+impl CliRenderer {
     /// Renders one ACP `session/update` notification into the existing CLI presentation style.
     fn render_session_update(
         &mut self,
@@ -546,21 +799,6 @@ fn client_capabilities() -> official_acp::ClientCapabilities {
         .terminal(false)
 }
 
-/// Parses an agent notification from a raw JSON-RPC message when the method is a notification.
-fn agent_notification(message: &Value) -> io::Result<Option<official_acp::SessionNotification>> {
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    match official_acp::AgentNotification::parse_message(method, &params) {
-        Ok(official_acp::AgentNotification::SessionNotification(notification)) => {
-            Ok(Some(notification))
-        }
-        Ok(_) => Ok(None),
-        Err(_) => Ok(None),
-    }
-}
-
 /// Returns a canonical path when available, otherwise preserves the caller-provided path.
 fn canonicalize_best_effort(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
@@ -579,12 +817,19 @@ fn content_block_text(block: &official_acp::ContentBlock) -> Option<&str> {
     }
 }
 
-/// Builds a JSON-RPC client error object for ACP client-side method handling.
-fn json_rpc_client_error(code: i64, message: impl ToString) -> Value {
-    json!({
-        "code": code,
-        "message": message.to_string(),
-    })
+/// Converts an I/O error into the ACP SDK error type used by client callbacks.
+fn acp_io_error(error: io::Error) -> official_acp::Error {
+    official_acp::Error::internal_error().data(error.to_string())
+}
+
+/// Converts an embedded ACP agent error into the ACP SDK error type.
+fn acp_agent_error(error: agent::Error) -> official_acp::Error {
+    official_acp::Error::internal_error().data(error.to_string())
+}
+
+/// Converts a task join failure into the ACP SDK error type.
+fn acp_join_to_official_error(error: tokio::task::JoinError, stage: &str) -> official_acp::Error {
+    official_acp::Error::internal_error().data(format!("{stage}: {error}"))
 }
 
 /// Tracks whether the human CLI renderer currently has an open streamed line.
@@ -600,12 +845,13 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
+    use agent_client_protocol::schema as official_acp;
     use serde_json::json;
     use tools::{ToolCallRequest, ToolContext};
 
     use crate::message::AcpMessage;
 
-    use super::{AcpCliWriter, SessionRpc};
+    use super::CliClientServices;
 
     #[derive(Clone, Default)]
     struct SharedBufferWriter {
@@ -644,7 +890,8 @@ mod tests {
     /// Verifies the local ACP client advertises filesystem RPC support.
     #[test]
     fn client_capabilities_advertise_filesystem_methods() {
-        let capabilities = SessionRpc::value(&super::client_capabilities());
+        let capabilities =
+            serde_json::to_value(super::client_capabilities()).expect("capabilities serialize");
 
         assert_eq!(capabilities["fs"]["readTextFile"], json!(true));
         assert_eq!(capabilities["fs"]["writeTextFile"], json!(true));
@@ -656,30 +903,18 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         let file_path = workspace.path().join("src.txt");
         std::fs::write(&file_path, "one\ntwo\nthree\n").expect("file should be written");
-        let mut writer = AcpCliWriter::new(Vec::<u8>::new());
+        let writer = CliClientServices::new(Vec::<u8>::new());
         writer.register_session_root("session-1", workspace.path().to_path_buf());
 
-        writeln!(
-            writer,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 10,
-                "method": "fs/read_text_file",
-                "params": {
-                    "sessionId": "session-1",
-                    "path": file_path,
-                    "line": 2,
-                    "limit": 1
-                }
-            })
-        )
-        .expect("request should be written");
-
         let response = writer
-            .take_response(10)
-            .expect("fs response should be buffered");
-        assert_eq!(response["result"]["content"], json!("two\n"));
+            .handle_fs_read_text_file_response(
+                official_acp::ReadTextFileRequest::new("session-1", file_path)
+                    .line(2)
+                    .limit(1),
+            )
+            .expect("fs response should be returned");
+
+        assert_eq!(response.content, "two\n");
     }
 
     /// Verifies ACP fs/read_text_file resolves relative paths from the registered session root.
@@ -688,28 +923,17 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         std::fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n")
             .expect("file should be written");
-        let mut writer = AcpCliWriter::new(Vec::<u8>::new());
+        let writer = CliClientServices::new(Vec::<u8>::new());
         writer.register_session_root("session-1", workspace.path().to_path_buf());
 
-        writeln!(
-            writer,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 12,
-                "method": "fs/read_text_file",
-                "params": {
-                    "sessionId": "session-1",
-                    "path": "Cargo.toml"
-                }
-            })
-        )
-        .expect("request should be written");
-
         let response = writer
-            .take_response(12)
-            .expect("fs response should be buffered");
-        assert_eq!(response["result"]["content"], json!("[workspace]\n"));
+            .handle_fs_read_text_file_response(official_acp::ReadTextFileRequest::new(
+                "session-1",
+                "Cargo.toml",
+            ))
+            .expect("fs response should be returned");
+
+        assert_eq!(response.content, "[workspace]\n");
     }
 
     /// Rejects ACP fs/read_text_file traversal paths outside the session root.
@@ -723,31 +947,20 @@ mod tests {
         let outside = parent.join("outside_read.txt");
         std::fs::write(&outside, "outside-file").expect("outside file should be written");
 
-        let mut writer = AcpCliWriter::new(Vec::<u8>::new());
+        let writer = CliClientServices::new(Vec::<u8>::new());
         writer.register_session_root("session-1", workspace.path().to_path_buf());
 
-        writeln!(
-            writer,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 13,
-                "method": "fs/read_text_file",
-                "params": {
-                    "sessionId": "session-1",
-                    "path": "../outside_read.txt"
-                }
-            })
-        )
-        .expect("request should be written");
+        let error = writer
+            .handle_fs_read_text_file_response(official_acp::ReadTextFileRequest::new(
+                "session-1",
+                "../outside_read.txt",
+            ))
+            .expect_err("path traversal should be rejected");
 
-        let response = writer
-            .take_response(13)
-            .expect("fs response should be buffered");
-        assert_eq!(response["error"]["code"], json!(-32602));
-        assert_eq!(
-            response["error"]["message"],
-            json!("filesystem path must stay inside the session root")
+        assert!(
+            error
+                .to_string()
+                .contains("filesystem path must stay inside the session root")
         );
         assert_eq!(
             std::fs::read_to_string(outside).expect("outside file should still be readable"),
@@ -760,29 +973,17 @@ mod tests {
     fn client_handles_fs_write_text_file_requests() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         let file_path = workspace.path().join("created.txt");
-        let mut writer = AcpCliWriter::new(Vec::<u8>::new());
+        let writer = CliClientServices::new(Vec::<u8>::new());
         writer.register_session_root("session-1", workspace.path().to_path_buf());
 
-        writeln!(
-            writer,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 11,
-                "method": "fs/write_text_file",
-                "params": {
-                    "sessionId": "session-1",
-                    "path": file_path,
-                    "content": "created through ACP"
-                }
-            })
-        )
-        .expect("request should be written");
+        writer
+            .handle_fs_write_text_file_response(official_acp::WriteTextFileRequest::new(
+                "session-1",
+                file_path.clone(),
+                "created through ACP",
+            ))
+            .expect("fs response should be returned");
 
-        let response = writer
-            .take_response(11)
-            .expect("fs response should be buffered");
-        assert_eq!(response["result"], json!({}));
         assert_eq!(
             std::fs::read_to_string(file_path).expect("file should be readable"),
             "created through ACP"
@@ -800,29 +1001,17 @@ mod tests {
         let outside = parent.join("outside_write.txt");
         std::fs::write(&outside, "outside-file").expect("outside file should be written");
 
-        let mut writer = AcpCliWriter::new(Vec::<u8>::new());
+        let writer = CliClientServices::new(Vec::<u8>::new());
         writer.register_session_root("session-1", workspace.path().to_path_buf());
 
-        writeln!(
-            writer,
-            "{}",
-            json!({
-                "jsonrpc": "2.0",
-                "id": 14,
-                "method": "fs/write_text_file",
-                "params": {
-                    "sessionId": "session-1",
-                    "path": "../outside_write.txt",
-                    "content": "should not write"
-                }
-            })
-        )
-        .expect("request should be written");
+        writer
+            .handle_fs_write_text_file_response(official_acp::WriteTextFileRequest::new(
+                "session-1",
+                "../outside_write.txt",
+                "should not write",
+            ))
+            .expect_err("path traversal should be rejected");
 
-        let response = writer
-            .take_response(14)
-            .expect("fs response should be buffered");
-        assert_eq!(response["error"]["code"], json!(-32602));
         assert_eq!(
             std::fs::read_to_string(outside).expect("outside file should still be readable"),
             "outside-file"
@@ -833,20 +1022,20 @@ mod tests {
     #[test]
     fn client_renders_reasoning_and_answer_with_section_labels() {
         let output = SharedBufferWriter::default();
-        let mut writer = AcpCliWriter::new(output.clone());
+        let writer = CliClientServices::new(output.clone());
 
-        writeln!(
-            writer,
-            "{}",
-            SessionRpc::session_update("session-1", AcpMessage::thought_text("thinking"))
-        )
-        .expect("reasoning update should be written");
-        writeln!(
-            writer,
-            "{}",
-            SessionRpc::session_update("session-1", AcpMessage::agent_text("answer"))
-        )
-        .expect("answer update should be written");
+        writer
+            .render_session_update(official_acp::SessionNotification::new(
+                "session-1",
+                AcpMessage::thought_text("thinking"),
+            ))
+            .expect("reasoning update should render");
+        writer
+            .render_session_update(official_acp::SessionNotification::new(
+                "session-1",
+                AcpMessage::agent_text("answer"),
+            ))
+            .expect("answer update should render");
 
         assert_eq!(output.rendered(), "[think]\nthinking\n[answer]\nanswer");
     }

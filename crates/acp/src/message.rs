@@ -1,5 +1,5 @@
 use agent_client_protocol::schema as official_acp;
-use agent_client_protocol::{JsonRpcNotification, JsonRpcRequest, jsonrpcmsg, util::json_cast};
+use agent_client_protocol::{JsonRpcNotification, jsonrpcmsg, util::json_cast};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -94,21 +94,6 @@ impl SessionRpc {
         Self::value(&response)
     }
 
-    /// Builds a JSON-RPC request envelope from an official ACP request type.
-    pub(crate) fn request<R>(id: u64, request: &R) -> Value
-    where
-        R: JsonRpcRequest,
-    {
-        let message = request
-            .to_untyped_message()
-            .expect("official ACP request conversion should not fail");
-        let params = json_cast(message.params)
-            .expect("official ACP request params should be JSON-RPC params");
-        let request =
-            jsonrpcmsg::Request::new_v2(message.method, params, Some(jsonrpcmsg::Id::Number(id)));
-        Self::value(&request)
-    }
-
     /// Serializes official ACP schema values for JSON-RPC envelopes.
     pub(crate) fn value<T>(value: &T) -> Value
     where
@@ -183,17 +168,5 @@ mod tests {
         assert_eq!(response["result"]["ok"], json!(true));
         assert_eq!(error["id"], json!(8));
         assert_eq!(error["error"]["code"], json!(-32602));
-    }
-
-    /// Verifies JSON-RPC request envelopes use ACP schema trait metadata instead of method strings.
-    #[test]
-    fn rpc_request_uses_schema_request_method() {
-        let request = official_acp::PromptRequest::new("session-1", vec![]);
-        let envelope = SessionRpc::request(6, &request);
-
-        assert_eq!(envelope["jsonrpc"], json!("2.0"));
-        assert_eq!(envelope["id"], json!(6));
-        assert_eq!(envelope["method"], json!("session/prompt"));
-        assert_eq!(envelope["params"]["sessionId"], json!("session-1"));
     }
 }

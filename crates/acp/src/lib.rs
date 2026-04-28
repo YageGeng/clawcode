@@ -2,6 +2,7 @@ pub mod agent;
 pub mod client;
 
 mod message;
+mod permission;
 
 pub use agent::{
     AcpAgent, Error, Result, SharedAcpWriter, run_sdk_stdio_agent, run_stdio_agent, shared_writer,

@@ -11,8 +11,9 @@ pub mod router;
 pub mod spec;
 
 pub use context::{
-    ApprovalRequirement, RiskLevel, ToolApprovalHandler, ToolApprovalRequest, ToolCallRequest,
-    ToolContext, ToolInvocation, ToolMetadata, ToolOutput, ToolPayload,
+    ApprovalRequirement, RiskLevel, ToolApproval, ToolApprovalFuture, ToolApprovalHandler,
+    ToolApprovalRequest, ToolCallRequest, ToolContext, ToolInvocation, ToolMetadata, ToolOutput,
+    ToolPayload,
 };
 pub use create::{create_default_tool_router, create_file_tool_router_with_root};
 pub use error::{Error, Result};

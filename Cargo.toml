@@ -28,6 +28,10 @@ async-stream = { version = "0.3" }
 pin-project-lite = "0.2"
 async-trait = "0.1"
 
+# acp protocol
+agent-client-protocol = { version = "0.11" }
+agent-client-protocol-schema = { version = "0.12", features = ["unstable_elicitation"] }
+
 # log
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

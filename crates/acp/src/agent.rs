@@ -14,14 +14,17 @@ use kernel::{
     events::{AgentEvent, EventSink},
     model::AgentModel,
     session::{SessionId, ThreadId},
-    tools::router::ToolRouter,
+    tools::{ToolApprovalFuture, ToolApprovalHandler, ToolApprovalRequest, router::ToolRouter},
 };
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
-use crate::message::{AcpMessage, SessionRpc};
+use crate::{
+    message::{AcpMessage, SessionRpc},
+    permission::{build_tool_permission_request, permission_response_approved},
+};
 
 pub type SharedAcpWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -121,6 +124,7 @@ pub struct AcpAgent<M> {
     /// Indicates the active router already exposes ACP filesystem tools for the human client path.
     has_client_fs_tools: bool,
     skills: skills::SkillConfig,
+    tool_approval_handler: Option<ToolApprovalHandler>,
     writer: SharedAcpWriter,
     sessions: HashMap<String, AcpSession>,
 }
@@ -144,9 +148,16 @@ where
             router,
             has_client_fs_tools,
             skills,
+            tool_approval_handler: None,
             writer,
             sessions: HashMap::new(),
         }
+    }
+
+    /// Installs a tool approval handler used for tools marked as requiring approval.
+    pub fn with_tool_approval_handler(mut self, handler: ToolApprovalHandler) -> Self {
+        self.tool_approval_handler = Some(handler);
+        self
     }
 
     /// Runs this agent through the official ACP SDK transport and typed dispatch layer.
@@ -185,18 +196,26 @@ where
                 async move |request: official_acp::PromptRequest,
                             responder: Responder<official_acp::PromptResponse>,
                             connection: ConnectionTo<OfficialClient>| {
-                    let response =
-                        spawn_sdk_prompt_turn(Arc::clone(&prompt_state), request, connection)
-                            .await
-                            .map_err(|_| Error::OfficialAcp {
-                                source: official_acp::Error::internal_error()
-                                    .data("SDK prompt worker dropped its response"),
-                                stage: "acp-sdk-prompt-worker".to_string(),
-                            });
-                    match response {
-                        Ok(Ok(response)) => responder.respond(response),
-                        Ok(Err(error)) | Err(error) => responder.respond_with_error(error.into()),
-                    }
+                    let prompt_state = Arc::clone(&prompt_state);
+                    let prompt_connection = connection.clone();
+                    // Prompt turns can send client requests such as `session/request_permission`.
+                    // Run the turn outside the SDK dispatch task so those responses can be read.
+                    connection.spawn(async move {
+                        let response =
+                            spawn_sdk_prompt_turn(prompt_state, request, prompt_connection)
+                                .await
+                                .map_err(|_| Error::OfficialAcp {
+                                    source: official_acp::Error::internal_error()
+                                        .data("SDK prompt worker dropped its response"),
+                                    stage: "acp-sdk-prompt-worker".to_string(),
+                                });
+                        match response {
+                            Ok(Ok(response)) => responder.respond(response),
+                            Ok(Err(error)) | Err(error) => {
+                                responder.respond_with_error(error.into())
+                            }
+                        }
+                    })
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -343,7 +362,8 @@ where
         self.write_session_update(&session_id, AcpMessage::user_text(&prompt))?;
 
         let sink = AcpEventSink::new(session_id, Arc::clone(&self.writer));
-        self.run_session_prompt(&session, prompt, sink).await?;
+        self.run_session_prompt(&session, prompt, sink, self.tool_approval_handler.clone())
+            .await?;
 
         Ok(official_acp::PromptResponse::new(
             official_acp::StopReason::EndTurn,
@@ -360,8 +380,10 @@ where
         let (session, prompt) = self.prepare_session_prompt(params)?;
         send_sdk_session_update(&connection, &session_id, AcpMessage::user_text(&prompt))?;
 
+        let approval_handler = sdk_approval_handler(connection.clone());
         let sink = SdkAcpEventSink::new(session_id, connection);
-        self.run_session_prompt(&session, prompt, sink).await?;
+        self.run_session_prompt(&session, prompt, sink, Some(approval_handler))
+            .await?;
 
         Ok(official_acp::PromptResponse::new(
             official_acp::StopReason::EndTurn,
@@ -398,6 +420,7 @@ where
         session: &AcpSession,
         prompt: String,
         sink: E,
+        tool_approval_handler: Option<ToolApprovalHandler>,
     ) -> Result<()>
     where
         E: EventSink + 'static,
@@ -413,6 +436,8 @@ where
             // ACP itself does not impose a prompt-turn request budget here; tool limits still come
             // from the kernel defaults unless configured elsewhere.
             max_iterations: usize::MAX,
+            enforce_tool_approvals: tool_approval_handler.is_some(),
+            tool_approval_handler,
             ..AgentLoopConfig::default()
         });
 
@@ -671,6 +696,35 @@ fn initialize_response(
             official_acp::Implementation::new("clawcode", env!("CARGO_PKG_VERSION"))
                 .title("ClawCode"),
         )
+}
+
+/// ACP SDK-backed approval handler that forwards tool approvals to the connected client.
+struct SdkApprovalHandler {
+    connection: ConnectionTo<OfficialClient>,
+}
+
+impl kernel::tools::ToolApproval for SdkApprovalHandler {
+    /// Sends one ACP `session/request_permission` request and fails closed on transport errors.
+    fn approve(&self, request: ToolApprovalRequest) -> ToolApprovalFuture {
+        let connection = self.connection.clone();
+        Box::pin(async move {
+            let approval_request = build_tool_permission_request(&request);
+            // ACP has no separate capability flag for `session/request_permission`; unsupported
+            // clients fail closed here so high-risk tool calls are never silently allowed.
+            match connection.send_request(approval_request).block_task().await {
+                Ok(response) => permission_response_approved(&response),
+                Err(error) => {
+                    warn!(error = %error, "ACP permission request failed");
+                    false
+                }
+            }
+        })
+    }
+}
+
+/// Builds an async ACP permission handler that forwards approval requests to the connected client.
+fn sdk_approval_handler(connection: ConnectionTo<OfficialClient>) -> ToolApprovalHandler {
+    Arc::new(SdkApprovalHandler { connection })
 }
 
 /// Sends one typed `session/update` notification through an official SDK connection.

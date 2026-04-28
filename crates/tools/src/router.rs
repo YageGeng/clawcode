@@ -88,11 +88,12 @@ impl ToolRouter {
                     .unwrap_or(serde_json::Value::Null),
             };
 
-            let approved = invocation
-                .context
-                .tool_approval_handler
-                .as_ref()
-                .is_some_and(|handler| handler(&approval_request));
+            let approved = if let Some(handler) = invocation.context.tool_approval_handler.as_ref()
+            {
+                handler.approve(approval_request).await
+            } else {
+                false
+            };
 
             if !approved {
                 return ToolApprovalRequiredSnafu {

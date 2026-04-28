@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snafu::ResultExt;
@@ -30,8 +30,27 @@ pub struct ToolApprovalRequest {
     pub arguments: serde_json::Value,
 }
 
+/// Future returned by asynchronous tool approval handlers.
+pub type ToolApprovalFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+
+/// Approves or rejects a high-risk tool call at dispatch time.
+pub trait ToolApproval: Send + Sync {
+    /// Returns whether this tool call is approved for execution.
+    fn approve(&self, request: ToolApprovalRequest) -> ToolApprovalFuture;
+}
+
+impl<F> ToolApproval for F
+where
+    F: Fn(ToolApprovalRequest) -> ToolApprovalFuture + Send + Sync,
+{
+    /// Delegates approval to closure-backed handlers.
+    fn approve(&self, request: ToolApprovalRequest) -> ToolApprovalFuture {
+        self(request)
+    }
+}
+
 /// Evaluates whether a tool call is approved at runtime.
-pub type ToolApprovalHandler = Arc<dyn Fn(&ToolApprovalRequest) -> bool + Send + Sync>;
+pub type ToolApprovalHandler = Arc<dyn ToolApproval>;
 
 /// Stores runtime metadata that affects dispatch behavior.
 #[derive(Debug, Clone)]
@@ -96,7 +115,7 @@ impl ToolContext {
     /// Installs an approval callback for handlers that require confirmation.
     pub fn with_tool_approval_handler(
         mut self,
-        handler: impl Fn(&ToolApprovalRequest) -> bool + Send + Sync + 'static,
+        handler: impl Fn(ToolApprovalRequest) -> ToolApprovalFuture + Send + Sync + 'static,
     ) -> Self {
         self.tool_approval_handler = Some(Arc::new(handler));
         self

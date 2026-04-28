@@ -133,7 +133,10 @@ impl AgentLoopConfig {
     /// Installs an approval hook for tools requiring explicit user confirmation.
     pub fn with_tool_approval_handler(
         mut self,
-        handler: impl Fn(&crate::tools::ToolApprovalRequest) -> bool + Send + Sync + 'static,
+        handler: impl Fn(crate::tools::ToolApprovalRequest) -> crate::tools::ToolApprovalFuture
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.tool_approval_handler = Some(std::sync::Arc::new(handler));
         self
