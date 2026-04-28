@@ -2,6 +2,7 @@ mod collector;
 mod publisher;
 
 use futures_util::StreamExt;
+use llm::completion::message::Reasoning;
 use llm::usage::Usage;
 
 use self::{
@@ -20,6 +21,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub(crate) struct StreamIterationResult {
     pub(crate) text: Option<String>,
+    pub(crate) reasoning: Vec<Reasoning>,
     pub(crate) ready_tool_calls: CompletedToolCallQueue,
     pub(crate) in_flight_tool_calls: InFlightToolCallRegistry,
     pub(crate) usage: Usage,
@@ -72,6 +74,7 @@ impl From<StreamIterationResult> for IterationOutcome {
             Self::ContinueWithTools(ToolExecutionPlan {
                 message_id: iteration_result.message_id,
                 text: iteration_result.text,
+                reasoning: iteration_result.reasoning,
                 queue: iteration_result.ready_tool_calls,
                 in_flight: iteration_result.in_flight_tool_calls,
             })

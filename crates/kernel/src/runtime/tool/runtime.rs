@@ -98,6 +98,7 @@ where
         let ToolCallBatch {
             message_id,
             text,
+            reasoning,
             calls,
             total_tool_calls,
             max_tool_calls,
@@ -116,7 +117,7 @@ where
             }
         );
 
-        self.append_assistant_tool_call_message(message_id, text, &calls)
+        self.append_assistant_tool_call_message(message_id, text, reasoning, &calls)
             .await?;
 
         if tool_execution_mode == ToolExecutionMode::Serial {
@@ -135,9 +136,15 @@ where
         &mut self,
         message_id: Option<String>,
         text: Option<String>,
+        reasoning: Vec<llm::completion::message::Reasoning>,
         calls: &[ToolExecutionRequest],
     ) -> Result<()> {
         let mut assistant_content = Vec::new();
+        assistant_content.extend(
+            reasoning
+                .into_iter()
+                .map(llm::completion::message::AssistantContent::Reasoning),
+        );
         if let Some(text) = text {
             assistant_content.push(AssistantContent::text(text));
         }

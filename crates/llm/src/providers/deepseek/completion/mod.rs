@@ -101,12 +101,34 @@ pub struct ToolDefinition {
     pub function: FunctionDefinition,
 }
 
+/// Normalizes a tool name for providers that only allow `[A-Za-z0-9_-]`.
+fn sanitize_deepseek_tool_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "tool".to_string()
+    } else {
+        sanitized
+    }
+}
+
 impl From<completion::ToolDefinition> for ToolDefinition {
     fn from(tool: completion::ToolDefinition) -> Self {
         Self {
             r#type: "function".into(),
             function: FunctionDefinition {
-                name: tool.name,
+                // DeepSeek validates function names against `[A-Za-z0-9_-]`, so
+                // provider-incompatible aliases like `fs/read_text_file` must be normalized.
+                name: sanitize_deepseek_tool_name(&tool.name),
                 description: tool.description,
                 parameters: tool.parameters,
             },
@@ -729,5 +751,107 @@ impl ProviderResponseExt for CompletionResponse {
 
     fn get_usage(&self) -> Option<Self::Usage> {
         self.usage.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompletionRequest, DeepSeekRequestParams};
+    use crate::completion::{
+        self,
+        message::{AssistantContent, Message as CoreMessage},
+    };
+    use crate::one_or_many::OneOrMany;
+
+    /// Verifies DeepSeek request conversion sanitizes tool names for provider validation.
+    #[test]
+    fn deepseek_request_sanitizes_function_tool_names() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(CoreMessage::from("test".to_string())),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![completion::ToolDefinition {
+                name: "fs/read_text_file".to_string(),
+                description: "namespaced read alias".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from((
+            DeepSeekRequestParams {
+                model: "deepseek-v4-pro".to_string(),
+                reasoning_effort: None,
+                thinking_enabled: None,
+            },
+            request,
+        ))
+        .expect("request conversion should succeed");
+
+        let function_names = completion_request
+            .tools
+            .iter()
+            .map(|tool| tool.function.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(function_names, vec!["fs_read_text_file"]);
+    }
+
+    /// Verifies assistant reasoning preserved in chat history becomes DeepSeek reasoning_content.
+    #[test]
+    fn deepseek_request_keeps_reasoning_from_assistant_history() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(CoreMessage::Assistant {
+                id: None,
+                content: OneOrMany::many(vec![
+                    AssistantContent::reasoning("hidden chain of thought"),
+                    AssistantContent::tool_call(
+                        "call_1",
+                        "fs/read_text_file",
+                        serde_json::json!({"path": "cli.log"}),
+                    ),
+                ])
+                .expect("assistant content"),
+            }),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: Some(serde_json::json!({
+                "thinking": { "type": "enabled" }
+            })),
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from((
+            DeepSeekRequestParams {
+                model: "deepseek-v4-pro".to_string(),
+                reasoning_effort: None,
+                thinking_enabled: None,
+            },
+            request,
+        ))
+        .expect("request conversion should succeed");
+
+        match &completion_request.messages[0] {
+            super::Message::Assistant {
+                reasoning_content,
+                tool_calls,
+                ..
+            } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(
+                    reasoning_content.as_deref(),
+                    Some("hidden chain of thought")
+                );
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
     }
 }

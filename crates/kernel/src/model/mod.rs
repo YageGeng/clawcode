@@ -62,6 +62,7 @@ pub enum ResponseItem {
         id: Option<String>,
         summary: Vec<String>,
         content: Vec<String>,
+        encrypted_content: Option<String>,
     },
 }
 
@@ -207,6 +208,7 @@ struct PendingReasoning {
     id: Option<String>,
     summary: Vec<String>,
     content: Vec<String>,
+    encrypted_content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +226,7 @@ impl PendingReasoning {
             id,
             summary: Vec::new(),
             content: Vec::new(),
+            encrypted_content: None,
         }
     }
 }
@@ -444,6 +447,7 @@ impl ResponseEventMapper {
             id: pending.id.clone(),
             summary: Vec::new(),
             content: Vec::new(),
+            encrypted_content: None,
         }));
 
         for content in reasoning.content {
@@ -466,7 +470,10 @@ impl ResponseEventMapper {
                         content_index: index,
                     });
                 }
-                ReasoningContent::Encrypted(_) | _ => {}
+                ReasoningContent::Encrypted(data) => {
+                    pending.encrypted_content.get_or_insert(data);
+                }
+                _ => {}
             }
         }
 
@@ -490,6 +497,7 @@ impl ResponseEventMapper {
                 id: pending.id.clone(),
                 summary: Vec::new(),
                 content: Vec::new(),
+                encrypted_content: None,
             }));
         }
 
@@ -554,6 +562,7 @@ impl ResponseEventMapper {
                 id: pending.id,
                 summary: pending.summary,
                 content: pending.content,
+                encrypted_content: pending.encrypted_content,
             })
     }
 

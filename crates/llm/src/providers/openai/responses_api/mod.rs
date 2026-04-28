@@ -20,7 +20,7 @@ use crate::one_or_many::{OneOrMany, string_or_one_or_many};
 use crate::completion;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
-use snafu::{OptionExt, ResultExt, whatever};
+use snafu::{ResultExt, whatever};
 use tracing::{Instrument, Level, enabled, info_span};
 
 use std::convert::Infallible;
@@ -442,19 +442,20 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             });
                         }
                         crate::completion::message::AssistantContent::Reasoning(reasoning) => {
-                            let openai_reasoning =
-                                openai_reasoning_from_core(&reasoning).map_err(|err| {
-                                    {
-                                        ProviderSnafu {
-                                            msg: err.to_string(),
-                                        }
+                            if let Some(openai_reasoning) = openai_reasoning_from_core(&reasoning)
+                                .map_err(|err| {
+                                {
+                                    ProviderSnafu {
+                                        msg: err.to_string(),
                                     }
-                                    .build()
-                                })?;
-                            reasoning_items.push(InputItem {
-                                role: None,
-                                input: InputContent::Reasoning(openai_reasoning),
-                            });
+                                }
+                                .build()
+                            })? {
+                                reasoning_items.push(InputItem {
+                                    role: None,
+                                    input: InputContent::Reasoning(openai_reasoning),
+                                });
+                            }
                         }
                         crate::completion::message::AssistantContent::Image(_) => {
                             return Err(ProviderSnafu{
@@ -487,10 +488,13 @@ fn require_call_id(call_id: Option<String>, context: &str) -> Result<String, Com
 
 fn openai_reasoning_from_core(
     reasoning: &crate::completion::message::Reasoning,
-) -> Result<OpenAIReasoning, MessageError> {
-    let id = reasoning.id.clone().context(ConversionSnafu {
-        msg: "An OpenAI-generated ID is required when using OpenAI reasoning items",
-    })?;
+) -> Result<Option<OpenAIReasoning>, MessageError> {
+    let Some(id) = reasoning.id.clone() else {
+        // Streaming adapters may accumulate transient reasoning deltas before OpenAI emits the
+        // canonical reasoning item. Those deltas do not have a stable provider item ID and must
+        // not be replayed back into the Responses API.
+        return Ok(None);
+    };
     let mut summary = Vec::new();
     let mut encrypted_content = None;
     for content in &reasoning.content {
@@ -508,12 +512,12 @@ fn openai_reasoning_from_core(
         }
     }
 
-    Ok(OpenAIReasoning {
+    Ok(Some(OpenAIReasoning {
         id,
         summary,
         encrypted_content,
         status: None,
-    })
+    }))
 }
 
 /// The definition of a tool response, repurposed for OpenAI's Responses API.
@@ -765,6 +769,26 @@ impl From<completion::ToolDefinition> for ResponsesToolDefinition {
     }
 }
 
+fn filter_stateless_reasoning_items(input: &mut OneOrMany<InputItem>) {
+    let filtered = input
+        .iter()
+        .filter(|item| {
+            !matches!(
+                &item.input,
+                InputContent::Reasoning(OpenAIReasoning {
+                    encrypted_content: None,
+                    ..
+                })
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Ok(next_input) = OneOrMany::many(filtered) {
+        *input = next_input;
+    }
+}
+
 /// Token usage.
 /// Token usage from the OpenAI Responses API generally shows the input tokens and output tokens (both with more in-depth details) as well as a total tokens field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -991,6 +1015,17 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
                 include.push(Include::ReasoningEncryptedContent);
             }
         }
+        if additional_parameters.store == Some(false) {
+            let include = additional_parameters.include.get_or_insert_with(Vec::new);
+            if !include
+                .iter()
+                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+            {
+                // Stateless Responses flows must request encrypted reasoning so any
+                // later tool-continuation can replay reasoning items without server storage.
+                include.push(Include::ReasoningEncryptedContent);
+            }
+        }
 
         // Apply output_schema as structured output if not already configured via additional_params
         if additional_parameters.text.is_none()
@@ -1132,6 +1167,25 @@ where
         }
 
         req.tools.extend(self.tools.clone());
+
+        if req.additional_parameters.store == Some(false) {
+            let include = req
+                .additional_parameters
+                .include
+                .get_or_insert_with(Vec::new);
+            if !include
+                .iter()
+                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+            {
+                // Stateless Responses flows must request encrypted reasoning so follow-up
+                // tool turns can replay reasoning items without relying on stored server items.
+                include.push(Include::ReasoningEncryptedContent);
+            }
+
+            // Stored-disabled sessions cannot reference bare reasoning IDs. Keep only
+            // reasoning items that carry the encrypted payload needed for stateless replay.
+            filter_stateless_reasoning_items(&mut req.input);
+        }
 
         // OpenAI/Codex tool name validation does not allow `/`, so normalize function
         // tool names to match the required character class while leaving hosted tool names
@@ -1996,14 +2050,17 @@ impl TryFrom<message::Message> for Vec<Message> {
                             },
                         )),
                         crate::completion::message::AssistantContent::Reasoning(reasoning) => {
-                            reasoning_items.push(Message::Assistant {
-                                content: OneOrMany::one(AssistantContentType::Reasoning(
-                                    openai_reasoning_from_core(&reasoning)?,
-                                )),
-                                id: assistant_message_id.clone(),
-                                name: None,
-                                status: ToolStatus::Completed,
-                            });
+                            if let Some(openai_reasoning) = openai_reasoning_from_core(&reasoning)?
+                            {
+                                reasoning_items.push(Message::Assistant {
+                                    content: OneOrMany::one(AssistantContentType::Reasoning(
+                                        openai_reasoning,
+                                    )),
+                                    id: assistant_message_id.clone(),
+                                    name: None,
+                                    status: ToolStatus::Completed,
+                                });
+                            }
                         }
                         crate::completion::message::AssistantContent::Image(_) => {
                             return Err(ConversionSnafu {
@@ -2099,6 +2156,15 @@ mod tests {
         assert_eq!(completion_request.additional_parameters.store, Some(false));
         assert!(
             completion_request
+                .additional_parameters
+                .include
+                .as_ref()
+                .is_some_and(|include| include
+                    .iter()
+                    .any(|item| matches!(item, Include::ReasoningEncryptedContent)))
+        );
+        assert!(
+            completion_request
                 .input
                 .iter()
                 .all(|item| !matches!(item.role, Some(Role::System)))
@@ -2156,6 +2222,201 @@ mod tests {
         assert!(function_names.contains(&"write_text_file"));
         assert!(!function_names.contains(&"fs/read_text_file"));
         assert!(!function_names.contains(&"write/text_file"));
+    }
+
+    /// Verifies assistant-history reasoning preserves encrypted payloads for stateless reuse.
+    #[test]
+    fn assistant_history_reasoning_keeps_encrypted_content() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(CoreMessage::Assistant {
+                id: Some("msg_123".to_string()),
+                content: OneOrMany::one(completion::message::AssistantContent::Reasoning(
+                    completion::message::Reasoning {
+                        id: Some("rs_123".to_string()),
+                        content: vec![
+                            completion::message::ReasoningContent::Summary("plan".to_string()),
+                            completion::message::ReasoningContent::Encrypted("opaque".to_string()),
+                        ],
+                    },
+                )),
+            }),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: Some(serde_json::json!({
+                "store": false
+            })),
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from(("gpt-5".to_string(), request))
+            .expect("responses request should be valid");
+
+        let reasoning_items = completion_request
+            .input
+            .iter()
+            .filter_map(|item| match &item.input {
+                InputContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(reasoning_items.len(), 1);
+        assert_eq!(reasoning_items[0].id, "rs_123");
+        assert_eq!(
+            reasoning_items[0].encrypted_content.as_deref(),
+            Some("opaque")
+        );
+        assert!(
+            completion_request
+                .additional_parameters
+                .include
+                .as_ref()
+                .is_some_and(|include| include
+                    .iter()
+                    .any(|item| matches!(item, Include::ReasoningEncryptedContent)))
+        );
+    }
+
+    /// Verifies ID-less reasoning deltas are not replayed into Responses requests.
+    #[test]
+    fn assistant_history_skips_reasoning_without_provider_id() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![
+                CoreMessage::Assistant {
+                    id: Some("msg_123".to_string()),
+                    content: OneOrMany::one(completion::message::AssistantContent::Reasoning(
+                        completion::message::Reasoning::summaries(vec!["draft".to_string()]),
+                    )),
+                },
+                CoreMessage::User {
+                    content: OneOrMany::one(completion::message::UserContent::from(
+                        "continue".to_string(),
+                    )),
+                },
+            ])
+            .expect("chat history"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from(("gpt-5".to_string(), request))
+            .expect("responses request should be valid");
+
+        assert!(
+            completion_request
+                .input
+                .iter()
+                .all(|item| !matches!(item.input, InputContent::Reasoning(_)))
+        );
+    }
+
+    /// Verifies stateless requests drop stale reasoning items that lack encrypted payloads.
+    #[test]
+    fn stateless_requests_drop_unencrypted_reasoning_items() {
+        let model = super::ResponsesCompletionModel::with_model(codex_client(), "codex-test");
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::many(vec![
+                CoreMessage::Assistant {
+                    id: Some("msg_123".to_string()),
+                    content: OneOrMany::one(completion::message::AssistantContent::Reasoning(
+                        completion::message::Reasoning::summaries(vec!["stale".to_string()])
+                            .with_id("rs_stale".to_string()),
+                    )),
+                },
+                CoreMessage::User {
+                    content: OneOrMany::one(completion::message::UserContent::from(
+                        "continue".to_string(),
+                    )),
+                },
+            ])
+            .expect("chat history"),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        let completion_request = model
+            .create_completion_request(request)
+            .expect("codex request should be valid");
+
+        assert!(
+            completion_request
+                .input
+                .iter()
+                .all(|item| !matches!(item.input, InputContent::Reasoning(_)))
+        );
+    }
+
+    /// Verifies provider-side filtering keeps only canonical reasoning items with IDs.
+    #[test]
+    fn provider_filters_idless_reasoning_when_canonical_item_exists() {
+        let request = completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(CoreMessage::Assistant {
+                id: Some("msg_123".to_string()),
+                content: OneOrMany::many(vec![
+                    completion::message::AssistantContent::Reasoning(
+                        completion::message::Reasoning::summaries(vec!["draft".to_string()]),
+                    ),
+                    completion::message::AssistantContent::Reasoning(
+                        completion::message::Reasoning {
+                            id: Some("rs_123".to_string()),
+                            content: vec![
+                                completion::message::ReasoningContent::Summary("final".to_string()),
+                                completion::message::ReasoningContent::Encrypted(
+                                    "opaque".to_string(),
+                                ),
+                            ],
+                        },
+                    ),
+                    completion::message::AssistantContent::text("done"),
+                ])
+                .expect("assistant content"),
+            }),
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            tool_choice: None,
+            additional_params: Some(serde_json::json!({
+                "store": false
+            })),
+            output_schema: None,
+        };
+
+        let completion_request = CompletionRequest::try_from(("gpt-5".to_string(), request))
+            .expect("responses request should be valid");
+
+        let reasoning_items = completion_request
+            .input
+            .iter()
+            .filter_map(|item| match &item.input {
+                InputContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(reasoning_items.len(), 1);
+        assert_eq!(reasoning_items[0].id, "rs_123");
+        assert_eq!(
+            reasoning_items[0].encrypted_content.as_deref(),
+            Some("opaque")
+        );
     }
 
     #[test]

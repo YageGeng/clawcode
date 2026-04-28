@@ -30,6 +30,7 @@ where
     let ToolExecutionPlan {
         message_id,
         text,
+        reasoning,
         queue,
         mut in_flight,
     } = plan;
@@ -68,6 +69,11 @@ where
             .apply_batch(ToolCallBatch {
                 message_id: first_batch.then_some(message_id.clone()).flatten(),
                 text: if first_batch { text.clone() } else { None },
+                reasoning: if first_batch {
+                    reasoning.clone()
+                } else {
+                    Vec::new()
+                },
                 calls: batch.queue.into_requests(),
                 total_tool_calls,
                 max_tool_calls: config.max_tool_calls,

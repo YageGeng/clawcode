@@ -1,4 +1,7 @@
-use llm::usage::Usage;
+use llm::{
+    completion::message::{Reasoning, ReasoningContent},
+    usage::Usage,
+};
 
 use crate::{
     Result,
@@ -16,6 +19,7 @@ pub(super) struct StreamResponseCollector {
     streamed_text: String,
     completed_message_text: Option<String>,
     saw_text_delta: bool,
+    reasoning_items: Vec<Reasoning>,
     ready_tool_calls: CompletedToolCallQueue,
     in_flight_tool_calls: InFlightToolCallRegistry,
     usage: Usage,
@@ -30,6 +34,7 @@ impl StreamResponseCollector {
             streamed_text: String::new(),
             completed_message_text: None,
             saw_text_delta: false,
+            reasoning_items: Vec::new(),
             ready_tool_calls: CompletedToolCallQueue::default(),
             in_flight_tool_calls: InFlightToolCallRegistry::with_next_handle_sequence(
                 next_tool_handle_sequence,
@@ -96,6 +101,27 @@ impl StreamResponseCollector {
                 }
                 Vec::new()
             }
+            ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                id,
+                summary,
+                content,
+                encrypted_content,
+            }) => {
+                let mut reasoning = Reasoning::summaries(summary.clone()).optional_id(id.clone());
+                if let Some(encrypted_content) = encrypted_content.clone() {
+                    reasoning
+                        .content
+                        .push(ReasoningContent::Encrypted(encrypted_content));
+                }
+                reasoning
+                    .content
+                    .extend(content.iter().cloned().map(|text| ReasoningContent::Text {
+                        text,
+                        signature: None,
+                    }));
+                self.reasoning_items.push(reasoning);
+                Vec::new()
+            }
             ResponseEvent::Completed { usage, message_id } => {
                 self.usage = *usage;
                 self.message_id = message_id.clone();
@@ -111,8 +137,7 @@ impl StreamResponseCollector {
             | ResponseEvent::ReasoningContentDelta { .. }
             | ResponseEvent::OutputItemDone(ResponseItem::ToolCall {
                 arguments: None, ..
-            })
-            | ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. }) => Vec::new(),
+            }) => Vec::new(),
         }
     }
 
@@ -135,10 +160,39 @@ impl StreamResponseCollector {
 
         Ok(StreamIterationResult {
             text,
+            reasoning: self.reasoning_items,
             ready_tool_calls: self.ready_tool_calls,
             in_flight_tool_calls: self.in_flight_tool_calls,
             usage: self.usage,
             message_id: self.message_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamResponseCollector;
+    use crate::model::{ResponseEvent, ResponseItem};
+
+    /// Verifies stream aggregation preserves reasoning blocks for later tool continuations.
+    #[test]
+    fn collector_keeps_reasoning_items() {
+        let mut collector = StreamResponseCollector::new(0);
+        collector.record_event(&ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+            id: Some("rs_1".to_string()),
+            summary: vec!["plan".to_string()],
+            content: vec!["hidden".to_string()],
+            encrypted_content: Some("opaque".to_string()),
+        }));
+        collector.record_event(&ResponseEvent::Completed {
+            message_id: Some("msg_1".to_string()),
+            usage: llm::usage::Usage::new(),
+        });
+
+        let result = collector.build().expect("collector should build");
+        assert_eq!(result.reasoning.len(), 1);
+        assert_eq!(result.reasoning[0].id.as_deref(), Some("rs_1"));
+        assert_eq!(result.reasoning[0].display_text(), "plan\nhidden");
+        assert_eq!(result.reasoning[0].encrypted_content(), Some("opaque"));
     }
 }

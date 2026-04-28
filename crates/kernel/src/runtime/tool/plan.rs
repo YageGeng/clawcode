@@ -1,4 +1,4 @@
-use llm::completion::Message;
+use llm::completion::{Message, message::Reasoning};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -17,6 +17,7 @@ use crate::{
 pub(crate) struct ToolExecutionPlan {
     pub(crate) message_id: Option<String>,
     pub(crate) text: Option<String>,
+    pub(crate) reasoning: Vec<Reasoning>,
     pub(crate) queue: CompletedToolCallQueue,
     pub(crate) in_flight: InFlightToolCallRegistry,
 }
@@ -40,6 +41,7 @@ where
 pub(super) struct ToolCallBatch {
     pub(super) message_id: Option<String>,
     pub(super) text: Option<String>,
+    pub(super) reasoning: Vec<Reasoning>,
     pub(super) calls: Vec<ToolExecutionRequest>,
     pub(super) total_tool_calls: usize,
     pub(super) max_tool_calls: usize,
