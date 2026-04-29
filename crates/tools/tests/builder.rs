@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tools::{
-    Result, ToolCallRequest, ToolContext, ToolInvocation, ToolOutput, handler::ToolHandler,
-    registry::ToolRegistryBuilder,
+    Result, StructuredToolOutput, ToolCallRequest, ToolContext, ToolInvocation, ToolOutput,
+    handler::ToolHandler, registry::ToolRegistryBuilder,
 };
 
 /// Verifies router-visible specs are owned by the builder output rather than inferred from handlers.
@@ -89,10 +89,11 @@ async fn router_dispatch_passes_invocation_metadata_to_handlers() {
         .await
         .unwrap();
 
-    assert_eq!(output.structured["call_id"], "provider-call-7");
-    assert_eq!(output.structured["tool_name"], "inspecting_tool");
-    assert_eq!(output.structured["session_id"], "session-7");
-    assert_eq!(output.structured["text"], "hello");
+    let structured = output.structured.to_serde_value();
+    assert_eq!(structured["call_id"], "provider-call-7");
+    assert_eq!(structured["tool_name"], "inspecting_tool");
+    assert_eq!(structured["session_id"], "session-7");
+    assert_eq!(structured["text"], "hello");
 }
 
 /// Simple visible tool used to prove the builder surfaces explicit specs.
@@ -194,12 +195,12 @@ impl ToolHandler for InspectingTool {
 
         Ok(ToolOutput {
             text: text.clone(),
-            structured: serde_json::json!({
+            structured: StructuredToolOutput::json_value(serde_json::json!({
                 "call_id": invocation.effective_call_id(),
                 "tool_name": invocation.tool_name,
                 "session_id": invocation.context.session_id,
                 "text": text,
-            }),
+            })),
         })
     }
 }

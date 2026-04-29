@@ -9,7 +9,10 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::{
     ApprovalRequirement, Result, RiskLevel,
-    context::{ToolInvocation, ToolMetadata, ToolOutput},
+    context::{
+        StructuredToolOutput, ToolInvocation, ToolMetadata, ToolOutput,
+        WriteTextFileStructuredOutput,
+    },
     error::{ToolExecutionSnafu, ToolIoSnafu},
     handler::ToolHandler,
 };
@@ -44,7 +47,9 @@ impl WriteTextFileTool {
 
         Ok(ToolOutput {
             text: "file written".to_string(),
-            structured: serde_json::json!({ "ok": true }),
+            structured: StructuredToolOutput::WriteTextFile(WriteTextFileStructuredOutput {
+                ok: true,
+            }),
         })
     }
 

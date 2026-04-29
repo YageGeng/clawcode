@@ -25,6 +25,13 @@ pub enum ToolCallInFlightState {
     Failed,
 }
 
+/// Captures the terminal outcome of a tool call once result content is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallCompletionStatus {
+    Succeeded,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskContinuationAction {
     Continue,
@@ -173,10 +180,11 @@ pub enum AgentEvent {
         arguments: serde_json::Value,
     },
     ToolCallCompleted {
+        status: ToolCallCompletionStatus,
         name: String,
         handle_id: String,
         output: String,
-        structured_output: Option<serde_json::Value>,
+        structured_output: Option<tools::StructuredToolOutput>,
     },
     TaskContinuationDecided {
         turn_index: usize,

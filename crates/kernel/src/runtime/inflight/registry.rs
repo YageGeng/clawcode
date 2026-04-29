@@ -92,7 +92,7 @@ impl InFlightToolCallRegistry {
     pub(crate) fn update_structured_output(
         &mut self,
         handle_id: &str,
-        structured_output: Option<serde_json::Value>,
+        structured_output: Option<tools::StructuredToolOutput>,
     ) -> Option<InFlightToolCallEntry> {
         let entry = self
             .entries
@@ -215,7 +215,7 @@ impl InFlightToolCallRegistry {
     pub(crate) fn update_structured_output_checked(
         &mut self,
         handle_id: &str,
-        structured_output: Option<serde_json::Value>,
+        structured_output: Option<tools::StructuredToolOutput>,
     ) -> Result<InFlightToolCallEntry> {
         self.update_structured_output(handle_id, structured_output)
             .ok_or_else(|| crate::Error::Runtime {
@@ -249,7 +249,7 @@ pub(crate) struct InFlightToolCallEntry {
     pub(crate) handle_id: String,
     pub(crate) state: ToolCallInFlightState,
     pub(crate) output_summary: Option<String>,
-    pub(crate) structured_output: Option<serde_json::Value>,
+    pub(crate) structured_output: Option<tools::StructuredToolOutput>,
     pub(crate) error_summary: Option<String>,
     pub(crate) started_at: Option<DateTime<Utc>>,
     pub(crate) finished_at: Option<DateTime<Utc>>,

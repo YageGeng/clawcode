@@ -290,9 +290,9 @@ impl ToolExecutor {
     ) -> llm::completion::Message {
         let mut content =
             llm::completion::message::ToolResultContent::from_tool_output(output.text.clone());
-        if output.structured != serde_json::json!({ "text": output.text }) {
+        if !output.structured.is_plain_text_equivalent(&output.text) {
             let structured_content = llm::completion::message::ToolResultContent::from_tool_output(
-                output.structured.to_string(),
+                output.structured.to_serde_value().to_string(),
             )
             .into_iter()
             .collect::<Vec<_>>();

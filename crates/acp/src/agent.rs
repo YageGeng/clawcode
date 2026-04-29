@@ -11,7 +11,7 @@ use agent_client_protocol::{
 };
 use kernel::{
     AgentLoopConfig, SessionTaskContext, ThreadHandle, ThreadRunRequest, ThreadRuntime,
-    events::{AgentEvent, EventSink},
+    events::{AgentEvent, EventSink, ToolCallCompletionStatus},
     model::AgentModel,
     session::{SessionId, ThreadId},
     tools::{
@@ -580,12 +580,20 @@ impl TryFrom<AgentEvent> for AcpSessionUpdate {
                 ..
             } => AcpMessage::tool_started(handle_id, name, arguments),
             AgentEvent::ToolCallCompleted {
+                status,
                 name,
                 handle_id,
                 output,
                 structured_output,
                 ..
-            } => AcpMessage::tool_completed(handle_id, name, output, structured_output),
+            } => match status {
+                ToolCallCompletionStatus::Succeeded => {
+                    AcpMessage::tool_completed(handle_id, name, output, structured_output)
+                }
+                ToolCallCompletionStatus::Failed => {
+                    AcpMessage::tool_failed(handle_id, name, output, structured_output)
+                }
+            },
             _ => return Err(IgnoredAgentEvent),
         };
 
@@ -1283,6 +1291,7 @@ mod tests {
         let sink = AcpEventSink::new("session-1".to_string(), shared_writer(writer.clone()));
 
         sink.publish(AgentEvent::ToolCallCompleted {
+            status: ToolCallCompletionStatus::Succeeded,
             name: "example_tool".to_string(),
             handle_id: "call-1".to_string(),
             output: "done".to_string(),
@@ -1297,5 +1306,65 @@ mod tests {
         );
         assert!(messages[0]["params"]["update"].get("_meta").is_none());
         assert!(messages[0]["params"]["update"].get("rawOutput").is_none());
+    }
+
+    /// Verifies failed tool results become ACP failed updates with the surfaced error message.
+    #[tokio::test]
+    async fn event_sink_maps_failed_tool_results_to_failed_updates() {
+        let writer = SharedBufferWriter::default();
+        let sink = AcpEventSink::new("session-1".to_string(), shared_writer(writer.clone()));
+
+        sink.publish(AgentEvent::ToolCallCompleted {
+            status: ToolCallCompletionStatus::Failed,
+            name: "apply_patch".to_string(),
+            handle_id: "call-1".to_string(),
+            output: "tool dispatch failed".to_string(),
+            structured_output: Some(tools::StructuredToolOutput::failure(
+                "apply_patch verification failed: missing Begin/End markers",
+            )),
+        })
+        .await;
+
+        let messages = rendered_messages(&writer);
+        assert_eq!(
+            messages[0]["params"]["update"]["sessionUpdate"],
+            json!("tool_call_update")
+        );
+        assert_eq!(messages[0]["params"]["update"]["status"], json!("failed"));
+        assert_eq!(
+            messages[0]["params"]["update"]["content"][0]["content"]["text"],
+            json!("tool dispatch failed")
+        );
+    }
+
+    /// Verifies success/failure ACP mapping follows the explicit event status, not JSON payload shape.
+    #[tokio::test]
+    async fn event_sink_keeps_successful_json_payloads_completed() {
+        let writer = SharedBufferWriter::default();
+        let sink = AcpEventSink::new("session-1".to_string(), shared_writer(writer.clone()));
+
+        sink.publish(AgentEvent::ToolCallCompleted {
+            status: ToolCallCompletionStatus::Succeeded,
+            name: "business_tool".to_string(),
+            handle_id: "call-1".to_string(),
+            output: "business result".to_string(),
+            structured_output: Some(tools::StructuredToolOutput::json_value(json!({
+                "success": false,
+                "error": {
+                    "message": "domain-level false value"
+                }
+            }))),
+        })
+        .await;
+
+        let messages = rendered_messages(&writer);
+        assert_eq!(
+            messages[0]["params"]["update"]["status"],
+            json!("completed")
+        );
+        assert_eq!(
+            messages[0]["params"]["update"]["content"][0]["content"]["text"],
+            json!("business result")
+        );
     }
 }

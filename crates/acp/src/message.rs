@@ -2,6 +2,7 @@ use agent_client_protocol::schema as official_acp;
 use agent_client_protocol::{JsonRpcNotification, jsonrpcmsg, util::json_cast};
 use serde::Serialize;
 use serde_json::Value;
+use tools::StructuredToolOutput;
 
 /// Builder for official ACP session updates used by the agent adapter.
 pub(crate) struct AcpMessage;
@@ -40,7 +41,7 @@ impl AcpMessage {
         handle_id: impl Into<official_acp::ToolCallId>,
         name: impl Into<String>,
         output: impl Into<String>,
-        structured_output: Option<Value>,
+        structured_output: Option<StructuredToolOutput>,
     ) -> official_acp::SessionUpdate {
         official_acp::SessionUpdate::ToolCallUpdate(official_acp::ToolCallUpdate::new(
             handle_id,
@@ -50,7 +51,26 @@ impl AcpMessage {
                 .content(vec![official_acp::ToolCallContent::Content(
                     official_acp::Content::new(output.into()),
                 )])
-                .raw_output(structured_output),
+                .raw_output(structured_output.map(|value| value.to_serde_value())),
+        ))
+    }
+
+    /// Builds an ACP tool-call failure update with the rendered error text attached.
+    pub(crate) fn tool_failed(
+        handle_id: impl Into<official_acp::ToolCallId>,
+        name: impl Into<String>,
+        error_message: impl Into<String>,
+        structured_output: Option<StructuredToolOutput>,
+    ) -> official_acp::SessionUpdate {
+        official_acp::SessionUpdate::ToolCallUpdate(official_acp::ToolCallUpdate::new(
+            handle_id,
+            official_acp::ToolCallUpdateFields::new()
+                .title(name.into())
+                .status(official_acp::ToolCallStatus::Failed)
+                .content(vec![official_acp::ToolCallContent::Content(
+                    official_acp::Content::new(error_message.into()),
+                )])
+                .raw_output(structured_output.map(|value| value.to_serde_value())),
         ))
     }
 }
@@ -150,6 +170,19 @@ mod tests {
         assert_eq!(value["sessionUpdate"], json!("tool_call_update"));
         assert_eq!(value["toolCallId"], json!("call-1"));
         assert_eq!(value["status"], json!("completed"));
+        assert!(value.get("rawOutput").is_none());
+    }
+
+    /// Verifies failed tool updates carry `failed` status and the rendered error text.
+    #[test]
+    fn update_helpers_build_failed_tool_updates() {
+        let update = AcpMessage::tool_failed("call-1", "apply_patch", "bad patch", None);
+        let value = serde_json::to_value(update).expect("update should serialize");
+
+        assert_eq!(value["sessionUpdate"], json!("tool_call_update"));
+        assert_eq!(value["toolCallId"], json!("call-1"));
+        assert_eq!(value["status"], json!("failed"));
+        assert_eq!(value["content"][0]["content"]["text"], json!("bad patch"));
         assert!(value.get("rawOutput").is_none());
     }
 

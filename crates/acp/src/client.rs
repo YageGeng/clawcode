@@ -681,12 +681,34 @@ impl CliRenderer {
                 ))?;
             }
             official_acp::SessionUpdate::ToolCallUpdate(tool_call_update) => {
-                if matches!(
-                    tool_call_update.fields.status,
-                    Some(official_acp::ToolCallStatus::Completed)
-                ) {
-                    let title = tool_call_update.fields.title.as_deref().unwrap_or("tool");
-                    self.write_status_line(&format!("[tool] {title} completed"))?;
+                let title = tool_call_update.fields.title.as_deref().unwrap_or("tool");
+                match tool_call_update.fields.status {
+                    Some(official_acp::ToolCallStatus::Completed) => {
+                        self.write_status_line(&format!("[tool] {title} completed"))?;
+                    }
+                    Some(official_acp::ToolCallStatus::Failed) => {
+                        if let Some(error_text) =
+                            tool_call_update
+                                .fields
+                                .content
+                                .as_ref()
+                                .and_then(|content| {
+                                    content.iter().find_map(|content| match content {
+                                        official_acp::ToolCallContent::Content(content) => {
+                                            content_block_text(&content.content)
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                        {
+                            self.write_status_line(&format!(
+                                "[tool] {title} failed: {error_text}"
+                            ))?;
+                        } else {
+                            self.write_status_line(&format!("[tool] {title} failed"))?;
+                        }
+                    }
+                    _ => {}
                 }
             }
             official_acp::SessionUpdate::UserMessageChunk(_) => {}
@@ -1052,6 +1074,30 @@ mod tests {
             .expect("answer update should render");
 
         assert_eq!(output.rendered(), "[think]\nthinking\n[answer]\nanswer");
+    }
+
+    /// Verifies failed tool updates are rendered with failed status and the error text.
+    #[test]
+    fn client_renders_failed_tool_updates_with_error_details() {
+        let output = SharedBufferWriter::default();
+        let writer = CliClientServices::new(output.clone());
+
+        writer
+            .render_session_update(official_acp::SessionNotification::new(
+                "session-1",
+                AcpMessage::tool_failed(
+                    "call-1",
+                    "apply_patch",
+                    "apply_patch verification failed: missing Begin/End markers",
+                    None,
+                ),
+            ))
+            .expect("failed tool update should render");
+
+        assert_eq!(
+            output.rendered(),
+            "[tool] apply_patch failed: apply_patch verification failed: missing Begin/End markers\n"
+        );
     }
 
     /// Verifies filesystem tools are visible through the default tool router.

@@ -9,7 +9,7 @@ use snafu::{ResultExt, ensure};
 
 use crate::{
     Result,
-    context::{ToolInvocation, ToolOutput},
+    context::{ReadTextFileStructuredOutput, StructuredToolOutput, ToolInvocation, ToolOutput},
     error::{ToolExecutionSnafu, ToolIoSnafu},
     handler::ToolHandler,
 };
@@ -51,7 +51,9 @@ impl ReadTextFileTool {
 
         Ok(ToolOutput {
             text: content.clone(),
-            structured: serde_json::json!({ "content": content }),
+            structured: StructuredToolOutput::ReadTextFile(ReadTextFileStructuredOutput {
+                content,
+            }),
         })
     }
 

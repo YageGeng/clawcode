@@ -1,4 +1,4 @@
-use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snafu::ResultExt;
@@ -163,11 +163,143 @@ impl ToolContext {
     }
 }
 
+/// Carries the failure message exposed by tool outputs that represent execution errors.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolOutputError {
+    pub message: String,
+}
+
+/// Describes the built-in `fs/read_text_file` structured payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadTextFileStructuredOutput {
+    pub content: String,
+}
+
+/// Describes the built-in `fs/write_text_file` structured payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WriteTextFileStructuredOutput {
+    pub ok: bool,
+}
+
+/// Describes the built-in shell tool structured payload shared by one-shot and session modes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellStructuredOutput {
+    pub running: bool,
+    pub session_id: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+/// Describes one file entry in the `apply_patch` metadata payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPatchFileMetadata {
+    pub file_path: String,
+    pub relative_path: String,
+    pub r#type: String,
+    pub patch: String,
+    pub additions: usize,
+    pub deletions: usize,
+    pub move_path: Option<String>,
+}
+
+/// Describes one diagnostic entry attached to an `apply_patch` result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDiagnostic {
+    pub message: String,
+    pub severity: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+/// Describes the metadata block attached to the `apply_patch` structured payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplyPatchMetadata {
+    pub diff: String,
+    pub files: Vec<ApplyPatchFileMetadata>,
+    pub diagnostics: BTreeMap<String, Vec<ToolDiagnostic>>,
+}
+
+/// Describes the built-in `apply_patch` structured payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplyPatchStructuredOutput {
+    pub title: String,
+    pub output: String,
+    pub metadata: ApplyPatchMetadata,
+}
+
+/// Stores the strong-typed structured response of a tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StructuredToolOutput {
+    Text {
+        text: String,
+    },
+    Failure {
+        success: bool,
+        error: ToolOutputError,
+    },
+    ReadTextFile(ReadTextFileStructuredOutput),
+    WriteTextFile(WriteTextFileStructuredOutput),
+    Shell(ShellStructuredOutput),
+    ApplyPatch(ApplyPatchStructuredOutput),
+    /// Preserves arbitrary tool-specific JSON payloads without inventing a parallel JSON type.
+    Json(serde_json::Value),
+}
+
+impl StructuredToolOutput {
+    /// Builds the default text payload shape used by text-first tool outputs.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Builds the default failure payload shape used by failed tool outputs.
+    pub fn failure(message: impl Into<String>) -> Self {
+        Self::Failure {
+            success: false,
+            error: ToolOutputError {
+                message: message.into(),
+            },
+        }
+    }
+
+    /// Converts a `serde_json::Value` into the generic structured JSON variant.
+    pub fn json_value(value: serde_json::Value) -> Self {
+        Self::Json(value)
+    }
+
+    /// Returns whether this structured payload is exactly the default text shape for `text`.
+    pub fn is_plain_text_equivalent(&self, text: &str) -> bool {
+        matches!(self, Self::Text { text: structured_text } if structured_text == text)
+    }
+
+    /// Serializes the structured payload into the JSON value expected by wire formats.
+    pub fn to_serde_value(&self) -> serde_json::Value {
+        match self {
+            Self::Text { text } => serde_json::json!({ "text": text }),
+            Self::Failure { success, error } => serde_json::json!({
+                "success": success,
+                "error": error,
+            }),
+            Self::ReadTextFile(output) => serde_json::to_value(output)
+                .expect("read-text-file structured tool output should serialize"),
+            Self::WriteTextFile(output) => serde_json::to_value(output)
+                .expect("write-text-file structured tool output should serialize"),
+            Self::Shell(output) => {
+                serde_json::to_value(output).expect("shell structured tool output should serialize")
+            }
+            Self::ApplyPatch(output) => serde_json::to_value(output)
+                .expect("apply-patch structured tool output should serialize"),
+            Self::Json(value) => value.clone(),
+        }
+    }
+}
+
 /// Stores both the plain-text and structured response of a tool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     pub text: String,
-    pub structured: serde_json::Value,
+    pub structured: StructuredToolOutput,
 }
 
 impl ToolOutput {
@@ -176,7 +308,7 @@ impl ToolOutput {
         let text = text.into();
         Self {
             text: text.clone(),
-            structured: serde_json::json!({ "text": text }),
+            structured: StructuredToolOutput::text(text),
         }
     }
 
@@ -186,12 +318,7 @@ impl ToolOutput {
         let message = message.into();
         Self {
             text: message.clone(),
-            structured: serde_json::json!({
-                "success": false,
-                "error": {
-                    "message": message,
-                },
-            }),
+            structured: StructuredToolOutput::failure(message),
         }
     }
 }

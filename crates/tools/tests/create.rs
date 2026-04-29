@@ -99,8 +99,9 @@ async fn exec_command_runs_a_one_shot_shell_command() {
         .await
         .unwrap();
 
-    assert_eq!(output.structured["stdout"], "hello-shell");
-    assert_eq!(output.structured["running"], false);
+    let structured = output.structured.to_serde_value();
+    assert_eq!(structured["stdout"], "hello-shell");
+    assert_eq!(structured["running"], false);
 }
 
 /// Verifies absolute workspace-root paths are accepted for `exec_command` workdir.
@@ -125,8 +126,9 @@ async fn exec_command_accepts_workspace_absolute_workdir() {
         .await
         .unwrap();
 
-    assert_eq!(output.structured["stdout"], "hello-absolute");
-    assert_eq!(output.structured["running"], false);
+    let structured = output.structured.to_serde_value();
+    assert_eq!(structured["stdout"], "hello-absolute");
+    assert_eq!(structured["running"], false);
 }
 
 /// Verifies absolute paths outside the workspace are rejected by `exec_command`.
@@ -180,7 +182,7 @@ async fn exec_command_intercepts_apply_patch_shell_command() {
         .await
         .unwrap();
 
-    assert!(output.text.contains("added"));
+    assert!(output.text.contains("A via-shell.txt"));
     assert_eq!(
         fs::read_to_string(root.join("via-shell.txt")).unwrap(),
         "hello from shell interception\n"
@@ -213,7 +215,8 @@ async fn exec_command_does_not_intercept_apply_patch_with_trailing_commands() {
         .await
         .unwrap();
 
-    let stdout = output.structured["stdout"].as_str().unwrap();
+    let structured = output.structured.to_serde_value();
+    let stdout = structured["stdout"].as_str().unwrap();
     assert!(stdout.contains("trailing-command"));
     assert_eq!(
         fs::read_to_string(root.join("via-shell.txt")).unwrap(),
@@ -276,10 +279,8 @@ async fn write_stdin_continues_a_shell_session() {
         .await
         .unwrap();
 
-    let session_id = exec_output.structured["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let exec_structured = exec_output.structured.to_serde_value();
+    let session_id = exec_structured["session_id"].as_str().unwrap().to_string();
     let write_output = router
         .dispatch(
             ToolCallRequest::new(
@@ -296,8 +297,9 @@ async fn write_stdin_continues_a_shell_session() {
         .await
         .unwrap();
 
-    assert_eq!(write_output.structured["stdout"], "hello-session");
-    assert_eq!(write_output.structured["running"], false);
+    let write_structured = write_output.structured.to_serde_value();
+    assert_eq!(write_structured["stdout"], "hello-session");
+    assert_eq!(write_structured["running"], false);
 }
 
 /// Verifies completed sessions are removed from the process manager after exit.
@@ -323,10 +325,8 @@ async fn write_stdin_rejects_completed_session_ids() {
         .await
         .unwrap();
 
-    let session_id = exec_output.structured["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let exec_structured = exec_output.structured.to_serde_value();
+    let session_id = exec_structured["session_id"].as_str().unwrap().to_string();
     router
         .dispatch(
             ToolCallRequest::new(
@@ -374,7 +374,7 @@ async fn apply_patch_adds_a_file() {
                 "call-add",
                 "apply_patch",
                 serde_json::json!({
-                    "patch": "*** Begin Patch\n*** Add File: note.txt\n+hello\n+tools\n*** End Patch"
+                    "patchText": "*** Begin Patch\n*** Add File: note.txt\n+hello\n+tools\n*** End Patch"
                 }),
             ),
             ToolContext::new("session-1", "thread-1"),
@@ -382,7 +382,7 @@ async fn apply_patch_adds_a_file() {
         .await
         .unwrap();
 
-    assert!(output.text.contains("added"));
+    assert!(output.text.contains("A note.txt"));
     assert_eq!(
         fs::read_to_string(root.join("note.txt")).unwrap(),
         "hello\ntools\n"
@@ -402,7 +402,7 @@ async fn apply_patch_updates_a_file() {
                 "call-update",
                 "apply_patch",
                 serde_json::json!({
-                    "patch": "*** Begin Patch\n*** Update File: note.txt\n@@\n hello\n-tools\n+world\n*** End Patch"
+                    "patchText": "*** Begin Patch\n*** Update File: note.txt\n@@\n hello\n-tools\n+world\n*** End Patch"
                 }),
             ),
             ToolContext::new("session-1", "thread-1"),
@@ -410,7 +410,7 @@ async fn apply_patch_updates_a_file() {
         .await
         .unwrap();
 
-    assert!(output.text.contains("updated"));
+    assert!(output.text.contains("M note.txt"));
     assert_eq!(
         fs::read_to_string(root.join("note.txt")).unwrap(),
         "hello\nworld\n"
@@ -430,7 +430,7 @@ async fn apply_patch_deletes_a_file() {
                 "call-delete",
                 "apply_patch",
                 serde_json::json!({
-                    "patch": "*** Begin Patch\n*** Delete File: note.txt\n*** End Patch"
+                    "patchText": "*** Begin Patch\n*** Delete File: note.txt\n*** End Patch"
                 }),
             ),
             ToolContext::new("session-1", "thread-1"),
@@ -438,7 +438,7 @@ async fn apply_patch_deletes_a_file() {
         .await
         .unwrap();
 
-    assert!(output.text.contains("deleted"));
+    assert!(output.text.contains("D note.txt"));
     assert!(!root.join("note.txt").exists());
 }
 
@@ -455,7 +455,7 @@ async fn apply_patch_moves_a_file() {
                 "call-move",
                 "apply_patch",
                 serde_json::json!({
-                    "patch": "*** Begin Patch\n*** Update File: from.txt\n*** Move to: to.txt\n@@\n hello\n tools\n*** End Patch"
+                    "patchText": "*** Begin Patch\n*** Update File: from.txt\n*** Move to: to.txt\n@@\n hello\n tools\n*** End Patch"
                 }),
             ),
             ToolContext::new("session-1", "thread-1"),
@@ -463,7 +463,7 @@ async fn apply_patch_moves_a_file() {
         .await
         .unwrap();
 
-    assert!(output.text.contains("moved"));
+    assert!(output.text.contains("M from.txt -> to.txt"));
     assert!(!root.join("from.txt").exists());
     assert_eq!(
         fs::read_to_string(root.join("to.txt")).unwrap(),
@@ -484,7 +484,7 @@ async fn apply_patch_ignores_move_to_when_source_equals_target() {
                 "call-move-same-path",
                 "apply_patch",
                 serde_json::json!({
-                    "patch": "*** Begin Patch\n*** Update File: same.txt\n*** Move to: same.txt\n@@\n hello\n-tools\n+world\n*** End Patch"
+                    "patchText": "*** Begin Patch\n*** Update File: same.txt\n*** Move to: same.txt\n@@\n hello\n-tools\n+world\n*** End Patch"
                 }),
             ),
             ToolContext::new("session-1", "thread-1"),
@@ -492,11 +492,108 @@ async fn apply_patch_ignores_move_to_when_source_equals_target() {
         .await
         .unwrap();
 
-    assert!(output.text.contains("updated"));
+    assert!(output.text.contains("M same.txt"));
     assert!(root.join("same.txt").exists());
     assert_eq!(
         fs::read_to_string(root.join("same.txt")).unwrap(),
         "hello\nworld\n"
+    );
+}
+
+/// Verifies the tool accepts `patchText` and returns spec-shaped structured metadata.
+#[tokio::test]
+async fn apply_patch_accepts_patch_text_and_returns_metadata() {
+    let root = temp_root("apply-patch-patch-text-metadata");
+    let router = ToolRouter::from_path(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-patch-text-metadata",
+                "apply_patch",
+                serde_json::json!({
+                    "patchText": "*** Begin Patch\n*** Add File: hello.txt\n+hello metadata\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        output
+            .text
+            .contains("Success. Updated the following files:")
+    );
+    assert_eq!(
+        output.structured.to_serde_value()["title"],
+        "Success. Updated the following files:"
+    );
+    assert_eq!(
+        output.structured.to_serde_value()["metadata"]["files"][0]["relativePath"],
+        "hello.txt"
+    );
+    assert_eq!(
+        output.structured.to_serde_value()["metadata"]["files"][0]["type"],
+        "add"
+    );
+    assert!(
+        output.structured.to_serde_value()["metadata"]["diff"]
+            .as_str()
+            .unwrap()
+            .contains("hello metadata")
+    );
+}
+
+/// Verifies dry-run validation keeps file changes atomic when any hunk fails.
+#[tokio::test]
+async fn apply_patch_is_atomic_when_verification_fails() {
+    let root = temp_root("apply-patch-atomic");
+    let router = ToolRouter::from_path(&root).await;
+
+    let error = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-atomic-failure",
+                "apply_patch",
+                serde_json::json!({
+                    "patchText": "*** Begin Patch\n*** Add File: created.txt\n+created before failure\n*** Update File: missing.txt\n@@\n-missing\n+replacement\n*** End Patch"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("Failed to read file to update"));
+    assert!(!root.join("created.txt").exists());
+}
+
+/// Verifies wrapper text plus fuzzy matching can still update the expected file content.
+#[tokio::test]
+async fn apply_patch_extracts_embedded_patch_and_fuzzy_matches_lines() {
+    let root = temp_root("apply-patch-embedded-fuzzy");
+    fs::write(root.join("quote.txt"), "greet(“hi”);   \n").unwrap();
+    let router = ToolRouter::from_path(&root).await;
+
+    let output = router
+        .dispatch(
+            ToolCallRequest::new(
+                "call-embedded-fuzzy",
+                "apply_patch",
+                serde_json::json!({
+                    "patchText": "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: quote.txt\n@@ greet(\"hi\");\n-greet(\"hi\");\n+greet(\"bye\");\n*** End Patch\nEOF"
+                }),
+            ),
+            ToolContext::new("session-1", "thread-1"),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("M quote.txt"));
+    assert_eq!(
+        fs::read_to_string(root.join("quote.txt")).unwrap(),
+        "greet(\"bye\");\n"
     );
 }
 

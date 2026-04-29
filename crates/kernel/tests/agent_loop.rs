@@ -27,7 +27,7 @@ use tokio::sync::Barrier;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tools::{Error as ToolError, Result as ToolResult};
+use tools::{Error as ToolError, Result as ToolResult, StructuredToolOutput};
 
 #[derive(Clone)]
 struct SequenceModel {
@@ -217,7 +217,7 @@ impl Tool for TestEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({"text": text}),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -309,7 +309,7 @@ impl Tool for FirstCallBlockingEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({"text": text}),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -356,7 +356,7 @@ impl Tool for BlockingEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({"text": text}),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -483,7 +483,7 @@ impl Tool for BarrierEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({"text": text}),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -538,7 +538,7 @@ impl Tool for NamedParallelBarrierTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({"text": text}),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -594,7 +594,7 @@ impl Tool for StrictSerialEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({"text": text}),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -713,13 +713,16 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
         matches!(
             event,
             AgentEvent::ToolCallCompleted {
+                status,
                 name,
                 output,
                 structured_output,
                 ..
             } if name == "echo"
+                && *status == kernel::events::ToolCallCompletionStatus::Succeeded
                 && output == "hello"
-                && structured_output.as_ref() == Some(&json!({"text": "hello"}))
+                && structured_output.as_ref()
+                    == Some(&StructuredToolOutput::text("hello"))
         )
     }));
 }
@@ -789,8 +792,8 @@ async fn runner_keeps_completed_message_text_when_tool_calls_have_no_text_deltas
     builder.push_handler_spec(Arc::new(TestEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner =
-        ThreadRuntime::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+        .with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1620,8 +1623,8 @@ async fn runner_returns_final_inflight_snapshot_in_run_result() {
             && entry.state == kernel::events::ToolCallInFlightState::Completed
             && (entry.output_summary.as_deref() == Some("hello")
                 || entry.output_summary.as_deref() == Some("world"))
-            && (entry.structured_output.as_ref() == Some(&json!({"text": "hello"}))
-                || entry.structured_output.as_ref() == Some(&json!({"text": "world"})))
+            && (entry.structured_output.as_ref() == Some(&StructuredToolOutput::text("hello"))
+                || entry.structured_output.as_ref() == Some(&StructuredToolOutput::text("world")))
             && entry.started_at.is_some()
             && entry.finished_at.is_some()
             && entry.duration_ms.is_some()
@@ -1655,8 +1658,8 @@ async fn runner_persists_tool_call_message_before_tool_completion() {
     }));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner =
-        ThreadRuntime::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+        .with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1838,22 +1841,25 @@ async fn runner_marks_inflight_tool_calls_cancelled_when_loop_token_is_triggered
 
 #[tokio::test]
 async fn runner_marks_inflight_tool_calls_failed_when_tool_execution_errors() {
-    let model = Arc::new(SequenceModel::new(vec![ModelResponse::tool_calls(
-        Some("calling echo".to_string()),
-        vec![ToolCallRequest::new(
-            "call_1",
-            "echo",
-            serde_json::json!({"text": "hello"}),
-        )],
-        usage(10),
-    )]));
+    let model = RecordingModel::new(vec![
+        ModelResponse::tool_calls(
+            Some("calling echo".to_string()),
+            vec![ToolCallRequest::new(
+                "call_1",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+            )],
+            usage(10),
+        ),
+        ModelResponse::text("tool failure reached the model", usage(6)),
+    ]);
     let store = Arc::new(InMemorySessionStore::default());
     let mut builder = ToolRegistryBuilder::new();
     builder.push_handler_spec(Arc::new(FailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner =
-        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+    let runner = ThreadRuntime::new(Arc::new(model.clone()), store, router, Arc::clone(&sink))
+        .with_config(AgentLoopConfig {
             max_iterations: 4,
             max_tool_calls: 4,
             recent_message_limit: 20,
@@ -1861,15 +1867,15 @@ async fn runner_marks_inflight_tool_calls_failed_when_tool_execution_errors() {
             ..AgentLoopConfig::default()
         });
 
-    let error = runner
+    let result = runner
         .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "say hello",
         ))
         .await
-        .expect_err("runner should surface tool execution failures");
-    assert!(matches!(error, Error::Tool { .. }));
+        .expect("runner should continue after surfacing the failed tool result to the model");
+    assert_eq!(result.text, "tool failure reached the model");
 
     let events = sink.snapshot().await;
     let states = events
@@ -1919,50 +1925,46 @@ async fn runner_marks_inflight_tool_calls_failed_when_tool_execution_errors() {
         } if *iteration == Some(1) && failed_handles.len() == 1
     )));
 
-    let inflight_snapshot = match error {
-        Error::Tool {
-            inflight_snapshot: Some(snapshot),
-            ..
-        } => snapshot,
-        other => panic!("expected tool error with inflight snapshot, got {other:?}"),
-    };
-    assert_eq!(inflight_snapshot.failed_handles.len(), 1);
-    assert_eq!(inflight_snapshot.entries.len(), 1);
-    assert_eq!(
-        inflight_snapshot.entries[0].state,
-        kernel::events::ToolCallInFlightState::Failed
-    );
-    assert_eq!(
-        inflight_snapshot.entries[0].error_summary.as_deref(),
-        Some(
-            "tool dispatch failed on `dispatch-tool`, runtime error on `failing-echo-handle`: echo failed"
-        )
-    );
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| matches!(
+        message,
+        Message::User { content }
+            if content.iter().any(|item| matches!(
+                item,
+                llm::completion::message::UserContent::ToolResult(tool_result)
+                    if format!("{tool_result:?}").contains("echo failed")
+            ))
+    )));
 }
 
 #[tokio::test]
-async fn runner_can_return_structured_failure_outcome_with_snapshot() {
-    let model = Arc::new(SequenceModel::new(vec![ModelResponse::tool_calls(
-        Some("calling echo".to_string()),
-        vec![ToolCallRequest::new(
-            "call_1",
-            "echo",
-            serde_json::json!({"text": "hello"}),
-        )],
-        usage(10),
-    )]));
+async fn runner_can_return_success_outcome_after_tool_failure_reaches_model() {
+    let model = Arc::new(SequenceModel::new(vec![
+        ModelResponse::tool_calls(
+            Some("calling echo".to_string()),
+            vec![ToolCallRequest::new(
+                "call_1",
+                "echo",
+                serde_json::json!({"text": "hello"}),
+            )],
+            usage(10),
+        ),
+        ModelResponse::text("tool failure reached the model", usage(6)),
+    ]));
     let store = Arc::new(InMemorySessionStore::default());
     let mut builder = ToolRegistryBuilder::new();
     builder.push_handler_spec(Arc::new(FailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
-        max_iterations: 4,
-        max_tool_calls: 4,
-        recent_message_limit: 20,
-        tool_choice: llm::completion::message::ToolChoice::Auto,
-        ..AgentLoopConfig::default()
-    });
+    let runner =
+        ThreadRuntime::new(model, store, router, Arc::clone(&sink)).with_config(AgentLoopConfig {
+            max_iterations: 4,
+            max_tool_calls: 4,
+            recent_message_limit: 20,
+            tool_choice: llm::completion::message::ToolChoice::Auto,
+            ..AgentLoopConfig::default()
+        });
 
     let outcome = runner
         .run_outcome_request(RunRequest::new(
@@ -1973,90 +1975,73 @@ async fn runner_can_return_structured_failure_outcome_with_snapshot() {
         .await
         .unwrap();
 
-    let failure = match outcome {
-        kernel::runtime::RunOutcome::Failure(failure) => failure,
-        other => panic!("expected structured failure outcome, got {other:?}"),
+    let success = match outcome {
+        kernel::runtime::RunOutcome::Success(success) => success,
+        other => panic!("expected structured success outcome, got {other:?}"),
     };
-    assert!(matches!(failure.error, Error::Tool { .. }));
-    assert_eq!(failure.inflight_snapshot.failed_handles.len(), 1);
-    assert_eq!(failure.inflight_snapshot.entries.len(), 1);
-    assert_eq!(
-        failure.inflight_snapshot.entries[0].state,
-        kernel::events::ToolCallInFlightState::Failed
-    );
-    assert!(
-        failure.continuation_decision_trace.is_empty(),
-        "tool failures before any continuation decision should not fabricate continuation traces"
-    );
+    assert_eq!(success.text, "tool failure reached the model");
 }
 
 #[tokio::test]
-async fn runner_keeps_completed_tool_results_in_failure_snapshot_when_a_later_call_fails() {
-    let model = Arc::new(SequenceModel::new(vec![ModelResponse::tool_calls(
-        Some("calling mixed tools".to_string()),
-        vec![
-            ToolCallRequest::new("call_1", "echo", serde_json::json!({"text": "hello"})),
-            ToolCallRequest::new("call_2", "fail_echo", serde_json::json!({"text": "boom"})),
-        ],
-        usage(10),
-    )]));
+async fn runner_keeps_success_and_failure_states_when_mixed_tool_batch_returns_to_model() {
+    let model = Arc::new(SequenceModel::new(vec![
+        ModelResponse::tool_calls(
+            Some("calling mixed tools".to_string()),
+            vec![
+                ToolCallRequest::new("call_1", "echo", serde_json::json!({"text": "hello"})),
+                ToolCallRequest::new("call_2", "fail_echo", serde_json::json!({"text": "boom"})),
+            ],
+            usage(10),
+        ),
+        ModelResponse::text("mixed tool batch handled", usage(6)),
+    ]));
     let store = Arc::new(InMemorySessionStore::default());
     let mut builder = ToolRegistryBuilder::new();
     builder.push_handler_spec(Arc::new(TestEchoTool));
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
-        max_iterations: 4,
-        max_tool_calls: 4,
-        recent_message_limit: 20,
-        tool_choice: llm::completion::message::ToolChoice::Auto,
-        ..AgentLoopConfig::default()
-    });
+    let runner = ThreadRuntime::new(model, Arc::clone(&store), router, Arc::clone(&sink))
+        .with_config(AgentLoopConfig {
+            max_iterations: 4,
+            max_tool_calls: 4,
+            recent_message_limit: 20,
+            tool_choice: llm::completion::message::ToolChoice::Auto,
+            ..AgentLoopConfig::default()
+        });
 
-    let outcome = runner
-        .run_outcome_request(RunRequest::new(
+    let result = runner
+        .run_request(RunRequest::new(
             SessionId::new(),
             ThreadId::new(),
             "run mixed tools",
         ))
         .await
-        .unwrap();
+        .expect("runner should continue after a mixed success/failure tool batch");
+    assert_eq!(result.text, "mixed tool batch handled");
 
-    let failure = match outcome {
-        kernel::runtime::RunOutcome::Failure(failure) => failure,
-        other => panic!("expected structured failure outcome, got {other:?}"),
-    };
-    let completed_entries = failure
-        .inflight_snapshot
-        .entries
-        .iter()
-        .filter(|entry| entry.state == kernel::events::ToolCallInFlightState::Completed)
-        .collect::<Vec<_>>();
-    let failed_entries = failure
-        .inflight_snapshot
-        .entries
-        .iter()
-        .filter(|entry| entry.state == kernel::events::ToolCallInFlightState::Failed)
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        completed_entries.len(),
-        1,
-        "the successful call should remain visible in the failure snapshot"
-    );
-    assert_eq!(completed_entries[0].name, "echo");
-    assert_eq!(
-        completed_entries[0].output_summary.as_deref(),
-        Some("hello")
-    );
-    assert_eq!(failed_entries.len(), 1);
-    assert_eq!(failed_entries[0].name, "fail_echo");
+    let events = sink.snapshot().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallInFlightStateUpdated {
+            tool_id,
+            state,
+            ..
+        } if tool_id == "call_1" && *state == kernel::events::ToolCallInFlightState::Completed
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallInFlightStateUpdated {
+            tool_id,
+            state,
+            ..
+        } if tool_id == "call_2" && *state == kernel::events::ToolCallInFlightState::Failed
+    )));
 }
 
 #[tokio::test]
-/// Verifies that task-level failure snapshots retain handles completed in earlier turns.
-async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
+/// Verifies failed tool results are persisted as tool-result messages across multiple turns.
+async fn runner_persists_failed_tool_results_across_turns() {
     let model = Arc::new(SequenceModel::new(vec![
         ModelResponse::tool_calls(
             Some("first turn uses tool".to_string()),
@@ -2069,7 +2054,7 @@ async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
         ),
         ModelResponse::text("first turn complete", usage(6)),
         ModelResponse::tool_calls(
-            Some("second turn fails".to_string()),
+            Some("second turn has a failed tool".to_string()),
             vec![ToolCallRequest::new(
                 "call_2",
                 "fail_echo",
@@ -2077,6 +2062,7 @@ async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
             )],
             usage(8),
         ),
+        ModelResponse::text("second turn complete", usage(6)),
     ]));
     let store = Arc::new(InMemorySessionStore::default());
     let session_id = SessionId::new();
@@ -2095,59 +2081,42 @@ async fn runner_failure_snapshot_keeps_prior_turn_runtime_entries() {
     builder.push_handler_spec(Arc::new(NamedFailingEchoTool));
     let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
-    let runner = ThreadRuntime::new(model, store, router, sink).with_config(AgentLoopConfig {
-        max_iterations: 4,
-        max_tool_calls: 4,
-        recent_message_limit: 20,
-        tool_choice: llm::completion::message::ToolChoice::Auto,
-        ..AgentLoopConfig::default()
-    });
+    let runner =
+        ThreadRuntime::new(model, Arc::clone(&store), router, sink).with_config(AgentLoopConfig {
+            max_iterations: 4,
+            max_tool_calls: 4,
+            recent_message_limit: 20,
+            tool_choice: llm::completion::message::ToolChoice::Auto,
+            ..AgentLoopConfig::default()
+        });
 
-    let outcome = runner
-        .run_outcome_request(RunRequest::new(session_id, thread_id, "first input"))
+    let result = runner
+        .run_request(RunRequest::new(
+            session_id.clone(),
+            thread_id.clone(),
+            "first input",
+        ))
         .await
-        .expect("runner should return a structured failure outcome");
+        .expect("runner should keep going across turns after a failed tool result");
+    assert_eq!(result.text, "second turn complete");
 
-    let failure = match outcome {
-        kernel::runtime::RunOutcome::Failure(failure) => failure,
-        other => panic!("expected structured failure outcome, got {other:?}"),
-    };
-
-    let completed_entries = failure
-        .inflight_snapshot
-        .entries
+    let messages = store
+        .load_messages_state(session_id, thread_id, 20)
+        .await
+        .expect("messages should load after both turns");
+    let tool_result_messages = messages
         .iter()
-        .filter(|entry| entry.state == kernel::events::ToolCallInFlightState::Completed)
-        .collect::<Vec<_>>();
-    let failed_entries = failure
-        .inflight_snapshot
-        .entries
-        .iter()
-        .filter(|entry| entry.state == kernel::events::ToolCallInFlightState::Failed)
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        completed_entries.len(),
-        1,
-        "the first turn's completed tool handle should remain visible in task failure snapshots"
-    );
-    assert_eq!(completed_entries[0].name, "echo");
-    assert_eq!(failed_entries.len(), 1);
-    assert_eq!(failed_entries[0].name, "fail_echo");
-
-    let mut handle_ids = failure
-        .inflight_snapshot
-        .entries
-        .iter()
-        .map(|entry| entry.handle_id.clone())
-        .collect::<Vec<_>>();
-    handle_ids.sort();
-    handle_ids.dedup();
-    assert_eq!(
-        handle_ids.len(),
-        failure.inflight_snapshot.entries.len(),
-        "task-level failure snapshots should not reuse tool execution handles across turns"
-    );
+        .filter(|message| {
+            matches!(
+                message,
+                Message::User { content }
+                    if content
+                        .iter()
+                        .any(|item| matches!(item, llm::completion::message::UserContent::ToolResult(_)))
+            )
+        })
+        .count();
+    assert_eq!(tool_result_messages, 2);
 }
 
 #[tokio::test]
@@ -2301,8 +2270,8 @@ async fn runner_preserves_primary_error_when_turn_cleanup_also_fails() {
     };
     assert_eq!(stage, "runner-discard-active-turn");
     assert!(
-        matches!(*source, Error::Tool { .. }),
-        "the original tool failure should remain the typed source of the cleanup error"
+        matches!(*source, Error::Runtime { ref stage, .. } if stage == "sequence-model-complete"),
+        "after the failed tool result is returned to the model, the follow-up model failure should remain the primary error"
     );
     assert!(
         matches!(*cleanup_error, Error::Runtime { ref stage, .. } if stage == "test-discard-failure"),

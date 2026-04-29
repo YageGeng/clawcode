@@ -21,7 +21,9 @@ use tokio::{
 use crate::{
     ApprovalRequirement, Result, RiskLevel,
     builtin::apply_patch::ApplyPatchTool,
-    context::{ToolInvocation, ToolMetadata, ToolOutput},
+    context::{
+        ShellStructuredOutput, StructuredToolOutput, ToolInvocation, ToolMetadata, ToolOutput,
+    },
     error::{RuntimeSnafu, ToolExecutionSnafu, ToolIoSnafu},
     handler::ToolHandler,
 };
@@ -254,12 +256,12 @@ impl UnifiedExecProcessManager {
         );
         Ok(ToolOutput {
             text,
-            structured: serde_json::json!({
-                "running": running,
-                "session_id": session_id,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code.and_then(|status| status.code()),
+            structured: StructuredToolOutput::Shell(ShellStructuredOutput {
+                running,
+                session_id: Some(session_id.to_string()),
+                stdout,
+                stderr,
+                exit_code: exit_code.and_then(|status| status.code()),
             }),
         })
     }
@@ -480,12 +482,12 @@ impl UnifiedExecRuntime {
 
         Ok(ToolOutput {
             text,
-            structured: serde_json::json!({
-                "running": false,
-                "session_id": serde_json::Value::Null,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": output.status.code(),
+            structured: StructuredToolOutput::Shell(ShellStructuredOutput {
+                running: false,
+                session_id: None,
+                stdout,
+                stderr,
+                exit_code: output.status.code(),
             }),
         })
     }

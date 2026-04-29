@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::sync::{Barrier, Notify};
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
-use tools::{Error as ToolError, Result as ToolResult};
+use tools::{Error as ToolError, Result as ToolResult, StructuredToolOutput};
 
 /// Echo tool used to verify queue-driven execution order.
 struct TestEchoTool;
@@ -55,7 +55,7 @@ impl Tool for TestEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({ "text": text }),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -107,7 +107,7 @@ impl Tool for BarrierEchoTool {
 
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({ "text": text }),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -203,7 +203,7 @@ impl Tool for BlockingEchoTool {
         #[allow(unreachable_code)]
         Ok(ToolOutput {
             text: text.to_string(),
-            structured: json!({ "text": text }),
+            structured: StructuredToolOutput::text(text),
         })
     }
 }
@@ -428,10 +428,15 @@ async fn execute_queue_report_separates_failed_response_from_completed_results()
         "failed requests should not be reported as completed results"
     );
     let failure_result = failure.failed_result;
+    assert!(matches!(
+        &failure_result.output.structured,
+        StructuredToolOutput::Failure { success, .. } if !success
+    ));
     assert!(
         failure_result
             .output
             .structured
+            .to_serde_value()
             .get("success")
             .and_then(|value| value.as_bool())
             .is_some_and(|value| !value)
@@ -444,6 +449,7 @@ async fn execute_queue_report_separates_failed_response_from_completed_results()
         failure_result
             .output
             .structured
+            .to_serde_value()
             .get("error")
             .and_then(|error| error.get("message"))
             .and_then(|message| message.as_str()),

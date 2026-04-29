@@ -10,9 +10,11 @@ pub mod router;
 pub mod spec;
 
 pub use context::{
-    ApprovalRequirement, RiskLevel, ToolApproval, ToolApprovalFuture, ToolApprovalHandler,
-    ToolApprovalProfile, ToolApprovalRequest, ToolCallRequest, ToolContext, ToolInvocation,
-    ToolMetadata, ToolOutput, ToolPayload,
+    ApplyPatchFileMetadata, ApplyPatchMetadata, ApplyPatchStructuredOutput, ApprovalRequirement,
+    ReadTextFileStructuredOutput, RiskLevel, ShellStructuredOutput, StructuredToolOutput,
+    ToolApproval, ToolApprovalFuture, ToolApprovalHandler, ToolApprovalProfile,
+    ToolApprovalRequest, ToolCallRequest, ToolContext, ToolDiagnostic, ToolInvocation,
+    ToolMetadata, ToolOutput, ToolOutputError, ToolPayload, WriteTextFileStructuredOutput,
 };
 pub use error::{Error, Result};
 pub use handler::ToolHandler;

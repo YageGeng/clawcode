@@ -36,7 +36,7 @@ pub struct ToolCallRuntimeEntry {
     pub tool_call_id: String,
     pub state: ToolCallInFlightState,
     pub output_summary: Option<String>,
-    pub structured_output: Option<serde_json::Value>,
+    pub structured_output: Option<tools::StructuredToolOutput>,
     pub error_summary: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
