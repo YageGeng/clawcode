@@ -241,7 +241,7 @@ fn render_system_prompt(inputs: RenderInputs) -> String {
 /// Renders the static default role declaration used when no custom system prompt exists.
 fn default_role_section() -> String {
     [
-        "You are an expert coding assistant operating inside pi, a coding agent harness.",
+        "You are an expert coding assistant operating inside ClawCode, a coding agent harness.",
         "You help users by reading files, executing commands, editing code, and writing new files.",
     ]
     .join("\n")
