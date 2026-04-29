@@ -394,7 +394,7 @@ async fn execute_queue_cancellation_aborts_parallel_queue_without_hanging() {
 }
 
 #[tokio::test]
-async fn execute_queue_report_includes_failure_response_for_dispatch_failures() {
+async fn execute_queue_report_separates_failed_response_from_completed_results() {
     let mut builder = ToolRegistryBuilder::new();
     builder.push_handler_spec(Arc::new(FailingEchoTool));
     let router = builder.build_router();
@@ -423,11 +423,11 @@ async fn execute_queue_report_includes_failure_response_for_dispatch_failures() 
         panic!("expected failed batch report for failing tool execution");
     };
 
-    let failure_result = failure
-        .completed_results
-        .into_iter()
-        .next()
-        .expect("failure report should include failed tool output");
+    assert!(
+        failure.completed_results.is_empty(),
+        "failed requests should not be reported as completed results"
+    );
+    let failure_result = failure.failed_result;
     assert!(
         failure_result
             .output
@@ -436,14 +436,19 @@ async fn execute_queue_report_includes_failure_response_for_dispatch_failures() 
             .and_then(|value| value.as_bool())
             .is_some_and(|value| !value)
     );
-    assert_eq!(failure_result.output.text, "failing tool invocation");
+    assert_eq!(
+        failure_result.output.text,
+        "tool dispatch failed on `dispatch-tool`, runtime error on `failing-echo-handle`: failing tool invocation"
+    );
     assert_eq!(
         failure_result
             .output
             .structured
             .get("error")
-            .and_then(|error| error.get("source"))
-            .and_then(|source| source.as_str()),
-        Some("runtime:failing-echo-handle")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str()),
+        Some(
+            "tool dispatch failed on `dispatch-tool`, runtime error on `failing-echo-handle`: failing tool invocation"
+        )
     );
 }

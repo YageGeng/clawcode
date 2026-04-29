@@ -26,6 +26,7 @@ pub enum ToolExecutionBatchReport {
 #[derive(Debug)]
 pub struct ToolExecutionFailure {
     pub completed_results: Vec<ToolExecutionResult>,
+    pub failed_result: ToolExecutionResult,
     pub failed_request: ToolExecutionRequest,
     pub error: crate::Error,
 }
@@ -196,10 +197,10 @@ impl ToolExecutor {
                 Ok(result) => results.push(result),
                 Err(error) => {
                     let failure_result = Self::failure_response(&call, &error);
-                    results.push(failure_result);
                     return Ok(ToolExecutionBatchReport::Failed(Box::new(
                         ToolExecutionFailure {
                             completed_results: results,
+                            failed_result: failure_result,
                             failed_request: call,
                             error,
                         },
@@ -243,7 +244,8 @@ impl ToolExecutor {
                         Err((failed_request, error)) if failure.is_none() => {
                             let failed_output = Self::failure_response(&failed_request, &error);
                             failure = Some(ToolExecutionFailure {
-                                completed_results: Vec::from([failed_output]),
+                                completed_results: Vec::new(),
+                                failed_result: failed_output,
                                 failed_request,
                                 error,
                             });
@@ -266,9 +268,8 @@ impl ToolExecutor {
 
     /// Builds a model-visible failure output for one failed request.
     ///
-    /// This keeps tool-call observability consistent with successful calls:
-    /// the error is still emitted as a tool-result message and can be included
-    /// in downstream history/snapshots.
+    /// This keeps tool-call observability consistent by preserving a structured
+    /// failure output payload for snapshots and error reporting.
     fn failure_response(
         request: &ToolExecutionRequest,
         error: &crate::Error,

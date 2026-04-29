@@ -270,6 +270,14 @@ where
                 let failure = *failure;
                 self.append_completed_tool_results(failure.completed_results)
                     .await?;
+                self.in_flight_tool_calls.update_output_summary_checked(
+                    &failure.failed_result.handle_id,
+                    Some(failure.failed_result.output.text.clone()),
+                )?;
+                self.in_flight_tool_calls.update_structured_output_checked(
+                    &failure.failed_result.handle_id,
+                    Some(failure.failed_result.output.structured.clone()),
+                )?;
                 self.publisher()
                     .publish_failure_updates(
                         vec![failure.failed_request.handle_id.clone()],

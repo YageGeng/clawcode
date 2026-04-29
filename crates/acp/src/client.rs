@@ -974,7 +974,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("filesystem path must stay inside the session root")
+                .contains("path must stay inside the tool root")
         );
         assert_eq!(
             std::fs::read_to_string(outside).expect("outside file should still be readable"),

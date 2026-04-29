@@ -354,25 +354,33 @@ impl UnifiedExecRuntime {
         let requested = workdir.unwrap_or(".");
         let request_path = Path::new(requested);
         let relative_path = if request_path.is_absolute() {
+            let canonical_request_path = request_path.canonicalize().context(ToolIoSnafu {
+                tool: tool.to_string(),
+                stage: format!("{stage}-workdir-canonicalize"),
+            })?;
             ensure!(
-                request_path.starts_with(&canonical_root),
+                canonical_request_path.starts_with(&canonical_root),
                 ToolExecutionSnafu {
                     tool: tool.to_string(),
                     stage: stage.to_string(),
                     message: "workdir must be relative to the workspace root".to_string(),
                 }
             );
-            request_path.strip_prefix(&canonical_root).map_err(|_| {
-                ToolExecutionSnafu {
-                    tool: tool.to_string(),
-                    stage: stage.to_string(),
-                    message: "workdir must be relative to the workspace root".to_string(),
-                }
-                .build()
-            })?
+            canonical_request_path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    ToolExecutionSnafu {
+                        tool: tool.to_string(),
+                        stage: stage.to_string(),
+                        message: "workdir must be relative to the workspace root".to_string(),
+                    }
+                    .build()
+                })?
+                .to_path_buf()
         } else {
-            request_path
+            request_path.to_path_buf()
         };
+
         ensure!(
             !relative_path
                 .components()
