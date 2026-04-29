@@ -38,3 +38,6 @@ roots = []
 
 [approval]
 profile = "trust_all"
+
+[persistence]
+enabled = true

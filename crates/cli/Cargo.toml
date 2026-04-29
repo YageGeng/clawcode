@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 acp = { path = "../acp" }
 kernel = { path = "../kernel" }
+store = { path = "../store" }
 tools = { path = "../tools" }
 llm = { path = "../llm" }
 skills = { path = "../skills" }

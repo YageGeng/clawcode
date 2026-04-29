@@ -15,6 +15,7 @@ snafu = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+store = { path = "../store" }
 tools = { path = "../tools" }
 uuid = { workspace = true }
 futures-util = { workspace = true }

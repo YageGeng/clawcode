@@ -24,6 +24,9 @@ pub struct AppConfig {
     /// Tool approval behavior used when the CLI creates ACP approval handlers.
     #[serde(default)]
     pub approval: CliApprovalConfig,
+    /// Session persistence configuration.
+    #[serde(default)]
+    pub persistence: CliPersistenceConfig,
 }
 
 impl AppConfig {
@@ -54,6 +57,26 @@ impl CliApprovalConfig {
     /// Converts CLI-loaded approval settings into the runtime approval profile.
     pub fn to_tool_approval_profile(&self) -> ToolApprovalProfile {
         self.profile.into()
+    }
+}
+
+/// CLI-owned session persistence configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CliPersistenceConfig {
+    /// Whether session persistence is enabled. Defaults to `true`.
+    #[serde(default = "default_persistence_enabled")]
+    pub enabled: bool,
+}
+
+fn default_persistence_enabled() -> bool {
+    true
+}
+
+impl Default for CliPersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_persistence_enabled(),
+        }
     }
 }
 

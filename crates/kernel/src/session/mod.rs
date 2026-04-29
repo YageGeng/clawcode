@@ -1,12 +1,13 @@
 use std::fmt;
 
 use llm::{completion::Message, usage::Usage};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::context::SessionTaskContext;
 
 /// Stable session identifier used by the runtime and adapters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
 
 impl Default for SessionId {
@@ -20,6 +21,16 @@ impl SessionId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Returns the inner UUID value.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+
+    /// Constructs an identifier from an existing UUID (e.g. during session replay).
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
 }
 
 impl fmt::Display for SessionId {
@@ -29,7 +40,7 @@ impl fmt::Display for SessionId {
 }
 
 /// Stable thread identifier used to separate conversations inside a session.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ThreadId(Uuid);
 
 impl Default for ThreadId {
@@ -43,6 +54,16 @@ impl ThreadId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Returns the inner UUID value.
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+
+    /// Constructs an identifier from an existing UUID (e.g. during session replay).
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
 }
 
 impl fmt::Display for ThreadId {
@@ -52,7 +73,7 @@ impl fmt::Display for ThreadId {
 }
 
 /// One persisted turn containing the input transcript and token usage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     pub user_text: String,
     pub transcript: Vec<Message>,
@@ -71,7 +92,7 @@ impl Turn {
 }
 
 /// Describes one queued continuation request that the outer task loop may consume.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionContinuationRequest {
     PendingInput { input: String },
     SystemFollowUp { input: String },

@@ -1,0 +1,18 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# workspace deps
+llm = { path = "../llm" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+# third-party
+dirs = "6"

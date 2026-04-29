@@ -20,3 +20,6 @@ pub use runtime::{
     ThreadRunRequest, ThreadRuntime, ThreadRuntimeDeps,
 };
 pub use session::{InMemorySessionStore, SessionId, ThreadId, Turn};
+
+// Re-export the session persistence store crate.
+pub use store;

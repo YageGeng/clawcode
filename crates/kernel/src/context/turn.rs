@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -6,7 +7,7 @@ use crate::{
 };
 
 /// Complete runtime context carried by one turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnContext {
     pub agent_id: String,
     pub parent_agent_id: Option<String>,
@@ -69,6 +70,21 @@ impl TurnContext {
     pub fn with_timezone(mut self, timezone: impl Into<String>) -> Self {
         self.timezone = Some(timezone.into());
         self
+    }
+
+    /// Reconstructs a full runtime context from a durable snapshot (e.g. after session replay).
+    pub fn from_item(item: TurnContextItem) -> Self {
+        Self {
+            agent_id: item.agent_id,
+            parent_agent_id: item.parent_agent_id,
+            name: item.name,
+            session_id: item.session_id,
+            thread_id: item.thread_id,
+            system_prompt: item.system_prompt,
+            cwd: item.cwd,
+            current_date: item.current_date,
+            timezone: item.timezone,
+        }
     }
 
     /// Converts the runtime context into a durable baseline snapshot.

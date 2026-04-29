@@ -1,9 +1,10 @@
 use llm::completion::Message;
+use serde::{Deserialize, Serialize};
 
 use crate::session::{SessionId, ThreadId};
 
 /// Durable snapshot of the stable runtime fields for one completed turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnContextItem {
     pub agent_id: String,
     pub parent_agent_id: Option<String>,

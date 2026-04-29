@@ -5,11 +5,12 @@ use llm::{
     },
     usage::Usage,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::context::{TurnContext, TurnContextItem};
 
 /// One finalized turn retained in prompt-visible history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedTurn {
     pub user_text: String,
     pub transcript: Vec<Message>,
@@ -59,6 +60,8 @@ impl ContextManager {
     pub fn append_message(&mut self, message: Message) {
         if let Some(active_turn) = self.active_turn.as_mut() {
             active_turn.transcript.push(message);
+        } else {
+            tracing::warn!("append_message called without an active turn — message dropped");
         }
     }
 

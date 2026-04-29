@@ -63,6 +63,7 @@ pub struct HumanAcpClient {
     services: CliClientServices,
     initialized: bool,
     session_id: Option<String>,
+    resume_session_id: Option<String>,
 }
 
 impl HumanAcpClient {
@@ -73,7 +74,14 @@ impl HumanAcpClient {
             services,
             initialized: false,
             session_id: None,
+            resume_session_id: None,
         }
+    }
+
+    /// Sets the session ID to resume from the persistence store.
+    pub fn with_resume_session(mut self, resume_id: String) -> Self {
+        self.resume_session_id = Some(resume_id);
+        self
     }
 
     /// Runs one human prompt by sending ACP `initialize`, `session/new`, and `session/prompt`.
@@ -109,6 +117,9 @@ impl HumanAcpClient {
     }
 
     /// Creates and caches the ACP session required before prompt turns can run.
+    ///
+    /// When `resume_session_id` is set, passes it through `_meta.resumeSessionId`
+    /// so the agent loads persisted state instead of creating a fresh session.
     async fn ensure_session(&mut self) -> std::result::Result<(), official_acp::Error> {
         if !self.initialized {
             self.connection
@@ -130,9 +141,18 @@ impl HumanAcpClient {
 
         if self.session_id.is_none() {
             let cwd = env::current_dir().map_err(acp_io_error)?;
+            let mut new_session = official_acp::NewSessionRequest::new(cwd.clone());
+            if let Some(ref resume_id) = self.resume_session_id {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "resumeSessionId".to_string(),
+                    serde_json::Value::String(resume_id.clone()),
+                );
+                new_session.meta = Some(meta);
+            }
             let response = self
                 .connection
-                .send_request(official_acp::NewSessionRequest::new(cwd.clone()))
+                .send_request(new_session)
                 .block_task()
                 .await?;
             let session_id = response.session_id.to_string();
@@ -145,13 +165,22 @@ impl HumanAcpClient {
     }
 }
 
+/// Runtime configuration for an interactive CLI session.
+pub struct CliSessionConfig {
+    pub skills: skills::SkillConfig,
+    pub tool_approval_profile: ToolApprovalProfile,
+    pub resume_session_id: Option<String>,
+}
+
 /// Runs the interactive human CLI loop while routing every turn through ACP.
+///
+/// When `resume_session_id` is set in the config, the client requests session
+/// resume via `_meta.resumeSessionId` on the `session/new` request.
 pub async fn run_interactive_cli_via_acp<M, R, W>(
     model: Arc<M>,
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
-    skills: skills::SkillConfig,
-    tool_approval_profile: ToolApprovalProfile,
+    session_config: CliSessionConfig,
     input: &mut R,
     output: W,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -166,11 +195,16 @@ where
         model,
         store,
         router,
-        skills,
-        tool_approval_profile,
+        session_config.skills,
+        session_config.tool_approval_profile,
         agent_transport,
     );
-    let client_result = run_cli_client(services, client_transport, input);
+    let client_result = run_cli_client(
+        services,
+        client_transport,
+        input,
+        session_config.resume_session_id,
+    );
 
     let (result, should_abort_agent) = tokio::select! {
         result = client_result => (result, true),
@@ -239,6 +273,7 @@ async fn run_cli_client<R>(
     services: CliClientServices,
     transport: impl agent_client_protocol::ConnectTo<OfficialClient> + 'static,
     input: &mut R,
+    resume_session_id: Option<String>,
 ) -> std::result::Result<(), official_acp::Error>
 where
     R: BufRead,
@@ -307,7 +342,11 @@ where
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async move |connection| {
-            run_prompt_loop(HumanAcpClient::new(connection, prompt_services), input).await
+            let mut client = HumanAcpClient::new(connection, prompt_services);
+            if let Some(ref resume_id) = resume_session_id {
+                client = client.with_resume_session(resume_id.clone());
+            }
+            run_prompt_loop(client, input).await
         })
         .await
 }

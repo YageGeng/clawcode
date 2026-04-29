@@ -313,6 +313,10 @@ where
     }
 
     /// Creates a new kernel thread for an ACP session and returns the typed ACP response.
+    ///
+    /// When the client sends `_meta: { resumeSessionId: "<uuid>" }`, the agent loads
+    /// the persisted session from disk and replays its history into the store, resuming
+    /// from where it left off instead of starting fresh.
     async fn handle_session_new_response(
         &mut self,
         params: official_acp::NewSessionRequest,
@@ -326,19 +330,60 @@ where
         }
         let session_router = self.build_session_router(params.cwd.clone()).await?;
 
-        let session_id = SessionId::new();
+        // Check for session resume request via _meta.
+        let resume_id = params
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("resumeSessionId"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let (session_id, thread_id) = if let Some(ref resume_id) = resume_id {
+            match self.load_and_replay_session(resume_id).await {
+                Ok((sid, tid)) => {
+                    info!("resumed session {resume_id}");
+                    (sid, tid)
+                }
+                Err(e) => {
+                    warn!("failed to resume session {resume_id}: {e}, creating new");
+                    (SessionId::new(), ThreadId::new())
+                }
+            }
+        } else {
+            (SessionId::new(), ThreadId::new())
+        };
+
         let thread =
-            ThreadHandle::new(session_id.clone(), ThreadId::new()).with_cwd(params.cwd.clone());
-        let session_id = session_id.to_string();
+            ThreadHandle::new(session_id.clone(), thread_id.clone()).with_cwd(params.cwd.clone());
+        let session_id_str = session_id.to_string();
         self.sessions.insert(
-            session_id.clone(),
+            session_id_str.clone(),
             AcpSession {
                 thread,
                 router: session_router,
             },
         );
 
-        Ok(official_acp::NewSessionResponse::new(session_id))
+        Ok(official_acp::NewSessionResponse::new(session_id_str))
+    }
+
+    /// Loads a persisted session from disk and replays its events into the store.
+    async fn load_and_replay_session(&self, resume_id: &str) -> Result<(SessionId, ThreadId)> {
+        let path = store::find_session_by_id(resume_id).ok_or_else(|| Error::InvalidRequest {
+            message: format!("session not found: {resume_id}"),
+            stage: "acp-session-resume-find".to_string(),
+        })?;
+        let events = store::load_session_events(&path).map_err(|e| Error::Io {
+            source: e,
+            stage: "acp-session-resume-load".to_string(),
+        })?;
+        self.store
+            .load_from_events(events)
+            .await
+            .map_err(|e| Error::Kernel {
+                source: Box::new(e),
+                stage: "acp-session-resume-replay".to_string(),
+            })
     }
 
     /// Builds a per-session tool router rooted at the requested workspace root.
@@ -714,7 +759,7 @@ fn initialize_response(
     _params: &official_acp::InitializeRequest,
 ) -> official_acp::InitializeResponse {
     let agent_capabilities = official_acp::AgentCapabilities::new()
-        .load_session(false)
+        .load_session(true)
         .prompt_capabilities(
             official_acp::PromptCapabilities::new()
                 .image(false)

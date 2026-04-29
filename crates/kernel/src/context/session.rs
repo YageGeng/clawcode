@@ -1,14 +1,17 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::RwLock;
 
 use crate::{
     Result,
-    context::{CompletedTurn, ContextManager, TurnContext},
+    context::{CompletedTurn, ContextManager, TurnContext, TurnContextItem},
     session::{SessionContinuationRequest, SessionId, ThreadId, Turn},
 };
 use llm::{completion::Message, usage::Usage};
+use store::SessionStore;
 
 #[derive(Debug, Default)]
 struct SessionThreadState {
@@ -18,17 +21,45 @@ struct SessionThreadState {
 }
 
 /// Stable session-scoped state used by turn/task execution.
-#[derive(Debug, Default)]
+///
+/// When constructed with a [`SessionStore`], every turn lifecycle event
+/// is persisted to the configured backend. Persistence failures are logged
+/// and do not interrupt the agent loop.
+#[derive(Default)]
 pub struct SessionTaskContext {
     threads: RwLock<HashMap<(SessionId, ThreadId), SessionThreadState>>,
+    persistence: Option<Arc<dyn SessionStore>>,
     fail_next_take_continuation: AtomicBool,
     fail_next_discard_turn: AtomicBool,
+}
+
+impl fmt::Debug for SessionTaskContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionTaskContext")
+            .field(
+                "persistence",
+                &self.persistence.as_ref().map(|_| "<SessionStore>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionTaskContext {
     /// Creates an empty session task context.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attaches a persistence backend. All subsequent turn events are
+    /// recorded to the store.
+    pub fn with_persistence(mut self, persistence: Arc<dyn SessionStore>) -> Self {
+        self.persistence = Some(persistence);
+        self
+    }
+
+    /// Returns the attached persistence backend, if any.
+    pub fn persistence(&self) -> Option<&Arc<dyn SessionStore>> {
+        self.persistence.as_ref()
     }
 
     /// Forces the next continuation-drain attempt to fail for testing cleanup paths.
@@ -154,6 +185,15 @@ impl SessionTaskContext {
         user_text: String,
         user_message: Message,
     ) -> Result<()> {
+        if let Some(p) = &self.persistence {
+            p.record_turn_started(
+                session_id.as_uuid(),
+                thread_id.as_uuid(),
+                &user_text,
+                &user_message,
+            )
+            .await;
+        }
         self.with_history(session_id, thread_id, |history| {
             history.begin_turn(user_text, user_message);
         })
@@ -168,6 +208,10 @@ impl SessionTaskContext {
         thread_id: ThreadId,
         message: Message,
     ) -> Result<()> {
+        if let Some(p) = &self.persistence {
+            p.record_message(session_id.as_uuid(), thread_id.as_uuid(), &message)
+                .await;
+        }
         self.with_history(session_id, thread_id, |history| {
             history.append_message(message);
         })
@@ -181,6 +225,20 @@ impl SessionTaskContext {
         turn_context: &TurnContext,
         usage: Usage,
     ) -> Result<()> {
+        if let Some(p) = &self.persistence {
+            let context_item = serde_json::to_value(turn_context.to_turn_context_item())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("failed to serialize turn context for persistence: {e}");
+                    serde_json::Value::Null
+                });
+            p.record_turn_completed(
+                turn_context.session_id.as_uuid(),
+                turn_context.thread_id.as_uuid(),
+                usage,
+                context_item,
+            )
+            .await;
+        }
         self.with_history(
             turn_context.session_id.clone(),
             turn_context.thread_id.clone(),
@@ -233,6 +291,10 @@ impl SessionTaskContext {
                 stage: "test-discard-failure".to_string(),
                 inflight_snapshot: None,
             });
+        }
+        if let Some(p) = &self.persistence {
+            p.record_turn_discarded(session_id.as_uuid(), thread_id.as_uuid())
+                .await;
         }
         self.with_history(session_id, thread_id, |history| {
             history.discard_turn();
@@ -325,5 +387,126 @@ impl SessionTaskContext {
             })
             .await
             .unwrap_or_default())
+    }
+
+    /// Replays persisted turn events into this store, restoring session state.
+    ///
+    /// Uses internal history operations to avoid triggering persistence hooks
+    /// during replay. Returns the `(session_id, thread_id)` from the first
+    /// `TurnStarted` event.
+    ///
+    /// Corrupted events (e.g. `TurnCompleted` without a preceding `TurnStarted`)
+    /// are logged and skipped rather than panicking.
+    pub async fn load_from_events(
+        &self,
+        events: Vec<store::TurnEvent>,
+    ) -> Result<(SessionId, ThreadId)> {
+        use store::TurnEvent;
+
+        if events.is_empty() {
+            return Err(crate::Error::Runtime {
+                message: "session replay received an empty event list".to_string(),
+                stage: "session-load-from-events".to_string(),
+                inflight_snapshot: None,
+            });
+        }
+
+        let mut session_id: Option<SessionId> = None;
+        let mut thread_id: Option<ThreadId> = None;
+        let mut active_turn = false;
+
+        for event in events {
+            match event {
+                TurnEvent::TurnStarted {
+                    session_id: sid,
+                    thread_id: tid,
+                    user_text,
+                    message,
+                    ..
+                } => {
+                    if session_id.is_none() {
+                        session_id = Some(SessionId::from_uuid(sid));
+                        thread_id = Some(ThreadId::from_uuid(tid));
+                    }
+                    let sid = SessionId::from_uuid(sid);
+                    let tid = ThreadId::from_uuid(tid);
+                    self.with_history(sid, tid, |history| {
+                        history.begin_turn(user_text, message);
+                    })
+                    .await;
+                    active_turn = true;
+                }
+                TurnEvent::Message {
+                    session_id: sid,
+                    thread_id: tid,
+                    message,
+                    ..
+                } => {
+                    let sid = SessionId::from_uuid(sid);
+                    let tid = ThreadId::from_uuid(tid);
+                    self.with_history(sid, tid, |history| {
+                        history.append_message(message);
+                    })
+                    .await;
+                }
+                TurnEvent::TurnCompleted {
+                    session_id: sid,
+                    thread_id: tid,
+                    usage,
+                    context_item,
+                    ..
+                } => {
+                    if !active_turn {
+                        tracing::warn!(
+                            "session replay: TurnCompleted without active turn (sid={sid}) — skipped"
+                        );
+                        continue;
+                    }
+                    let sid = SessionId::from_uuid(sid);
+                    let tid = ThreadId::from_uuid(tid);
+                    let context_item: TurnContextItem = serde_json::from_value(context_item)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(
+                                "session replay: failed to deserialize context_item: {e}"
+                            );
+                            TurnContext::new(sid.clone(), tid.clone()).to_turn_context_item()
+                        });
+                    let turn_context = TurnContext::from_item(context_item);
+                    self.with_history(sid, tid, |history| {
+                        history.finalize_turn(usage, &turn_context);
+                    })
+                    .await;
+                    active_turn = false;
+                }
+                TurnEvent::TurnDiscarded {
+                    session_id: sid,
+                    thread_id: tid,
+                    ..
+                } => {
+                    if !active_turn {
+                        tracing::warn!(
+                            "session replay: TurnDiscarded without active turn (sid={sid}) — skipped"
+                        );
+                        continue;
+                    }
+                    let sid = SessionId::from_uuid(sid);
+                    let tid = ThreadId::from_uuid(tid);
+                    self.with_history(sid, tid, |history| {
+                        history.discard_turn();
+                    })
+                    .await;
+                    active_turn = false;
+                }
+            }
+        }
+
+        match (session_id, thread_id) {
+            (Some(sid), Some(tid)) => Ok((sid, tid)),
+            _ => Err(crate::Error::Runtime {
+                message: "no TurnStarted event found in session replay".to_string(),
+                stage: "session-load-from-events".to_string(),
+                inflight_snapshot: None,
+            }),
+        }
     }
 }
