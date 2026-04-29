@@ -500,7 +500,7 @@ mod tests {
 
         async fn definition(&self, _prompt: String) -> ToolDefinition {
             ToolDefinition {
-                name: self.name(),
+                name: self.name().to_string(),
                 description: "A tool that returns some example text.".to_string(),
                 parameters: serde_json::json!({
                         "type": "object",

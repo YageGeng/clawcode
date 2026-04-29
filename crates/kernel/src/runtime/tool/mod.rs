@@ -62,29 +62,44 @@ where
         input.new_messages,
         &mut completed_batch_summary,
     );
-    let mut first_batch = true;
-
-    for batch in batches {
+    let mut batch_iter = batches.into_iter();
+    if let Some(first) = batch_iter.next() {
         total_tool_calls = runtime
             .apply_batch(ToolCallBatch {
-                message_id: first_batch.then_some(message_id.clone()).flatten(),
-                text: if first_batch { text.clone() } else { None },
-                reasoning: if first_batch {
-                    reasoning.clone()
-                } else {
-                    Vec::new()
-                },
-                calls: batch.queue.into_requests(),
+                message_id: message_id.clone(),
+                text: text.clone(),
+                reasoning: reasoning.clone(),
+                calls: first.queue.into_requests(),
                 total_tool_calls,
                 max_tool_calls: config.max_tool_calls,
-                tool_execution_mode: batch.mode,
-                cancellation_token: config.cancellation_token.clone(),
+                tool_execution_mode: first.mode,
+                cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
                 tool_context: ToolContext::new(input.session_id.clone(), input.thread_id.clone())
                     .with_tool_approval_profile(config.tool_approval_profile)
                     .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
             })
             .await?;
-        first_batch = false;
+
+        for batch in batch_iter {
+            total_tool_calls = runtime
+                .apply_batch(ToolCallBatch {
+                    message_id: None,
+                    text: None,
+                    reasoning: Vec::new(),
+                    calls: batch.queue.into_requests(),
+                    total_tool_calls,
+                    max_tool_calls: config.max_tool_calls,
+                    tool_execution_mode: batch.mode,
+                    cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
+                    tool_context: ToolContext::new(
+                        input.session_id.clone(),
+                        input.thread_id.clone(),
+                    )
+                    .with_tool_approval_profile(config.tool_approval_profile)
+                    .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
+                })
+                .await?;
+        }
     }
 
     debug_assert_eq!(
@@ -92,14 +107,6 @@ where
         total_calls_in_plan,
         "each ready tool call should produce an in-flight registry entry",
     );
-    debug_assert!(
-        in_flight
-            .entries
-            .iter()
-            .all(|entry| !matches!(entry.identity(), ("", _, _) | (_, "", _) | (_, _, ""))),
-        "in-flight registry entries should always retain stable tool identifiers",
-    );
-
     Ok((
         total_tool_calls,
         in_flight.snapshot().into(),

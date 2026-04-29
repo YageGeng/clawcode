@@ -85,12 +85,7 @@ where
 
     /// Returns every handle currently marked as running.
     fn running_handle_ids(&self) -> Vec<String> {
-        self.in_flight_tool_calls
-            .entries
-            .iter()
-            .filter(|entry| entry.state == crate::events::ToolCallInFlightState::Running)
-            .map(|entry| entry.handle_id.clone())
-            .collect()
+        self.in_flight_tool_calls.running_handle_ids()
     }
 
     /// Appends the assistant's tool-call message and drains the selected execution batch.
@@ -121,10 +116,10 @@ where
             .await?;
 
         if tool_execution_mode == ToolExecutionMode::Serial {
-            self.execute_serial(calls, tool_context, cancellation_token.unwrap_or_default())
+            self.execute_serial(calls, tool_context, cancellation_token)
                 .await?;
         } else {
-            self.execute_parallel(calls, tool_context, cancellation_token.unwrap_or_default())
+            self.execute_parallel(calls, tool_context, cancellation_token)
                 .await?;
         }
 
@@ -275,13 +270,8 @@ where
                 } = *failure;
                 self.append_completed_tool_results(completed_results)
                     .await?;
-                self.append_failed_tool_result(crate::tools::executor::ToolExecutionFailure {
-                    completed_results: Vec::new(),
-                    failed_result,
-                    failed_request,
-                    error,
-                })
-                .await
+                self.append_failed_tool_result(failed_request, failed_result, error)
+                    .await
             }
         }
     }
@@ -352,57 +342,54 @@ where
     /// Records a failed tool result for the model while preserving failed in-flight state.
     async fn append_failed_tool_result(
         &mut self,
-        failure: crate::tools::executor::ToolExecutionFailure,
+        failed_request: crate::tools::executor::ToolExecutionRequest,
+        failed_result: crate::tools::executor::ToolExecutionResult,
+        error: crate::Error,
     ) -> Result<()> {
-        let tool_call_id = failure
-            .failed_result
+        let tool_call_id = failed_result
             .call
             .call_id
             .clone()
-            .unwrap_or_else(|| failure.failed_result.call.id.clone());
+            .unwrap_or_else(|| failed_result.call.id.clone());
         self.in_flight_tool_calls.update_output_summary_checked(
-            &failure.failed_result.handle_id,
-            Some(failure.failed_result.output.text.clone()),
+            &failed_result.handle_id,
+            Some(failed_result.output.text.clone()),
         )?;
         self.in_flight_tool_calls.update_structured_output_checked(
-            &failure.failed_result.handle_id,
-            Some(failure.failed_result.output.structured.clone()),
+            &failed_result.handle_id,
+            Some(failed_result.output.structured.clone()),
         )?;
         self.publisher()
-            .publish_failure_updates(
-                vec![failure.failed_request.handle_id.clone()],
-                failure.error.to_string(),
-            )
+            .publish_failure_updates(vec![failed_request.handle_id.clone()], error.to_string())
             .await?;
         // Even failed tool executions still produce a tool-result payload that the next model
         // iteration should see, so persist the message while leaving the handle state as `Failed`.
         self.events
             .publish(crate::events::AgentEvent::ToolCallCompleted {
                 status: crate::events::ToolCallCompletionStatus::Failed,
-                name: failure.failed_result.call.name.clone(),
-                handle_id: failure.failed_result.handle_id.clone(),
-                output: failure.failed_result.output.text.clone(),
-                structured_output: Some(failure.failed_result.output.structured.clone()),
+                name: failed_result.call.name.clone(),
+                handle_id: failed_result.handle_id.clone(),
+                output: failed_result.output.text.clone(),
+                structured_output: Some(failed_result.output.structured.clone()),
             })
             .await;
         self.store
             .append_message_state(
                 self.session_id.clone(),
                 self.thread_id.clone(),
-                failure.failed_result.message.clone(),
+                failed_result.message.clone(),
             )
             .await?;
-        self.working_messages
-            .push(failure.failed_result.message.clone());
-        self.new_messages.push(failure.failed_result.message);
+        self.working_messages.push(failed_result.message.clone());
+        self.new_messages.push(failed_result.message);
         self.completed_batch_summary
             .entries
             .push(ToolBatchSummaryEntry {
-                handle_id: failure.failed_result.handle_id,
-                name: failure.failed_result.call.name,
-                tool_id: failure.failed_result.call.id,
+                handle_id: failed_result.handle_id,
+                name: failed_result.call.name,
+                tool_id: failed_result.call.id,
                 tool_call_id,
-                output_summary: failure.failed_result.output.text,
+                output_summary: failed_result.output.text,
             });
         Ok(())
     }

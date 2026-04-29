@@ -16,8 +16,8 @@ pub trait Tool: Sized {
     type Output: Serialize;
 
     /// A method returning the name of the tool.
-    fn name(&self) -> String {
-        Self::NAME.to_string()
+    fn name(&self) -> &'static str {
+        Self::NAME
     }
 
     /// A method returning the tool definition. The user prompt can be used to

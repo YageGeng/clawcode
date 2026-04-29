@@ -46,6 +46,6 @@ pub(super) struct ToolCallBatch {
     pub(super) total_tool_calls: usize,
     pub(super) max_tool_calls: usize,
     pub(super) tool_execution_mode: ToolExecutionMode,
-    pub(super) cancellation_token: Option<CancellationToken>,
+    pub(super) cancellation_token: CancellationToken,
     pub(super) tool_context: ToolContext,
 }

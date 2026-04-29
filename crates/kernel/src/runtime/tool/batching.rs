@@ -48,7 +48,7 @@ pub(super) fn build_tool_execution_batches(
     if !parallel_batch.is_empty() {
         batches.push(ToolExecutionBatch {
             mode: ToolExecutionMode::Parallel,
-            queue: ToolExecutionQueue::from_requests(parallel_batch),
+            queue: ToolExecutionQueue::from_requests(std::mem::take(&mut parallel_batch)),
         });
     }
 

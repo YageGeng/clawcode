@@ -106,22 +106,13 @@ where
         failed_handle_ids: Vec<String>,
         error_summary: String,
     ) -> Result<()> {
-        let failed_entries = self
+        let failed_meta = self
             .in_flight_tool_calls
-            .entries
-            .iter()
-            .filter(|entry| {
-                failed_handle_ids
-                    .iter()
-                    .any(|handle_id| handle_id == &entry.handle_id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for entry in failed_entries {
+            .names_for_handles(&failed_handle_ids);
+        for (name, handle_id) in failed_meta {
             self.publish_state_update(
-                &entry.name,
-                &entry.handle_id,
+                &name,
+                &handle_id,
                 ToolCallInFlightState::Failed,
                 Some(error_summary.clone()),
             )
@@ -147,11 +138,9 @@ where
             None,
         )
         .await?;
-        // Log tool invocation arguments so local CLI/users can trace tool start parameters.
         info!(
             name = %call.call.name,
             handle_id = %call.handle_id,
-            arguments = %call.call.arguments,
             "tool call started"
         );
         self.events

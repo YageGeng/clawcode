@@ -46,6 +46,11 @@ impl InFlightToolCallRegistry {
             finished_at: None,
             duration_ms: None,
         };
+        // Identifiers must be non-empty — enforced here once rather than on the hot path.
+        debug_assert!(
+            !matches!(entry.identity(), ("", _, _) | (_, "", _) | (_, _, "")),
+            "registry entries must have non-empty identifiers"
+        );
         self.entries.push_back(entry.clone());
         entry
     }
@@ -126,6 +131,26 @@ impl InFlightToolCallRegistry {
                     && entry.state != ToolCallInFlightState::Failed
             })
             .cloned()
+            .collect()
+    }
+
+    /// Returns handle IDs for every entry currently in the `Running` state.
+    pub(crate) fn running_handle_ids(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.state == ToolCallInFlightState::Running)
+            .map(|entry| entry.handle_id.clone())
+            .collect()
+    }
+
+    /// Returns `(name, handle_id)` pairs for entries whose handle matches any in the given list.
+    ///
+    /// Only clones the two fields needed for event publishing, avoiding a full entry clone.
+    pub(crate) fn names_for_handles(&self, handle_ids: &[String]) -> Vec<(String, String)> {
+        self.entries
+            .iter()
+            .filter(|entry| handle_ids.iter().any(|id| id == &entry.handle_id))
+            .map(|entry| (entry.name.clone(), entry.handle_id.clone()))
             .collect()
     }
 
