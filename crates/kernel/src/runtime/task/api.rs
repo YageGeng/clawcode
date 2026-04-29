@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use llm::usage::Usage;
@@ -13,7 +14,7 @@ use crate::{
     tools::router::ToolRouter,
 };
 
-use super::runner::run_task;
+use super::runner::{TaskRunInput, run_task};
 
 /// Shared dependencies that stay stable for one thread runtime lifecycle.
 pub struct ThreadRuntimeDeps<M, E> {
@@ -44,6 +45,8 @@ impl<M, E> ThreadRuntimeDeps<M, E> {
 #[derive(Debug, Clone, Default)]
 pub struct ThreadConfig {
     pub system_prompt: Option<String>,
+    pub append_system_prompt: Option<String>,
+    pub cwd: Option<PathBuf>,
 }
 
 /// Lightweight handle that identifies one session/thread binding.
@@ -70,6 +73,18 @@ impl ThreadHandle {
         self
     }
 
+    /// Sets additional system-prompt text appended after file-based prompt content.
+    pub fn with_append_system_prompt(mut self, append_system_prompt: impl Into<String>) -> Self {
+        self.config.append_system_prompt = Some(append_system_prompt.into());
+        self
+    }
+
+    /// Sets the stable working directory used for prompt discovery and rendering.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.config.cwd = Some(cwd.into());
+        self
+    }
+
     /// Returns the session identifier for this thread handle.
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
@@ -84,6 +99,16 @@ impl ThreadHandle {
     pub fn system_prompt(&self) -> Option<&String> {
         self.config.system_prompt.as_ref()
     }
+
+    /// Returns the optional appended system prompt carried by this handle.
+    pub fn append_system_prompt(&self) -> Option<&String> {
+        self.config.append_system_prompt.as_ref()
+    }
+
+    /// Returns the optional working directory carried by this handle.
+    pub fn cwd(&self) -> Option<&PathBuf> {
+        self.config.cwd.as_ref()
+    }
 }
 
 /// One thread submission with optional prompt overrides.
@@ -93,6 +118,8 @@ pub struct ThreadRunRequest {
     pub inputs: Vec<UserInput>,
     /// Optional system prompt override applied only to this submission.
     pub system_prompt_override: Option<String>,
+    /// Optional appended system prompt override applied only to this submission.
+    pub append_system_prompt_override: Option<String>,
 }
 
 impl ThreadRunRequest {
@@ -106,6 +133,7 @@ impl ThreadRunRequest {
         Self {
             inputs,
             system_prompt_override: None,
+            append_system_prompt_override: None,
         }
     }
 }
@@ -140,6 +168,14 @@ where
         self
     }
 
+    /// Invalidates the cached system prompt for one thread so the next run rebuilds it.
+    pub async fn expire_system_prompt(&self, thread: &ThreadHandle) {
+        self.deps
+            .store
+            .expire_system_prompt(thread.session_id().clone(), thread.thread_id().clone())
+            .await;
+    }
+
     /// Runs one input turn against the supplied thread and returns the final result.
     pub async fn run(&self, thread: &ThreadHandle, request: ThreadRunRequest) -> Result<RunResult> {
         match self.run_outcome(thread, request).await? {
@@ -159,17 +195,30 @@ where
             thread.thread_id().clone(),
             request.inputs,
         );
+        let use_system_prompt_cache = request.system_prompt_override.is_none()
+            && request.append_system_prompt_override.is_none();
         let system_prompt = request
             .system_prompt_override
             .or_else(|| thread.system_prompt().cloned());
+        let append_system_prompt = request
+            .append_system_prompt_override
+            .or_else(|| thread.append_system_prompt().cloned());
 
         run_task(
-            self.deps.model.as_ref(),
-            self.deps.store.as_ref(),
-            self.deps.tools.as_ref(),
-            self.deps.events.as_ref(),
-            &self.config,
-            system_prompt,
+            TaskRunInput {
+                model: self.deps.model.as_ref(),
+                store: self.deps.store.as_ref(),
+                router: self.deps.tools.as_ref(),
+                events: self.deps.events.as_ref(),
+                config: &self.config,
+                use_system_prompt_cache,
+                prompt_overrides: crate::prompt::SystemPromptOverrides {
+                    custom_prompt: system_prompt,
+                    append_system_prompt,
+                    cwd: thread.cwd().cloned(),
+                    current_date: None,
+                },
+            },
             run_request,
         )
         .await
@@ -186,12 +235,15 @@ where
     /// Runs a prebuilt runtime request and returns a structured success or failure payload.
     pub async fn run_outcome_request(&self, request: RunRequest) -> Result<RunOutcome> {
         run_task(
-            self.deps.model.as_ref(),
-            self.deps.store.as_ref(),
-            self.deps.tools.as_ref(),
-            self.deps.events.as_ref(),
-            &self.config,
-            None,
+            TaskRunInput {
+                model: self.deps.model.as_ref(),
+                store: self.deps.store.as_ref(),
+                router: self.deps.tools.as_ref(),
+                events: self.deps.events.as_ref(),
+                config: &self.config,
+                use_system_prompt_cache: true,
+                prompt_overrides: crate::prompt::SystemPromptOverrides::default(),
+            },
             request,
         )
         .await

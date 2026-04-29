@@ -34,6 +34,8 @@ pub struct SkillMetadata {
     pub description: String,
     /// Absolute or caller-provided path to the source `SKILL.md` file.
     pub path: PathBuf,
+    /// Hides the skill from model-visible prompt indexes while keeping it loadable by runtime code.
+    pub disable_model_invocation: bool,
 }
 
 /// Structured input used by skill mention selection without depending on the kernel crate.

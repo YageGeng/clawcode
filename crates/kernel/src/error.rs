@@ -25,14 +25,14 @@ pub enum Error {
     Runtime {
         message: String,
         stage: String,
-        inflight_snapshot: Option<ToolCallRuntimeSnapshot>,
+        inflight_snapshot: Option<Box<ToolCallRuntimeSnapshot>>,
     },
 
     #[snafu(display("tool dispatch failed on `{stage}`, {source}"))]
     Tool {
         source: tools::Error,
         stage: String,
-        inflight_snapshot: Option<ToolCallRuntimeSnapshot>,
+        inflight_snapshot: Option<Box<ToolCallRuntimeSnapshot>>,
     },
 
     #[snafu(display("skill error on `{stage}`, {source}"))]
@@ -48,7 +48,7 @@ pub enum Error {
         source: Box<Error>,
         cleanup_error: Box<Error>,
         stage: String,
-        inflight_snapshot: Option<ToolCallRuntimeSnapshot>,
+        inflight_snapshot: Option<Box<ToolCallRuntimeSnapshot>>,
     },
 }
 
@@ -61,12 +61,12 @@ impl Error {
             Self::Runtime { message, stage, .. } => Self::Runtime {
                 message,
                 stage,
-                inflight_snapshot: Some(inflight_snapshot),
+                inflight_snapshot: Some(Box::new(inflight_snapshot)),
             },
             Self::Tool { source, stage, .. } => Self::Tool {
                 source,
                 stage,
-                inflight_snapshot: Some(inflight_snapshot),
+                inflight_snapshot: Some(Box::new(inflight_snapshot)),
             },
             Self::Cleanup {
                 source,
@@ -77,7 +77,7 @@ impl Error {
                 source,
                 cleanup_error,
                 stage,
-                inflight_snapshot: Some(inflight_snapshot),
+                inflight_snapshot: Some(Box::new(inflight_snapshot)),
             },
             other => other,
         }

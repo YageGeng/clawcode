@@ -142,7 +142,6 @@ impl StreamResponseCollector {
     }
 
     /// Converts the collected stream state into the loop's iteration-specific result.
-    #[allow(clippy::result_large_err)]
     pub(super) fn build(self) -> Result<StreamIterationResult> {
         if !self.completed {
             return Err(crate::Error::Runtime {

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::{
     Result,
     context::{ToolCallRequest, ToolContext, ToolInvocation, ToolMetadata, ToolOutput},
+    spec::ToolPromptMetadata,
 };
 
 /// Defines the minimal behavior required for a tool handler.
@@ -22,12 +23,30 @@ pub trait ToolHandler: Send + Sync {
         ToolMetadata::default()
     }
 
+    /// Returns the one-line prompt snippet used in default system-prompt tool listings.
+    fn prompt_snippet(&self) -> Option<String> {
+        None
+    }
+
+    /// Returns prompt guidelines contributed by this tool to the default system prompt.
+    fn prompt_guidelines(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Builds the provider-facing tool definition.
     fn definition(&self) -> llm::completion::ToolDefinition {
         llm::completion::ToolDefinition {
             name: self.name().to_string(),
             description: self.description().to_string(),
             parameters: self.parameters(),
+        }
+    }
+
+    /// Builds prompt metadata exposed through the visible tool spec.
+    fn prompt_metadata(&self) -> ToolPromptMetadata {
+        ToolPromptMetadata {
+            prompt_snippet: self.prompt_snippet(),
+            prompt_guidelines: self.prompt_guidelines(),
         }
     }
 

@@ -5,6 +5,7 @@ use crate::{
     context::SessionTaskContext,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::AgentModel,
+    prompt::SystemPromptOverrides,
     runtime::{
         ToolCallRuntimeSnapshot,
         continuation::{AgentLoopConfig, decide_task_continuation},
@@ -15,20 +16,39 @@ use crate::{
 
 use super::{RunFailure, RunOutcome, RunRequest, RunResult};
 
+/// Bundles the stable dependencies and prompt policy used for one task execution.
+pub(crate) struct TaskRunInput<'a, M, E>
+where
+    M: AgentModel + 'static,
+    E: EventSink + 'static,
+{
+    pub(crate) model: &'a M,
+    pub(crate) store: &'a SessionTaskContext,
+    pub(crate) router: &'a ToolRouter,
+    pub(crate) events: &'a E,
+    pub(crate) config: &'a AgentLoopConfig,
+    pub(crate) use_system_prompt_cache: bool,
+    pub(crate) prompt_overrides: SystemPromptOverrides,
+}
+
 /// Executes one runtime task and wraps the inner turn result into the public outcome type.
 pub(crate) async fn run_task<M, E>(
-    model: &M,
-    store: &SessionTaskContext,
-    router: &ToolRouter,
-    events: &E,
-    config: &AgentLoopConfig,
-    system_prompt: Option<String>,
+    input: TaskRunInput<'_, M, E>,
     request: RunRequest,
 ) -> Result<RunOutcome>
 where
     M: AgentModel + 'static,
     E: EventSink + 'static,
 {
+    let TaskRunInput {
+        model,
+        store,
+        router,
+        events,
+        config,
+        use_system_prompt_cache,
+        prompt_overrides,
+    } = input;
     events
         .publish(AgentEvent::RunStarted {
             session_id: request.session_id.to_string(),
@@ -66,7 +86,8 @@ where
             config,
             TurnExecutionRequest {
                 request: turn_request.clone(),
-                system_prompt: system_prompt.clone(),
+                prompt_overrides: prompt_overrides.clone(),
+                use_system_prompt_cache,
                 next_tool_handle_sequence,
             },
         )
@@ -212,7 +233,7 @@ fn build_task_failure_outcome(
         | crate::Error::Cleanup {
             inflight_snapshot: Some(snapshot),
             ..
-        } => Some(snapshot.clone()),
+        } => Some((**snapshot).clone()),
         _ => None,
     };
     if let Some(error_snapshot) = error_snapshot {
@@ -248,7 +269,7 @@ pub(crate) async fn preserve_original_error_after_task_cleanup(
             source: Box::new(original_error),
             cleanup_error: Box::new(cleanup_error),
             stage: "runner-discard-active-turn".to_string(),
-            inflight_snapshot,
+            inflight_snapshot: inflight_snapshot.map(Box::new),
         },
     }
 }
@@ -264,7 +285,7 @@ fn extract_inflight_snapshot(error: &crate::Error) -> Option<ToolCallRuntimeSnap
         }
         | crate::Error::Cleanup {
             inflight_snapshot, ..
-        } => inflight_snapshot.clone(),
+        } => inflight_snapshot.as_deref().cloned(),
         _ => None,
     }
 }

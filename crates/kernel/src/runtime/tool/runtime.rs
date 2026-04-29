@@ -113,7 +113,7 @@ where
             crate::error::RuntimeSnafu {
                 message: format!("tool call limit exceeded: {max_tool_calls}"),
                 stage: "agent-loop-max-tool-calls".to_string(),
-                inflight_snapshot: Some(self.inflight_snapshot()),
+                inflight_snapshot: Some(Box::new(self.inflight_snapshot())),
             }
         );
 
@@ -168,7 +168,7 @@ where
             content: OneOrMany::many(assistant_content).map_err(|_| crate::Error::Runtime {
                 message: "assistant tool-call content cannot be empty".to_string(),
                 stage: "agent-loop-build-tool-call-message".to_string(),
-                inflight_snapshot: Some(self.inflight_snapshot()),
+                inflight_snapshot: Some(Box::new(self.inflight_snapshot())),
             })?,
         };
         self.store

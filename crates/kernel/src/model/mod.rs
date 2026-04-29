@@ -383,7 +383,6 @@ where
 
 impl ResponseEventMapper {
     /// Converts one upstream stream item into response events or a kernel model error.
-    #[allow(clippy::result_large_err)]
     fn map_stream_item<R>(
         &mut self,
         item: std::result::Result<StreamedAssistantContent<R>, llm::completion::CompletionError>,

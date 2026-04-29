@@ -8,6 +8,7 @@ use crate::{
     error::SkillsSnafu,
     input::{user_inputs_to_messages, user_inputs_to_skill_inputs},
     model::AgentModel,
+    prompt::{SystemPromptOverrides, build_system_prompt},
     runtime::{
         continuation::AgentLoopConfig,
         task::{RunRequest, preserve_original_error_after_task_cleanup},
@@ -20,7 +21,8 @@ use crate::{
 #[derive(Debug, Clone)]
 pub(crate) struct TurnExecutionRequest {
     pub(crate) request: RunRequest,
-    pub(crate) system_prompt: Option<String>,
+    pub(crate) prompt_overrides: SystemPromptOverrides,
+    pub(crate) use_system_prompt_cache: bool,
     pub(crate) next_tool_handle_sequence: usize,
 }
 
@@ -39,7 +41,8 @@ where
 {
     let TurnExecutionRequest {
         request,
-        system_prompt,
+        prompt_overrides,
+        use_system_prompt_cache,
         next_tool_handle_sequence,
     } = turn_request;
     let mut history = store
@@ -67,7 +70,15 @@ where
     let skill_outcome = skills::SkillsManager::new(config.skills.clone())
         .load()
         .await;
-    let system_prompt = merge_skills_into_system_prompt(system_prompt, &skill_outcome.skills);
+    let system_prompt = resolve_system_prompt(
+        store,
+        router,
+        &request,
+        &prompt_overrides,
+        &skill_outcome.skills,
+        use_system_prompt_cache,
+    )
+    .await?;
     let skill_inputs = user_inputs_to_skill_inputs(&request.inputs);
     let mention_options = skills::SkillMentionOptions::default();
     let selected_skills = skills::collect_explicit_skill_mentions(
@@ -105,17 +116,32 @@ where
     }
 }
 
-/// Appends the available-skills section to the system prompt when skills are discovered.
-fn merge_skills_into_system_prompt(
-    system_prompt: Option<String>,
+/// Resolves the effective system prompt, reusing a valid thread cache when allowed.
+async fn resolve_system_prompt(
+    store: &SessionTaskContext,
+    router: &ToolRouter,
+    request: &RunRequest,
+    prompt_overrides: &SystemPromptOverrides,
     skills: &[skills::SkillMetadata],
-) -> Option<String> {
-    let Some(skills_section) = skills::render_skills_section(skills) else {
-        return system_prompt;
-    };
+    use_system_prompt_cache: bool,
+) -> Result<Option<String>> {
+    if use_system_prompt_cache
+        && let Some(system_prompt) = store
+            .read_cached_system_prompt(request.session_id.clone(), request.thread_id.clone())
+            .await
+    {
+        return Ok(Some(system_prompt));
+    }
 
-    Some(match system_prompt {
-        Some(prompt) if !prompt.trim().is_empty() => format!("{prompt}\n\n{skills_section}"),
-        _ => skills_section,
-    })
+    let system_prompt = build_system_prompt(router, skills, prompt_overrides)?;
+    if use_system_prompt_cache && let Some(prompt) = system_prompt.clone() {
+        store
+            .save_cached_system_prompt(
+                request.session_id.clone(),
+                request.thread_id.clone(),
+                prompt,
+            )
+            .await;
+    }
+    Ok(system_prompt)
 }

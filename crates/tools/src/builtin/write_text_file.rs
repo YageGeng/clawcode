@@ -123,6 +123,10 @@ impl ToolHandler for WriteTextFileTool {
         "Write a UTF-8 text file under the configured workspace root."
     }
 
+    fn prompt_snippet(&self) -> Option<String> {
+        Some("Write complete UTF-8 text files inside the workspace.".to_string())
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

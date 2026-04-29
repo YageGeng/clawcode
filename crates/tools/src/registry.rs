@@ -98,7 +98,7 @@ impl ToolRegistryBuilder {
         supports_parallel_tool_calls: bool,
     ) {
         self.push_spec(
-            ToolSpec::function(handler.definition()),
+            ToolSpec::function_with_prompt(handler.definition(), handler.prompt_metadata()),
             supports_parallel_tool_calls,
         );
         self.register_handler(handler.name(), handler);

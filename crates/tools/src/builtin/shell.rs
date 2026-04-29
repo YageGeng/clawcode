@@ -513,6 +513,13 @@ impl ToolHandler for ExecCommandTool {
         "Run a shell command inside the workspace root. Use `tty: true` to keep the process alive and continue it with `write_stdin`."
     }
 
+    fn prompt_snippet(&self) -> Option<String> {
+        Some(
+            "Run shell commands in the workspace, optionally as an interactive session."
+                .to_string(),
+        )
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -584,6 +591,10 @@ impl ToolHandler for WriteStdinTool {
 
     fn description(&self) -> &'static str {
         "Write characters to a running `exec_command` session and fetch recent output."
+    }
+
+    fn prompt_snippet(&self) -> Option<String> {
+        Some("Continue an interactive shell session started by `exec_command`.".to_string())
     }
 
     fn parameters(&self) -> serde_json::Value {

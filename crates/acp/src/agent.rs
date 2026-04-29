@@ -327,9 +327,8 @@ where
         let session_router = self.build_session_router(params.cwd.clone()).await?;
 
         let session_id = SessionId::new();
-        let thread = ThreadHandle::new(session_id.clone(), ThreadId::new()).with_system_prompt(
-            "You are a helpful agent. Use tools when command execution or file edits are required. Keep changes inside the workspace and answer directly when no tool action is needed.",
-        );
+        let thread =
+            ThreadHandle::new(session_id.clone(), ThreadId::new()).with_cwd(params.cwd.clone());
         let session_id = session_id.to_string();
         self.sessions.insert(
             session_id.clone(),

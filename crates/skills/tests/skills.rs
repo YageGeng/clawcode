@@ -21,6 +21,7 @@ fn test_skill(name: &str, path: &str) -> SkillMetadata {
         name: name.to_string(),
         description: format!("{name} skill"),
         path: PathBuf::from(path),
+        disable_model_invocation: false,
     }
 }
 
@@ -91,12 +92,14 @@ fn render_skills_section_lists_available_skills() {
         name: "rust-error-snafu".to_string(),
         description: "Typed Rust errors.".to_string(),
         path: "/tmp/skills/rust-error-snafu/SKILL.md".into(),
+        disable_model_invocation: false,
     };
 
     let rendered = render_skills_section(&[skill]).expect("section should render");
 
-    assert!(rendered.contains("## Skills"));
-    assert!(rendered.contains("- rust-error-snafu: Typed Rust errors."));
+    assert!(rendered.contains("<available_skills>"));
+    assert!(rendered.contains("<name>rust-error-snafu</name>"));
+    assert!(rendered.contains("<description>Typed Rust errors.</description>"));
     assert!(rendered.contains("/tmp/skills/rust-error-snafu/SKILL.md"));
 }
 
@@ -107,11 +110,13 @@ fn explicit_mentions_select_unique_matching_skills() {
         name: "rust-error-snafu".to_string(),
         description: "Typed Rust errors.".to_string(),
         path: "/tmp/skills/rust-error-snafu/SKILL.md".into(),
+        disable_model_invocation: false,
     };
     let other = SkillMetadata {
         name: "other".to_string(),
         description: "Other skill.".to_string(),
         path: "/tmp/skills/other/SKILL.md".into(),
+        disable_model_invocation: false,
     };
 
     let inputs = vec![SkillInput::text(
@@ -235,6 +240,7 @@ fn structured_path_matches_relative_loaded_skill_path() {
         name: "alpha-skill".to_string(),
         description: "Alpha skill".to_string(),
         path: relative_path,
+        disable_model_invocation: false,
     };
     let inputs = vec![SkillInput::skill("alpha-skill", absolute_path)];
 
@@ -255,6 +261,7 @@ fn linked_path_matches_relative_loaded_skill_path() {
         name: "beta-skill".to_string(),
         description: "Beta skill".to_string(),
         path: relative_path,
+        disable_model_invocation: false,
     };
     let inputs = vec![SkillInput::text(format!(
         "use [$beta-skill]({})",
@@ -278,6 +285,7 @@ fn disabled_path_matches_relative_loaded_skill_path() {
         name: "gamma-skill".to_string(),
         description: "Gamma skill".to_string(),
         path: relative_path,
+        disable_model_invocation: false,
     };
     let inputs = vec![SkillInput::text("use $gamma-skill")];
     let options = SkillMentionOptions {
@@ -320,6 +328,7 @@ async fn build_skill_injections_wraps_selected_skill_contents() {
         name: "rust-error-snafu".to_string(),
         description: "Typed Rust errors.".to_string(),
         path: skill_path.clone(),
+        disable_model_invocation: false,
     }])
     .await
     .expect("injection should succeed");

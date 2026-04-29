@@ -23,4 +23,4 @@ pub use plan::{
 };
 pub use registry::{ToolRegistry, ToolRegistryBuilder};
 pub use router::ToolRouter;
-pub use spec::{ConfiguredToolSpec, ToolSpec};
+pub use spec::{ConfiguredToolSpec, ToolPromptMetadata, ToolSpec};

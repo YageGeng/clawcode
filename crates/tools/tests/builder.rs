@@ -25,6 +25,27 @@ async fn builder_controls_model_visible_definitions() {
     assert!(!names.contains(&"hidden_alias".to_string()));
 }
 
+/// Verifies prompt metadata declared by handlers is preserved on visible tool specs.
+#[tokio::test]
+async fn builder_preserves_prompt_metadata_on_visible_specs() {
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(VisibleTool));
+    let router = builder.build_router();
+
+    let spec = router
+        .find_spec("visible_tool")
+        .expect("visible tool spec should be present");
+
+    assert_eq!(
+        spec.prompt_metadata.prompt_snippet.as_deref(),
+        Some("Visible tool prompt snippet.")
+    );
+    assert_eq!(
+        spec.prompt_metadata.prompt_guidelines,
+        vec!["Visible tool prompt guideline.".to_string()]
+    );
+}
+
 /// Verifies handlers registered without a visible spec remain dispatchable by name.
 #[tokio::test]
 async fn builder_can_register_hidden_dispatch_only_handlers() {
@@ -97,6 +118,14 @@ impl ToolHandler for VisibleTool {
             },
             "required": ["text"]
         })
+    }
+
+    fn prompt_snippet(&self) -> Option<String> {
+        Some("Visible tool prompt snippet.".to_string())
+    }
+
+    fn prompt_guidelines(&self) -> Vec<String> {
+        vec!["Visible tool prompt guideline.".to_string()]
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput> {

@@ -156,7 +156,6 @@ impl InFlightToolCallRegistry {
     }
 
     /// Converts completed tool calls into executor requests by attaching the registered handles.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn execution_requests_for_calls(
         &self,
         calls: Vec<ToolCallRequest>,
@@ -174,7 +173,7 @@ impl InFlightToolCallRegistry {
                         call.id, tool_call_id
                     ),
                     stage: "agent-loop-map-tool-execution-request".to_string(),
-                    inflight_snapshot: Some(self.snapshot().into()),
+                    inflight_snapshot: Some(Box::new(self.snapshot().into())),
                 })?;
             requests.push(ToolExecutionRequest {
                 handle_id: entry.handle_id.clone(),
@@ -185,7 +184,6 @@ impl InFlightToolCallRegistry {
     }
 
     /// Updates one handle state and fails with structured context if the registry is inconsistent.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn update_state_checked(
         &mut self,
         handle_id: &str,
@@ -195,12 +193,11 @@ impl InFlightToolCallRegistry {
             .ok_or_else(|| crate::Error::Runtime {
                 message: format!("missing in-flight entry for handle `{handle_id}`"),
                 stage: "agent-loop-update-inflight-state".to_string(),
-                inflight_snapshot: Some(self.snapshot().into()),
+                inflight_snapshot: Some(Box::new(self.snapshot().into())),
             })
     }
 
     /// Updates one handle output summary and fails with structured context if the registry is inconsistent.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn update_output_summary_checked(
         &mut self,
         handle_id: &str,
@@ -210,12 +207,11 @@ impl InFlightToolCallRegistry {
             .ok_or_else(|| crate::Error::Runtime {
                 message: format!("missing in-flight entry for handle `{handle_id}`"),
                 stage: "agent-loop-update-output-summary".to_string(),
-                inflight_snapshot: Some(self.snapshot().into()),
+                inflight_snapshot: Some(Box::new(self.snapshot().into())),
             })
     }
 
     /// Updates one handle structured output and fails with structured context if the registry is inconsistent.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn update_structured_output_checked(
         &mut self,
         handle_id: &str,
@@ -225,12 +221,11 @@ impl InFlightToolCallRegistry {
             .ok_or_else(|| crate::Error::Runtime {
                 message: format!("missing in-flight entry for handle `{handle_id}`"),
                 stage: "agent-loop-update-structured-output".to_string(),
-                inflight_snapshot: Some(self.snapshot().into()),
+                inflight_snapshot: Some(Box::new(self.snapshot().into())),
             })
     }
 
     /// Updates one handle error summary and fails with structured context if the registry is inconsistent.
-    #[allow(clippy::result_large_err)]
     pub(crate) fn update_error_summary_checked(
         &mut self,
         handle_id: &str,
@@ -240,7 +235,7 @@ impl InFlightToolCallRegistry {
             .ok_or_else(|| crate::Error::Runtime {
                 message: format!("missing in-flight entry for handle `{handle_id}`"),
                 stage: "agent-loop-update-error-summary".to_string(),
-                inflight_snapshot: Some(self.snapshot().into()),
+                inflight_snapshot: Some(Box::new(self.snapshot().into())),
             })
     }
 }

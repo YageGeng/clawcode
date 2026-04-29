@@ -222,6 +222,37 @@ impl Tool for TestEchoTool {
     }
 }
 
+/// Minimal read tool used to make the skills index visible in system-prompt tests.
+struct PromptReadTool;
+
+#[async_trait]
+impl Tool for PromptReadTool {
+    fn name(&self) -> &'static str {
+        "fs/read_text_file"
+    }
+
+    fn description(&self) -> &'static str {
+        "Reads text files for prompt-assembly tests."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Unused path argument."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn handle(&self, _invocation: ToolInvocation) -> ToolResult<ToolOutput> {
+        Ok(ToolOutput::text("unused"))
+    }
+}
+
 /// Tool that blocks until the test inspects incremental session state.
 struct BlockingEchoTool {
     started: Arc<Notify>,
@@ -3660,10 +3691,9 @@ async fn runner_adds_available_skills_to_system_prompt_and_injects_explicit_ment
         usage(4),
     )]));
     let store = Arc::new(InMemorySessionStore::default());
-    let router = Arc::new(ToolRouter::new(
-        Arc::new(kernel::tools::ToolRegistry::default()),
-        Vec::new(),
-    ));
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(PromptReadTool));
+    let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runtime =
         ThreadRuntime::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
@@ -3691,8 +3721,9 @@ async fn runner_adds_available_skills_to_system_prompt_and_injects_explicit_ment
         .as_ref()
         .expect("skills should create a system prompt");
 
-    assert!(system_prompt.contains("## Skills"));
-    assert!(system_prompt.contains("- rust-error-snafu: Typed Rust errors."));
+    assert!(system_prompt.contains("<available_skills>"));
+    assert!(system_prompt.contains("<name>rust-error-snafu</name>"));
+    assert!(system_prompt.contains("<description>Typed Rust errors.</description>"));
     assert!(
         request
             .messages
@@ -3720,10 +3751,9 @@ async fn runner_lists_available_skills_without_injecting_unmentioned_skill_bodie
         usage(4),
     )]));
     let store = Arc::new(InMemorySessionStore::default());
-    let router = Arc::new(ToolRouter::new(
-        Arc::new(kernel::tools::ToolRegistry::default()),
-        Vec::new(),
-    ));
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(PromptReadTool));
+    let router = Arc::new(builder.build_router());
     let sink = Arc::new(RecordingEventSink::default());
     let runtime =
         ThreadRuntime::new(Arc::clone(&model), store, router, sink).with_config(AgentLoopConfig {
@@ -3764,6 +3794,170 @@ async fn runner_lists_available_skills_without_injecting_unmentioned_skill_bodie
             .messages
             .iter()
             .any(|message| first_user_text(message).contains("Use SNAFU context."))
+    );
+}
+
+/// Verifies one thread reuses its built system prompt until the cache is explicitly invalidated.
+#[tokio::test]
+async fn runner_reuses_cached_system_prompt_across_turns() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    fs::write(temp.path().join("AGENTS.md"), "project instructions v1").expect("AGENTS.md");
+    let model = Arc::new(RecordingModel::new(vec![
+        ModelResponse::text("first", usage(4)),
+        ModelResponse::text("second", usage(4)),
+    ]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let runtime = ThreadRuntime::new(
+        Arc::clone(&model),
+        Arc::clone(&store),
+        Arc::new(ToolRouter::new(
+            Arc::new(kernel::tools::ToolRegistry::default()),
+            Vec::new(),
+        )),
+        Arc::new(RecordingEventSink::default()),
+    );
+    let thread =
+        ThreadHandle::new(SessionId::new(), ThreadId::new()).with_cwd(temp.path().to_path_buf());
+
+    runtime
+        .run(&thread, ThreadRunRequest::new("first"))
+        .await
+        .unwrap();
+    fs::write(temp.path().join("AGENTS.md"), "project instructions v2").expect("AGENTS.md");
+    runtime
+        .run(&thread, ThreadRunRequest::new("second"))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].system_prompt, requests[1].system_prompt);
+    assert!(
+        requests[1]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("project instructions v1"))
+    );
+    assert!(
+        !requests[1]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("project instructions v2"))
+    );
+}
+
+/// Verifies invalidating a thread cache forces the next turn to rebuild the system prompt.
+#[tokio::test]
+async fn runner_rebuilds_system_prompt_after_cache_invalidation() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    fs::write(temp.path().join("AGENTS.md"), "project instructions v1").expect("AGENTS.md");
+    let model = Arc::new(RecordingModel::new(vec![
+        ModelResponse::text("first", usage(4)),
+        ModelResponse::text("second", usage(4)),
+    ]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let runtime = ThreadRuntime::new(
+        Arc::clone(&model),
+        Arc::clone(&store),
+        Arc::new(ToolRouter::new(
+            Arc::new(kernel::tools::ToolRegistry::default()),
+            Vec::new(),
+        )),
+        Arc::new(RecordingEventSink::default()),
+    );
+    let thread =
+        ThreadHandle::new(SessionId::new(), ThreadId::new()).with_cwd(temp.path().to_path_buf());
+
+    runtime
+        .run(&thread, ThreadRunRequest::new("first"))
+        .await
+        .unwrap();
+    fs::write(temp.path().join("AGENTS.md"), "project instructions v2").expect("AGENTS.md");
+    runtime.expire_system_prompt(&thread).await;
+    runtime
+        .run(&thread, ThreadRunRequest::new("second"))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("project instructions v1"))
+    );
+    assert!(
+        requests[1]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("project instructions v2"))
+    );
+}
+
+/// Verifies one-shot prompt overrides bypass the cache without replacing the cached default prompt.
+#[tokio::test]
+async fn runner_request_prompt_overrides_do_not_replace_cached_system_prompt() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    fs::write(temp.path().join("AGENTS.md"), "project instructions v1").expect("AGENTS.md");
+    let model = Arc::new(RecordingModel::new(vec![
+        ModelResponse::text("first", usage(4)),
+        ModelResponse::text("override", usage(4)),
+        ModelResponse::text("third", usage(4)),
+    ]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let runtime = ThreadRuntime::new(
+        Arc::clone(&model),
+        Arc::clone(&store),
+        Arc::new(ToolRouter::new(
+            Arc::new(kernel::tools::ToolRegistry::default()),
+            Vec::new(),
+        )),
+        Arc::new(RecordingEventSink::default()),
+    );
+    let thread =
+        ThreadHandle::new(SessionId::new(), ThreadId::new()).with_cwd(temp.path().to_path_buf());
+
+    runtime
+        .run(&thread, ThreadRunRequest::new("first"))
+        .await
+        .unwrap();
+    fs::write(temp.path().join("AGENTS.md"), "project instructions v2").expect("AGENTS.md");
+    runtime
+        .run(
+            &thread,
+            ThreadRunRequest {
+                inputs: vec![UserInput::text("override")],
+                system_prompt_override: Some("override prompt".to_string()),
+                append_system_prompt_override: None,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .run(&thread, ThreadRunRequest::new("third"))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.starts_with("override prompt"))
+    );
+    assert!(
+        requests[2]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("project instructions v1"))
+    );
+    assert!(
+        !requests[2]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("project instructions v2"))
     );
 }
 

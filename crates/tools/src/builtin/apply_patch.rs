@@ -189,6 +189,10 @@ impl ToolHandler for ApplyPatchTool {
         "Apply an OpenAI-style patch stream to files under the configured workspace root."
     }
 
+    fn prompt_snippet(&self) -> Option<String> {
+        Some("Edit workspace files by applying structured patch blocks.".to_string())
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

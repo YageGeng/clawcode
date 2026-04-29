@@ -1,13 +1,35 @@
+/// Model-visible prompt metadata associated with one tool specification.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ToolPromptMetadata {
+    pub prompt_snippet: Option<String>,
+    pub prompt_guidelines: Vec<String>,
+}
+
 /// Describes one model-visible tool specification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSpec {
     pub definition: llm::completion::ToolDefinition,
+    pub prompt_metadata: ToolPromptMetadata,
 }
 
 impl ToolSpec {
     /// Builds a function-style tool spec from an existing tool definition.
     pub fn function(definition: llm::completion::ToolDefinition) -> Self {
-        Self { definition }
+        Self {
+            definition,
+            prompt_metadata: ToolPromptMetadata::default(),
+        }
+    }
+
+    /// Builds a function-style tool spec from an existing definition plus prompt metadata.
+    pub fn function_with_prompt(
+        definition: llm::completion::ToolDefinition,
+        prompt_metadata: ToolPromptMetadata,
+    ) -> Self {
+        Self {
+            definition,
+            prompt_metadata,
+        }
     }
 
     /// Returns the stable visible tool name.

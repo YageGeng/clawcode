@@ -243,7 +243,7 @@ where
         message: format!("max iterations exceeded: {}", config.max_iterations),
         stage: "agent-loop-max-iterations".to_string(),
         inflight_snapshot: (!final_inflight_snapshot.entries.is_empty())
-            .then_some(final_inflight_snapshot),
+            .then_some(Box::new(final_inflight_snapshot)),
     }
     .fail()
 }

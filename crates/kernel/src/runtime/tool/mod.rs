@@ -45,7 +45,7 @@ where
         crate::error::RuntimeSnafu {
             message: format!("tool call limit exceeded: {}", config.max_tool_calls),
             stage: "agent-loop-max-tool-calls".to_string(),
-            inflight_snapshot: Some(in_flight.snapshot().into()),
+            inflight_snapshot: Some(Box::new(in_flight.snapshot().into())),
         }
     );
 

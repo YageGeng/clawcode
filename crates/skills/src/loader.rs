@@ -109,11 +109,14 @@ async fn parse_skill_file(path: &Path) -> std::result::Result<SkillMetadata, Str
     let frontmatter = extract_frontmatter(&contents)?;
     let name = extract_frontmatter_field(&frontmatter, "name")?;
     let description = extract_frontmatter_field(&frontmatter, "description")?;
+    let disable_model_invocation =
+        extract_optional_bool_field(&frontmatter, "disableModelInvocation")?;
 
     Ok(SkillMetadata {
         name,
         description,
         path: path.to_path_buf(),
+        disable_model_invocation,
     })
 }
 
@@ -157,4 +160,25 @@ fn extract_frontmatter_field(
     }
 
     Err(format!("missing field `{field}`"))
+}
+
+/// Parses an optional boolean frontmatter field, defaulting to false when absent.
+fn extract_optional_bool_field(
+    frontmatter: &str,
+    field: &str,
+) -> std::result::Result<bool, String> {
+    for line in frontmatter.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() == field {
+            return match value.trim() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                other => Err(format!("invalid boolean for `{field}`: {other}")),
+            };
+        }
+    }
+
+    Ok(false)
 }

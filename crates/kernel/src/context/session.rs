@@ -14,6 +14,7 @@ use llm::{completion::Message, usage::Usage};
 struct SessionThreadState {
     history: ContextManager,
     continuations: Vec<SessionContinuationRequest>,
+    cached_system_prompt: Option<String>,
 }
 
 /// Stable session-scoped state used by turn/task execution.
@@ -76,6 +77,39 @@ impl SessionTaskContext {
         let mut threads = self.threads.write().await;
         let thread = threads.entry((session_id, thread_id)).or_default();
         thread.continuations.push(continuation);
+    }
+
+    /// Returns the cached system prompt for one thread when it is still valid.
+    pub async fn read_cached_system_prompt(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Option<String> {
+        let threads = self.threads.read().await;
+        threads
+            .get(&(session_id, thread_id))
+            .and_then(|thread| thread.cached_system_prompt.clone())
+    }
+
+    /// Stores one rebuilt system prompt for reuse by later turns on the same thread.
+    pub async fn save_cached_system_prompt(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        system_prompt: String,
+    ) {
+        let mut threads = self.threads.write().await;
+        let thread = threads.entry((session_id, thread_id)).or_default();
+
+        thread.cached_system_prompt = Some(system_prompt);
+    }
+
+    /// Invalidates the cached system prompt so the next turn must rebuild it.
+    pub async fn expire_system_prompt(&self, session_id: SessionId, thread_id: ThreadId) {
+        let mut threads = self.threads.write().await;
+        if let Some(thread) = threads.get_mut(&(session_id, thread_id)) {
+            thread.cached_system_prompt = None;
+        }
     }
 
     /// Drains the oldest queued continuation request, if one exists.
