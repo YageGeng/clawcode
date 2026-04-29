@@ -82,4 +82,33 @@ impl Error {
             other => other,
         }
     }
+
+    /// Returns the user-facing failure text that should be surfaced to models and CLI clients.
+    pub fn display_message(&self) -> String {
+        match self {
+            Self::Tool { source, .. } => source.display_message(),
+            _ => self.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    /// Verifies kernel tool errors delegate user-facing text to the inner tool error.
+    #[test]
+    fn display_message_uses_inner_tool_error_message() {
+        let error = Error::Tool {
+            source: tools::Error::ToolExecution {
+                tool: "apply_patch".to_string(),
+                message: "missing Begin/End markers".to_string(),
+                stage: "apply-patch-parse".to_string(),
+            },
+            stage: "dispatch-tool".to_string(),
+            inflight_snapshot: None,
+        };
+
+        assert_eq!(error.display_message(), "missing Begin/End markers");
+    }
 }

@@ -274,7 +274,7 @@ impl ToolExecutor {
         request: &ToolExecutionRequest,
         error: &crate::Error,
     ) -> ToolExecutionResult {
-        let output = ToolOutput::failure(error.to_string());
+        let output = ToolOutput::failure(error.display_message());
         ToolExecutionResult {
             handle_id: request.handle_id.clone(),
             call: request.call.clone(),

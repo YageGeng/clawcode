@@ -441,10 +441,7 @@ async fn execute_queue_report_separates_failed_response_from_completed_results()
             .and_then(|value| value.as_bool())
             .is_some_and(|value| !value)
     );
-    assert_eq!(
-        failure_result.output.text,
-        "tool dispatch failed on `dispatch-tool`, runtime error on `failing-echo-handle`: failing tool invocation"
-    );
+    assert_eq!(failure_result.output.text, "failing tool invocation");
     assert_eq!(
         failure_result
             .output
@@ -453,8 +450,6 @@ async fn execute_queue_report_separates_failed_response_from_completed_results()
             .get("error")
             .and_then(|error| error.get("message"))
             .and_then(|message| message.as_str()),
-        Some(
-            "tool dispatch failed on `dispatch-tool`, runtime error on `failing-echo-handle`: failing tool invocation"
-        )
+        Some("failing tool invocation")
     );
 }
