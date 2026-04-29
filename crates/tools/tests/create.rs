@@ -8,16 +8,14 @@ use std::{
     process::id,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tools::create::create_file_tool_router_with_root;
 use tools::{
-    ToolCallRequest, ToolContext, ToolHandlerKind, build_default_tool_registry_plan,
-    create_default_tool_router,
+    ToolCallRequest, ToolContext, ToolHandlerKind, ToolRouter, build_default_tool_registry_plan,
 };
 
 /// Verifies the extracted tools crate exposes the default patch and shell tools.
 #[tokio::test]
 async fn default_router_exposes_file_tools() {
-    let router = create_default_tool_router().await;
+    let router = ToolRouter::from_path(".").await;
     let names = router
         .definitions()
         .await
@@ -64,11 +62,27 @@ fn default_tool_registry_plan_contains_specs_and_handlers() {
     );
 }
 
+/// Verifies the default tool plan preserves prompt metadata for builtin visible specs.
+#[test]
+fn default_tool_registry_plan_preserves_prompt_metadata() {
+    let plan = build_default_tool_registry_plan(temp_root("plan-prompt-metadata"));
+    let read_spec = plan
+        .specs
+        .iter()
+        .find(|configured| configured.name() == "fs/read_text_file")
+        .expect("read_text_file spec should exist");
+
+    assert_eq!(
+        read_spec.spec.prompt_metadata.prompt_snippet.as_deref(),
+        Some("Read UTF-8 text files from the workspace.")
+    );
+}
+
 /// Verifies the built-in shell tool can run a one-shot command.
 #[tokio::test]
 async fn exec_command_runs_a_one_shot_shell_command() {
     let root = temp_root("exec-command-one-shot");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -93,7 +107,7 @@ async fn exec_command_runs_a_one_shot_shell_command() {
 #[tokio::test]
 async fn exec_command_accepts_workspace_absolute_workdir() {
     let root = temp_root("exec-command-absolute-workdir");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -120,7 +134,7 @@ async fn exec_command_accepts_workspace_absolute_workdir() {
 async fn exec_command_rejects_workspace_absolute_workdir_outside_root() {
     let root = temp_root("exec-command-absolute-workdir-inside");
     let outside = temp_root("exec-command-absolute-workdir-outside");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let error = router
         .dispatch(
@@ -149,7 +163,7 @@ async fn exec_command_rejects_workspace_absolute_workdir_outside_root() {
 #[tokio::test]
 async fn exec_command_intercepts_apply_patch_shell_command() {
     let root = temp_root("exec-command-apply-patch");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -182,7 +196,7 @@ async fn exec_command_does_not_intercept_apply_patch_with_trailing_commands() {
         &root.join("apply_patch"),
         "#!/bin/sh\ncat >/dev/null\nprintf 'hello from shell interception\\n' > via-shell.txt\n",
     );
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -214,7 +228,7 @@ async fn exec_command_rejects_apply_patch_cd_symlink_escaping_workspace() {
     let root = temp_root("exec-command-apply-patch-symlink-escape");
     let outside = temp_root("exec-command-apply-patch-symlink-outside");
     unix_fs::symlink(&outside, root.join("escape")).unwrap();
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let error = router
         .dispatch(
@@ -243,7 +257,7 @@ async fn exec_command_rejects_apply_patch_cd_symlink_escaping_workspace() {
 #[tokio::test]
 async fn write_stdin_continues_a_shell_session() {
     let root = temp_root("exec-command-session");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let exec_output = router
         .dispatch(
@@ -290,7 +304,7 @@ async fn write_stdin_continues_a_shell_session() {
 #[tokio::test]
 async fn write_stdin_rejects_completed_session_ids() {
     let root = temp_root("exec-command-session-cleanup");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let exec_output = router
         .dispatch(
@@ -352,7 +366,7 @@ async fn write_stdin_rejects_completed_session_ids() {
 #[tokio::test]
 async fn apply_patch_adds_a_file() {
     let root = temp_root("apply-patch-add");
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -380,7 +394,7 @@ async fn apply_patch_adds_a_file() {
 async fn apply_patch_updates_a_file() {
     let root = temp_root("apply-patch-update");
     fs::write(root.join("note.txt"), "hello\ntools\n").unwrap();
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -408,7 +422,7 @@ async fn apply_patch_updates_a_file() {
 async fn apply_patch_deletes_a_file() {
     let root = temp_root("apply-patch-delete");
     fs::write(root.join("note.txt"), "hello\ntools\n").unwrap();
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -433,7 +447,7 @@ async fn apply_patch_deletes_a_file() {
 async fn apply_patch_moves_a_file() {
     let root = temp_root("apply-patch-move");
     fs::write(root.join("from.txt"), "hello\ntools\n").unwrap();
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(
@@ -462,7 +476,7 @@ async fn apply_patch_moves_a_file() {
 async fn apply_patch_ignores_move_to_when_source_equals_target() {
     let root = temp_root("apply-patch-move-same-path");
     fs::write(root.join("same.txt"), "hello\ntools\n").unwrap();
-    let router = create_file_tool_router_with_root(&root).await;
+    let router = ToolRouter::from_path(&root).await;
 
     let output = router
         .dispatch(

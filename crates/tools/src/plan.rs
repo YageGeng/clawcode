@@ -91,20 +91,41 @@ pub fn build_default_tool_registry_plan(root_dir: impl AsRef<Path>) -> ToolRegis
     let mut plan = ToolRegistryPlan::new();
 
     let read_text_file = ReadTextFileTool::new(root_dir);
-    plan.push_spec(ToolSpec::function(read_text_file.definition()), false);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(
+            read_text_file.definition(),
+            read_text_file.prompt_metadata(),
+        ),
+        false,
+    );
     plan.register_handler(read_text_file.name(), ToolHandlerKind::ReadTextFile);
     let write_text_file = WriteTextFileTool::new(root_dir);
-    plan.push_spec(ToolSpec::function(write_text_file.definition()), false);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(
+            write_text_file.definition(),
+            write_text_file.prompt_metadata(),
+        ),
+        false,
+    );
     plan.register_handler(write_text_file.name(), ToolHandlerKind::WriteTextFile);
     let apply_patch = ApplyPatchTool::new(root_dir);
-    plan.push_spec(ToolSpec::function(apply_patch.definition()), false);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(apply_patch.definition(), apply_patch.prompt_metadata()),
+        false,
+    );
     plan.register_handler(apply_patch.name(), ToolHandlerKind::ApplyPatch);
     let shell_runtime = Arc::new(UnifiedExecRuntime::new(root_dir));
     let exec_command = ExecCommandTool::new(Arc::clone(&shell_runtime));
-    plan.push_spec(ToolSpec::function(exec_command.definition()), true);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(exec_command.definition(), exec_command.prompt_metadata()),
+        true,
+    );
     plan.register_handler(exec_command.name(), ToolHandlerKind::ExecCommand);
     let write_stdin = WriteStdinTool::new(shell_runtime);
-    plan.push_spec(ToolSpec::function(write_stdin.definition()), false);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(write_stdin.definition(), write_stdin.prompt_metadata()),
+        false,
+    );
     plan.register_handler(write_stdin.name(), ToolHandlerKind::WriteStdin);
 
     plan

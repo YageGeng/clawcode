@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use crate::{
     Result,
     context::{ToolCallRequest, ToolContext, ToolInvocation, ToolOutput},
     error::{MissingToolSnafu, ToolApprovalRequiredSnafu, ToolTimeoutSnafu},
+    plan::build_default_tool_registry_plan,
     registry::ToolRegistry,
     spec::{ConfiguredToolSpec, ToolSpec},
 };
@@ -16,6 +17,13 @@ pub struct ToolRouter {
 }
 
 impl ToolRouter {
+    /// Builds the default local tool router rooted at the provided workspace path.
+    pub async fn from_path(root_dir: impl Into<PathBuf>) -> Self {
+        let root_dir = root_dir.into();
+        let plan = build_default_tool_registry_plan(&root_dir);
+        plan.build_builder(&root_dir).build_router()
+    }
+
     /// Builds a router from a pre-registered tool registry.
     pub fn new(registry: Arc<ToolRegistry>, specs: Vec<ConfiguredToolSpec>) -> Self {
         Self { registry, specs }

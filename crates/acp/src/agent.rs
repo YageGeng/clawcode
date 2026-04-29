@@ -351,9 +351,7 @@ where
 
         // For stdio server sessions (or any non-client wrapped router), rebuild tools against the
         // supplied session cwd so exec/patch/read/write operations are rooted correctly.
-        Ok(Arc::new(
-            tools::create::create_file_tool_router_with_root(cwd).await,
-        ))
+        Ok(Arc::new(ToolRouter::from_path(cwd).await))
     }
 
     /// Runs one ACP prompt turn through the kernel runtime and streams `session/update` events.

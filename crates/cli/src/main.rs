@@ -5,7 +5,7 @@ use std::{env, fs::OpenOptions, io, sync::Arc};
 use config::AppConfig;
 use kernel::{model::FactoryLlmAgentModel, session::InMemorySessionStore};
 use llm::providers::LlmModelFactory;
-use tools::create::create_default_tool_router;
+use tools::ToolRouter;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let model = Arc::new(build_agent_model(&config)?);
     let store = Arc::new(InMemorySessionStore::default());
-    let router = Arc::new(create_default_tool_router().await);
+    let router = Arc::new(ToolRouter::from_path(".").await);
     let skills = config.skills.to_skill_config();
     let tool_approval_profile = config.approval.to_tool_approval_profile();
 

@@ -2,7 +2,6 @@
 
 pub mod builtin;
 pub mod context;
-pub mod create;
 pub mod error;
 pub mod handler;
 pub mod plan;
@@ -15,7 +14,6 @@ pub use context::{
     ToolApprovalProfile, ToolApprovalRequest, ToolCallRequest, ToolContext, ToolInvocation,
     ToolMetadata, ToolOutput, ToolPayload,
 };
-pub use create::{create_default_tool_router, create_file_tool_router_with_root};
 pub use error::{Error, Result};
 pub use handler::ToolHandler;
 pub use plan::{

@@ -1059,7 +1059,7 @@ mod tests {
     async fn router_exposes_acp_filesystem_tools() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
         let file_path = workspace.path().join("tool-created.txt");
-        let router = tools::create_file_tool_router_with_root(workspace.path()).await;
+        let router = tools::ToolRouter::from_path(workspace.path()).await;
 
         let definitions = router.definitions().await;
         let definition_names = definitions
