@@ -412,8 +412,8 @@ impl ToolHandler for ApplyPatchTool {
         "Apply a structured patch that can add, delete, update, or move workspace files."
     }
 
-    fn prompt_snippet(&self) -> Option<String> {
-        Some("Edit workspace files by applying structured patch blocks.".to_string())
+    fn prompt_snippet(&self) -> Option<&'static str> {
+        Some("Edit workspace files by applying structured patch blocks.")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -724,7 +724,7 @@ fn seek_sequence(
     is_end_of_file: bool,
 ) -> Option<usize> {
     let trimmed_pattern = trim_trailing_empty_lines(pattern);
-    let candidates = [pattern, trimmed_pattern.as_slice()];
+    let candidates = [pattern, trimmed_pattern];
     let comparators = [
         LineComparator::Exact,
         LineComparator::TrimEnd,
@@ -815,17 +815,18 @@ fn compare_lines(left: &str, right: &str, comparator: LineComparator) -> bool {
 
 /// Normalizes the limited Unicode punctuation set defined by the patch spec.
 fn normalize_unicode(input: &str) -> String {
-    input
-        .chars()
-        .map(|character| match character {
-            '‘' | '’' | '‚' | '‛' => '\'',
-            '“' | '”' | '„' | '‟' => '"',
-            '‐' | '‑' | '‒' | '–' | '—' | '―' => '-',
-            '\u{00A0}' => ' ',
-            _ => character,
-        })
-        .collect::<String>()
-        .replace('…', "...")
+    let mut result = String::with_capacity(input.len());
+    for character in input.chars() {
+        match character {
+            '…' => result.push_str("..."),
+            '‘' | '’' | '‚' | '‛' => result.push('\''),
+            '“' | '”' | '„' | '‟' => result.push('"'),
+            '‐' | '‑' | '‒' | '–' | '—' | '―' => result.push('-'),
+            '\u{00A0}' => result.push(' '),
+            other => result.push(other),
+        }
+    }
+    result
 }
 
 /// Validates a relative workspace path and rejects traversal before path resolution.
@@ -903,12 +904,12 @@ fn ensure_trailing_newline(contents: &str) -> String {
 }
 
 /// Removes trailing empty lines before the fallback sequence search retries.
-fn trim_trailing_empty_lines(lines: &[String]) -> Vec<String> {
+fn trim_trailing_empty_lines(lines: &[String]) -> &[String] {
     let mut end = lines.len();
     while end > 0 && lines[end - 1].is_empty() {
         end -= 1;
     }
-    lines[..end].to_vec()
+    &lines[..end]
 }
 
 /// Counts additions and deletions directly from the parsed chunks.

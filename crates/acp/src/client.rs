@@ -1107,7 +1107,7 @@ mod tests {
         let file_path = workspace.path().join("tool-created.txt");
         let router = tools::ToolRouter::from_path(workspace.path()).await;
 
-        let definitions = router.definitions().await;
+        let definitions = router.definitions();
         let definition_names = definitions
             .iter()
             .map(|definition| definition.name.as_str())

@@ -1,8 +1,8 @@
 /// Model-visible prompt metadata associated with one tool specification.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ToolPromptMetadata {
-    pub prompt_snippet: Option<String>,
-    pub prompt_guidelines: Vec<String>,
+    pub prompt_snippet: Option<&'static str>,
+    pub prompt_guidelines: &'static [&'static str],
 }
 
 /// Describes one model-visible tool specification.

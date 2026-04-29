@@ -16,7 +16,6 @@ async fn builder_controls_model_visible_definitions() {
     let router = builder.build_router();
     let names = router
         .definitions()
-        .await
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
@@ -37,7 +36,7 @@ async fn builder_preserves_prompt_metadata_on_visible_specs() {
         .expect("visible tool spec should be present");
 
     assert_eq!(
-        spec.prompt_metadata.prompt_snippet.as_deref(),
+        spec.prompt_metadata.prompt_snippet,
         Some("Visible tool prompt snippet.")
     );
     assert_eq!(
@@ -121,12 +120,12 @@ impl ToolHandler for VisibleTool {
         })
     }
 
-    fn prompt_snippet(&self) -> Option<String> {
-        Some("Visible tool prompt snippet.".to_string())
+    fn prompt_snippet(&self) -> Option<&'static str> {
+        Some("Visible tool prompt snippet.")
     }
 
-    fn prompt_guidelines(&self) -> Vec<String> {
-        vec!["Visible tool prompt guideline.".to_string()]
+    fn prompt_guidelines(&self) -> &'static [&'static str] {
+        &["Visible tool prompt guideline."]
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput> {

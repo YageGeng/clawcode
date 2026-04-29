@@ -12,6 +12,8 @@ use crate::spec::{ConfiguredToolSpec, ToolSpec};
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn ToolHandler>>>,
+    /// Maps normalized tool names to handlers for O(1) alias resolution.
+    aliases: RwLock<HashMap<String, Arc<dyn ToolHandler>>>,
 }
 
 impl ToolRegistry {
@@ -23,31 +25,28 @@ impl ToolRegistry {
         self.register_arc(Arc::new(tool)).await;
     }
 
-    /// Registers a shared tool instance.
+    /// Registers a shared tool instance and its normalized-name alias.
     pub async fn register_arc(&self, tool: Arc<dyn ToolHandler>) {
-        self.tools
+        let name = tool.name().to_string();
+        let normalized = normalize_tool_name_for_lookup(&name);
+        self.aliases
             .write()
             .await
-            .insert(tool.name().to_string(), tool);
+            .insert(normalized, Arc::clone(&tool));
+        self.tools.write().await.insert(name, tool);
     }
 
     /// Looks up a tool by its stable name or sanitized alias.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
-        let normalized_name = normalize_tool_name_for_lookup(name);
         let tools = self.tools.read().await;
-
         if let Some(tool) = tools.get(name) {
             return Some(tool.clone());
         }
+        // Release tools read lock before acquiring aliases lock.
+        drop(tools);
 
-        // Normalize names so `fs_read_text_file` still resolves to `fs/read_text_file`.
-        for tool in tools.values() {
-            if normalize_tool_name_for_lookup(tool.name()) == normalized_name {
-                return Some(tool.clone());
-            }
-        }
-
-        None
+        let normalized = normalize_tool_name_for_lookup(name);
+        self.aliases.read().await.get(&normalized).cloned()
     }
 
     /// Returns sorted tool definitions that can be exposed to the model.
@@ -88,7 +87,7 @@ impl ToolRegistryBuilder {
 
     /// Pushes a visible tool spec while also registering the same handler for dispatch.
     pub fn push_handler_spec(&mut self, handler: Arc<dyn ToolHandler>) {
-        self.push_configured_handler_spec(handler, /*supports_parallel_tool_calls*/ false);
+        self.push_configured_handler_spec(handler, false);
     }
 
     /// Pushes a visible tool spec with explicit parallel support metadata.
@@ -111,17 +110,22 @@ impl ToolRegistryBuilder {
     }
 
     /// Registers a handler under an explicit dispatch name.
-    pub fn register_handler(&mut self, name: impl Into<String>, handler: Arc<dyn ToolHandler>) {
-        let name = name.into();
-        if self.handlers.insert(name.clone(), handler).is_some() {
+    pub fn register_handler(&mut self, name: &str, handler: Arc<dyn ToolHandler>) {
+        if self.handlers.insert(name.to_string(), handler).is_some() {
             warn!("overwriting handler for tool {name}");
         }
     }
 
     /// Finalizes the builder into a router that owns visible specs plus dispatch handlers.
     pub fn build_router(self) -> ToolRouter {
+        let mut aliases = HashMap::new();
+        for (name, handler) in &self.handlers {
+            let normalized = normalize_tool_name_for_lookup(name);
+            aliases.insert(normalized, Arc::clone(handler));
+        }
         let registry = Arc::new(ToolRegistry {
             tools: RwLock::new(self.handlers),
+            aliases: RwLock::new(aliases),
         });
         ToolRouter::new(registry, self.specs)
     }

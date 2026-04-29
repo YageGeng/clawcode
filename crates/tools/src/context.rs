@@ -281,15 +281,16 @@ impl StructuredToolOutput {
                 "success": success,
                 "error": error,
             }),
-            Self::ReadTextFile(output) => serde_json::to_value(output)
-                .expect("read-text-file structured tool output should serialize"),
-            Self::WriteTextFile(output) => serde_json::to_value(output)
-                .expect("write-text-file structured tool output should serialize"),
-            Self::Shell(output) => {
-                serde_json::to_value(output).expect("shell structured tool output should serialize")
+            Self::ReadTextFile(output) => {
+                serde_json::to_value(output).unwrap_or(serde_json::Value::Null)
             }
-            Self::ApplyPatch(output) => serde_json::to_value(output)
-                .expect("apply-patch structured tool output should serialize"),
+            Self::WriteTextFile(output) => {
+                serde_json::to_value(output).unwrap_or(serde_json::Value::Null)
+            }
+            Self::Shell(output) => serde_json::to_value(output).unwrap_or(serde_json::Value::Null),
+            Self::ApplyPatch(output) => {
+                serde_json::to_value(output).unwrap_or(serde_json::Value::Null)
+            }
             Self::Json(value) => value.clone(),
         }
     }

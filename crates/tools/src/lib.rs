@@ -18,9 +18,7 @@ pub use context::{
 };
 pub use error::{Error, Result};
 pub use handler::ToolHandler;
-pub use plan::{
-    PlannedToolHandler, ToolHandlerKind, ToolRegistryPlan, build_default_tool_registry_plan,
-};
+pub use plan::{PlannedToolHandler, ToolRegistryPlan, build_default_tool_registry_plan};
 pub use registry::{ToolRegistry, ToolRegistryBuilder};
 pub use router::ToolRouter;
 pub use spec::{ConfiguredToolSpec, ToolPromptMetadata, ToolSpec};

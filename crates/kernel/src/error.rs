@@ -86,7 +86,7 @@ impl Error {
     /// Returns the user-facing failure text that should be surfaced to models and CLI clients.
     pub fn display_message(&self) -> String {
         match self {
-            Self::Tool { source, .. } => source.display_message(),
+            Self::Tool { source, .. } => source.display_message().into_owned(),
             _ => self.to_string(),
         }
     }

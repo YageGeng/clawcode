@@ -258,7 +258,6 @@ fn render_tools_section(router: &ToolRouter) -> String {
                 .spec
                 .prompt_metadata
                 .prompt_snippet
-                .as_ref()
                 .map(|snippet| format!("- {}: {}", configured.spec.name(), snippet))
         })
         .collect::<Vec<_>>();
@@ -277,8 +276,8 @@ fn render_tools_section(router: &ToolRouter) -> String {
 fn render_guidelines_section(router: &ToolRouter) -> String {
     let mut guidelines = derive_guidelines_from_tools(router);
     for configured in router.specs() {
-        for guideline in &configured.spec.prompt_metadata.prompt_guidelines {
-            push_unique_line(&mut guidelines, guideline.clone());
+        for guideline in configured.spec.prompt_metadata.prompt_guidelines {
+            push_unique_line(&mut guidelines, (*guideline).to_string());
         }
     }
     push_unique_line(&mut guidelines, "Be concise in your responses".to_string());
@@ -605,8 +604,8 @@ mod tests {
             "Prompt test tool."
         }
 
-        fn prompt_snippet(&self) -> Option<String> {
-            Some("Prompt test snippet.".to_string())
+        fn prompt_snippet(&self) -> Option<&'static str> {
+            Some("Prompt test snippet.")
         }
 
         fn parameters(&self) -> serde_json::Value {

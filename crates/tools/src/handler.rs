@@ -24,13 +24,13 @@ pub trait ToolHandler: Send + Sync {
     }
 
     /// Returns the one-line prompt snippet used in default system-prompt tool listings.
-    fn prompt_snippet(&self) -> Option<String> {
+    fn prompt_snippet(&self) -> Option<&'static str> {
         None
     }
 
     /// Returns prompt guidelines contributed by this tool to the default system prompt.
-    fn prompt_guidelines(&self) -> Vec<String> {
-        Vec::new()
+    fn prompt_guidelines(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Builds the provider-facing tool definition.

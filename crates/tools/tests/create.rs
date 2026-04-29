@@ -8,9 +8,7 @@ use std::{
     process::id,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tools::{
-    ToolCallRequest, ToolContext, ToolHandlerKind, ToolRouter, build_default_tool_registry_plan,
-};
+use tools::{ToolCallRequest, ToolContext, ToolRouter, build_default_tool_registry_plan};
 
 /// Verifies the extracted tools crate exposes the default patch and shell tools.
 #[tokio::test]
@@ -18,7 +16,6 @@ async fn default_router_exposes_file_tools() {
     let router = ToolRouter::from_path(".").await;
     let names = router
         .definitions()
-        .await
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
@@ -40,7 +37,7 @@ fn default_tool_registry_plan_contains_specs_and_handlers() {
     let handler_names = plan
         .handlers
         .iter()
-        .map(|handler| handler.name.clone())
+        .map(|planned| planned.handler.name().to_string())
         .collect::<Vec<_>>();
 
     assert!(spec_names.contains(&"apply_patch".to_string()));
@@ -48,17 +45,17 @@ fn default_tool_registry_plan_contains_specs_and_handlers() {
     assert!(
         plan.handlers
             .iter()
-            .any(|handler| handler.kind == ToolHandlerKind::ApplyPatch)
+            .any(|planned| planned.handler.name() == "apply_patch")
     );
     assert!(
         plan.handlers
             .iter()
-            .any(|handler| handler.kind == ToolHandlerKind::ExecCommand)
+            .any(|planned| planned.handler.name() == "exec_command")
     );
     assert!(
         plan.handlers
             .iter()
-            .any(|handler| handler.kind == ToolHandlerKind::WriteStdin)
+            .any(|planned| planned.handler.name() == "write_stdin")
     );
 }
 
@@ -73,7 +70,7 @@ fn default_tool_registry_plan_preserves_prompt_metadata() {
         .expect("read_text_file spec should exist");
 
     assert_eq!(
-        read_spec.spec.prompt_metadata.prompt_snippet.as_deref(),
+        read_spec.spec.prompt_metadata.prompt_snippet,
         Some("Read UTF-8 text files from the workspace.")
     );
 }

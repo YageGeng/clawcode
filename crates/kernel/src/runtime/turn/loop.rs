@@ -92,7 +92,7 @@ where
     for iteration in 1..=config.max_iterations {
         // Recompute tool definitions for each iteration so dynamic tool routing
         // changes are reflected before the next model request is issued.
-        let tool_definitions = router.definitions().await;
+        let tool_definitions = router.definitions();
         events
             .publish(AgentEvent::StatusUpdated {
                 stage: AgentStage::ModelRequesting,

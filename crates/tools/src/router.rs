@@ -29,13 +29,13 @@ impl ToolRouter {
         Self { registry, specs }
     }
 
-    /// Returns the shared registry backing this router.
-    pub fn registry(&self) -> Arc<ToolRegistry> {
-        Arc::clone(&self.registry)
+    /// Returns a reference to the registry backing this router.
+    pub fn registry(&self) -> &Arc<ToolRegistry> {
+        &self.registry
     }
 
     /// Returns the model-visible tool definitions for this router.
-    pub async fn definitions(&self) -> Vec<llm::completion::ToolDefinition> {
+    pub fn definitions(&self) -> Vec<llm::completion::ToolDefinition> {
         let mut definitions = self
             .specs
             .iter()

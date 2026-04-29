@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tool_approval_profile = config.approval.to_tool_approval_profile();
 
     info!(
-        tool_count = router.definitions().await.len(),
+        tool_count = router.definitions().len(),
         "registered default tools through the extracted tools crate"
     );
 

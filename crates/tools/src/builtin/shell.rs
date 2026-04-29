@@ -320,16 +320,16 @@ impl UnifiedExecRuntime {
             return ApplyPatchTool::new(&patch_workdir).apply_patch_text(&intercepted.patch);
         }
 
-        let shell = args.shell.unwrap_or_else(default_shell);
+        let shell = args.shell.as_deref().unwrap_or(default_shell());
         let login = args.login.unwrap_or(false);
         let yield_time = Duration::from_millis(args.yield_time_ms.unwrap_or(DEFAULT_YIELD_TIME_MS));
 
         if args.tty.unwrap_or(false) {
             self.manager
-                .spawn_session(tool, &shell, login, &workdir, &args.cmd, yield_time)
+                .spawn_session(tool, shell, login, &workdir, &args.cmd, yield_time)
                 .await
         } else {
-            self.run_one_shot(tool, &shell, login, &workdir, &args.cmd)
+            self.run_one_shot(tool, shell, login, &workdir, &args.cmd)
                 .await
         }
     }
@@ -515,11 +515,8 @@ impl ToolHandler for ExecCommandTool {
         "Run a shell command inside the workspace root. Use `tty: true` to keep the process alive and continue it with `write_stdin`."
     }
 
-    fn prompt_snippet(&self) -> Option<String> {
-        Some(
-            "Run shell commands in the workspace, optionally as an interactive session."
-                .to_string(),
-        )
+    fn prompt_snippet(&self) -> Option<&'static str> {
+        Some("Run shell commands in the workspace, optionally as an interactive session.")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -595,8 +592,8 @@ impl ToolHandler for WriteStdinTool {
         "Write characters to a running `exec_command` session and fetch recent output."
     }
 
-    fn prompt_snippet(&self) -> Option<String> {
-        Some("Continue an interactive shell session started by `exec_command`.".to_string())
+    fn prompt_snippet(&self) -> Option<&'static str> {
+        Some("Continue an interactive shell session started by `exec_command`.")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -773,8 +770,8 @@ fn render_shell_text(
 }
 
 /// Returns the default shell binary used when the caller does not specify one.
-fn default_shell() -> String {
-    "/bin/sh".to_string()
+const fn default_shell() -> &'static str {
+    "/bin/sh"
 }
 
 #[cfg(test)]

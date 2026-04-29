@@ -105,8 +105,8 @@ impl ToolHandler for ReadTextFileTool {
         "Read a UTF-8 text file under the configured workspace root."
     }
 
-    fn prompt_snippet(&self) -> Option<String> {
-        Some("Read UTF-8 text files from the workspace.".to_string())
+    fn prompt_snippet(&self) -> Option<&'static str> {
+        Some("Read UTF-8 text files from the workspace.")
     }
 
     fn parameters(&self) -> serde_json::Value {
