@@ -366,6 +366,10 @@ where
 {
     let mut line = String::new();
 
+    // Trigger session/load (or session/new) early so history is displayed
+    // before the first prompt marker.
+    client.ensure_session().await?;
+
     loop {
         client.write_prompt_marker().map_err(acp_io_error)?;
 
@@ -755,7 +759,11 @@ impl CliRenderer {
                     _ => {}
                 }
             }
-            official_acp::SessionUpdate::UserMessageChunk(_) => {}
+            official_acp::SessionUpdate::UserMessageChunk(chunk) => {
+                if let Some(text) = content_chunk_text(&chunk) {
+                    self.write_status_line(&format!("[user] {text}"))?;
+                }
+            }
             _ => {}
         }
         Ok(())

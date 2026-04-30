@@ -19,6 +19,10 @@ use kernel::{
         router::ToolRouter,
     },
 };
+use llm::completion::{
+    Message,
+    message::{AssistantContent, UserContent},
+};
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::Mutex as AsyncMutex;
@@ -213,10 +217,14 @@ where
             .on_receive_request(
                 async move |request: official_acp::LoadSessionRequest,
                             responder: Responder<official_acp::LoadSessionResponse>,
-                            _connection: ConnectionTo<OfficialClient>| {
+                            connection: ConnectionTo<OfficialClient>| {
+                    let session_id = request.session_id.to_string();
                     let mut agent = session_load_state.lock().await;
                     match agent.handle_session_load_response(request).await {
-                        Ok(response) => responder.respond(response),
+                        Ok(response) => {
+                            agent.replay_history(&connection, &session_id).await;
+                            responder.respond(response)
+                        }
                         Err(error) => responder.respond_with_error(error.into()),
                     }
                 },
@@ -418,6 +426,39 @@ where
                 source: Box::new(e),
                 stage: "acp-session-resume-replay".to_string(),
             })
+    }
+
+    /// Replays loaded session messages to the client as `session/update` notifications.
+    async fn replay_history(&self, connection: &ConnectionTo<OfficialClient>, session_id: &str) {
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+        let Ok(messages) = self
+            .store
+            .load_messages_state(
+                *session.thread.session_id(),
+                session.thread.thread_id().clone(),
+                usize::MAX,
+            )
+            .await
+        else {
+            return;
+        };
+
+        for msg in &messages {
+            let Some(text) = display_text(msg) else {
+                continue;
+            };
+            let update = if matches!(msg, Message::User { .. }) {
+                AcpMessage::user_text(&text)
+            } else {
+                // Append newline so the renderer displays each message on its own line.
+                AcpMessage::agent_text(text + "\n")
+            };
+            if let Err(e) = send_sdk_session_update(connection, session_id, update) {
+                warn!("failed to replay history message: {e}");
+            }
+        }
     }
 
     /// Builds a per-session tool router rooted at the requested workspace root.
@@ -837,6 +878,20 @@ impl kernel::tools::ToolApproval for SdkApprovalHandler {
 /// Builds an async ACP permission handler that forwards approval requests to the connected client.
 fn sdk_approval_handler(connection: ConnectionTo<OfficialClient>) -> ToolApprovalHandler {
     Arc::new(SdkApprovalHandler { connection })
+}
+
+fn display_text(msg: &Message) -> Option<String> {
+    match msg {
+        Message::User { content } => content.iter().find_map(|c| match c {
+            UserContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        }),
+        Message::Assistant { content, .. } => content.iter().find_map(|c| match c {
+            AssistantContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
 }
 
 /// Sends one typed `session/update` notification through an official SDK connection.

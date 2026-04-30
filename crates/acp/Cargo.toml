@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 kernel = { path = "../kernel" }
+llm = { path = "../llm" }
 store = { path = "../store" }
 skills = { path = "../skills" }
 tools = { path = "../tools" }
@@ -22,5 +23,4 @@ tokio-util = { workspace = true, features = ["compat"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-llm = { path = "../llm" }
 tempfile = { workspace = true }
