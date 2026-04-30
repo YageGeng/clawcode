@@ -1,5 +1,11 @@
+use std::collections::HashMap;
+
 use agent_client_protocol::schema as official_acp;
 use agent_client_protocol::{JsonRpcNotification, jsonrpcmsg, util::json_cast};
+use llm::completion::{
+    Message,
+    message::{AssistantContent, ReasoningContent, ToolResultContent, UserContent},
+};
 use serde::Serialize;
 use serde_json::Value;
 use tools::StructuredToolOutput;
@@ -72,6 +78,97 @@ impl AcpMessage {
                 )])
                 .raw_output(structured_output.map(|value| value.to_serde_value())),
         ))
+    }
+}
+
+/// Extension trait that converts stored messages into ACP session updates
+/// for history replay.
+pub(crate) trait MessageHistoryExt {
+    fn to_acp(self) -> Vec<official_acp::SessionUpdate>;
+}
+
+impl MessageHistoryExt for Vec<Message> {
+    fn to_acp(self) -> Vec<official_acp::SessionUpdate> {
+        let mut updates = Vec::new();
+        let mut tool_calls: HashMap<String, (String, String)> = HashMap::new();
+
+        for msg in self {
+            match msg {
+                Message::User { content } => {
+                    for item in content.into_iter() {
+                        match item {
+                            UserContent::Text(t) => {
+                                updates.push(AcpMessage::user_text(t.text));
+                            }
+                            UserContent::ToolResult(tr) => {
+                                let call_id = tr.call_id.as_deref().unwrap_or(&tr.id);
+                                let (handle_id, name) = tool_calls
+                                    .get(call_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| (tr.id, "unknown".into()));
+
+                                let output = tr
+                                    .content
+                                    .into_iter()
+                                    .filter_map(|c| match c {
+                                        ToolResultContent::Text(t) => Some(t.text),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+
+                                updates.push(AcpMessage::tool_completed(
+                                    handle_id, name, output, None,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Message::Assistant { content, .. } => {
+                    for item in content.into_iter() {
+                        match item {
+                            AssistantContent::Text(t) => {
+                                updates.push(AcpMessage::agent_text(t.text + "\n"));
+                            }
+                            AssistantContent::Reasoning(r) => {
+                                let text: String = r
+                                    .content
+                                    .into_iter()
+                                    .filter_map(|rc| match rc {
+                                        ReasoningContent::Text { text, .. } => Some(text),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("");
+
+                                if !text.is_empty() {
+                                    updates.push(AcpMessage::thought_text(text));
+                                }
+                            }
+
+                            AssistantContent::ToolCall(tc) => {
+                                let handle_id = tc.call_id.clone().unwrap_or_else(|| tc.id.clone());
+                                let call_id = tc.call_id.unwrap_or_else(|| tc.id.clone());
+
+                                tool_calls
+                                    .insert(call_id, (handle_id.clone(), tc.function.name.clone()));
+
+                                updates.push(AcpMessage::tool_started(
+                                    handle_id,
+                                    tc.function.name,
+                                    tc.function.arguments,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        updates
     }
 }
 

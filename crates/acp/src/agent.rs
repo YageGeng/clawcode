@@ -19,17 +19,13 @@ use kernel::{
         router::ToolRouter,
     },
 };
-use llm::completion::{
-    Message,
-    message::{AssistantContent, UserContent},
-};
 use serde_json::{Value, json};
 use snafu::{ResultExt, Snafu};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, info, warn};
 
 use crate::{
-    message::{AcpMessage, SessionRpc},
+    message::{AcpMessage, MessageHistoryExt, SessionRpc},
     permission::{build_tool_permission_request, permission_response_approved},
 };
 
@@ -445,16 +441,7 @@ where
             return;
         };
 
-        for msg in &messages {
-            let Some(text) = display_text(msg) else {
-                continue;
-            };
-            let update = if matches!(msg, Message::User { .. }) {
-                AcpMessage::user_text(&text)
-            } else {
-                // Append newline so the renderer displays each message on its own line.
-                AcpMessage::agent_text(text + "\n")
-            };
+        for update in messages.to_acp() {
             if let Err(e) = send_sdk_session_update(connection, session_id, update) {
                 warn!("failed to replay history message: {e}");
             }
@@ -514,7 +501,9 @@ where
         let (session, prompt) = self.prepare_session_prompt(params)?;
         send_sdk_session_update(&connection, &session_id, AcpMessage::user_text(&prompt))?;
 
-        let approval_handler = sdk_approval_handler(connection.clone());
+        let approval_handler = Arc::new(SdkApprovalHandler {
+            connection: connection.clone(),
+        });
         let sink = SdkAcpEventSink::new(session_id, connection);
         self.run_session_prompt(&session, prompt, sink, Some(approval_handler))
             .await?;
@@ -872,25 +861,6 @@ impl kernel::tools::ToolApproval for SdkApprovalHandler {
                 }
             }
         })
-    }
-}
-
-/// Builds an async ACP permission handler that forwards approval requests to the connected client.
-fn sdk_approval_handler(connection: ConnectionTo<OfficialClient>) -> ToolApprovalHandler {
-    Arc::new(SdkApprovalHandler { connection })
-}
-
-fn display_text(msg: &Message) -> Option<String> {
-    match msg {
-        Message::User { content } => content.iter().find_map(|c| match c {
-            UserContent::Text(t) => Some(t.text.clone()),
-            _ => None,
-        }),
-        Message::Assistant { content, .. } => content.iter().find_map(|c| match c {
-            AssistantContent::Text(t) => Some(t.text.clone()),
-            _ => None,
-        }),
-        _ => None,
     }
 }
 

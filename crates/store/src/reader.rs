@@ -107,12 +107,16 @@ fn find_session_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 
 /// Returns the standard sessions root directory.
 pub fn sessions_root() -> PathBuf {
-    dirs::home_dir()
+    #[cfg(not(windows))]
+    let base = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".local")
-        .join("share")
-        .join("clawcode")
-        .join("sessions")
+        .join("share");
+
+    #[cfg(windows)]
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    base.join("clawcode").join("sessions")
 }
 
 fn collect_jsonl_files(dir: &Path, results: &mut Vec<SessionInfo>) -> std::io::Result<()> {
