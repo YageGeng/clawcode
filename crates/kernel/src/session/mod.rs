@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::context::SessionTaskContext;
 
 /// Stable session identifier used by the runtime and adapters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
 
 impl Default for SessionId {

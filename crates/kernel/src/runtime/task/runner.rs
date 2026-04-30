@@ -141,16 +141,14 @@ where
 
         // The continuation decision determines whether this task ends now or
         // gets translated into the next persisted turn request.
-        let next_request = continuation.into_run_request(
-            turn_request.session_id.clone(),
-            turn_request.thread_id.clone(),
-        );
+        let next_request =
+            continuation.into_run_request(turn_request.session_id, turn_request.thread_id.clone());
 
         match next_request {
             Some(next_request) => {
                 if let Err(error) = store
                     .finalize_turn_by_id(
-                        turn_request.session_id.clone(),
+                        turn_request.session_id,
                         turn_request.thread_id.clone(),
                         loop_result.usage,
                     )
@@ -172,7 +170,7 @@ where
             None => {
                 if let Err(error) = store
                     .finalize_turn_by_id(
-                        turn_request.session_id.clone(),
+                        turn_request.session_id,
                         turn_request.thread_id.clone(),
                         loop_result.usage,
                     )
@@ -296,6 +294,6 @@ async fn discard_active_turn_after_task_failure(
     request: &RunRequest,
 ) -> Result<()> {
     store
-        .discard_turn_state(request.session_id.clone(), request.thread_id.clone())
+        .discard_turn_state(request.session_id, request.thread_id.clone())
         .await
 }

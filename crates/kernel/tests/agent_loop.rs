@@ -632,7 +632,7 @@ async fn runner_executes_tool_calls_and_persists_the_turn() {
 
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
-    let thread = ThreadHandle::new(session_id.clone(), thread_id.clone())
+    let thread = ThreadHandle::new(session_id, thread_id.clone())
         .with_system_prompt("Use tools when they are helpful.");
     let result = runner
         .run(&thread, ThreadRunRequest::new("say hello"))
@@ -804,11 +804,7 @@ async fn runner_keeps_completed_message_text_when_tool_calls_have_no_text_deltas
     let thread_id = ThreadId::new();
 
     runner
-        .run_request(RunRequest::new(
-            session_id.clone(),
-            thread_id.clone(),
-            "say hello",
-        ))
+        .run_request(RunRequest::new(session_id, thread_id.clone(), "say hello"))
         .await
         .unwrap();
 
@@ -853,11 +849,7 @@ async fn runner_rejects_streams_that_end_without_completed_event() {
     let thread_id = ThreadId::new();
 
     let error = runner
-        .run_request(RunRequest::new(
-            session_id.clone(),
-            thread_id.clone(),
-            "say hello",
-        ))
+        .run_request(RunRequest::new(session_id, thread_id.clone(), "say hello"))
         .await
         .unwrap_err();
 
@@ -1670,16 +1662,13 @@ async fn runner_persists_tool_call_message_before_tool_completion() {
     let thread_id = ThreadId::new();
 
     let started_wait = started.notified();
-    let run_future = runner.run_request(RunRequest::new(
-        session_id.clone(),
-        thread_id.clone(),
-        "say hello",
-    ));
+    let run_future =
+        runner.run_request(RunRequest::new(session_id, thread_id.clone(), "say hello"));
     let observer = async {
         started_wait.await;
 
         let messages = store
-            .load_messages_state(session_id.clone(), thread_id.clone(), 20)
+            .load_messages_state(session_id, thread_id.clone(), 20)
             .await
             .unwrap();
         assert_eq!(messages[0], Message::user("say hello"));
@@ -1733,11 +1722,8 @@ async fn runner_cancels_in_flight_tool_batches_when_loop_token_is_triggered() {
     let thread_id = ThreadId::new();
 
     let started_wait = started.notified();
-    let run_future = runner.run_request(RunRequest::new(
-        session_id.clone(),
-        thread_id.clone(),
-        "say hello",
-    ));
+    let run_future =
+        runner.run_request(RunRequest::new(session_id, thread_id.clone(), "say hello"));
     let canceller = async {
         started_wait.await;
         cancellation.cancel();
@@ -2069,7 +2055,7 @@ async fn runner_persists_failed_tool_results_across_turns() {
     let thread_id = ThreadId::new();
     store
         .queue_continuation(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             SessionContinuationRequest::PendingInput {
                 input: "follow up".to_string(),
@@ -2092,7 +2078,7 @@ async fn runner_persists_failed_tool_results_across_turns() {
 
     let result = runner
         .run_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "first input",
         ))
@@ -2136,7 +2122,7 @@ async fn runner_returns_structured_failure_and_discards_active_turn_when_continu
 
     let outcome = runner
         .run_outcome_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "first input",
         ))
@@ -2157,7 +2143,7 @@ async fn runner_returns_structured_failure_and_discards_active_turn_when_continu
 
     let second_result = runner
         .run_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "second input",
         ))
@@ -2453,7 +2439,7 @@ async fn runner_drains_pending_inputs_within_one_task_run() {
     let thread_id = ThreadId::new();
     store
         .queue_continuation(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             SessionContinuationRequest::PendingInput {
                 input: "follow up".to_string(),
@@ -2466,7 +2452,7 @@ async fn runner_drains_pending_inputs_within_one_task_run() {
 
     let result = runner
         .run_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "first input",
         ))
@@ -2476,7 +2462,7 @@ async fn runner_drains_pending_inputs_within_one_task_run() {
     assert_eq!(result.text, "second");
 
     let messages = store
-        .load_messages_state(session_id.clone(), thread_id.clone(), 20)
+        .load_messages_state(session_id, thread_id.clone(), 20)
         .await
         .expect("session messages should load");
     let user_messages = messages
@@ -2564,7 +2550,7 @@ async fn runner_drains_pending_inputs_enqueued_during_an_active_turn() {
 
     let started_wait = started.notified();
     let run_future = runner.run_request(RunRequest::new(
-        session_id.clone(),
+        session_id,
         thread_id.clone(),
         "first input",
     ));
@@ -2572,7 +2558,7 @@ async fn runner_drains_pending_inputs_enqueued_during_an_active_turn() {
         started_wait.await;
         store
             .queue_continuation(
-                session_id.clone(),
+                session_id,
                 thread_id.clone(),
                 SessionContinuationRequest::PendingInput {
                     input: "runtime follow up".to_string(),
@@ -2587,7 +2573,7 @@ async fn runner_drains_pending_inputs_enqueued_during_an_active_turn() {
     assert_eq!(result.text, "second turn complete");
 
     let messages = store
-        .load_messages_state(session_id.clone(), thread_id.clone(), 20)
+        .load_messages_state(session_id, thread_id.clone(), 20)
         .await
         .expect("session messages should load");
     let user_messages = messages
@@ -2650,7 +2636,7 @@ async fn runner_distinguishes_system_follow_up_continuations() {
     let thread_id = ThreadId::new();
     store
         .queue_continuation(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             SessionContinuationRequest::SystemFollowUp {
                 input: "system asks for another turn".to_string(),
@@ -2663,7 +2649,7 @@ async fn runner_distinguishes_system_follow_up_continuations() {
 
     let result = runner
         .run_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "first input",
         ))
@@ -2773,7 +2759,7 @@ async fn runner_can_generate_system_follow_up_from_loop_result() {
 
     let result = runner
         .run_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "first input",
         ))
@@ -2832,7 +2818,7 @@ async fn runner_can_generate_system_follow_up_from_turn_completion_hook() {
 
     let result = runner
         .run_request(RunRequest::new(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             "first input",
         ))
@@ -4005,7 +3991,7 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
     let sink = Arc::new(RecordingEventSink::default());
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
-    let thread = ThreadHandle::new(session_id.clone(), thread_id.clone())
+    let thread = ThreadHandle::new(session_id, thread_id.clone())
         .with_system_prompt("You are a helpful agent.");
     let runtime = ThreadRuntime::new(
         model,

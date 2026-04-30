@@ -1,7 +1,8 @@
 mod config;
 
-use std::{env, fs::OpenOptions, io, sync::Arc};
+use std::{fs::OpenOptions, io, path::PathBuf, sync::Arc};
 
+use clap::Parser;
 use config::AppConfig;
 use kernel::{model::FactoryLlmAgentModel, session::InMemorySessionStore};
 use llm::providers::LlmModelFactory;
@@ -9,6 +10,27 @@ use store::JsonlSessionStore;
 use tools::ToolRouter;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// ACP-powered coding assistant CLI.
+#[derive(Parser)]
+#[command(name = "clawcode", version)]
+struct CliArgs {
+    /// Run as ACP stdio server instead of interactive client.
+    #[arg(long)]
+    serve: bool,
+
+    /// List persisted sessions.
+    #[arg(short = 'l', long)]
+    list_sessions: bool,
+
+    /// Resume a persisted session by ID.
+    #[arg(short = 'r', long, value_name = "SESSION_ID")]
+    resume: Option<String>,
+
+    /// Path to the log file (default: cli.log).
+    #[arg(long, value_name = "PATH", default_value = "cli.log")]
+    log: PathBuf,
+}
 
 /// Builds the CLI model adapter selected by the loaded app config.
 fn build_agent_model(
@@ -19,68 +41,13 @@ fn build_agent_model(
     Ok(FactoryLlmAgentModel::new(model))
 }
 
-/// CLI argument payload parsed from the command line.
-struct CliArgs {
-    mode: CliMode,
-    list_sessions: bool,
-    resume_session_id: Option<String>,
-    no_persist: bool,
-}
-
-/// Parses CLI arguments including interactive flags.
-fn parse_args(args: impl IntoIterator<Item = String>) -> CliArgs {
-    let mut mode = CliMode::Client;
-    let mut list_sessions = false;
-    let mut resume_session_id = None;
-    let mut resume_requested = false;
-    let mut no_persist = false;
-    let mut args_iter = args.into_iter();
-
-    while let Some(arg) = args_iter.next() {
-        match arg.as_str() {
-            "serve" => mode = CliMode::Server,
-            "--list-sessions" | "-l" => list_sessions = true,
-            "--no-persist" => no_persist = true,
-            "--resume" | "-r" => {
-                resume_requested = true;
-                resume_session_id = args_iter.next();
-            }
-            other if other.starts_with('-') => {
-                eprintln!("warning: unrecognized flag `{other}`");
-            }
-            _ => {}
-        }
-    }
-
-    if resume_requested && resume_session_id.is_none() {
-        eprintln!("error: --resume requires a session ID argument");
-        std::process::exit(1);
-    }
-
-    CliArgs {
-        mode,
-        list_sessions,
-        resume_session_id,
-        no_persist,
-    }
-}
-
-/// Selects whether the binary runs as a human ACP client or as the exported ACP stdio agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliMode {
-    /// Human-facing interactive CLI implemented as an ACP client.
-    Client,
-    /// Machine-facing ACP server over stdio.
-    Server,
-}
-
-/// Initializes tracing output for the ACP CLI process in `cli.log`.
-fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
+/// Initializes tracing output for the ACP CLI process.
+fn init_tracing(log_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"));
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("cli.log")?;
+        .open(log_path)?;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(false)
@@ -91,11 +58,48 @@ fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn relative_time(now: chrono::NaiveDateTime, then: chrono::NaiveDateTime) -> String {
+    let delta = (now - then).num_seconds().max(0);
+    match delta {
+        d if d < 60 => "just now".to_string(),
+        d if d < 3600 => format!("{}m ago", d / 60),
+        d if d < 86400 => format!("{}h ago", d / 3600),
+        d if d < 172800 => "yesterday".to_string(),
+        d if d < 604800 => format!("{}d ago", d / 86400),
+        _ => then.format("%m-%d").to_string(),
+    }
+}
+
+fn session_preview(path: &std::path::Path) -> String {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    for _ in 0..3 {
+        line.clear();
+        if std::io::BufRead::read_line(&mut reader, &mut line).is_err() {
+            break;
+        }
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&line)
+            && map.get("type").and_then(|v| v.as_str()) == Some("turn_started")
+            && let Some(text) = map.get("user_text").and_then(|v| v.as_str())
+        {
+            let preview: String = text.chars().take(50).collect();
+            if text.chars().count() > 50 {
+                return format!("{preview}...");
+            }
+            return preview;
+        }
+    }
+    String::new()
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing()?;
-
-    let cli_args = parse_args(env::args().skip(1));
+    let cli_args = CliArgs::parse();
+    init_tracing(&cli_args.log)?;
     let config = config::app_config();
 
     // Handle --list-sessions: print and exit.
@@ -105,15 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("No persisted sessions found.");
             }
             Ok(sessions) => {
-                println!("Persisted sessions (newest first):");
+                let now = chrono::Utc::now().naive_utc();
+                println!("{:<14} {:<14} {:<6} PREVIEW", "ID", "WHEN", "TURNS");
                 for s in &sessions {
-                    println!(
-                        "  {}  |  {}  |  {} turns  |  {}",
-                        s.id,
-                        s.created_at.format("%Y-%m-%d %H:%M"),
-                        s.turn_count,
-                        s.path.display(),
-                    );
+                    let when = relative_time(now, s.modified_at);
+                    let preview = session_preview(&s.path);
+                    println!("{:<14} {:<14} {:<6} {}", s.id, when, s.turn_count, preview);
                 }
             }
             Err(e) => eprintln!("Failed to list sessions: {e}"),
@@ -121,19 +122,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Resolve the existing session file path when --resume is set so new
+    // turns append to the same file instead of creating a fresh one.
+    let resume_path = cli_args
+        .resume
+        .as_ref()
+        .and_then(|id| store::find_session_by_id(id));
+
+    // When --resume is used but the session file doesn't exist, fail early.
+    if let Some(ref id) = cli_args.resume
+        && resume_path.is_none()
+    {
+        eprintln!("error: session not found: {id}");
+        std::process::exit(1);
+    }
+
+    let mode_label = if cli_args.serve { "server" } else { "client" };
     info!(
         current_model = %config.current_model_ref(),
         provider_count = config.llm.providers.len(),
-        mode = ?cli_args.mode,
+        mode = mode_label,
         "starting ACP cli agent"
     );
 
     let model = Arc::new(build_agent_model(&config)?);
+
     let store = {
         let builder = InMemorySessionStore::default();
-        let persistence_enabled = config.persistence.enabled && !cli_args.no_persist;
+        let persistence_enabled = config.persistence.enabled;
         let builder = if persistence_enabled {
-            match JsonlSessionStore::create() {
+            let persist_result = if let Some(ref path) = resume_path {
+                JsonlSessionStore::create_at(path)
+            } else {
+                JsonlSessionStore::create()
+            };
+            match persist_result {
                 Ok(persist) => {
                     info!(
                         "session persistence enabled at {}",
@@ -160,27 +183,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "registered default tools through the extracted tools crate"
     );
 
-    match cli_args.mode {
-        CliMode::Client => {
-            let stdin = io::stdin();
-            let mut input = stdin.lock();
-            acp::run_interactive_cli_via_acp(
-                Arc::clone(&model),
-                Arc::clone(&store),
-                Arc::clone(&router),
-                acp::CliSessionConfig {
-                    skills,
-                    tool_approval_profile,
-                    resume_session_id: cli_args.resume_session_id,
-                },
-                &mut input,
-                io::stdout(),
-            )
-            .await?;
-        }
-        CliMode::Server => {
-            acp::run_sdk_stdio_agent(model, store, router, skills, tool_approval_profile).await?;
-        }
+    if cli_args.serve {
+        acp::run_sdk_stdio_agent(model, store, router, skills, tool_approval_profile).await?;
+    } else {
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        acp::run_interactive_cli_via_acp(
+            Arc::clone(&model),
+            Arc::clone(&store),
+            Arc::clone(&router),
+            acp::CliSessionConfig {
+                skills,
+                tool_approval_profile,
+                resume_session_id: cli_args.resume,
+            },
+            &mut input,
+            io::stdout(),
+        )
+        .await?;
     }
 
     Ok(())

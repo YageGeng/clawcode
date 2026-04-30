@@ -52,7 +52,7 @@ where
     let mut completed_batch_summary = ToolBatchSummary::default();
     let mut runtime = ToolRuntime::new(
         input.store,
-        input.session_id.clone(),
+        input.session_id,
         input.thread_id.clone(),
         input.router,
         input.events,
@@ -74,7 +74,7 @@ where
                 max_tool_calls: config.max_tool_calls,
                 tool_execution_mode: first.mode,
                 cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
-                tool_context: ToolContext::new(input.session_id.clone(), input.thread_id.clone())
+                tool_context: ToolContext::new(input.session_id, input.thread_id.clone())
                     .with_tool_approval_profile(config.tool_approval_profile)
                     .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
             })
@@ -91,12 +91,9 @@ where
                     max_tool_calls: config.max_tool_calls,
                     tool_execution_mode: batch.mode,
                     cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
-                    tool_context: ToolContext::new(
-                        input.session_id.clone(),
-                        input.thread_id.clone(),
-                    )
-                    .with_tool_approval_profile(config.tool_approval_profile)
-                    .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
+                    tool_context: ToolContext::new(input.session_id, input.thread_id.clone())
+                        .with_tool_approval_profile(config.tool_approval_profile)
+                        .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
                 })
                 .await?;
         }

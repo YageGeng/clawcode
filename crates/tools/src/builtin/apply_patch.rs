@@ -781,16 +781,13 @@ fn seek_sequence_with_comparator(
     }
 
     let last_start = lines.len().checked_sub(pattern.len())?;
-    for start_idx in search_start..=last_start {
-        if matches_sequence(
+    (search_start..=last_start).find(|&start_idx| {
+        matches_sequence(
             &lines[start_idx..start_idx + pattern.len()],
             pattern,
             comparator,
-        ) {
-            return Some(start_idx);
-        }
-    }
-    None
+        )
+    })
 }
 
 /// Compares two line slices with the selected fuzzy-matching strategy.

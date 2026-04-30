@@ -13,7 +13,7 @@ async fn session_task_context_drains_queued_continuations_in_order() {
 
     session
         .queue_continuation(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             SessionContinuationRequest::PendingInput {
                 input: "one".to_string(),
@@ -22,7 +22,7 @@ async fn session_task_context_drains_queued_continuations_in_order() {
         .await;
     session
         .queue_continuation(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             SessionContinuationRequest::SystemFollowUp {
                 input: "two".to_string(),
@@ -32,7 +32,7 @@ async fn session_task_context_drains_queued_continuations_in_order() {
 
     assert!(matches!(
         session
-            .drain_continuation(session_id.clone(), thread_id.clone())
+            .drain_continuation(session_id, thread_id.clone())
             .await,
         Some(SessionContinuationRequest::PendingInput { input }) if input == "one"
     ));
@@ -47,11 +47,10 @@ async fn session_task_context_exposes_history_mutations() {
     let session = SessionTaskContext::new();
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
-    let turn_context =
-        TurnContext::new(session_id.clone(), thread_id.clone()).with_system_prompt("system");
+    let turn_context = TurnContext::new(session_id, thread_id.clone()).with_system_prompt("system");
 
     session
-        .with_history(session_id.clone(), thread_id.clone(), |history| {
+        .with_history(session_id, thread_id.clone(), |history| {
             history.begin_turn("hello".to_string(), Message::user("hello"));
             history.append_message(Message::assistant("world"));
             history.finalize_turn(Usage::new(), &turn_context);
@@ -76,7 +75,7 @@ async fn session_task_context_mirrors_store_style_message_access() {
 
     session
         .append_turn_state(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             Turn::new(
                 "hello",
@@ -105,7 +104,7 @@ async fn session_task_context_take_pending_input_keeps_non_pending_continuations
 
     session
         .queue_continuation(
-            session_id.clone(),
+            session_id,
             thread_id.clone(),
             SessionContinuationRequest::SystemFollowUp {
                 input: "system follow up".to_string(),
@@ -114,7 +113,7 @@ async fn session_task_context_take_pending_input_keeps_non_pending_continuations
         .await;
 
     let error = session
-        .drain_pending_input(session_id.clone(), thread_id.clone())
+        .drain_pending_input(session_id, thread_id.clone())
         .await
         .expect_err("non-pending continuations should not be consumed as pending input");
     assert!(matches!(error, kernel::Error::Runtime { .. }));
@@ -134,7 +133,7 @@ fn context_manager_can_reconstruct_latest_reference_snapshot() {
     let session_id = SessionId::new();
     let thread_id = ThreadId::new();
     let mut history = kernel::ContextManager::new();
-    let first = TurnContext::new(session_id.clone(), thread_id.clone()).with_system_prompt("one");
+    let first = TurnContext::new(session_id, thread_id.clone()).with_system_prompt("one");
     let second = first.clone().with_timezone("Asia/Shanghai");
 
     history.begin_turn("a".to_string(), Message::user("a"));

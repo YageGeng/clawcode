@@ -118,8 +118,8 @@ impl HumanAcpClient {
 
     /// Creates and caches the ACP session required before prompt turns can run.
     ///
-    /// When `resume_session_id` is set, passes it through `_meta.resumeSessionId`
-    /// so the agent loads persisted state instead of creating a fresh session.
+    /// When `resume_session_id` is set, sends `session/load` per the ACP spec
+    /// to restore persisted state instead of creating a fresh session.
     async fn ensure_session(&mut self) -> std::result::Result<(), official_acp::Error> {
         if !self.initialized {
             self.connection
@@ -141,24 +141,29 @@ impl HumanAcpClient {
 
         if self.session_id.is_none() {
             let cwd = env::current_dir().map_err(acp_io_error)?;
-            let mut new_session = official_acp::NewSessionRequest::new(cwd.clone());
-            if let Some(ref resume_id) = self.resume_session_id {
-                let mut meta = serde_json::Map::new();
-                meta.insert(
-                    "resumeSessionId".to_string(),
-                    serde_json::Value::String(resume_id.clone()),
-                );
-                new_session.meta = Some(meta);
-            }
-            let response = self
-                .connection
-                .send_request(new_session)
-                .block_task()
-                .await?;
-            let session_id = response.session_id.to_string();
             let root = cwd.canonicalize().map_err(acp_io_error)?;
-            self.services.register_session_root(&session_id, root);
-            self.session_id = Some(session_id);
+
+            if let Some(ref resume_id) = self.resume_session_id {
+                // ACP-spec session/load: restore the persisted session by its id.
+                self.connection
+                    .send_request(official_acp::LoadSessionRequest::new(
+                        resume_id.clone(),
+                        cwd,
+                    ))
+                    .block_task()
+                    .await?;
+                self.services.register_session_root(resume_id, root);
+                self.session_id = Some(resume_id.clone());
+            } else {
+                let response = self
+                    .connection
+                    .send_request(official_acp::NewSessionRequest::new(cwd))
+                    .block_task()
+                    .await?;
+                let session_id = response.session_id.to_string();
+                self.services.register_session_root(&session_id, root);
+                self.session_id = Some(session_id);
+            }
         }
 
         Ok(())

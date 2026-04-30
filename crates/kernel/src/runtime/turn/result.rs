@@ -63,11 +63,7 @@ where
             content: OneOrMany::one(AssistantContent::Reasoning(reasoning_item)),
         };
         store
-            .append_message_state(
-                session_id.clone(),
-                thread_id.clone(),
-                assistant_reasoning.clone(),
-            )
+            .append_message_state(session_id, thread_id.clone(), assistant_reasoning.clone())
             .await?;
         new_messages.push(assistant_reasoning);
     }
@@ -132,7 +128,7 @@ mod tests {
 
         store
             .begin_turn_state(
-                session_id.clone(),
+                session_id,
                 thread_id.clone(),
                 "hello".to_string(),
                 user_message.clone(),
@@ -144,7 +140,7 @@ mod tests {
             &store,
             &events,
             FinalizeTextResponseRequest {
-                session_id: session_id.clone(),
+                session_id,
                 thread_id: thread_id.clone(),
                 message_id: Some("msg_123".to_string()),
                 text: "hello from agent".to_string(),
@@ -194,7 +190,7 @@ mod tests {
 
         store
             .begin_turn_state(
-                session_id.clone(),
+                session_id,
                 thread_id.clone(),
                 "calculate".to_string(),
                 user_message.clone(),
@@ -206,7 +202,7 @@ mod tests {
             &store,
             &events,
             FinalizeTextResponseRequest {
-                session_id: session_id.clone(),
+                session_id,
                 thread_id: thread_id.clone(),
                 message_id: Some("msg_200".to_string()),
                 text: "answer".to_string(),

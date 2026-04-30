@@ -172,7 +172,7 @@ where
     pub async fn expire_system_prompt(&self, thread: &ThreadHandle) {
         self.deps
             .store
-            .expire_system_prompt(thread.session_id().clone(), thread.thread_id().clone())
+            .expire_system_prompt(*thread.session_id(), thread.thread_id().clone())
             .await;
     }
 
@@ -191,7 +191,7 @@ where
         request: ThreadRunRequest,
     ) -> Result<RunOutcome> {
         let run_request = RunRequest::from_inputs(
-            thread.session_id().clone(),
+            *thread.session_id(),
             thread.thread_id().clone(),
             request.inputs,
         );

@@ -47,7 +47,7 @@ where
     } = turn_request;
     let mut history = store
         .load_messages_state(
-            request.session_id.clone(),
+            request.session_id,
             request.thread_id.clone(),
             config.recent_message_limit,
         )
@@ -60,7 +60,7 @@ where
         .unwrap_or_else(|| Message::user(request.display_input.clone()));
     store
         .begin_turn_state(
-            request.session_id.clone(),
+            request.session_id,
             request.thread_id.clone(),
             request.display_input.clone(),
             persisted_user_message,
@@ -101,7 +101,7 @@ where
         events,
         config,
         AgentLoopRequest {
-            session_id: request.session_id.clone(),
+            session_id: request.session_id,
             thread_id: request.thread_id.clone(),
             system_prompt,
             working_messages: history,
@@ -127,7 +127,7 @@ async fn resolve_system_prompt(
 ) -> Result<Option<String>> {
     if use_system_prompt_cache
         && let Some(system_prompt) = store
-            .read_cached_system_prompt(request.session_id.clone(), request.thread_id.clone())
+            .read_cached_system_prompt(request.session_id, request.thread_id.clone())
             .await
     {
         return Ok(Some(system_prompt));
@@ -136,11 +136,7 @@ async fn resolve_system_prompt(
     let system_prompt = build_system_prompt(router, skills, prompt_overrides)?;
     if use_system_prompt_cache && let Some(prompt) = system_prompt.clone() {
         store
-            .save_cached_system_prompt(
-                request.session_id.clone(),
-                request.thread_id.clone(),
-                prompt,
-            )
+            .save_cached_system_prompt(request.session_id, request.thread_id.clone(), prompt)
             .await;
     }
     Ok(system_prompt)

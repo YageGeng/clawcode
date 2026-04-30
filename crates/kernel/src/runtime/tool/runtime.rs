@@ -168,7 +168,7 @@ where
         };
         self.store
             .append_message_state(
-                self.session_id.clone(),
+                self.session_id,
                 self.thread_id.clone(),
                 assistant_message.clone(),
             )
@@ -318,7 +318,7 @@ where
                 .await;
             self.store
                 .append_message_state(
-                    self.session_id.clone(),
+                    self.session_id,
                     self.thread_id.clone(),
                     result.message.clone(),
                 )
@@ -375,7 +375,7 @@ where
             .await;
         self.store
             .append_message_state(
-                self.session_id.clone(),
+                self.session_id,
                 self.thread_id.clone(),
                 failed_result.message.clone(),
             )

@@ -172,7 +172,7 @@ where
                     store,
                     events,
                     FinalizeTextResponseRequest {
-                        session_id: session_id.clone(),
+                        session_id,
                         thread_id: thread_id.clone(),
                         message_id,
                         text,
@@ -195,7 +195,7 @@ where
                     execute_tool_execution_plan(
                         ToolExecutionRuntimeInput {
                             store,
-                            session_id: session_id.clone(),
+                            session_id,
                             thread_id: thread_id.clone(),
                             router,
                             events,

@@ -240,7 +240,7 @@ impl SessionTaskContext {
             .await;
         }
         self.with_history(
-            turn_context.session_id.clone(),
+            turn_context.session_id,
             turn_context.thread_id.clone(),
             |history| {
                 history.finalize_turn(usage, turn_context);
@@ -258,7 +258,7 @@ impl SessionTaskContext {
         usage: Usage,
     ) -> Result<()> {
         let turn_context = self
-            .read_history(session_id.clone(), thread_id.clone(), |history| {
+            .read_history(session_id, thread_id.clone(), |history| {
                 history.reference_context_item()
             })
             .await
@@ -358,7 +358,7 @@ impl SessionTaskContext {
         thread_id: ThreadId,
         turn: Turn,
     ) -> Result<()> {
-        self.with_history(session_id.clone(), thread_id.clone(), |history| {
+        self.with_history(session_id, thread_id.clone(), |history| {
             // Reconstructed turns do not carry a durable context snapshot yet, so
             // attach an empty baseline placeholder until the runtime migration
             // routes real TurnContextItem values through this path.
@@ -366,7 +366,7 @@ impl SessionTaskContext {
                 user_text: turn.user_text,
                 transcript: turn.transcript,
                 usage: turn.usage,
-                context_item: TurnContext::new(session_id.clone(), thread_id.clone())
+                context_item: TurnContext::new(session_id, thread_id.clone())
                     .to_turn_context_item(),
             });
         })
@@ -469,7 +469,7 @@ impl SessionTaskContext {
                             tracing::warn!(
                                 "session replay: failed to deserialize context_item: {e}"
                             );
-                            TurnContext::new(sid.clone(), tid.clone()).to_turn_context_item()
+                            TurnContext::new(sid, tid.clone()).to_turn_context_item()
                         });
                     let turn_context = TurnContext::from_item(context_item);
                     self.with_history(sid, tid, |history| {

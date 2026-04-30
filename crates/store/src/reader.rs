@@ -13,8 +13,8 @@ pub struct SessionInfo {
     pub id: String,
     /// Full path to the JSONL file.
     pub path: PathBuf,
-    /// Approximate creation time derived from filesystem metadata.
-    pub created_at: chrono::NaiveDateTime,
+    /// Last modification time derived from filesystem metadata.
+    pub modified_at: chrono::NaiveDateTime,
     /// Approximate turn count (line count of the JSONL file).
     pub turn_count: usize,
 }
@@ -31,7 +31,7 @@ pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
 
     let mut sessions = Vec::new();
     collect_jsonl_files(&data_dir, &mut sessions)?;
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_at));
     Ok(sessions)
 }
 
@@ -107,8 +107,10 @@ fn find_session_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 
 /// Returns the standard sessions root directory.
 pub fn sessions_root() -> PathBuf {
-    dirs::data_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local")
+        .join("share")
         .join("clawcode")
         .join("sessions")
 }
@@ -144,15 +146,15 @@ fn parse_session_info(path: &Path) -> std::io::Result<SessionInfo> {
 
     let metadata = path.metadata()?;
     let system_time = metadata
-        .created()
-        .or_else(|_| metadata.modified())
+        .modified()
+        .or_else(|_| metadata.created())
         .unwrap_or(std::time::SystemTime::now());
-    let created_at = chrono::DateTime::<chrono::Utc>::from(system_time).naive_utc();
+    let modified_at = chrono::DateTime::<chrono::Utc>::from(system_time).naive_utc();
 
     Ok(SessionInfo {
         id,
         path: path.to_path_buf(),
-        created_at,
+        modified_at,
         turn_count,
     })
 }

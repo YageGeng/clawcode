@@ -16,7 +16,7 @@ async fn session_persists_and_replays_turn_events() {
 
     store
         .begin_turn_state(
-            sid.clone(),
+            sid,
             tid.clone(),
             "hello".to_string(),
             Message::user("hello"),
@@ -25,11 +25,11 @@ async fn session_persists_and_replays_turn_events() {
         .expect("begin turn");
 
     store
-        .append_message_state(sid.clone(), tid.clone(), Message::assistant("hi there"))
+        .append_message_state(sid, tid.clone(), Message::assistant("hi there"))
         .await
         .expect("append assistant message");
 
-    let ctx = TurnContext::new(sid.clone(), tid.clone());
+    let ctx = TurnContext::new(sid, tid.clone());
     store
         .finalize_turn_state(&ctx, Usage::default())
         .await
@@ -62,17 +62,12 @@ async fn session_records_discarded_turn() {
     let tid = ThreadId::new();
 
     store
-        .begin_turn_state(
-            sid.clone(),
-            tid.clone(),
-            "oops".to_string(),
-            Message::user("oops"),
-        )
+        .begin_turn_state(sid, tid.clone(), "oops".to_string(), Message::user("oops"))
         .await
         .expect("begin turn");
 
     store
-        .discard_turn_state(sid.clone(), tid.clone())
+        .discard_turn_state(sid, tid.clone())
         .await
         .expect("discard turn");
 
@@ -97,19 +92,14 @@ async fn session_records_multi_turn() {
 
     // Turn 1
     store
-        .begin_turn_state(
-            sid.clone(),
-            tid.clone(),
-            "q1".to_string(),
-            Message::user("q1"),
-        )
+        .begin_turn_state(sid, tid.clone(), "q1".to_string(), Message::user("q1"))
         .await
         .expect("begin turn 1");
     store
-        .append_message_state(sid.clone(), tid.clone(), Message::assistant("a1"))
+        .append_message_state(sid, tid.clone(), Message::assistant("a1"))
         .await
         .expect("append");
-    let ctx1 = TurnContext::new(sid.clone(), tid.clone());
+    let ctx1 = TurnContext::new(sid, tid.clone());
     store
         .finalize_turn_state(&ctx1, Usage::default())
         .await
@@ -117,19 +107,14 @@ async fn session_records_multi_turn() {
 
     // Turn 2
     store
-        .begin_turn_state(
-            sid.clone(),
-            tid.clone(),
-            "q2".to_string(),
-            Message::user("q2"),
-        )
+        .begin_turn_state(sid, tid.clone(), "q2".to_string(), Message::user("q2"))
         .await
         .expect("begin turn 2");
     store
-        .append_message_state(sid.clone(), tid.clone(), Message::assistant("a2"))
+        .append_message_state(sid, tid.clone(), Message::assistant("a2"))
         .await
         .expect("append");
-    let ctx2 = TurnContext::new(sid.clone(), tid.clone());
+    let ctx2 = TurnContext::new(sid, tid.clone());
     store
         .finalize_turn_state(&ctx2, Usage::default())
         .await
@@ -157,12 +142,7 @@ async fn list_sessions_discovers_files() {
         let sid = SessionId::new();
         let tid = ThreadId::new();
         store
-            .begin_turn_state(
-                sid.clone(),
-                tid.clone(),
-                "hi".to_string(),
-                Message::user("hi"),
-            )
+            .begin_turn_state(sid, tid.clone(), "hi".to_string(), Message::user("hi"))
             .await
             .expect("begin");
         store
@@ -185,23 +165,15 @@ async fn store_without_persistence_works_normally() {
     let tid = ThreadId::new();
 
     store
-        .begin_turn_state(
-            sid.clone(),
-            tid.clone(),
-            "test".to_string(),
-            Message::user("test"),
-        )
+        .begin_turn_state(sid, tid.clone(), "test".to_string(), Message::user("test"))
         .await
         .expect("begin");
     store
-        .append_message_state(sid.clone(), tid.clone(), Message::assistant("ok"))
+        .append_message_state(sid, tid.clone(), Message::assistant("ok"))
         .await
         .expect("append");
     store
-        .finalize_turn_state(
-            &TurnContext::new(sid.clone(), tid.clone()),
-            Usage::default(),
-        )
+        .finalize_turn_state(&TurnContext::new(sid, tid.clone()), Usage::default())
         .await
         .expect("finalize");
 
@@ -228,7 +200,7 @@ async fn load_from_events_resumes_session() {
         let store = InMemorySessionStore::default().with_persistence(Arc::new(persist));
         store
             .begin_turn_state(
-                sid.clone(),
+                sid,
                 tid.clone(),
                 "hello".to_string(),
                 Message::user("hello"),
@@ -236,14 +208,11 @@ async fn load_from_events_resumes_session() {
             .await
             .expect("begin");
         store
-            .append_message_state(sid.clone(), tid.clone(), Message::assistant("hi"))
+            .append_message_state(sid, tid.clone(), Message::assistant("hi"))
             .await
             .expect("append");
         store
-            .finalize_turn_state(
-                &TurnContext::new(sid.clone(), tid.clone()),
-                Usage::default(),
-            )
+            .finalize_turn_state(&TurnContext::new(sid, tid.clone()), Usage::default())
             .await
             .expect("finalize");
     }
@@ -258,7 +227,7 @@ async fn load_from_events_resumes_session() {
 
     // Phase 3: Verify the replayed messages are available.
     let messages = resumed_store
-        .load_messages_state(loaded_sid.clone(), loaded_tid.clone(), 10)
+        .load_messages_state(loaded_sid, loaded_tid.clone(), 10)
         .await
         .expect("load messages");
     assert_eq!(messages.len(), 2);
@@ -268,7 +237,7 @@ async fn load_from_events_resumes_session() {
     // Phase 4: Continue the resumed session with a new turn.
     resumed_store
         .begin_turn_state(
-            loaded_sid.clone(),
+            loaded_sid,
             loaded_tid.clone(),
             "continue".to_string(),
             Message::user("continue"),
@@ -276,16 +245,12 @@ async fn load_from_events_resumes_session() {
         .await
         .expect("begin turn 2");
     resumed_store
-        .append_message_state(
-            loaded_sid.clone(),
-            loaded_tid.clone(),
-            Message::assistant("reply"),
-        )
+        .append_message_state(loaded_sid, loaded_tid.clone(), Message::assistant("reply"))
         .await
         .expect("append turn 2");
     resumed_store
         .finalize_turn_state(
-            &TurnContext::new(loaded_sid.clone(), loaded_tid.clone()),
+            &TurnContext::new(loaded_sid, loaded_tid.clone()),
             Usage::default(),
         )
         .await

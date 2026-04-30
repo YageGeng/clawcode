@@ -184,6 +184,7 @@ where
     ) -> Result<()> {
         let state = Arc::new(AsyncMutex::new(self));
         let session_new_state = Arc::clone(&state);
+        let session_load_state = Arc::clone(&state);
         let prompt_state = Arc::clone(&state);
 
         agent_client_protocol::Agent
@@ -203,6 +204,18 @@ where
                             _connection: ConnectionTo<OfficialClient>| {
                     let mut agent = session_new_state.lock().await;
                     match agent.handle_session_new_response(request).await {
+                        Ok(response) => responder.respond(response),
+                        Err(error) => responder.respond_with_error(error.into()),
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: official_acp::LoadSessionRequest,
+                            responder: Responder<official_acp::LoadSessionResponse>,
+                            _connection: ConnectionTo<OfficialClient>| {
+                    let mut agent = session_load_state.lock().await;
+                    match agent.handle_session_load_response(request).await {
                         Ok(response) => responder.respond(response),
                         Err(error) => responder.respond_with_error(error.into()),
                     }
@@ -291,6 +304,9 @@ where
             official_acp::ClientRequest::NewSessionRequest(params) => {
                 self.handle_session_new(params).await
             }
+            official_acp::ClientRequest::LoadSessionRequest(params) => {
+                self.handle_session_load(params).await
+            }
             official_acp::ClientRequest::PromptRequest(params) => {
                 self.handle_session_prompt(params).await
             }
@@ -313,10 +329,6 @@ where
     }
 
     /// Creates a new kernel thread for an ACP session and returns the typed ACP response.
-    ///
-    /// When the client sends `_meta: { resumeSessionId: "<uuid>" }`, the agent loads
-    /// the persisted session from disk and replays its history into the store, resuming
-    /// from where it left off instead of starting fresh.
     async fn handle_session_new_response(
         &mut self,
         params: official_acp::NewSessionRequest,
@@ -330,41 +342,63 @@ where
         }
         let session_router = self.build_session_router(params.cwd.clone()).await?;
 
-        // Check for session resume request via _meta.
-        let resume_id = params
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.get("resumeSessionId"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let (session_id, thread_id) = if let Some(ref resume_id) = resume_id {
-            match self.load_and_replay_session(resume_id).await {
-                Ok((sid, tid)) => {
-                    info!("resumed session {resume_id}");
-                    (sid, tid)
-                }
-                Err(e) => {
-                    warn!("failed to resume session {resume_id}: {e}, creating new");
-                    (SessionId::new(), ThreadId::new())
-                }
-            }
-        } else {
-            (SessionId::new(), ThreadId::new())
-        };
-
-        let thread =
-            ThreadHandle::new(session_id.clone(), thread_id.clone()).with_cwd(params.cwd.clone());
-        let session_id_str = session_id.to_string();
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let thread = ThreadHandle::new(session_id, thread_id).with_cwd(params.cwd);
         self.sessions.insert(
-            session_id_str.clone(),
+            session_id.to_string(),
             AcpSession {
                 thread,
                 router: session_router,
             },
         );
 
-        Ok(official_acp::NewSessionResponse::new(session_id_str))
+        Ok(official_acp::NewSessionResponse::new(
+            session_id.to_string(),
+        ))
+    }
+
+    /// Loads a persisted session via `session/load` and returns the typed ACP response.
+    ///
+    /// Finds the session file by its id, replays events into the in-memory store,
+    /// and registers the session so subsequent `session/prompt` calls resolve correctly.
+    async fn handle_session_load(
+        &mut self,
+        params: official_acp::LoadSessionRequest,
+    ) -> Result<Value> {
+        Ok(SessionRpc::value(
+            &self.handle_session_load_response(params).await?,
+        ))
+    }
+
+    /// Handles the typed `session/load` request per the ACP specification.
+    async fn handle_session_load_response(
+        &mut self,
+        params: official_acp::LoadSessionRequest,
+    ) -> Result<official_acp::LoadSessionResponse> {
+        if !params.cwd.is_absolute() {
+            return InvalidRequestSnafu {
+                message: "session/load cwd must be absolute".to_string(),
+                stage: "acp-session-load-cwd-absolute".to_string(),
+            }
+            .fail();
+        }
+        let session_router = self.build_session_router(params.cwd.clone()).await?;
+        let resume_session_id = params.session_id.to_string();
+
+        let (session_id, thread_id) = self.load_and_replay_session(&resume_session_id).await?;
+
+        let thread = ThreadHandle::new(session_id, thread_id).with_cwd(params.cwd);
+        self.sessions.insert(
+            resume_session_id.clone(),
+            AcpSession {
+                thread,
+                router: session_router,
+            },
+        );
+
+        info!("loaded session {resume_session_id}");
+        Ok(official_acp::LoadSessionResponse::new())
     }
 
     /// Loads a persisted session from disk and replays its events into the store.

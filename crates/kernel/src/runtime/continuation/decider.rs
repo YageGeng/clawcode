@@ -155,7 +155,7 @@ pub(crate) async fn decide_task_continuation(
     }
 
     let continuation = store
-        .take_continuation_state(request.session_id.clone(), request.thread_id.clone())
+        .take_continuation_state(request.session_id, request.thread_id.clone())
         .await?;
     Ok(match continuation {
         Some(continuation) => {
