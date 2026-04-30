@@ -1,50 +1,54 @@
 # ClawCode
 
-ClawCode is a Rust implementation of an AI REPL that executes tool calls through a kernel/runtime loop and routes requests to LLM providers.
+ClawCode is a Rust AI coding assistant that implements the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) for interactive agent workflows with LLM providers.
 
-## What it does
+## Features
 
-- Runs a local CLI entrypoint (`cli`) for interactive agent workflows.
-- Orchestrates turns in `kernel` (tool execution, continuation, turn/event flow).
-- Executes built-in tools in `tools` and exposes shell/apply-patch style capabilities.
-- Sends prompts/completions via `llm` providers (including DeepSeek/OpenAI adapters).
-- Supports skill injections via the `skills` crate.
+- **ACP-compliant** — `session/load`, `session/prompt`, `initialize` per the ACP specification.
+- **Session persistence** — JSONL-based session storage with resume support (`-r`).
+- **Local CLI** — interactive terminal client with streaming output, tool approval, and history replay.
+- **Built-in tools** — file read/write, shell execution, apply-patch, extensible via `ToolRouter`.
+- **Multi-provider** — supports DeepSeek, OpenAI, and ChatGPT backends.
 
 ## Quick start
 
 ```bash
-# build CLI
-cargo build -p cli
+cargo run -p cli                          # new session
+cargo run -p cli -- -r <session-id>       # resume a session
+cargo run -p cli -- -l                    # list persisted sessions
+cargo run -p cli -- --serve               # ACP stdio agent
+cargo run -p cli -- --log /tmp/claw.log   # custom log path
 
-# run CLI
-cargo run -p cli
-
-# run tests
-cargo test
-# or a single crate
-cargo test -p kernel
+cargo test                                # all tests
 ```
 
 ## Project layout
 
 ```text
-Cargo.toml                 # workspace manifest
 crates/
-  cli/      # command entrypoint
-  kernel/   # agent runtime and orchestration
-  tools/    # tool router + built-ins
-  llm/      # completion providers and protocol conversion
-  skills/   # skill pipeline hooks
-  acp/      # ACP protocol types
+  cli/      # CLI entrypoint, argument parsing (clap)
+  kernel/   # agent runtime, turn orchestration, tool dispatch
+  tools/    # tool router and built-in tools
+  llm/      # LLM provider adapters and protocol conversion
+  acp/      # ACP agent, client, session management, message types
+  store/    # JSONL session persistence (read/write)
+  skills/   # skill injection pipeline
 ```
+
+## Session persistence
+
+Sessions are stored as JSONL files under:
+- **Linux / macOS** — `~/.local/share/clawcode/sessions/YYYY/MM/DD/`
+- **Windows** — `%APPDATA%/clawcode/sessions/YYYY/MM/DD/`
+
+Each turn records user input, model responses, tool calls, tool results, and usage stats. Resumed sessions replay full conversation history including tool interactions.
 
 ## Requirements
 
-- Rust 2024 (toolchain in `rust-toolchain.toml`).
-- A configured LLM provider environment (depending on runtime config).
+- Rust 2024 (toolchain in `rust-toolchain.toml`)
+- Configured LLM provider credentials in `base.toml`
 
-## Notes
+## Code quality
 
-- Tool errors should remain model-consumable while preserving internal context in structured fields.
-- Keep changes aligned to crate boundaries: model protocol conversions in `llm`, orchestration in `kernel`, tool behavior in `tools`.
-- Formatting and linting are enforced by `pre-commit` (`fmt`, `clippy --tests --examples -Dwarnings`).
+- `pre-commit` enforces `rustfmt` and `clippy --tests --examples -Dwarnings`
+- Crate boundaries: protocol in `acp`, orchestration in `kernel`, tools in `tools`, providers in `llm`, persistence in `store`
