@@ -2450,6 +2450,7 @@ dependencies = [
  "llm",
  "serde",
  "serde_json",
+ "snafu",
  "tokio",
  "tracing",
  "uuid",
@@ -2779,6 +2780,7 @@ dependencies = [
  "snafu",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

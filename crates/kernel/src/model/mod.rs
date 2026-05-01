@@ -391,8 +391,7 @@ impl ResponseEventMapper {
         R: Clone + Unpin,
     {
         item.map(|content| self.map_streamed_content(content))
-            .map_err(|source| crate::Error::Model {
-                source,
+            .context(ModelSnafu {
                 stage: "agent-model-stream-next".to_string(),
             })
     }

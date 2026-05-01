@@ -2,7 +2,7 @@ use llm::completion::{Message, message::Reasoning};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    context::SessionTaskContext,
+    context::{SessionTaskContext, TurnContext},
     runtime::inflight::{CompletedToolCallQueue, InFlightToolCallRegistry},
     session::{SessionId, ThreadId},
     tools::{
@@ -30,6 +30,8 @@ where
     pub(crate) store: &'a SessionTaskContext,
     pub(crate) session_id: SessionId,
     pub(crate) thread_id: ThreadId,
+    pub(crate) turn_context: &'a TurnContext,
+    pub(crate) collaboration_runtime: Option<tools::CollaborationRuntimeHandle>,
     pub(crate) router: &'a ToolRouter,
     pub(crate) events: &'a E,
     pub(crate) working_messages: &'a mut Vec<Message>,

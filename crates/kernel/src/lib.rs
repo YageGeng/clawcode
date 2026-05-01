@@ -16,8 +16,8 @@ pub use input::{
     UserInput, user_inputs_display_text, user_inputs_to_messages, user_inputs_to_skill_inputs,
 };
 pub use runtime::{
-    AgentLoopConfig, RunFailure, RunOutcome, RunRequest, RunResult, ThreadConfig, ThreadHandle,
-    ThreadRunRequest, ThreadRuntime, ThreadRuntimeDeps,
+    AgentLoopConfig, CollaborationSession, RunFailure, RunOutcome, RunRequest, RunResult,
+    ThreadConfig, ThreadHandle, ThreadRunRequest, ThreadRuntime, ThreadRuntimeDeps,
 };
 pub use session::{InMemorySessionStore, SessionId, ThreadId, Turn};
 

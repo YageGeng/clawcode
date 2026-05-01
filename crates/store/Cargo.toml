@@ -13,6 +13,7 @@ uuid = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+snafu = { workspace = true }
 
 # third-party
 dirs = "6"

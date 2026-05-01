@@ -13,7 +13,7 @@ use crate::{
         ApplyPatchFileMetadata, ApplyPatchMetadata, ApplyPatchStructuredOutput,
         StructuredToolOutput, ToolInvocation, ToolMetadata, ToolOutput,
     },
-    error::{ToolExecutionSnafu, ToolIoSnafu},
+    error::{ToolExecutionIoSnafu, ToolExecutionSnafu, ToolExecutionUtf8Snafu, ToolIoSnafu},
     handler::ToolHandler,
 };
 
@@ -311,30 +311,24 @@ impl ApplyPatchTool {
         display_path: &str,
         operation: &str,
     ) -> Result<TextFileContents> {
-        let bytes = fs::read(path).map_err(|_| {
-            ToolExecutionSnafu {
-                tool: self.name().to_string(),
-                stage: stage.to_string(),
-                message: format!(
-                    "apply_patch verification failed: Failed to read file to {operation}: {display_path}"
-                ),
-            }
-            .build()
+        let bytes = fs::read(path).context(ToolExecutionIoSnafu {
+            tool: self.name().to_string(),
+            stage: stage.to_string(),
+            message: format!(
+                "apply_patch verification failed: Failed to read file to {operation}: {display_path}"
+            ),
         })?;
         let (has_bom, text_bytes) = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
             (true, &bytes[3..])
         } else {
             (false, bytes.as_slice())
         };
-        let text = String::from_utf8(text_bytes.to_vec()).map_err(|_| {
-            ToolExecutionSnafu {
-                tool: self.name().to_string(),
-                stage: stage.to_string(),
-                message: format!(
-                    "apply_patch verification failed: file is not valid UTF-8: {display_path}"
-                ),
-            }
-            .build()
+        let text = String::from_utf8(text_bytes.to_vec()).context(ToolExecutionUtf8Snafu {
+            tool: self.name().to_string(),
+            stage: stage.to_string(),
+            message: format!(
+                "apply_patch verification failed: file is not valid UTF-8: {display_path}"
+            ),
         })?;
         Ok(TextFileContents { text, has_bom })
     }
@@ -349,13 +343,10 @@ impl ApplyPatchTool {
         let canonical_root = self.canonical_root(stage)?;
         let relative_path = validate_relative_path(raw_path, self.name(), stage)?;
         let candidate = canonical_root.join(relative_path);
-        let canonical_candidate = candidate.canonicalize().map_err(|_| {
-            ToolExecutionSnafu {
-                tool: self.name().to_string(),
-                stage: stage.to_string(),
-                message: missing_message.clone(),
-            }
-            .build()
+        let canonical_candidate = candidate.canonicalize().context(ToolExecutionIoSnafu {
+            tool: self.name().to_string(),
+            stage: stage.to_string(),
+            message: missing_message,
         })?;
         ensure!(
             canonical_candidate.starts_with(&canonical_root),

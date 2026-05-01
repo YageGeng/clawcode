@@ -4,7 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::event::TurnEvent;
+use snafu::ResultExt;
+
+use crate::event::SessionEvent;
+use crate::{
+    Result,
+    error::{IoSnafu, JsonSnafu},
+};
 
 /// Metadata about one persisted session discovered on disk.
 #[derive(Debug, Clone)]
@@ -23,7 +29,7 @@ pub struct SessionInfo {
 ///
 /// Recursively scans `~/.local/share/clawcode/sessions/` for `*.jsonl` files
 /// and returns them sorted newest-first.
-pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
+pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let data_dir = sessions_root();
     if !data_dir.exists() {
         return Ok(Vec::new());
@@ -35,21 +41,30 @@ pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
-/// Loads a session JSONL file and replays all events, returning the raw `TurnEvent` list.
+/// Loads a session JSONL file and replays all events, returning the raw `SessionEvent` list.
 ///
 /// Callers can reconstruct in-memory state from the returned events.
-pub fn load_session_events(path: &Path) -> std::io::Result<Vec<TurnEvent>> {
-    let file = fs::File::open(path)?;
+pub fn load_session_events(path: &Path) -> Result<Vec<SessionEvent>> {
+    let path = path.to_path_buf();
+    let file = fs::File::open(&path).context(IoSnafu {
+        stage: "store-load-session-open".to_string(),
+        path: path.clone(),
+    })?;
     let reader = BufReader::new(file);
     let mut events = Vec::new();
 
     for line in reader.lines() {
-        let line = line?;
+        let line = line.context(IoSnafu {
+            stage: "store-load-session-read-line".to_string(),
+            path: path.clone(),
+        })?;
         if line.trim().is_empty() {
             continue;
         }
-        let event: TurnEvent = serde_json::from_str(&line)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let event: SessionEvent = serde_json::from_str(&line).context(JsonSnafu {
+            stage: "store-load-session-parse-line".to_string(),
+            path: path.clone(),
+        })?;
         events.push(event);
     }
 
@@ -119,25 +134,36 @@ pub fn sessions_root() -> PathBuf {
     base.join("clawcode").join("sessions")
 }
 
-fn collect_jsonl_files(dir: &Path, results: &mut Vec<SessionInfo>) -> std::io::Result<()> {
+fn collect_jsonl_files(dir: &Path, results: &mut Vec<SessionInfo>) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    let dir_path = dir.to_path_buf();
+    for entry in fs::read_dir(dir).context(IoSnafu {
+        stage: "store-list-read-dir".to_string(),
+        path: dir_path.clone(),
+    })? {
+        let entry = entry.context(IoSnafu {
+            stage: "store-list-read-dir-entry".to_string(),
+            path: dir_path.clone(),
+        })?;
         let path = entry.path();
         if path.is_dir() {
             collect_jsonl_files(&path, results)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-            && let Ok(info) = parse_session_info(&path)
-        {
-            results.push(info);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            match parse_session_info(&path) {
+                Ok(info) => results.push(info),
+                Err(error) => {
+                    tracing::warn!("failed to inspect session file {}: {error}", path.display())
+                }
+            }
         }
     }
     Ok(())
 }
 
-fn parse_session_info(path: &Path) -> std::io::Result<SessionInfo> {
+fn parse_session_info(path: &Path) -> Result<SessionInfo> {
+    let path = path.to_path_buf();
     let filename = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -146,9 +172,25 @@ fn parse_session_info(path: &Path) -> std::io::Result<SessionInfo> {
     // Extract UUID from filename like "session-20260429T120000-uuid.jsonl"
     let id = filename.rsplit('-').next().unwrap_or(filename).to_string();
 
-    let turn_count = BufReader::new(fs::File::open(path)?).lines().count();
+    // Count lines explicitly so corrupted files surface the real read error
+    // instead of being silently truncated during metadata display.
+    let turn_count = BufReader::new(fs::File::open(&path).context(IoSnafu {
+        stage: "store-session-info-open".to_string(),
+        path: path.clone(),
+    })?)
+    .lines()
+    .try_fold(0usize, |count, line| {
+        line.context(IoSnafu {
+            stage: "store-session-info-read-line".to_string(),
+            path: path.clone(),
+        })
+        .map(|_| count + 1)
+    })?;
 
-    let metadata = path.metadata()?;
+    let metadata = path.metadata().context(IoSnafu {
+        stage: "store-session-info-metadata".to_string(),
+        path: path.clone(),
+    })?;
     let system_time = metadata
         .modified()
         .or_else(|_| metadata.created())
@@ -157,7 +199,7 @@ fn parse_session_info(path: &Path) -> std::io::Result<SessionInfo> {
 
     Ok(SessionInfo {
         id,
-        path: path.to_path_buf(),
+        path,
         modified_at,
         turn_count,
     })

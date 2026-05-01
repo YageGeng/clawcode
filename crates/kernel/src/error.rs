@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use snafu::Snafu;
 
 use crate::runtime::ToolCallRuntimeSnapshot;
@@ -6,6 +8,25 @@ use crate::runtime::ToolCallRuntimeSnapshot;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("I/O error on `{stage}`, {source}"))]
+    Io {
+        source: std::io::Error,
+        stage: String,
+    },
+
+    #[snafu(display("I/O error on `{stage}` for `{}`: {source}", path.display()))]
+    PathIo {
+        source: std::io::Error,
+        stage: String,
+        path: PathBuf,
+    },
+
+    #[snafu(display("channel closed on `{stage}`, {source}"))]
+    Channel {
+        source: tokio::sync::watch::error::RecvError,
+        stage: String,
+    },
+
     #[snafu(display("model error on `{stage}`, {source}"))]
     Model {
         source: llm::completion::CompletionError,
@@ -30,7 +51,8 @@ pub enum Error {
 
     #[snafu(display("tool dispatch failed on `{stage}`, {source}"))]
     Tool {
-        source: tools::Error,
+        #[snafu(source(from(tools::Error, Box::new)))]
+        source: Box<tools::Error>,
         stage: String,
         inflight_snapshot: Option<Box<ToolCallRuntimeSnapshot>>,
     },
@@ -100,11 +122,11 @@ mod tests {
     #[test]
     fn display_message_uses_inner_tool_error_message() {
         let error = Error::Tool {
-            source: tools::Error::ToolExecution {
+            source: Box::new(tools::Error::ToolExecution {
                 tool: "apply_patch".to_string(),
                 message: "missing Begin/End markers".to_string(),
                 stage: "apply-patch-parse".to_string(),
-            },
+            }),
             stage: "dispatch-tool".to_string(),
             inflight_snapshot: None,
         };

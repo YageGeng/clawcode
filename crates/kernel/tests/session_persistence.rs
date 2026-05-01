@@ -1,7 +1,8 @@
+use chrono::Utc;
 use kernel::{InMemorySessionStore, SessionId, ThreadId, TurnContext};
 use llm::{completion::Message, usage::Usage};
 use std::sync::Arc;
-use store::{JsonlSessionStore, load_session_events};
+use store::{JsonlSessionStore, SessionEvent, load_session_events};
 
 /// Verifies that a session store with persistence records a full turn round-trip.
 #[tokio::test]
@@ -263,4 +264,106 @@ async fn load_from_events_resumes_session() {
     assert_eq!(all_messages.len(), 4);
     assert_eq!(all_messages[2], Message::user("continue"));
     assert_eq!(all_messages[3], Message::assistant("reply"));
+}
+
+/// Verifies replay tracks active turns per thread so interleaved child events
+/// do not cause the parent turn to be dropped on resume.
+#[tokio::test]
+async fn load_from_events_preserves_interleaved_thread_turns() {
+    let session_id = SessionId::new();
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let parent_context = TurnContext::new(session_id, parent_thread_id.clone());
+    let child_context = TurnContext::new(session_id, child_thread_id.clone());
+    let events = vec![
+        SessionEvent::TurnStarted {
+            session_id: session_id.as_uuid(),
+            thread_id: parent_thread_id.as_uuid(),
+            user_text: "parent turn 1".to_string(),
+            message: Message::user("parent turn 1"),
+            timestamp: Utc::now(),
+        },
+        SessionEvent::Message {
+            session_id: session_id.as_uuid(),
+            thread_id: parent_thread_id.as_uuid(),
+            message: Message::assistant("parent answer 1"),
+            timestamp: Utc::now(),
+        },
+        SessionEvent::TurnStarted {
+            session_id: session_id.as_uuid(),
+            thread_id: child_thread_id.as_uuid(),
+            user_text: "child turn 1".to_string(),
+            message: Message::user("child turn 1"),
+            timestamp: Utc::now(),
+        },
+        SessionEvent::Message {
+            session_id: session_id.as_uuid(),
+            thread_id: child_thread_id.as_uuid(),
+            message: Message::assistant("child answer 1"),
+            timestamp: Utc::now(),
+        },
+        SessionEvent::TurnCompleted {
+            session_id: session_id.as_uuid(),
+            thread_id: child_thread_id.as_uuid(),
+            usage: Usage::default(),
+            context_item: serde_json::to_value(child_context.to_turn_context_item())
+                .expect("child turn context should serialize"),
+            timestamp: Utc::now(),
+        },
+        SessionEvent::TurnCompleted {
+            session_id: session_id.as_uuid(),
+            thread_id: parent_thread_id.as_uuid(),
+            usage: Usage::default(),
+            context_item: serde_json::to_value(parent_context.to_turn_context_item())
+                .expect("parent turn context should serialize"),
+            timestamp: Utc::now(),
+        },
+    ];
+
+    let resumed_store = InMemorySessionStore::default();
+    let (loaded_session_id, loaded_thread_id) = resumed_store
+        .load_from_events(events)
+        .await
+        .expect("replay should succeed");
+    assert_eq!(loaded_session_id, session_id);
+    assert_eq!(loaded_thread_id, parent_thread_id);
+
+    resumed_store
+        .begin_turn_state(
+            loaded_session_id,
+            loaded_thread_id.clone(),
+            "parent turn 2".to_string(),
+            Message::user("parent turn 2"),
+        )
+        .await
+        .expect("replayed parent thread should accept a second turn");
+    resumed_store
+        .append_message_state(
+            loaded_session_id,
+            loaded_thread_id.clone(),
+            Message::assistant("parent answer 2"),
+        )
+        .await
+        .expect("second parent turn should append");
+    resumed_store
+        .finalize_turn_state(
+            &TurnContext::new(loaded_session_id, loaded_thread_id.clone()),
+            Usage::default(),
+        )
+        .await
+        .expect("second parent turn should finalize");
+
+    let parent_messages = resumed_store
+        .load_messages_state(loaded_session_id, loaded_thread_id, 10)
+        .await
+        .expect("parent messages should load");
+    assert_eq!(
+        parent_messages,
+        vec![
+            Message::user("parent turn 1"),
+            Message::assistant("parent answer 1"),
+            Message::user("parent turn 2"),
+            Message::assistant("parent answer 2"),
+        ]
+    );
 }

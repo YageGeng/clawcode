@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -135,6 +135,32 @@ impl SessionTaskContext {
         thread.cached_system_prompt = Some(system_prompt);
     }
 
+    /// Seeds a durable turn context baseline for a thread that has not produced any turns yet.
+    pub async fn seed_turn_context(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_context: TurnContext,
+    ) {
+        self.with_history(session_id, thread_id, |history| {
+            history.set_reference_context_item(Some(turn_context.to_turn_context_item()));
+        })
+        .await;
+    }
+
+    /// Loads the latest durable turn context snapshot for one thread when it exists.
+    pub async fn load_turn_context(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Option<TurnContext> {
+        self.read_history(session_id, thread_id, |history| {
+            history.reference_context_item().map(TurnContext::from_item)
+        })
+        .await
+        .flatten()
+    }
+
     /// Invalidates the cached system prompt so the next turn must rebuild it.
     pub async fn expire_system_prompt(&self, session_id: SessionId, thread_id: ThreadId) {
         let mut threads = self.threads.write().await;
@@ -248,35 +274,6 @@ impl SessionTaskContext {
         )
         .await;
         Ok(())
-    }
-
-    /// Finalizes the active turn when only session/thread identifiers are available.
-    pub async fn finalize_turn_by_id(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-        usage: Usage,
-    ) -> Result<()> {
-        let turn_context = self
-            .read_history(session_id, thread_id.clone(), |history| {
-                history.reference_context_item()
-            })
-            .await
-            .flatten()
-            .map(|context_item| {
-                let mut turn_context =
-                    TurnContext::new(context_item.session_id, context_item.thread_id);
-                turn_context.agent_id = context_item.agent_id;
-                turn_context.parent_agent_id = context_item.parent_agent_id;
-                turn_context.name = context_item.name;
-                turn_context.system_prompt = context_item.system_prompt;
-                turn_context.cwd = context_item.cwd;
-                turn_context.current_date = context_item.current_date;
-                turn_context.timezone = context_item.timezone;
-                turn_context
-            })
-            .unwrap_or_else(|| TurnContext::new(session_id, thread_id));
-        self.finalize_turn_state(&turn_context, usage).await
     }
 
     /// Discards the active turn after a failed execution.
@@ -399,9 +396,9 @@ impl SessionTaskContext {
     /// are logged and skipped rather than panicking.
     pub async fn load_from_events(
         &self,
-        events: Vec<store::TurnEvent>,
+        events: Vec<store::SessionEvent>,
     ) -> Result<(SessionId, ThreadId)> {
-        use store::TurnEvent;
+        use store::SessionEvent;
 
         if events.is_empty() {
             return Err(crate::Error::Runtime {
@@ -413,11 +410,13 @@ impl SessionTaskContext {
 
         let mut session_id: Option<SessionId> = None;
         let mut thread_id: Option<ThreadId> = None;
-        let mut active_turn = false;
+        // Track active turns per replayed thread so interleaved parent/child events
+        // can finalize independently without clobbering each other's lifecycle state.
+        let mut active_turns = HashSet::new();
 
         for event in events {
             match event {
-                TurnEvent::TurnStarted {
+                SessionEvent::TurnStarted {
                     session_id: sid,
                     thread_id: tid,
                     user_text,
@@ -425,45 +424,47 @@ impl SessionTaskContext {
                     ..
                 } => {
                     if session_id.is_none() {
-                        session_id = Some(SessionId::from_uuid(sid));
-                        thread_id = Some(ThreadId::from_uuid(tid));
+                        session_id = Some(SessionId::from(sid));
+                        thread_id = Some(ThreadId::from(tid));
                     }
-                    let sid = SessionId::from_uuid(sid);
-                    let tid = ThreadId::from_uuid(tid);
+                    let sid = SessionId::from(sid);
+                    let tid = ThreadId::from(tid);
+                    let replay_key = (sid, tid.clone());
                     self.with_history(sid, tid, |history| {
                         history.begin_turn(user_text, message);
                     })
                     .await;
-                    active_turn = true;
+                    active_turns.insert(replay_key);
                 }
-                TurnEvent::Message {
+                SessionEvent::Message {
                     session_id: sid,
                     thread_id: tid,
                     message,
                     ..
                 } => {
-                    let sid = SessionId::from_uuid(sid);
-                    let tid = ThreadId::from_uuid(tid);
+                    let sid = SessionId::from(sid);
+                    let tid = ThreadId::from(tid);
                     self.with_history(sid, tid, |history| {
                         history.append_message(message);
                     })
                     .await;
                 }
-                TurnEvent::TurnCompleted {
+                SessionEvent::TurnCompleted {
                     session_id: sid,
                     thread_id: tid,
                     usage,
                     context_item,
                     ..
                 } => {
-                    if !active_turn {
+                    let sid = SessionId::from(sid);
+                    let tid = ThreadId::from(tid);
+                    let replay_key = (sid, tid.clone());
+                    if !active_turns.contains(&replay_key) {
                         tracing::warn!(
-                            "session replay: TurnCompleted without active turn (sid={sid}) — skipped"
+                            "session replay: TurnCompleted without active turn (sid={sid}, tid={tid}) — skipped"
                         );
                         continue;
                     }
-                    let sid = SessionId::from_uuid(sid);
-                    let tid = ThreadId::from_uuid(tid);
                     let context_item: TurnContextItem = serde_json::from_value(context_item)
                         .unwrap_or_else(|e| {
                             tracing::warn!(
@@ -476,26 +477,34 @@ impl SessionTaskContext {
                         history.finalize_turn(usage, &turn_context);
                     })
                     .await;
-                    active_turn = false;
+                    active_turns.remove(&replay_key);
                 }
-                TurnEvent::TurnDiscarded {
+                SessionEvent::TurnDiscarded {
                     session_id: sid,
                     thread_id: tid,
                     ..
                 } => {
-                    if !active_turn {
+                    let sid = SessionId::from(sid);
+                    let tid = ThreadId::from(tid);
+                    let replay_key = (sid, tid.clone());
+                    if !active_turns.contains(&replay_key) {
                         tracing::warn!(
-                            "session replay: TurnDiscarded without active turn (sid={sid}) — skipped"
+                            "session replay: TurnDiscarded without active turn (sid={sid}, tid={tid}) — skipped"
                         );
                         continue;
                     }
-                    let sid = SessionId::from_uuid(sid);
-                    let tid = ThreadId::from_uuid(tid);
                     self.with_history(sid, tid, |history| {
                         history.discard_turn();
                     })
                     .await;
-                    active_turn = false;
+                    active_turns.remove(&replay_key);
+                }
+                SessionEvent::AgentRegistered { .. }
+                | SessionEvent::AgentStatusChanged { .. }
+                | SessionEvent::MailboxDelivered { .. } => {
+                    // Collaboration events are persisted for supervisor replay, but the
+                    // session transcript loader intentionally ignores them for now because
+                    // they do not affect prompt-visible turn history.
                 }
             }
         }

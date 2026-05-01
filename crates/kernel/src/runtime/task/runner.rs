@@ -27,6 +27,7 @@ where
     pub(crate) router: &'a ToolRouter,
     pub(crate) events: &'a E,
     pub(crate) config: &'a AgentLoopConfig,
+    pub(crate) collaboration_runtime: Option<tools::CollaborationRuntimeHandle>,
     pub(crate) use_system_prompt_cache: bool,
     pub(crate) prompt_overrides: SystemPromptOverrides,
 }
@@ -46,6 +47,7 @@ where
         router,
         events,
         config,
+        collaboration_runtime,
         use_system_prompt_cache,
         prompt_overrides,
     } = input;
@@ -84,6 +86,7 @@ where
             router,
             events,
             config,
+            collaboration_runtime.clone(),
             TurnExecutionRequest {
                 request: turn_request.clone(),
                 prompt_overrides: prompt_overrides.clone(),
@@ -147,11 +150,7 @@ where
         match next_request {
             Some(next_request) => {
                 if let Err(error) = store
-                    .finalize_turn_by_id(
-                        turn_request.session_id,
-                        turn_request.thread_id.clone(),
-                        loop_result.usage,
-                    )
+                    .finalize_turn_state(&loop_result.turn_context, loop_result.usage)
                     .await
                 {
                     let error =
@@ -169,11 +168,7 @@ where
             }
             None => {
                 if let Err(error) = store
-                    .finalize_turn_by_id(
-                        turn_request.session_id,
-                        turn_request.thread_id.clone(),
-                        loop_result.usage,
-                    )
+                    .finalize_turn_state(&loop_result.turn_context, loop_result.usage)
                     .await
                 {
                     let error =

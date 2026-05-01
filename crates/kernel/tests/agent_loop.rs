@@ -4067,16 +4067,16 @@ async fn agent_runs_with_stable_context_and_persists_the_turn() {
 }
 
 #[tokio::test]
-async fn agent_context_can_fork_child_identity_for_the_same_thread() {
+async fn agent_context_can_fork_child_identity_for_a_dedicated_thread() {
     let parent = TurnContext::new(SessionId::new(), ThreadId::new()).with_name("planner");
     let child = parent.fork("reviewer");
 
     assert_eq!(child.session_id, parent.session_id);
-    assert_eq!(child.thread_id, parent.thread_id);
     assert_eq!(
         child.parent_agent_id.as_deref(),
         Some(parent.agent_id.as_str())
     );
     assert_eq!(child.name.as_deref(), Some("reviewer"));
     assert_ne!(child.agent_id, parent.agent_id);
+    assert_ne!(child.thread_id, parent.thread_id);
 }

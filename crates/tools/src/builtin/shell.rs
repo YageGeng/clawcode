@@ -24,7 +24,7 @@ use crate::{
     context::{
         ShellStructuredOutput, StructuredToolOutput, ToolInvocation, ToolMetadata, ToolOutput,
     },
-    error::{RuntimeSnafu, ToolExecutionSnafu, ToolIoSnafu},
+    error::{RuntimeSnafu, ToolExecutionSnafu, ToolIoSnafu, ToolPathSnafu},
     handler::ToolHandler,
 };
 
@@ -370,13 +370,10 @@ impl UnifiedExecRuntime {
             );
             canonical_request_path
                 .strip_prefix(&canonical_root)
-                .map_err(|_| {
-                    ToolExecutionSnafu {
-                        tool: tool.to_string(),
-                        stage: stage.to_string(),
-                        message: "workdir must be relative to the workspace root".to_string(),
-                    }
-                    .build()
+                .context(ToolPathSnafu {
+                    tool: tool.to_string(),
+                    stage: stage.to_string(),
+                    message: "workdir must be relative to the workspace root".to_string(),
                 })?
                 .to_path_buf()
         } else {

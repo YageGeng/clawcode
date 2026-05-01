@@ -5,6 +5,7 @@ use std::{
 };
 
 use chrono::Utc;
+use snafu::ResultExt;
 
 use crate::Result;
 use skills::SkillMetadata;
@@ -103,20 +104,14 @@ struct ContextPromptFile {
 fn resolve_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
     let cwd = match cwd {
         Some(cwd) => cwd,
-        None => env::current_dir().map_err(|error| crate::Error::Runtime {
-            message: format!("failed to read current working directory: {error}"),
+        None => env::current_dir().context(crate::error::IoSnafu {
             stage: "prompt-current-dir".to_string(),
-            inflight_snapshot: None,
         })?,
     };
 
-    cwd.canonicalize().map_err(|error| crate::Error::Runtime {
-        message: format!(
-            "failed to canonicalize prompt working directory `{}`: {error}",
-            cwd.display()
-        ),
+    cwd.canonicalize().context(crate::error::PathIoSnafu {
         stage: "prompt-canonicalize-cwd".to_string(),
-        inflight_snapshot: None,
+        path: cwd.clone(),
     })
 }
 
@@ -146,10 +141,9 @@ fn read_existing_file(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(path).map_err(|error| crate::Error::Runtime {
-        message: format!("failed to read prompt file `{}`: {error}", path.display()),
+    let content = fs::read_to_string(path).context(crate::error::PathIoSnafu {
         stage: "prompt-read-file".to_string(),
-        inflight_snapshot: None,
+        path: path.to_path_buf(),
     })?;
     Ok(normalize_optional_text(Some(content)))
 }
@@ -178,25 +172,17 @@ fn read_context_file(
         return Ok(None);
     }
 
-    let canonical = path.canonicalize().map_err(|error| crate::Error::Runtime {
-        message: format!(
-            "failed to canonicalize context file `{}`: {error}",
-            path.display()
-        ),
+    let canonical = path.canonicalize().context(crate::error::PathIoSnafu {
         stage: "prompt-canonicalize-context-file".to_string(),
-        inflight_snapshot: None,
+        path: path.to_path_buf(),
     })?;
     if !seen.insert(canonical.clone()) {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&canonical).map_err(|error| crate::Error::Runtime {
-        message: format!(
-            "failed to read context file `{}`: {error}",
-            canonical.display()
-        ),
+    let content = fs::read_to_string(&canonical).context(crate::error::PathIoSnafu {
         stage: "prompt-read-context-file".to_string(),
-        inflight_snapshot: None,
+        path: canonical.clone(),
     })?;
 
     Ok(Some(ContextPromptFile {
@@ -375,21 +361,13 @@ fn collect_doc_entries(project_root: &Path, dir_name: &str) -> Result<Vec<(Strin
     }
 
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|error| crate::Error::Runtime {
-        message: format!(
-            "failed to read documentation directory `{}`: {error}",
-            dir.display()
-        ),
+    for entry in fs::read_dir(&dir).context(crate::error::PathIoSnafu {
         stage: "prompt-read-doc-directory".to_string(),
-        inflight_snapshot: None,
+        path: dir.clone(),
     })? {
-        let entry = entry.map_err(|error| crate::Error::Runtime {
-            message: format!(
-                "failed to enumerate documentation directory `{}`: {error}",
-                dir.display()
-            ),
+        let entry = entry.context(crate::error::PathIoSnafu {
             stage: "prompt-enumerate-doc-directory".to_string(),
-            inflight_snapshot: None,
+            path: dir.clone(),
         })?;
         let path = entry.path();
         if path.is_file() {
@@ -488,7 +466,7 @@ mod tests {
         .expect("prompt should build")
         .expect("default prompt should exist");
 
-        assert!(prompt.contains("You are an expert coding assistant operating inside pi"));
+        assert!(prompt.contains("You are an expert coding assistant operating inside ClawCode"));
         assert!(prompt.contains("Available tools:"));
         assert!(prompt.contains("fs/read_text_file: Prompt test snippet."));
         assert!(prompt.contains("# Project Context"));

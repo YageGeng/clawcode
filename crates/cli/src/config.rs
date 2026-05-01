@@ -149,8 +149,7 @@ pub fn load_config() -> Result<AppConfig, Box<figment::Error>> {
         figment = figment.merge(Toml::file(format!("base.{}.toml", profile)));
     }
 
-    figment
+    Ok(figment
         .merge(Env::prefixed("APP_").split("__"))
-        .extract::<AppConfig>()
-        .map_err(Box::new)
+        .extract::<AppConfig>()?)
 }

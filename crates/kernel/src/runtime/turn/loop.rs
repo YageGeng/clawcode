@@ -3,6 +3,7 @@ use llm::{completion::Message, usage::Usage};
 use crate::{
     Result,
     context::SessionTaskContext,
+    context::TurnContext,
     events::AgentStage,
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     model::{AgentModel, ModelRequest},
@@ -46,16 +47,37 @@ pub struct LoopResult {
     pub inflight_snapshot: ToolCallRuntimeSnapshot,
     pub requested_continuation: Option<SessionContinuationRequest>,
     pub continuation_decision_trace: Vec<TaskContinuationDecisionTraceEntry>,
+    pub turn_context: TurnContext,
     pub(crate) next_tool_handle_sequence: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentLoopRequest {
     pub session_id: SessionId,
     pub thread_id: ThreadId,
     pub system_prompt: Option<String>,
+    pub turn_context: TurnContext,
+    pub collaboration_runtime: Option<tools::CollaborationRuntimeHandle>,
     pub working_messages: Vec<Message>,
     pub next_tool_handle_sequence: usize,
+}
+
+impl std::fmt::Debug for AgentLoopRequest {
+    /// Formats the loop request without trying to render the opaque collaboration runtime handle.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentLoopRequest")
+            .field("session_id", &self.session_id)
+            .field("thread_id", &self.thread_id)
+            .field("system_prompt", &self.system_prompt)
+            .field("turn_context", &self.turn_context)
+            .field(
+                "collaboration_runtime",
+                &self.collaboration_runtime.as_ref().map(|_| "<runtime>"),
+            )
+            .field("working_messages", &self.working_messages)
+            .field("next_tool_handle_sequence", &self.next_tool_handle_sequence)
+            .finish()
+    }
 }
 
 /// Runs one turn through repeated sampling iterations until the model can respond.
@@ -75,6 +97,8 @@ where
         session_id,
         thread_id,
         system_prompt,
+        turn_context,
+        collaboration_runtime,
         mut working_messages,
         mut next_tool_handle_sequence,
     } = request;
@@ -148,6 +172,7 @@ where
                         inflight_snapshot: final_inflight_snapshot.clone(),
                         requested_continuation: requested_continuation.clone(),
                         continuation_decision_trace: continuation_decision_trace.clone(),
+                        turn_context: turn_context.clone(),
                         next_tool_handle_sequence,
                     },
                     None,
@@ -183,6 +208,7 @@ where
                         inflight_snapshot: final_inflight_snapshot,
                         requested_continuation,
                         continuation_decision_trace,
+                        turn_context,
                         next_tool_handle_sequence,
                     },
                 )
@@ -197,6 +223,8 @@ where
                             store,
                             session_id,
                             thread_id: thread_id.clone(),
+                            turn_context: &turn_context,
+                            collaboration_runtime: collaboration_runtime.clone(),
                             router,
                             events,
                             working_messages: &mut working_messages,
@@ -225,6 +253,7 @@ where
                         inflight_snapshot: final_inflight_snapshot.clone(),
                         requested_continuation: requested_continuation.clone(),
                         continuation_decision_trace: continuation_decision_trace.clone(),
+                        turn_context: turn_context.clone(),
                         next_tool_handle_sequence,
                     },
                     Some(tool_batch_summary),

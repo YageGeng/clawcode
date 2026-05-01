@@ -9,7 +9,11 @@ use crate::{
     events::EventSink,
     input::{UserInput, user_inputs_display_text},
     model::AgentModel,
-    runtime::{ToolCallRuntimeSnapshot, continuation::AgentLoopConfig},
+    runtime::{
+        ToolCallRuntimeSnapshot,
+        collaboration::{AgentSupervisor, CollaborationSession, KernelCollaborationRuntime},
+        continuation::AgentLoopConfig,
+    },
     session::{SessionId, ThreadId},
     tools::router::ToolRouter,
 };
@@ -142,6 +146,7 @@ impl ThreadRunRequest {
 pub struct ThreadRuntime<M, E> {
     deps: ThreadRuntimeDeps<M, E>,
     config: AgentLoopConfig,
+    supervisor: Arc<AgentSupervisor>,
 }
 
 impl<M, E> ThreadRuntime<M, E>
@@ -156,9 +161,39 @@ where
         tools: Arc<ToolRouter>,
         events: Arc<E>,
     ) -> Self {
+        let collaboration_session = CollaborationSession::new(Arc::clone(&store));
+        Self::new_with_collaboration_session(model, store, tools, events, collaboration_session)
+    }
+
+    /// Builds a runtime that reuses an existing collaboration session across prompt turns.
+    pub fn new_with_collaboration_session(
+        model: Arc<M>,
+        store: Arc<SessionTaskContext>,
+        tools: Arc<ToolRouter>,
+        events: Arc<E>,
+        collaboration_session: CollaborationSession,
+    ) -> Self {
+        Self::new_with_supervisor(
+            model,
+            store,
+            tools,
+            events,
+            collaboration_session.supervisor(),
+        )
+    }
+
+    /// Builds a runtime that reuses an existing collaboration supervisor.
+    pub(crate) fn new_with_supervisor(
+        model: Arc<M>,
+        store: Arc<SessionTaskContext>,
+        tools: Arc<ToolRouter>,
+        events: Arc<E>,
+        supervisor: Arc<AgentSupervisor>,
+    ) -> Self {
         Self {
             deps: ThreadRuntimeDeps::new(model, store, tools, events),
             config: AgentLoopConfig::default(),
+            supervisor,
         }
     }
 
@@ -166,6 +201,25 @@ where
     pub fn with_config(mut self, config: AgentLoopConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// Builds a collaboration runtime handle for one caller thread.
+    pub fn collaboration_runtime_for_thread(
+        &self,
+        _thread: &ThreadHandle,
+    ) -> tools::CollaborationRuntimeHandle {
+        Arc::new(KernelCollaborationRuntime::new(
+            Arc::clone(&self.deps.model),
+            Arc::clone(&self.deps.store),
+            Arc::clone(&self.deps.tools),
+            self.config.clone(),
+            Arc::clone(&self.supervisor),
+        ))
+    }
+
+    /// Returns the shareable collaboration session handle used by this runtime.
+    pub fn collaboration_session(&self) -> CollaborationSession {
+        CollaborationSession::from_supervisor(Arc::clone(&self.supervisor))
     }
 
     /// Invalidates the cached system prompt for one thread so the next run rebuilds it.
@@ -211,6 +265,7 @@ where
                 router: self.deps.tools.as_ref(),
                 events: self.deps.events.as_ref(),
                 config: &self.config,
+                collaboration_runtime: Some(self.collaboration_runtime_for_thread(thread)),
                 use_system_prompt_cache,
                 prompt_overrides: crate::prompt::SystemPromptOverrides {
                     custom_prompt: system_prompt,
@@ -241,6 +296,9 @@ where
                 router: self.deps.tools.as_ref(),
                 events: self.deps.events.as_ref(),
                 config: &self.config,
+                collaboration_runtime: Some(self.collaboration_runtime_for_thread(
+                    &ThreadHandle::new(request.session_id, request.thread_id.clone()),
+                )),
                 use_system_prompt_cache: true,
                 prompt_overrides: crate::prompt::SystemPromptOverrides::default(),
             },

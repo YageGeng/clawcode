@@ -3,6 +3,9 @@ use std::{fmt, path::Path, sync::Arc};
 use crate::{
     builtin::{
         apply_patch::ApplyPatchTool,
+        collaboration::{
+            CloseAgentTool, ListAgentsTool, SendAgentInputTool, SpawnAgentTool, WaitAgentTool,
+        },
         read_text_file::ReadTextFileTool,
         shell::{ExecCommandTool, UnifiedExecRuntime, WriteStdinTool},
         write_text_file::WriteTextFileTool,
@@ -128,6 +131,44 @@ pub fn build_default_tool_registry_plan(root_dir: impl AsRef<Path>) -> ToolRegis
         false,
     );
     plan.register_handler(write_stdin);
+
+    let spawn_agent = Arc::new(SpawnAgentTool);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(spawn_agent.definition(), spawn_agent.prompt_metadata()),
+        false,
+    );
+    plan.register_handler(spawn_agent);
+
+    let send_agent_input = Arc::new(SendAgentInputTool);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(
+            send_agent_input.definition(),
+            send_agent_input.prompt_metadata(),
+        ),
+        false,
+    );
+    plan.register_handler(send_agent_input);
+
+    let wait_agent = Arc::new(WaitAgentTool);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(wait_agent.definition(), wait_agent.prompt_metadata()),
+        false,
+    );
+    plan.register_handler(wait_agent);
+
+    let close_agent = Arc::new(CloseAgentTool);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(close_agent.definition(), close_agent.prompt_metadata()),
+        false,
+    );
+    plan.register_handler(close_agent);
+
+    let list_agents = Arc::new(ListAgentsTool);
+    plan.push_spec(
+        ToolSpec::function_with_prompt(list_agents.definition(), list_agents.prompt_metadata()),
+        false,
+    );
+    plan.register_handler(list_agents);
 
     plan
 }

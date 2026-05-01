@@ -29,7 +29,11 @@ enum ClientHandlerError {
     Io { source: io::Error, stage: String },
 
     #[snafu(display("ACP client tool failed on `{stage}`, {source}"))]
-    Tool { source: tools::Error, stage: String },
+    Tool {
+        #[snafu(source(from(tools::Error, Box::new)))]
+        source: Box<tools::Error>,
+        stage: String,
+    },
 
     #[snafu(display("ACP client task failed on `{stage}`, {source}"))]
     Join {
@@ -229,7 +233,7 @@ where
         agent_task.abort();
         let _ = agent_task.await;
     }
-    result.map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })
+    Ok(result?)
 }
 
 /// Builds paired in-memory ACP byte-stream transports for the embedded client and agent.
@@ -314,9 +318,11 @@ where
                 .await
                 .context(JoinSnafu {
                     stage: "acp-client-permission-blocking-task".to_string(),
-                })
-                .map_err(official_acp::Error::from)
-                .and_then(|response| response);
+                });
+                let response = match response {
+                    Ok(response) => response,
+                    Err(error) => Err(error.into()),
+                };
                 match response {
                     Ok(response) => responder.respond(response),
                     Err(error) => responder.respond_with_error(error),
@@ -468,8 +474,7 @@ impl CliClientServices {
         &self,
         request: official_acp::RequestPermissionRequest,
     ) -> std::result::Result<official_acp::RequestPermissionResponse, official_acp::Error> {
-        self.handle_request_permission_typed(request)
-            .map_err(official_acp::Error::from)
+        Ok(self.handle_request_permission_typed(request)?)
     }
 
     /// Handles an ACP read request and returns the typed SDK response.
@@ -477,8 +482,7 @@ impl CliClientServices {
         &self,
         request: official_acp::ReadTextFileRequest,
     ) -> std::result::Result<official_acp::ReadTextFileResponse, official_acp::Error> {
-        self.handle_fs_read_text_file_typed(request)
-            .map_err(official_acp::Error::from)
+        Ok(self.handle_fs_read_text_file_typed(request)?)
     }
 
     /// Handles an ACP write request and returns the typed SDK response.
@@ -486,8 +490,7 @@ impl CliClientServices {
         &self,
         request: official_acp::WriteTextFileRequest,
     ) -> std::result::Result<official_acp::WriteTextFileResponse, official_acp::Error> {
-        self.handle_fs_write_text_file_typed(request)
-            .map_err(official_acp::Error::from)
+        Ok(self.handle_fs_write_text_file_typed(request)?)
     }
 }
 

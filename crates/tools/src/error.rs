@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io};
+use std::{borrow::Cow, io, path::StripPrefixError, string::FromUtf8Error};
 
 use snafu::Snafu;
 
@@ -32,6 +32,30 @@ pub enum Error {
         stage: String,
     },
 
+    #[snafu(display("tool `{tool}` failed on `{stage}`: {message}"))]
+    ToolExecutionIo {
+        tool: String,
+        message: String,
+        stage: String,
+        source: io::Error,
+    },
+
+    #[snafu(display("tool `{tool}` failed on `{stage}`: {message}"))]
+    ToolExecutionUtf8 {
+        tool: String,
+        message: String,
+        stage: String,
+        source: FromUtf8Error,
+    },
+
+    #[snafu(display("tool `{tool}` failed on `{stage}`: {message}"))]
+    ToolPath {
+        tool: String,
+        message: String,
+        stage: String,
+        source: StripPrefixError,
+    },
+
     #[snafu(display("tool `{tool}` requires approval before execution on `{stage}`"))]
     ToolApprovalRequired { tool: String, stage: String },
 
@@ -40,6 +64,13 @@ pub enum Error {
         tool: String,
         stage: String,
         source: io::Error,
+    },
+
+    #[snafu(display("invalid identifier `{input}` on `{stage}`: {source}"))]
+    InvalidIdentifier {
+        input: String,
+        stage: String,
+        source: uuid::Error,
     },
 }
 
@@ -55,10 +86,14 @@ impl Error {
             Self::MissingTool { tool, .. } => Cow::Owned(format!("missing tool `{tool}`")),
             Self::Runtime { message, .. } => Cow::Borrowed(message),
             Self::ToolExecution { message, .. } => Cow::Borrowed(message),
+            Self::ToolExecutionIo { message, .. } => Cow::Borrowed(message),
+            Self::ToolExecutionUtf8 { message, .. } => Cow::Borrowed(message),
+            Self::ToolPath { message, .. } => Cow::Borrowed(message),
             Self::ToolApprovalRequired { tool, .. } => {
                 Cow::Owned(format!("tool `{tool}` requires approval before execution"))
             }
             Self::ToolIo { source, .. } => Cow::Owned(source.to_string()),
+            Self::InvalidIdentifier { .. } => Cow::Owned(self.to_string()),
         }
     }
 }

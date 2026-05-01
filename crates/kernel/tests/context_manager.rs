@@ -22,7 +22,7 @@ fn turn_context_can_snapshot_and_fork_child() {
         Some(parent.agent_id.as_str())
     );
     assert_eq!(child.session_id, parent.session_id);
-    assert_eq!(child.thread_id, parent.thread_id);
+    assert_ne!(child.thread_id, parent.thread_id);
     assert_eq!(child.system_prompt, parent.system_prompt);
 }
 

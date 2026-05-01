@@ -157,14 +157,21 @@ where
                 call.call.arguments.clone(),
             ));
         }
-
-        let assistant_message = Message::Assistant {
-            id: message_id,
-            content: OneOrMany::many(assistant_content).map_err(|_| crate::Error::Runtime {
+        ensure!(
+            !assistant_content.is_empty(),
+            crate::error::RuntimeSnafu {
                 message: "assistant tool-call content cannot be empty".to_string(),
                 stage: "agent-loop-build-tool-call-message".to_string(),
                 inflight_snapshot: Some(Box::new(self.inflight_snapshot())),
-            })?,
+            }
+        );
+
+        let assistant_message = Message::Assistant {
+            id: message_id,
+            // The guard above keeps the user-facing error structured while letting
+            // the collection conversion stay infallible at this point.
+            content: OneOrMany::many(assistant_content)
+                .expect("assistant tool-call content is validated as non-empty"),
         };
         self.store
             .append_message_state(

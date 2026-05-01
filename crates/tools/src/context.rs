@@ -3,7 +3,11 @@ use std::{collections::BTreeMap, fmt, future::Future, pin::Pin, sync::Arc, time:
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snafu::ResultExt;
 
-use crate::{Result, error::JsonSnafu};
+use crate::{
+    Result,
+    collaboration::{AgentRuntimeContext, CollaborationRuntimeHandle},
+    error::JsonSnafu,
+};
 
 /// Describes the risk profile of a tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,8 +112,10 @@ impl Default for ToolMetadata {
 pub struct ToolContext {
     pub session_id: String,
     pub thread_id: String,
+    pub agent: AgentRuntimeContext,
     pub approval_profile: ToolApprovalProfile,
     pub tool_approval_handler: Option<ToolApprovalHandler>,
+    pub collaboration_runtime: Option<CollaborationRuntimeHandle>,
 }
 
 impl fmt::Debug for ToolContext {
@@ -118,10 +124,15 @@ impl fmt::Debug for ToolContext {
         f.debug_struct("ToolContext")
             .field("session_id", &self.session_id)
             .field("thread_id", &self.thread_id)
+            .field("agent", &self.agent)
             .field("approval_profile", &self.approval_profile)
             .field(
                 "tool_approval_handler",
                 &self.tool_approval_handler.as_ref().map(|_| "<function>"),
+            )
+            .field(
+                "collaboration_runtime",
+                &self.collaboration_runtime.as_ref().map(|_| "<runtime>"),
             )
             .finish()
     }
@@ -129,13 +140,21 @@ impl fmt::Debug for ToolContext {
 
 impl ToolContext {
     /// Builds a tool context from runtime identifiers.
-    pub fn new(session_id: impl ToString, thread_id: impl ToString) -> Self {
+    pub fn new(session_id: impl Into<String>, thread_id: impl Into<String>) -> Self {
         Self {
-            session_id: session_id.to_string(),
-            thread_id: thread_id.to_string(),
+            session_id: session_id.into(),
+            thread_id: thread_id.into(),
+            agent: AgentRuntimeContext::default(),
             approval_profile: ToolApprovalProfile::TrustAll,
             tool_approval_handler: None,
+            collaboration_runtime: None,
         }
+    }
+
+    /// Attaches the active agent identity and stable environment to this tool call.
+    pub fn with_agent_runtime_context(mut self, agent: AgentRuntimeContext) -> Self {
+        self.agent = agent;
+        self
     }
 
     /// Selects the runtime approval profile for this call path.
@@ -159,6 +178,21 @@ impl ToolContext {
         handler: Option<ToolApprovalHandler>,
     ) -> Self {
         self.tool_approval_handler = handler;
+        self
+    }
+
+    /// Installs a collaboration runtime for mailbox-driven subagent tools.
+    pub fn with_collaboration_runtime(mut self, runtime: CollaborationRuntimeHandle) -> Self {
+        self.collaboration_runtime = Some(runtime);
+        self
+    }
+
+    /// Installs an optional collaboration runtime without allocating a no-op wrapper.
+    pub fn with_collaboration_runtime_if_needed(
+        mut self,
+        runtime: Option<CollaborationRuntimeHandle>,
+    ) -> Self {
+        self.collaboration_runtime = runtime;
         self
     }
 }

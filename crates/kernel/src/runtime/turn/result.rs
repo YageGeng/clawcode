@@ -9,7 +9,7 @@ use llm::{
 
 use crate::{
     Result,
-    context::SessionTaskContext,
+    context::{SessionTaskContext, TurnContext},
     events::{AgentEvent, EventSink, TaskContinuationDecisionTraceEntry},
     runtime::{inflight::ToolCallRuntimeSnapshot, turn::LoopResult},
     session::{SessionContinuationRequest, SessionId, ThreadId},
@@ -20,6 +20,7 @@ use crate::{
 pub(crate) struct FinalizeTextResponseRequest {
     pub session_id: SessionId,
     pub thread_id: ThreadId,
+    pub turn_context: TurnContext,
     pub message_id: Option<String>,
     pub text: String,
     pub reasoning: Vec<Reasoning>,
@@ -44,6 +45,7 @@ where
     let FinalizeTextResponseRequest {
         session_id,
         thread_id,
+        turn_context,
         message_id,
         text,
         reasoning,
@@ -93,6 +95,7 @@ where
         inflight_snapshot,
         requested_continuation,
         continuation_decision_trace,
+        turn_context,
         next_tool_handle_sequence,
     })
 }
@@ -106,6 +109,7 @@ mod tests {
 
     use super::{FinalizeTextResponseRequest, finalize_text_response};
     use crate::{
+        context::TurnContext,
         events::{AgentEvent, RecordingEventSink},
         session::{InMemorySessionStore, SessionId, ThreadId},
     };
@@ -142,6 +146,7 @@ mod tests {
             FinalizeTextResponseRequest {
                 session_id,
                 thread_id: thread_id.clone(),
+                turn_context: TurnContext::new(session_id, thread_id.clone()),
                 message_id: Some("msg_123".to_string()),
                 text: "hello from agent".to_string(),
                 reasoning: Vec::new(),
@@ -204,6 +209,7 @@ mod tests {
             FinalizeTextResponseRequest {
                 session_id,
                 thread_id: thread_id.clone(),
+                turn_context: TurnContext::new(session_id, thread_id.clone()),
                 message_id: Some("msg_200".to_string()),
                 text: "answer".to_string(),
                 reasoning: vec![Reasoning::new("thinking"), Reasoning::new("summary")],

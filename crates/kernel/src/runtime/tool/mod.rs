@@ -75,8 +75,17 @@ where
                 tool_execution_mode: first.mode,
                 cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
                 tool_context: ToolContext::new(input.session_id, input.thread_id.clone())
+                    .with_agent_runtime_context(tools::AgentRuntimeContext {
+                        agent_id: Some(input.turn_context.agent_id.clone()),
+                        name: input.turn_context.name.clone(),
+                        system_prompt: input.turn_context.system_prompt.clone(),
+                        cwd: input.turn_context.cwd.clone(),
+                        current_date: input.turn_context.current_date.clone(),
+                        timezone: input.turn_context.timezone.clone(),
+                    })
                     .with_tool_approval_profile(config.tool_approval_profile)
-                    .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
+                    .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone())
+                    .with_collaboration_runtime_if_needed(input.collaboration_runtime.clone()),
             })
             .await?;
 
@@ -92,8 +101,17 @@ where
                     tool_execution_mode: batch.mode,
                     cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
                     tool_context: ToolContext::new(input.session_id, input.thread_id.clone())
+                        .with_agent_runtime_context(tools::AgentRuntimeContext {
+                            agent_id: Some(input.turn_context.agent_id.clone()),
+                            name: input.turn_context.name.clone(),
+                            system_prompt: input.turn_context.system_prompt.clone(),
+                            cwd: input.turn_context.cwd.clone(),
+                            current_date: input.turn_context.current_date.clone(),
+                            timezone: input.turn_context.timezone.clone(),
+                        })
                         .with_tool_approval_profile(config.tool_approval_profile)
-                        .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone()),
+                        .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone())
+                        .with_collaboration_runtime_if_needed(input.collaboration_runtime.clone()),
                 })
                 .await?;
         }

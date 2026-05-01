@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use llm::{completion::Message, usage::Usage};
 use serde::{Deserialize, Serialize};
@@ -26,16 +26,43 @@ impl SessionId {
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
+}
 
-    /// Constructs an identifier from an existing UUID (e.g. during session replay).
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
+impl From<Uuid> for SessionId {
+    /// Wraps a UUID in the stable runtime session identifier type.
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl FromStr for SessionId {
+    type Err = uuid::Error;
+
+    /// Parses a user-facing UUID string into a session identifier.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(Self::from)
+    }
+}
+
+impl TryFrom<&str> for SessionId {
+    type Error = uuid::Error;
+
+    /// Parses a borrowed UUID string into a session identifier.
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
 impl fmt::Display for SessionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl From<SessionId> for String {
+    /// Converts a typed session identifier into its stable string representation.
+    fn from(value: SessionId) -> Self {
+        value.to_string()
     }
 }
 
@@ -59,16 +86,43 @@ impl ThreadId {
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
+}
 
-    /// Constructs an identifier from an existing UUID (e.g. during session replay).
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
+impl From<Uuid> for ThreadId {
+    /// Wraps a UUID in the stable runtime thread identifier type.
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl FromStr for ThreadId {
+    type Err = uuid::Error;
+
+    /// Parses a user-facing UUID string into a thread identifier.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(Self::from)
+    }
+}
+
+impl TryFrom<&str> for ThreadId {
+    type Error = uuid::Error;
+
+    /// Parses a borrowed UUID string into a thread identifier.
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
 impl fmt::Display for ThreadId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl From<ThreadId> for String {
+    /// Converts a typed thread identifier into its stable string representation.
+    fn from(value: ThreadId) -> Self {
+        value.to_string()
     }
 }
 

@@ -104,12 +104,17 @@ impl TurnContext {
 
     /// Forks a child context that inherits the stable parent scope and prompt state.
     pub fn fork_child(&self, name: impl Into<String>) -> Self {
+        self.fork_child_thread(name, ThreadId::new())
+    }
+
+    /// Forks a child context that runs on an explicit child thread identifier.
+    pub fn fork_child_thread(&self, name: impl Into<String>, thread_id: ThreadId) -> Self {
         Self {
             agent_id: Uuid::new_v4().to_string(),
             parent_agent_id: Some(self.agent_id.clone()),
             name: Some(name.into()),
             session_id: self.session_id,
-            thread_id: self.thread_id.clone(),
+            thread_id,
             system_prompt: self.system_prompt.clone(),
             cwd: self.cwd.clone(),
             current_date: self.current_date.clone(),

@@ -1,3 +1,4 @@
+mod collaboration;
 mod continuation;
 mod inflight;
 mod sampling;
@@ -5,6 +6,7 @@ mod task;
 mod tool;
 mod turn;
 
+pub use collaboration::CollaborationSession;
 pub use continuation::{
     AgentLoopConfig, ContinuationDecisionHook, ContinuationHook, ContinuationHookContext,
     ContinuationHookDecision, ContinuationHookPhase, ContinuationResolver,

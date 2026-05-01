@@ -10,7 +10,8 @@ use agent_client_protocol::{
     Client as OfficialClient, ConnectTo, ConnectionTo, JsonRpcMessage, Responder,
 };
 use kernel::{
-    AgentLoopConfig, SessionTaskContext, ThreadHandle, ThreadRunRequest, ThreadRuntime,
+    AgentLoopConfig, CollaborationSession, SessionTaskContext, ThreadHandle, ThreadRunRequest,
+    ThreadRuntime,
     events::{AgentEvent, EventSink, ToolCallCompletionStatus},
     model::AgentModel,
     session::{SessionId, ThreadId},
@@ -64,6 +65,19 @@ pub enum Error {
         source: official_acp::Error,
         stage: String,
     },
+
+    #[snafu(display("ACP store failed on `{stage}`, {source}"))]
+    Store {
+        #[snafu(source(from(store::Error, Box::new)))]
+        source: Box<store::Error>,
+        stage: String,
+    },
+
+    #[snafu(display("ACP worker channel failed on `{stage}`, {source}"))]
+    Recv {
+        source: tokio::sync::oneshot::error::RecvError,
+        stage: String,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -77,7 +91,7 @@ impl From<Error> for official_acp::Error {
             Error::Json { .. } => official_acp::Error::parse_error().data(message),
             Error::InvalidRequest { .. } => official_acp::Error::invalid_params().data(message),
             Error::MethodNotFound { .. } => official_acp::Error::method_not_found().data(message),
-            Error::Io { .. } | Error::Kernel { .. } => {
+            Error::Io { .. } | Error::Kernel { .. } | Error::Store { .. } | Error::Recv { .. } => {
                 official_acp::Error::internal_error().data(message)
             }
         }
@@ -91,7 +105,11 @@ impl Error {
             Error::Json { .. } => -32700,
             Error::InvalidRequest { .. } => -32602,
             Error::MethodNotFound { .. } => -32601,
-            Error::Io { .. } | Error::Kernel { .. } | Error::OfficialAcp { .. } => -32603,
+            Error::Io { .. }
+            | Error::Kernel { .. }
+            | Error::OfficialAcp { .. }
+            | Error::Store { .. }
+            | Error::Recv { .. } => -32603,
         }
     }
 
@@ -117,6 +135,7 @@ struct JsonRpcRequest {
 struct AcpSession {
     thread: ThreadHandle,
     router: Arc<ToolRouter>,
+    collaboration: CollaborationSession,
 }
 
 /// ACP stdio agent that exposes the existing kernel runtime through JSON-RPC methods.
@@ -238,9 +257,7 @@ where
                         let response =
                             spawn_sdk_prompt_turn(prompt_state, request, prompt_connection)
                                 .await
-                                .map_err(|_| Error::OfficialAcp {
-                                    source: official_acp::Error::internal_error()
-                                        .data("SDK prompt worker dropped its response"),
+                                .context(RecvSnafu {
                                     stage: "acp-sdk-prompt-worker".to_string(),
                                 });
                         match response {
@@ -345,6 +362,7 @@ where
             .fail();
         }
         let session_router = self.build_session_router(params.cwd.clone()).await?;
+        let collaboration = CollaborationSession::new(Arc::clone(&self.store));
 
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
@@ -354,6 +372,7 @@ where
             AcpSession {
                 thread,
                 router: session_router,
+                collaboration,
             },
         );
 
@@ -389,8 +408,10 @@ where
         }
         let session_router = self.build_session_router(params.cwd.clone()).await?;
         let resume_session_id = params.session_id.to_string();
-
-        let (session_id, thread_id) = self.load_and_replay_session(&resume_session_id).await?;
+        let collaboration = CollaborationSession::new(Arc::clone(&self.store));
+        let (session_id, thread_id) = self
+            .load_and_replay_session(&resume_session_id, &collaboration)
+            .await?;
 
         let thread = ThreadHandle::new(session_id, thread_id).with_cwd(params.cwd);
         self.sessions.insert(
@@ -398,6 +419,7 @@ where
             AcpSession {
                 thread,
                 router: session_router,
+                collaboration,
             },
         );
 
@@ -406,22 +428,34 @@ where
     }
 
     /// Loads a persisted session from disk and replays its events into the store.
-    async fn load_and_replay_session(&self, resume_id: &str) -> Result<(SessionId, ThreadId)> {
+    async fn load_and_replay_session(
+        &self,
+        resume_id: &str,
+        collaboration: &CollaborationSession,
+    ) -> Result<(SessionId, ThreadId)> {
         let path = store::find_session_by_id(resume_id).ok_or_else(|| Error::InvalidRequest {
             message: format!("session not found: {resume_id}"),
             stage: "acp-session-resume-find".to_string(),
         })?;
-        let events = store::load_session_events(&path).map_err(|e| Error::Io {
-            source: e,
-            stage: "acp-session-resume-load".to_string(),
+
+        let events = store::load_session_events(&path).context(StoreSnafu {
+            stage: "acp-session-resume-load",
         })?;
-        self.store
-            .load_from_events(events)
+
+        let replayed = self
+            .store
+            .load_from_events(events.clone())
             .await
-            .map_err(|e| Error::Kernel {
-                source: Box::new(e),
-                stage: "acp-session-resume-replay".to_string(),
-            })
+            .context(KernelSnafu {
+                stage: "acp-session-resume-replay",
+            })?;
+        collaboration
+            .replay_events(&events)
+            .await
+            .context(KernelSnafu {
+                stage: "acp-session-resume-replay-collaboration",
+            })?;
+        Ok(replayed)
     }
 
     /// Replays loaded session messages to the client as `session/update` notifications.
@@ -557,11 +591,12 @@ where
                 self.tool_approval_profile
             };
 
-        let runtime = ThreadRuntime::new(
+        let runtime = ThreadRuntime::new_with_collaboration_session(
             Arc::clone(&self.model),
             Arc::clone(&self.store),
             Arc::clone(&session.router),
             Arc::new(sink),
+            session.collaboration.clone(),
         )
         .with_config(AgentLoopConfig {
             skills: self.skills.clone(),
