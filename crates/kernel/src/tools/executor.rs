@@ -226,9 +226,10 @@ impl ToolExecutor {
                 let context = context.clone();
                 async move {
                     let failed_request = call.clone();
-                    Self::execute_one(router, call, context)
-                        .await
-                        .map_err(|error| (failed_request, error))
+                    match Self::execute_one(router, call, context).await {
+                        Ok(result) => Ok(result),
+                        Err(error) => Err((failed_request, error)),
+                    }
                 }
             })
             .collect::<Vec<_>>();

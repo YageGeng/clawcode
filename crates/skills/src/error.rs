@@ -12,6 +12,13 @@ pub enum Error {
         stage: String,
         path: PathBuf,
     },
+
+    #[snafu(display("skill parse error on `{stage}` for `{}`: {message}", path.display()))]
+    Parse {
+        message: String,
+        stage: String,
+        path: PathBuf,
+    },
 }
 
 /// Result alias used by operations that cannot safely degrade to load warnings.

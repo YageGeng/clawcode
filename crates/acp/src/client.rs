@@ -16,7 +16,7 @@ use kernel::{
     tools::{ToolApprovalProfile, router::ToolRouter},
 };
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use tools::builtin::{read_text_file::ReadTextFileTool, write_text_file::WriteTextFileTool};
 
 /// Errors produced while serving ACP client-side requests in the human CLI.
@@ -25,6 +25,9 @@ enum ClientHandlerError {
     #[snafu(display("ACP client request is invalid on `{stage}`: {message}"))]
     InvalidParams { message: String, stage: String },
 
+    #[snafu(display("ACP client runtime failed on `{stage}`: {message}"))]
+    Runtime { message: String, stage: String },
+
     #[snafu(display("ACP client I/O failed on `{stage}`, {source}"))]
     Io { source: io::Error, stage: String },
 
@@ -32,6 +35,13 @@ enum ClientHandlerError {
     Tool {
         #[snafu(source(from(tools::Error, Box::new)))]
         source: Box<tools::Error>,
+        stage: String,
+    },
+
+    #[snafu(display("ACP client protocol failed on `{stage}`, {source}"))]
+    OfficialAcp {
+        #[snafu(source(from(official_acp::Error, Box::new)))]
+        source: Box<official_acp::Error>,
         stage: String,
     },
 
@@ -52,7 +62,9 @@ impl From<ClientHandlerError> for official_acp::Error {
             ClientHandlerError::InvalidParams { .. } => {
                 official_acp::Error::invalid_params().data(message)
             }
-            ClientHandlerError::Io { .. }
+            ClientHandlerError::OfficialAcp { source, .. } => *source,
+            ClientHandlerError::Runtime { .. }
+            | ClientHandlerError::Io { .. }
             | ClientHandlerError::Tool { .. }
             | ClientHandlerError::Join { .. } => {
                 official_acp::Error::internal_error().data(message)
@@ -89,14 +101,11 @@ impl HumanAcpClient {
     }
 
     /// Runs one human prompt by sending ACP `initialize`, `session/new`, and `session/prompt`.
-    pub async fn run_prompt(
-        &mut self,
-        prompt: String,
-    ) -> std::result::Result<(), official_acp::Error> {
+    async fn run_prompt(&mut self, prompt: String) -> ClientHandlerResult<()> {
         self.ensure_session().await?;
-        let session_id = self.session_id.clone().ok_or_else(|| {
-            official_acp::Error::internal_error()
-                .data("ACP session was not available after initialization")
+        let session_id = self.session_id.clone().context(RuntimeSnafu {
+            message: "ACP session was not available after initialization".to_string(),
+            stage: "acp-client-run-prompt-session-id".to_string(),
         })?;
 
         self.connection
@@ -105,8 +114,13 @@ impl HumanAcpClient {
                 vec![official_acp::ContentBlock::from(prompt)],
             ))
             .block_task()
-            .await?;
-        self.services.finish_turn().map_err(acp_io_error)?;
+            .await
+            .context(OfficialAcpSnafu {
+                stage: "acp-client-run-prompt-request".to_string(),
+            })?;
+        self.services.finish_turn().context(IoSnafu {
+            stage: "acp-client-run-prompt-finish-turn".to_string(),
+        })?;
         Ok(())
     }
 
@@ -124,7 +138,7 @@ impl HumanAcpClient {
     ///
     /// When `resume_session_id` is set, sends `session/load` per the ACP spec
     /// to restore persisted state instead of creating a fresh session.
-    async fn ensure_session(&mut self) -> std::result::Result<(), official_acp::Error> {
+    async fn ensure_session(&mut self) -> ClientHandlerResult<()> {
         if !self.initialized {
             self.connection
                 .send_request(
@@ -139,13 +153,20 @@ impl HumanAcpClient {
                         ),
                 )
                 .block_task()
-                .await?;
+                .await
+                .context(OfficialAcpSnafu {
+                    stage: "acp-client-ensure-session-initialize".to_string(),
+                })?;
             self.initialized = true;
         }
 
         if self.session_id.is_none() {
-            let cwd = env::current_dir().map_err(acp_io_error)?;
-            let root = cwd.canonicalize().map_err(acp_io_error)?;
+            let cwd = env::current_dir().context(IoSnafu {
+                stage: "acp-client-ensure-session-current-dir".to_string(),
+            })?;
+            let root = cwd.canonicalize().context(IoSnafu {
+                stage: "acp-client-ensure-session-canonicalize-root".to_string(),
+            })?;
 
             if let Some(ref resume_id) = self.resume_session_id {
                 // ACP-spec session/load: restore the persisted session by its id.
@@ -155,7 +176,10 @@ impl HumanAcpClient {
                         cwd,
                     ))
                     .block_task()
-                    .await?;
+                    .await
+                    .context(OfficialAcpSnafu {
+                        stage: "acp-client-ensure-session-load".to_string(),
+                    })?;
                 self.services.register_session_root(resume_id, root);
                 self.session_id = Some(resume_id.clone());
             } else {
@@ -163,7 +187,10 @@ impl HumanAcpClient {
                     .connection
                     .send_request(official_acp::NewSessionRequest::new(cwd))
                     .block_task()
-                    .await?;
+                    .await
+                    .context(OfficialAcpSnafu {
+                        stage: "acp-client-ensure-session-new".to_string(),
+                    })?;
                 let session_id = response.session_id.to_string();
                 self.services.register_session_root(&session_id, root);
                 self.session_id = Some(session_id);
@@ -299,9 +326,14 @@ where
         .on_receive_notification(
             async move |notification: official_acp::SessionNotification,
                         _connection: ConnectionTo<OfficialAgent>| {
-                notification_services
-                    .render_session_update(notification)
-                    .map_err(acp_io_error)
+                match notification_services.render_session_update(notification) {
+                    Ok(()) => Ok(()),
+                    Err(source) => Err(ClientHandlerError::Io {
+                        source,
+                        stage: "acp-client-session-update-notification".to_string(),
+                    }
+                    .into()),
+                }
             },
             agent_client_protocol::on_receive_notification!(),
         )
@@ -357,16 +389,16 @@ where
             if let Some(ref resume_id) = resume_session_id {
                 client = client.with_resume_session(resume_id.clone());
             }
-            run_prompt_loop(client, input).await
+            match run_prompt_loop(client, input).await {
+                Ok(()) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         })
         .await
 }
 
 /// Runs the terminal prompt loop over an established ACP client connection.
-async fn run_prompt_loop<R>(
-    mut client: HumanAcpClient,
-    input: &mut R,
-) -> std::result::Result<(), official_acp::Error>
+async fn run_prompt_loop<R>(mut client: HumanAcpClient, input: &mut R) -> ClientHandlerResult<()>
 where
     R: BufRead,
 {
@@ -377,10 +409,15 @@ where
     client.ensure_session().await?;
 
     loop {
-        client.write_prompt_marker().map_err(acp_io_error)?;
+        client.write_prompt_marker().context(IoSnafu {
+            stage: "acp-client-prompt-loop-write-marker".to_string(),
+        })?;
 
         line.clear();
-        if input.read_line(&mut line).map_err(acp_io_error)? == 0 {
+        if input.read_line(&mut line).context(IoSnafu {
+            stage: "acp-client-prompt-loop-read-line".to_string(),
+        })? == 0
+        {
             break;
         }
 
@@ -393,7 +430,9 @@ where
         }
 
         if let Err(error) = client.run_prompt(prompt.to_string()).await {
-            client.write_error_line(&error).map_err(acp_io_error)?;
+            client.write_error_line(&error).context(IoSnafu {
+                stage: "acp-client-prompt-loop-write-error".to_string(),
+            })?;
         }
     }
 
@@ -509,12 +548,10 @@ impl SessionRoots {
 
     /// Returns the registered root for one session or a typed invalid-params error.
     fn get(&self, session_id: &str, stage: &str) -> ClientHandlerResult<&PathBuf> {
-        self.roots
-            .get(session_id)
-            .ok_or_else(|| ClientHandlerError::InvalidParams {
-                message: format!("unknown sessionId `{session_id}`"),
-                stage: stage.to_string(),
-            })
+        self.roots.get(session_id).context(InvalidParamsSnafu {
+            message: format!("unknown sessionId `{session_id}`"),
+            stage: stage.to_string(),
+        })
     }
 }
 
@@ -688,12 +725,12 @@ impl CliClientServices {
             })?;
 
         let selected = if matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-            allow_option.ok_or_else(|| ClientHandlerError::InvalidParams {
+            allow_option.context(InvalidParamsSnafu {
                 message: "permission request has no allow option".to_string(),
                 stage: "acp-client-permission-allow-option".to_string(),
             })?
         } else {
-            reject_option.ok_or_else(|| ClientHandlerError::InvalidParams {
+            reject_option.context(InvalidParamsSnafu {
                 message: "permission request has no reject option".to_string(),
                 stage: "acp-client-permission-reject-option".to_string(),
             })?
@@ -906,11 +943,6 @@ fn content_block_text(block: &official_acp::ContentBlock) -> Option<&str> {
         official_acp::ContentBlock::Text(text) => Some(text.text.as_str()),
         _ => None,
     }
-}
-
-/// Converts an I/O error into the ACP SDK error type used by client callbacks.
-fn acp_io_error(error: io::Error) -> official_acp::Error {
-    official_acp::Error::internal_error().data(error.to_string())
 }
 
 /// Converts an embedded ACP agent error into the ACP SDK error type.

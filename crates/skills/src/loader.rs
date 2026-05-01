@@ -1,9 +1,14 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 
+use snafu::ResultExt;
 use tokio::fs;
 
-use crate::model::{SkillConfig, SkillLoadError, SkillLoadOutcome, SkillMetadata};
+use crate::{
+    Result,
+    error::{IoSnafu, ParseSnafu},
+    model::{SkillConfig, SkillLoadError, SkillLoadOutcome, SkillMetadata},
+};
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const REPO_SKILLS_DIR: &str = ".agents/skills";
@@ -94,7 +99,10 @@ async fn scan_root(root: &Path, outcome: &mut SkillLoadOutcome) {
             } else if metadata.is_file() && file_name == SKILL_FILE_NAME {
                 match parse_skill_file(&path).await {
                     Ok(skill) => outcome.skills.push(skill),
-                    Err(message) => outcome.errors.push(SkillLoadError { path, message }),
+                    Err(error) => outcome.errors.push(SkillLoadError {
+                        path,
+                        message: error.to_string(),
+                    }),
                 }
             }
         }
@@ -102,50 +110,64 @@ async fn scan_root(root: &Path, outcome: &mut SkillLoadOutcome) {
 }
 
 /// Reads and parses the required YAML frontmatter fields from one skill file.
-async fn parse_skill_file(path: &Path) -> std::result::Result<SkillMetadata, String> {
-    let contents = fs::read_to_string(path)
-        .await
-        .map_err(|error| format!("failed to read skill file: {error}"))?;
-    let frontmatter = extract_frontmatter(&contents)?;
-    let name = extract_frontmatter_field(&frontmatter, "name")?;
-    let description = extract_frontmatter_field(&frontmatter, "description")?;
+async fn parse_skill_file(path: &Path) -> Result<SkillMetadata> {
+    let path = path.to_path_buf();
+    let contents = fs::read_to_string(&path).await.context(IoSnafu {
+        stage: "skills-read-skill-file".to_string(),
+        path: path.clone(),
+    })?;
+    let frontmatter = extract_frontmatter(&path, &contents)?;
+    let name = extract_frontmatter_field(&path, &frontmatter, "name")?;
+    let description = extract_frontmatter_field(&path, &frontmatter, "description")?;
     let disable_model_invocation =
-        extract_optional_bool_field(&frontmatter, "disableModelInvocation")?;
+        extract_optional_bool_field(&path, &frontmatter, "disableModelInvocation")?;
 
     Ok(SkillMetadata {
         name,
         description,
-        path: path.to_path_buf(),
+        path,
         disable_model_invocation,
     })
 }
 
 /// Extracts the first YAML frontmatter block delimited by `---` markers.
-fn extract_frontmatter(contents: &str) -> std::result::Result<String, String> {
+fn extract_frontmatter(path: &Path, contents: &str) -> Result<String> {
     let mut lines = contents.lines();
     if !matches!(lines.next(), Some(line) if line.trim() == "---") {
-        return Err("missing YAML frontmatter delimited by ---".to_string());
+        return ParseSnafu {
+            message: "missing YAML frontmatter delimited by ---".to_string(),
+            stage: "skills-parse-frontmatter-open".to_string(),
+            path: path.to_path_buf(),
+        }
+        .fail();
     }
 
     let mut frontmatter = Vec::new();
     for line in lines {
         if line.trim() == "---" {
             if frontmatter.is_empty() {
-                return Err("missing YAML frontmatter fields".to_string());
+                return ParseSnafu {
+                    message: "missing YAML frontmatter fields".to_string(),
+                    stage: "skills-parse-frontmatter-fields".to_string(),
+                    path: path.to_path_buf(),
+                }
+                .fail();
             }
             return Ok(frontmatter.join("\n"));
         }
         frontmatter.push(line);
     }
 
-    Err("missing YAML frontmatter closing delimiter".to_string())
+    ParseSnafu {
+        message: "missing YAML frontmatter closing delimiter".to_string(),
+        stage: "skills-parse-frontmatter-close".to_string(),
+        path: path.to_path_buf(),
+    }
+    .fail()
 }
 
 /// Parses a simple `key: value` frontmatter field and normalizes whitespace.
-fn extract_frontmatter_field(
-    frontmatter: &str,
-    field: &str,
-) -> std::result::Result<String, String> {
+fn extract_frontmatter_field(path: &Path, frontmatter: &str, field: &str) -> Result<String> {
     for line in frontmatter.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
@@ -153,20 +175,27 @@ fn extract_frontmatter_field(
         if key.trim() == field {
             let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
             if value.is_empty() {
-                return Err(format!("missing field `{field}`"));
+                return ParseSnafu {
+                    message: format!("missing field `{field}`"),
+                    stage: "skills-parse-frontmatter-field".to_string(),
+                    path: path.to_path_buf(),
+                }
+                .fail();
             }
             return Ok(value);
         }
     }
 
-    Err(format!("missing field `{field}`"))
+    ParseSnafu {
+        message: format!("missing field `{field}`"),
+        stage: "skills-parse-frontmatter-field".to_string(),
+        path: path.to_path_buf(),
+    }
+    .fail()
 }
 
 /// Parses an optional boolean frontmatter field, defaulting to false when absent.
-fn extract_optional_bool_field(
-    frontmatter: &str,
-    field: &str,
-) -> std::result::Result<bool, String> {
+fn extract_optional_bool_field(path: &Path, frontmatter: &str, field: &str) -> Result<bool> {
     for line in frontmatter.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
@@ -175,7 +204,12 @@ fn extract_optional_bool_field(
             return match value.trim() {
                 "true" => Ok(true),
                 "false" => Ok(false),
-                other => Err(format!("invalid boolean for `{field}`: {other}")),
+                other => ParseSnafu {
+                    message: format!("invalid boolean for `{field}`: {other}"),
+                    stage: "skills-parse-frontmatter-bool".to_string(),
+                    path: path.to_path_buf(),
+                }
+                .fail(),
             };
         }
     }

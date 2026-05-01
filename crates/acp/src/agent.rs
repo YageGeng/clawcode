@@ -313,10 +313,16 @@ where
     async fn dispatch(&mut self, request: JsonRpcRequest) -> Result<Value> {
         let method = request.method;
         let params = request.params.unwrap_or(Value::Null);
-        let request =
-            official_acp::ClientRequest::parse_message(&method, &params).map_err(|error| {
-                acp_schema_parse_error(&method, error, "acp-dispatch-typed-request")
-            })?;
+        let request = match official_acp::ClientRequest::parse_message(&method, &params) {
+            Ok(request) => request,
+            Err(error) => {
+                return Err(acp_schema_parse_error(
+                    &method,
+                    error,
+                    "acp-dispatch-typed-request",
+                ));
+            }
+        };
 
         match request {
             official_acp::ClientRequest::InitializeRequest(params) => {
@@ -553,12 +559,7 @@ where
         params: official_acp::PromptRequest,
     ) -> Result<(AcpSession, String)> {
         let session_id = params.session_id.to_string();
-        let prompt = KernelPromptText::try_from(params)
-            .map(KernelPromptText::into_inner)
-            .map_err(|message| Error::InvalidRequest {
-                message,
-                stage: "acp-session-prompt-content".to_string(),
-            })?;
+        let prompt = KernelPromptText::from_request(params)?.into_inner();
         let session =
             self.sessions
                 .get(&session_id)
@@ -943,22 +944,14 @@ impl KernelPromptText {
     fn into_inner(self) -> String {
         self.0
     }
-}
 
-impl TryFrom<official_acp::PromptRequest> for KernelPromptText {
-    type Error = String;
-
-    /// Converts an official ACP prompt request into the text-only prompt used by the kernel.
-    fn try_from(value: official_acp::PromptRequest) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(value.prompt)
+    /// Converts one official ACP prompt request into normalized kernel prompt text.
+    fn from_request(value: official_acp::PromptRequest) -> Result<Self> {
+        Self::from_blocks(value.prompt)
     }
-}
 
-impl TryFrom<Vec<official_acp::ContentBlock>> for KernelPromptText {
-    type Error = String;
-
-    /// Converts official ACP prompt content blocks into the text-only input currently accepted by the kernel.
-    fn try_from(blocks: Vec<official_acp::ContentBlock>) -> std::result::Result<Self, Self::Error> {
+    /// Converts official ACP content blocks into the text-only input currently accepted by the kernel.
+    fn from_blocks(blocks: Vec<official_acp::ContentBlock>) -> Result<Self> {
         let mut text_parts = Vec::new();
 
         for block in blocks {
@@ -978,22 +971,37 @@ impl TryFrom<Vec<official_acp::ContentBlock>> for KernelPromptText {
                     text_parts.push(format!("[resource_link] {}", resource_link.uri));
                 }
                 official_acp::ContentBlock::Image(_) => {
-                    return Err("unsupported prompt content block type `image`".to_string());
+                    return InvalidRequestSnafu {
+                        message: "unsupported prompt content block type `image`".to_string(),
+                        stage: "acp-session-prompt-content".to_string(),
+                    }
+                    .fail();
                 }
                 official_acp::ContentBlock::Audio(_) => {
-                    return Err("unsupported prompt content block type `audio`".to_string());
+                    return InvalidRequestSnafu {
+                        message: "unsupported prompt content block type `audio`".to_string(),
+                        stage: "acp-session-prompt-content".to_string(),
+                    }
+                    .fail();
                 }
                 _ => {
-                    return Err(
-                        "unsupported prompt content block type from future ACP schema".to_string(),
-                    );
+                    return InvalidRequestSnafu {
+                        message: "unsupported prompt content block type from future ACP schema"
+                            .to_string(),
+                        stage: "acp-session-prompt-content".to_string(),
+                    }
+                    .fail();
                 }
             }
         }
 
         let prompt = text_parts.join("\n\n");
         if prompt.trim().is_empty() {
-            Err("prompt content must not be empty".to_string())
+            InvalidRequestSnafu {
+                message: "prompt content must not be empty".to_string(),
+                stage: "acp-session-prompt-content".to_string(),
+            }
+            .fail()
         } else {
             Ok(Self(prompt))
         }
@@ -1045,11 +1053,15 @@ mod tests {
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         request.on_receiving_result(async move |result| {
-            tx.send(result)
-                .map_err(|_| official_acp::Error::internal_error())
+            if tx.send(result).is_err() {
+                return Err(official_acp::Error::internal_error());
+            }
+            Ok(())
         })?;
-        rx.await
-            .map_err(|_| official_acp::Error::internal_error())?
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => Err(official_acp::Error::internal_error()),
+        }
     }
 
     #[derive(Clone, Default)]
