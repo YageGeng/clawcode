@@ -52,6 +52,10 @@ pub type ContinuationDecisionHook =
 pub struct AgentLoopConfig {
     pub max_iterations: usize,
     pub max_tool_calls: usize,
+    /// Configured policy: the deepest child-agent generation this runtime permits.
+    /// `None` means unlimited. This is the single source of truth; every turn
+    /// snapshots it into `AgentRuntimeContext.max_subagent_depth` for tool visibility.
+    pub max_subagent_depth: Option<usize>,
     pub recent_message_limit: usize,
     pub skills: skills::SkillConfig,
     pub tool_choice: ToolChoice,
@@ -70,6 +74,7 @@ impl std::fmt::Debug for AgentLoopConfig {
         f.debug_struct("AgentLoopConfig")
             .field("max_iterations", &self.max_iterations)
             .field("max_tool_calls", &self.max_tool_calls)
+            .field("max_subagent_depth", &self.max_subagent_depth)
             .field("recent_message_limit", &self.recent_message_limit)
             .field("skills", &self.skills)
             .field("tool_choice", &self.tool_choice)
@@ -109,6 +114,7 @@ impl Default for AgentLoopConfig {
             max_iterations: 8,
             // Keep tool-call cap disabled by default to avoid hard-baked execution ceilings.
             max_tool_calls: usize::MAX,
+            max_subagent_depth: None,
             recent_message_limit: 24,
             skills: skills::SkillConfig::default(),
             tool_choice: ToolChoice::Auto,
@@ -130,6 +136,12 @@ impl AgentLoopConfig {
         tool_approval_profile: ToolApprovalProfile,
     ) -> Self {
         self.tool_approval_profile = tool_approval_profile;
+        self
+    }
+
+    /// Caps the deepest child-agent generation that may be spawned from this runtime.
+    pub fn with_max_subagent_depth(mut self, max_subagent_depth: Option<usize>) -> Self {
+        self.max_subagent_depth = max_subagent_depth;
         self
     }
 

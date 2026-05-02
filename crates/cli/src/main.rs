@@ -176,15 +176,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let router = Arc::new(ToolRouter::from_path(".").await);
     let skills = config.skills.to_skill_config();
+    let max_subagent_depth = config.runtime.max_subagent_depth;
     let tool_approval_profile = config.approval.to_tool_approval_profile();
 
     info!(
-        tool_count = router.definitions().len(),
+        tool_count = router
+            .definitions_for_agent(&tools::AgentRuntimeContext::default())
+            .len(),
+        max_subagent_depth = ?max_subagent_depth,
         "registered default tools through the extracted tools crate"
     );
 
     if cli_args.serve {
-        acp::run_sdk_stdio_agent(model, store, router, skills, tool_approval_profile).await?;
+        acp::run_sdk_stdio_agent(
+            model,
+            store,
+            router,
+            skills,
+            max_subagent_depth,
+            tool_approval_profile,
+        )
+        .await?;
     } else {
         let stdin = io::stdin();
         let mut input = stdin.lock();
@@ -194,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&router),
             acp::CliSessionConfig {
                 skills,
+                max_subagent_depth,
                 tool_approval_profile,
                 resume_session_id: cli_args.resume,
             },

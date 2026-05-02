@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tools::AgentRuntimeContext;
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +12,8 @@ use crate::{
 pub struct TurnContext {
     pub agent_id: String,
     pub parent_agent_id: Option<String>,
+    #[serde(default)]
+    pub subagent_depth: usize,
     pub name: Option<String>,
     pub session_id: SessionId,
     pub thread_id: ThreadId,
@@ -26,6 +29,7 @@ impl TurnContext {
         Self {
             agent_id: Uuid::new_v4().to_string(),
             parent_agent_id: None,
+            subagent_depth: 0,
             name: None,
             session_id,
             thread_id,
@@ -45,6 +49,12 @@ impl TurnContext {
     /// Records the parent agent identifier for a derived child context.
     pub fn with_parent_agent_id(mut self, parent_agent_id: impl Into<String>) -> Self {
         self.parent_agent_id = Some(parent_agent_id.into());
+        self
+    }
+
+    /// Records the stable spawn depth for this agent thread.
+    pub fn with_subagent_depth(mut self, subagent_depth: usize) -> Self {
+        self.subagent_depth = subagent_depth;
         self
     }
 
@@ -77,6 +87,7 @@ impl TurnContext {
         Self {
             agent_id: item.agent_id,
             parent_agent_id: item.parent_agent_id,
+            subagent_depth: item.subagent_depth,
             name: item.name,
             session_id: item.session_id,
             thread_id: item.thread_id,
@@ -92,6 +103,7 @@ impl TurnContext {
         TurnContextItem {
             agent_id: self.agent_id.clone(),
             parent_agent_id: self.parent_agent_id.clone(),
+            subagent_depth: self.subagent_depth,
             name: self.name.clone(),
             session_id: self.session_id,
             thread_id: self.thread_id.clone(),
@@ -112,6 +124,7 @@ impl TurnContext {
         Self {
             agent_id: Uuid::new_v4().to_string(),
             parent_agent_id: Some(self.agent_id.clone()),
+            subagent_depth: self.subagent_depth.saturating_add(1),
             name: Some(name.into()),
             session_id: self.session_id,
             thread_id,
@@ -125,5 +138,22 @@ impl TurnContext {
     /// Forks a child context while preserving the legacy `AgentContext` API shape.
     pub fn fork(&self, name: impl Into<String>) -> Self {
         self.fork_child(name)
+    }
+
+    /// Converts the turn context into the tool-facing runtime identity snapshot.
+    pub fn to_agent_runtime_context(
+        &self,
+        max_subagent_depth: Option<usize>,
+    ) -> AgentRuntimeContext {
+        AgentRuntimeContext {
+            agent_id: Some(self.agent_id.clone()),
+            name: self.name.clone(),
+            system_prompt: self.system_prompt.clone(),
+            cwd: self.cwd.clone(),
+            current_date: self.current_date.clone(),
+            timezone: self.timezone.clone(),
+            subagent_depth: self.subagent_depth,
+            max_subagent_depth,
+        }
     }
 }

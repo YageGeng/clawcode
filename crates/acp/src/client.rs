@@ -204,6 +204,7 @@ impl HumanAcpClient {
 /// Runtime configuration for an interactive CLI session.
 pub struct CliSessionConfig {
     pub skills: skills::SkillConfig,
+    pub max_subagent_depth: Option<usize>,
     pub tool_approval_profile: ToolApprovalProfile,
     pub resume_session_id: Option<String>,
 }
@@ -232,6 +233,7 @@ where
         store,
         router,
         session_config.skills,
+        session_config.max_subagent_depth,
         session_config.tool_approval_profile,
         agent_transport,
     );
@@ -286,6 +288,7 @@ fn spawn_embedded_agent<M>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
+    max_subagent_depth: Option<usize>,
     tool_approval_profile: ToolApprovalProfile,
     transport: impl agent_client_protocol::ConnectTo<OfficialAgent> + 'static,
 ) -> tokio::task::JoinHandle<agent::Result<()>>
@@ -300,6 +303,7 @@ where
         agent::shared_writer(std::io::sink()),
         true,
     )
+    .with_max_subagent_depth(max_subagent_depth)
     .with_tool_approval_profile(tool_approval_profile);
     tokio::spawn(async move { agent.connect_sdk(transport).await })
 }
@@ -1194,7 +1198,7 @@ mod tests {
         let file_path = workspace.path().join("tool-created.txt");
         let router = tools::ToolRouter::from_path(workspace.path()).await;
 
-        let definitions = router.definitions();
+        let definitions = router.definitions_for_agent(&tools::AgentRuntimeContext::default());
         let definition_names = definitions
             .iter()
             .map(|definition| definition.name.as_str())

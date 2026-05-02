@@ -146,6 +146,7 @@ pub struct AcpAgent<M> {
     /// Indicates the active router already exposes ACP filesystem tools for the human client path.
     has_client_fs_tools: bool,
     skills: skills::SkillConfig,
+    max_subagent_depth: Option<usize>,
     tool_approval_profile: ToolApprovalProfile,
     tool_approval_profile_configured: bool,
     tool_approval_handler: Option<ToolApprovalHandler>,
@@ -172,6 +173,7 @@ where
             router,
             has_client_fs_tools,
             skills,
+            max_subagent_depth: None,
             tool_approval_profile: ToolApprovalProfile::TrustAll,
             tool_approval_profile_configured: false,
             tool_approval_handler: None,
@@ -193,6 +195,12 @@ where
     ) -> Self {
         self.tool_approval_profile = tool_approval_profile;
         self.tool_approval_profile_configured = true;
+        self
+    }
+
+    /// Caps the deepest child-agent generation this ACP agent permits.
+    pub fn with_max_subagent_depth(mut self, max_subagent_depth: Option<usize>) -> Self {
+        self.max_subagent_depth = max_subagent_depth;
         self
     }
 
@@ -604,6 +612,7 @@ where
             // ACP itself does not impose a prompt-turn request budget here; tool limits still come
             // from the kernel defaults unless configured elsewhere.
             max_iterations: usize::MAX,
+            max_subagent_depth: self.max_subagent_depth,
             tool_approval_profile,
             tool_approval_handler,
             ..AgentLoopConfig::default()
@@ -788,6 +797,7 @@ pub async fn run_stdio_agent<M, R>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
+    max_subagent_depth: Option<usize>,
     input: R,
     writer: SharedAcpWriter,
 ) -> Result<()>
@@ -795,7 +805,8 @@ where
     M: AgentModel + 'static,
     R: BufRead,
 {
-    let mut agent = AcpAgent::new(model, store, router, skills, writer, false);
+    let mut agent = AcpAgent::new(model, store, router, skills, writer, false)
+        .with_max_subagent_depth(max_subagent_depth);
 
     for line in input.lines() {
         let line = line.context(IoSnafu {
@@ -817,6 +828,7 @@ pub async fn run_sdk_stdio_agent<M>(
     store: Arc<SessionTaskContext>,
     router: Arc<ToolRouter>,
     skills: skills::SkillConfig,
+    max_subagent_depth: Option<usize>,
     tool_approval_profile: ToolApprovalProfile,
 ) -> Result<()>
 where
@@ -832,6 +844,7 @@ where
         shared_writer(std::io::sink()),
         false,
     )
+    .with_max_subagent_depth(max_subagent_depth)
     .with_tool_approval_profile(tool_approval_profile);
     agent
         .connect_sdk(agent_client_protocol::ByteStreams::new(
@@ -1143,12 +1156,41 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct RecordingAcpModel {
+        requests: Arc<AsyncMutex<Vec<ModelRequest>>>,
+    }
+
+    impl RecordingAcpModel {
+        /// Returns every request observed by the recording model.
+        async fn requests(&self) -> Vec<ModelRequest> {
+            self.requests.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl AgentModel for RecordingAcpModel {
+        /// Records each request and returns a fixed response for prompt-inspection tests.
+        async fn complete(&self, request: ModelRequest) -> KernelResult<ModelResponse> {
+            self.requests.lock().await.push(request);
+            Ok(ModelResponse::text("recorded", Usage::default()))
+        }
+    }
+
     /// Builds the empty tool router used by ACP adapter tests.
     fn empty_router() -> Arc<ToolRouter> {
         Arc::new(ToolRouter::new(
             Arc::new(kernel::tools::ToolRegistry::default()),
             Vec::new(),
         ))
+    }
+
+    /// Builds a router that exposes the collaboration tools used by depth-limit tests.
+    fn collaboration_router() -> Arc<ToolRouter> {
+        let mut builder = ::tools::ToolRegistryBuilder::new();
+        builder.push_handler_spec(Arc::new(::tools::builtin::collaboration::SpawnAgentTool));
+        builder.push_handler_spec(Arc::new(::tools::builtin::collaboration::WaitAgentTool));
+        Arc::new(builder.build_router())
     }
 
     /// Parses captured ACP output into one JSON value per newline-delimited message.
@@ -1406,6 +1448,58 @@ mod tests {
             })
             .await
             .expect("SDK client should complete");
+    }
+
+    /// Verifies the ACP agent forwards `max_subagent_depth` into the kernel prompt runtime.
+    #[tokio::test]
+    async fn sdk_agent_applies_max_subagent_depth_to_prompt_runtime() {
+        let (agent_channel, client_channel) = agent_client_protocol::Channel::duplex();
+        let model = Arc::new(RecordingAcpModel::default());
+        let agent = AcpAgent::new(
+            Arc::clone(&model),
+            Arc::new(InMemorySessionStore::default()),
+            collaboration_router(),
+            skills::SkillConfig::default(),
+            shared_writer(io::sink()),
+            false,
+        )
+        .with_max_subagent_depth(Some(0));
+
+        tokio::spawn(async move {
+            agent
+                .connect_sdk(agent_channel)
+                .await
+                .expect("SDK agent connection should complete");
+        });
+
+        agent_client_protocol::Client
+            .builder()
+            .connect_with(client_channel, async move |connection| {
+                let session = recv_response(
+                    connection.send_request(official_acp::NewSessionRequest::new("/tmp")),
+                )
+                .await?;
+                let prompt = vec![official_acp::ContentBlock::from("say hello".to_string())];
+                let response = recv_response(
+                    connection
+                        .send_request(official_acp::PromptRequest::new(session.session_id, prompt)),
+                )
+                .await?;
+
+                assert_eq!(response.stop_reason, official_acp::StopReason::EndTurn);
+                Ok(())
+            })
+            .await
+            .expect("SDK client should complete");
+
+        let requests = model.requests().await;
+        assert_eq!(requests.len(), 1);
+        let system_prompt = requests[0]
+            .system_prompt
+            .as_deref()
+            .expect("system prompt should exist");
+        assert!(!system_prompt.contains("spawn_agent"));
+        assert!(system_prompt.contains("wait_agent"));
     }
 
     /// Verifies kernel reasoning deltas are exposed as ACP thought chunks.

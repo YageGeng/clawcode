@@ -14,6 +14,12 @@ pub struct AgentRuntimeContext {
     pub cwd: Option<String>,
     pub current_date: Option<String>,
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub subagent_depth: usize,
+    /// Snapshot of the configured depth limit captured when this context was built.
+    /// The authoritative policy lives in `AgentLoopConfig.max_subagent_depth`;
+    /// this field carries a copy for per-tool visibility decisions.
+    pub max_subagent_depth: Option<usize>,
 }
 
 /// Describes the latest lifecycle state observed for one agent thread.

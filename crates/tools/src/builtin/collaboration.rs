@@ -73,6 +73,16 @@ impl ToolHandler for SpawnAgentTool {
         Some("Spawn a child agent with its own mailbox-backed thread.")
     }
 
+    /// Hides `spawn_agent` from agents that have reached the configured depth limit.
+    fn visible_when(&self) -> Option<fn(&AgentRuntimeContext) -> bool> {
+        Some(
+            |agent: &AgentRuntimeContext| match agent.max_subagent_depth {
+                Some(max) => agent.subagent_depth < max,
+                None => true,
+            },
+        )
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

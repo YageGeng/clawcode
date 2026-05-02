@@ -112,11 +112,12 @@ where
     let mut final_inflight_snapshot = ToolCallRuntimeSnapshot::default();
     let mut requested_continuation = None;
     let mut continuation_decision_trace = Vec::new();
+    let agent_runtime_context = turn_context.to_agent_runtime_context(config.max_subagent_depth);
 
     for iteration in 1..=config.max_iterations {
         // Recompute tool definitions for each iteration so dynamic tool routing
         // changes are reflected before the next model request is issued.
-        let tool_definitions = router.definitions();
+        let tool_definitions = router.definitions_for_agent(&agent_runtime_context);
         events
             .publish(AgentEvent::StatusUpdated {
                 stage: AgentStage::ModelRequesting,

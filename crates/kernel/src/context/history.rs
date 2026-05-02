@@ -101,6 +101,24 @@ impl ContextManager {
     pub fn initial_context_items(&self, turn_context: &TurnContext) -> Vec<Message> {
         let mut items = Vec::new();
 
+        items.push(Message::assistant(format!(
+            "<initial_context><field>agent_id</field><value>{}</value></initial_context>",
+            turn_context.agent_id
+        )));
+        if let Some(parent_agent_id) = turn_context.parent_agent_id.as_deref() {
+            items.push(Message::assistant(format!(
+                "<initial_context><field>parent_agent_id</field><value>{parent_agent_id}</value></initial_context>"
+            )));
+        }
+        items.push(Message::assistant(format!(
+            "<initial_context><field>subagent_depth</field><value>{}</value></initial_context>",
+            turn_context.subagent_depth
+        )));
+        if let Some(name) = turn_context.name.as_deref() {
+            items.push(Message::assistant(format!(
+                "<initial_context><field>name</field><value>{name}</value></initial_context>"
+            )));
+        }
         if let Some(system_prompt) = turn_context.system_prompt.as_deref() {
             items.push(Message::assistant(format!(
                 "<initial_context><field>system_prompt</field><value>{system_prompt}</value></initial_context>"
@@ -123,6 +141,15 @@ impl ContextManager {
         }
 
         items
+    }
+
+    /// Returns the initial context snapshot for a first turn or a diff for later turns.
+    pub fn context_messages(&self, turn_context: &TurnContext) -> Vec<Message> {
+        if self.turns.is_empty() {
+            self.initial_context_items(turn_context)
+        } else {
+            self.settings_diff_items(turn_context)
+        }
     }
 
     /// Builds settings-only update items against the current reference baseline.

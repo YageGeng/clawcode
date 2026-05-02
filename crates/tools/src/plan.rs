@@ -12,7 +12,7 @@ use crate::{
     },
     handler::ToolHandler,
     registry::ToolRegistryBuilder,
-    spec::ToolSpec,
+    spec::{ConfiguredToolSpec, ToolSpec},
 };
 
 /// Stores one dispatch registration including the already-constructed handler.
@@ -52,11 +52,27 @@ impl ToolRegistryPlan {
         }
     }
 
-    /// Adds one visible tool spec to the plan.
-    pub fn push_spec(&mut self, spec: ToolSpec, supports_parallel_tool_calls: bool) {
-        self.specs.push(crate::ConfiguredToolSpec::new(
+    /// Adds one handler-backed spec while preserving handler-derived visibility metadata.
+    pub fn push_handler_spec(
+        &mut self,
+        handler: Arc<dyn ToolHandler>,
+        supports_parallel_tool_calls: bool,
+    ) {
+        let spec = ToolSpec::function_with_prompt(handler.definition(), handler.prompt_metadata());
+        self.specs.push(ConfiguredToolSpec::new(
             spec,
             supports_parallel_tool_calls,
+            handler.visible_when(),
+        ));
+        self.register_handler(handler);
+    }
+
+    /// Adds one visible tool spec to the plan.
+    pub fn push_spec(&mut self, spec: ToolSpec, supports_parallel_tool_calls: bool) {
+        self.specs.push(ConfiguredToolSpec::new(
+            spec,
+            supports_parallel_tool_calls,
+            None,
         ));
     }
 
@@ -69,7 +85,7 @@ impl ToolRegistryPlan {
     pub fn build_builder(&self, _root_dir: &Path) -> ToolRegistryBuilder {
         let mut builder = ToolRegistryBuilder::new();
         for spec in &self.specs {
-            builder.push_spec(spec.spec.clone(), spec.supports_parallel_tool_calls);
+            builder.push_configured_spec(spec.clone());
         }
         for planned in &self.handlers {
             builder.register_handler(planned.handler.name(), Arc::clone(&planned.handler));
@@ -91,84 +107,35 @@ pub fn build_default_tool_registry_plan(root_dir: impl AsRef<Path>) -> ToolRegis
     let mut plan = ToolRegistryPlan::new();
 
     let read_text_file = Arc::new(ReadTextFileTool::new(root_dir));
-    plan.push_spec(
-        ToolSpec::function_with_prompt(
-            read_text_file.definition(),
-            read_text_file.prompt_metadata(),
-        ),
-        false,
-    );
-    plan.register_handler(read_text_file);
+    plan.push_handler_spec(read_text_file, false);
 
     let write_text_file = Arc::new(WriteTextFileTool::new(root_dir));
-    plan.push_spec(
-        ToolSpec::function_with_prompt(
-            write_text_file.definition(),
-            write_text_file.prompt_metadata(),
-        ),
-        false,
-    );
-    plan.register_handler(write_text_file);
+    plan.push_handler_spec(write_text_file, false);
 
     let apply_patch = Arc::new(ApplyPatchTool::new(root_dir));
-    plan.push_spec(
-        ToolSpec::function_with_prompt(apply_patch.definition(), apply_patch.prompt_metadata()),
-        false,
-    );
-    plan.register_handler(apply_patch);
+    plan.push_handler_spec(apply_patch, false);
 
     let shell_runtime = Arc::new(UnifiedExecRuntime::new(root_dir));
     let exec_command = Arc::new(ExecCommandTool::new(Arc::clone(&shell_runtime)));
-    plan.push_spec(
-        ToolSpec::function_with_prompt(exec_command.definition(), exec_command.prompt_metadata()),
-        true,
-    );
-    plan.register_handler(exec_command);
+    plan.push_handler_spec(exec_command, true);
 
     let write_stdin = Arc::new(WriteStdinTool::new(shell_runtime));
-    plan.push_spec(
-        ToolSpec::function_with_prompt(write_stdin.definition(), write_stdin.prompt_metadata()),
-        false,
-    );
-    plan.register_handler(write_stdin);
+    plan.push_handler_spec(write_stdin, false);
 
     let spawn_agent = Arc::new(SpawnAgentTool);
-    plan.push_spec(
-        ToolSpec::function_with_prompt(spawn_agent.definition(), spawn_agent.prompt_metadata()),
-        false,
-    );
-    plan.register_handler(spawn_agent);
+    plan.push_handler_spec(spawn_agent, false);
 
     let send_agent_input = Arc::new(SendAgentInputTool);
-    plan.push_spec(
-        ToolSpec::function_with_prompt(
-            send_agent_input.definition(),
-            send_agent_input.prompt_metadata(),
-        ),
-        false,
-    );
-    plan.register_handler(send_agent_input);
+    plan.push_handler_spec(send_agent_input, false);
 
     let wait_agent = Arc::new(WaitAgentTool);
-    plan.push_spec(
-        ToolSpec::function_with_prompt(wait_agent.definition(), wait_agent.prompt_metadata()),
-        false,
-    );
-    plan.register_handler(wait_agent);
+    plan.push_handler_spec(wait_agent, false);
 
     let close_agent = Arc::new(CloseAgentTool);
-    plan.push_spec(
-        ToolSpec::function_with_prompt(close_agent.definition(), close_agent.prompt_metadata()),
-        false,
-    );
-    plan.register_handler(close_agent);
+    plan.push_handler_spec(close_agent, false);
 
     let list_agents = Arc::new(ListAgentsTool);
-    plan.push_spec(
-        ToolSpec::function_with_prompt(list_agents.definition(), list_agents.prompt_metadata()),
-        false,
-    );
-    plan.register_handler(list_agents);
+    plan.push_handler_spec(list_agents, false);
 
     plan
 }

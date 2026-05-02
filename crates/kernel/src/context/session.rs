@@ -12,12 +12,36 @@ use crate::{
 };
 use llm::{completion::Message, usage::Usage};
 use store::SessionStore;
+use tools::AgentRuntimeContext;
 
 #[derive(Debug, Default)]
 struct SessionThreadState {
     history: ContextManager,
     continuations: Vec<SessionContinuationRequest>,
-    cached_system_prompt: Option<String>,
+    cached_system_prompt: Option<CachedSystemPrompt>,
+}
+
+/// Stable cache key for one system prompt entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemPromptCacheKey {
+    subagent_depth: usize,
+    max_subagent_depth: Option<usize>,
+}
+
+impl From<&AgentRuntimeContext> for SystemPromptCacheKey {
+    fn from(agent_runtime_context: &AgentRuntimeContext) -> Self {
+        Self {
+            subagent_depth: agent_runtime_context.subagent_depth,
+            max_subagent_depth: agent_runtime_context.max_subagent_depth,
+        }
+    }
+}
+
+/// Cached system prompt paired with the visibility policy that produced it.
+#[derive(Debug, Clone)]
+struct CachedSystemPrompt {
+    cache_key: SystemPromptCacheKey,
+    system_prompt: String,
 }
 
 /// Stable session-scoped state used by turn/task execution.
@@ -115,11 +139,18 @@ impl SessionTaskContext {
         &self,
         session_id: SessionId,
         thread_id: ThreadId,
+        agent_runtime_context: &AgentRuntimeContext,
     ) -> Option<String> {
         let threads = self.threads.read().await;
-        threads
-            .get(&(session_id, thread_id))
-            .and_then(|thread| thread.cached_system_prompt.clone())
+        threads.get(&(session_id, thread_id)).and_then(|thread| {
+            thread.cached_system_prompt.as_ref().and_then(|cached| {
+                if cached.cache_key == SystemPromptCacheKey::from(agent_runtime_context) {
+                    Some(cached.system_prompt.clone())
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// Stores one rebuilt system prompt for reuse by later turns on the same thread.
@@ -127,12 +158,16 @@ impl SessionTaskContext {
         &self,
         session_id: SessionId,
         thread_id: ThreadId,
+        agent_runtime_context: AgentRuntimeContext,
         system_prompt: String,
     ) {
         let mut threads = self.threads.write().await;
         let thread = threads.entry((session_id, thread_id)).or_default();
 
-        thread.cached_system_prompt = Some(system_prompt);
+        thread.cached_system_prompt = Some(CachedSystemPrompt {
+            cache_key: SystemPromptCacheKey::from(&agent_runtime_context),
+            system_prompt,
+        });
     }
 
     /// Seeds a durable turn context baseline for a thread that has not produced any turns yet.
@@ -384,6 +419,20 @@ impl SessionTaskContext {
             })
             .await
             .unwrap_or_default())
+    }
+
+    /// Loads the model-visible context bootstrap messages for one thread.
+    pub async fn load_context_messages_state(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_context: &TurnContext,
+    ) -> Vec<Message> {
+        self.read_history(session_id, thread_id, |history| {
+            history.context_messages(turn_context)
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Replays persisted turn events into this store, restoring session state.

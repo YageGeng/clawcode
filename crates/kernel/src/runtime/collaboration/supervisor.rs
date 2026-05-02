@@ -67,6 +67,7 @@ pub(super) struct ChildAgentRegistrationRequest<'a> {
     pub(super) session_id: SessionId,
     pub(super) thread_id: ThreadId,
     pub(super) origin: &'a AgentRuntimeContext,
+    pub(super) max_subagent_depth: Option<usize>,
     pub(super) name: Option<String>,
     pub(super) cwd: Option<String>,
     pub(super) system_prompt: Option<String>,
@@ -207,11 +208,20 @@ impl AgentSupervisor {
         let session_id = input.session_id;
         let thread_id = input.thread_id;
         let origin = input.origin;
+        let max_subagent_depth = input.max_subagent_depth;
         let name = input.name;
         let cwd = input.cwd;
         let system_prompt = input.system_prompt;
         let current_date = input.current_date;
         let timezone = input.timezone;
+        if let Some(max_subagent_depth) = max_subagent_depth
+            && origin.subagent_depth >= max_subagent_depth
+        {
+            return Err(runtime_error(
+                "supervisor-register-child-depth-limit",
+                "subagent depth limit reached; this agent cannot spawn more subagents",
+            ));
+        }
         let parent_agent_id = self
             .ensure_origin_agent(session_id, thread_id.clone(), origin)
             .await?;
@@ -225,6 +235,7 @@ impl AgentSupervisor {
             .unwrap_or_else(|| {
                 let mut context = TurnContext::new(session_id, thread_id.clone());
                 context.agent_id = parent_agent_id.clone();
+                context.subagent_depth = origin.subagent_depth;
                 context.name = origin.name.clone();
                 context.system_prompt = origin.system_prompt.clone();
                 context.cwd = origin.cwd.clone();
@@ -428,6 +439,7 @@ impl AgentSupervisor {
                         thread_id.clone(),
                         agent_id,
                         parent_agent_id.as_deref(),
+                        path,
                         name.as_deref(),
                     );
                     replayed_contexts.push(replayed_context);
@@ -1014,6 +1026,12 @@ impl From<&str> for AgentPathSortKey {
 }
 
 /// Builds the stable root-agent turn context from the caller environment.
+///
+/// Depth invariant: `origin.subagent_depth` is the caller's own depth, not the
+/// root's. For the true root agent (depth 0) this is always correct. If a child
+/// agent lazily triggers root-context creation via `ensure_origin_agent`, the
+/// root's depth will still be 0 because child agents use a different `thread_id`
+/// and therefore never reach this fallback path for the root's `(session, thread)` key.
 fn origin_turn_context(
     session_id: SessionId,
     thread_id: ThreadId,
@@ -1022,6 +1040,7 @@ fn origin_turn_context(
 ) -> TurnContext {
     let mut turn_context = TurnContext::new(session_id, thread_id);
     turn_context.agent_id = agent_id.to_string();
+    turn_context.subagent_depth = origin.subagent_depth;
     turn_context.name = origin.name.clone();
     turn_context.system_prompt = origin.system_prompt.clone();
     turn_context.cwd = origin.cwd.clone();
@@ -1037,18 +1056,33 @@ fn deserialize_replayed_turn_context(
     thread_id: ThreadId,
     agent_id: &str,
     parent_agent_id: Option<&str>,
+    path: &str,
     name: Option<&str>,
 ) -> TurnContext {
     turn_context
         .and_then(|value| serde_json::from_value::<TurnContextItem>(value.clone()).ok())
         .map(TurnContext::from_item)
+        .map(|mut replayed| {
+            // The dotted path is the ground truth for agent topology, so it
+            // must be authoritative rather than trusting a possibly-corrupt stored value.
+            replayed.subagent_depth = agent_path_depth(path);
+            replayed
+        })
         .unwrap_or_else(|| {
             let mut fallback = TurnContext::new(session_id, thread_id);
             fallback.agent_id = agent_id.to_string();
             fallback.parent_agent_id = parent_agent_id.map(ToOwned::to_owned);
+            fallback.subagent_depth = agent_path_depth(path);
             fallback.name = name.map(ToOwned::to_owned);
             fallback
         })
+}
+
+/// Counts the dotted path segments that identify one agent's nesting depth.
+fn agent_path_depth(path: &str) -> usize {
+    path.split('.')
+        .filter(|segment| !segment.is_empty())
+        .count()
 }
 
 // ---------------------------------------------------------------------------

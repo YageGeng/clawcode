@@ -1,4 +1,5 @@
 use crate::tools::{
+    AgentRuntimeContext,
     executor::{ToolExecutionMode, ToolExecutionQueue, ToolExecutionRequest},
     router::ToolRouter,
 };
@@ -13,6 +14,7 @@ pub(super) struct ToolExecutionBatch {
 /// Splits one tool execution plan into batches according to the selected mode and tool capabilities.
 pub(super) fn build_tool_execution_batches(
     router: &ToolRouter,
+    agent: &AgentRuntimeContext,
     mode: ToolExecutionMode,
     calls: Vec<ToolExecutionRequest>,
 ) -> Vec<ToolExecutionBatch> {
@@ -27,7 +29,7 @@ pub(super) fn build_tool_execution_batches(
     let mut parallel_batch = Vec::new();
 
     for call in calls {
-        if router.tool_supports_parallel(&call.call.name) {
+        if router.tool_supports_parallel_for_agent(&call.call.name, agent) {
             parallel_batch.push(call);
             continue;
         }

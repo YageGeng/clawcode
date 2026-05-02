@@ -47,6 +47,7 @@ Each turn records user input, model responses, tool calls, tool results, and usa
 
 - Rust 2024 (toolchain in `rust-toolchain.toml`)
 - Configured LLM provider credentials in `base.toml`
+- CLI runtime limits such as `max_subagent_depth` live under `[runtime]` in `base.toml`
 
 ## Code quality
 

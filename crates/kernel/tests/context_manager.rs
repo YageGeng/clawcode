@@ -52,7 +52,21 @@ fn context_manager_reinjects_full_context_without_baseline() {
         .with_timezone("Asia/Shanghai");
 
     let initial_items = history.initial_context_items(&turn_context);
-    assert_eq!(initial_items.len(), 2);
+    assert_eq!(initial_items.len(), 4);
+    assert!(initial_items.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant { content, .. }
+                if format!("{content:?}").contains("<field>agent_id</field>")
+        )
+    }));
+    assert!(initial_items.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant { content, .. }
+                if format!("{content:?}").contains("<field>subagent_depth</field>")
+        )
+    }));
 }
 
 #[test]
@@ -64,4 +78,29 @@ fn context_manager_emits_diff_items_when_baseline_exists() {
     let current = baseline.clone().with_timezone("Asia/Shanghai");
     let diff_items = history.settings_diff_items(&current);
     assert_eq!(diff_items.len(), 1);
+}
+
+#[test]
+fn context_manager_keeps_first_turn_on_initial_context_even_with_seeded_baseline() {
+    let mut history = ContextManager::new();
+    let turn_context = TurnContext::new(SessionId::new(), ThreadId::new())
+        .with_name("worker")
+        .with_system_prompt("system");
+    history.set_reference_context_item(Some(turn_context.to_turn_context_item()));
+
+    let context_messages = history.context_messages(&turn_context);
+    assert!(context_messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant { content, .. }
+                if format!("{content:?}").contains("<field>agent_id</field>")
+        )
+    }));
+    assert!(context_messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant { content, .. }
+                if format!("{content:?}").contains("<field>name</field>")
+        )
+    }));
 }

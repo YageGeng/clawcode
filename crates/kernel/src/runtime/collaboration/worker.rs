@@ -162,6 +162,7 @@ where
                 session_id,
                 thread_id,
                 origin: &request.origin,
+                max_subagent_depth: self.config.max_subagent_depth,
                 name: request.name,
                 cwd: request.cwd,
                 system_prompt: request.system_prompt,

@@ -117,6 +117,24 @@ fn default_tool_registry_plan_contains_collaboration_tools() {
     assert!(spec_names.contains(&"list_agents".to_string()));
 }
 
+/// Verifies the default `from_path` router preserves depth-aware visibility for `spawn_agent`.
+#[tokio::test]
+async fn default_router_hides_spawn_agent_when_depth_limit_is_reached() {
+    let router = ToolRouter::from_path(temp_root("collaboration-depth-filter")).await;
+    let tool_names = router
+        .definitions_for_agent(&AgentRuntimeContext {
+            subagent_depth: 1,
+            max_subagent_depth: Some(1),
+            ..AgentRuntimeContext::default()
+        })
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<Vec<_>>();
+
+    assert!(!tool_names.iter().any(|name| name == "spawn_agent"));
+    assert!(tool_names.iter().any(|name| name == "wait_agent"));
+}
+
 /// Verifies collaboration tools fail clearly when no runtime is available in the tool context.
 #[tokio::test]
 async fn spawn_agent_requires_collaboration_runtime() {
@@ -155,6 +173,7 @@ async fn collaboration_tools_dispatch_through_runtime() {
             cwd: Some("/workspace".to_string()),
             current_date: Some("2026-05-01".to_string()),
             timezone: Some("Asia/Shanghai".to_string()),
+            ..AgentRuntimeContext::default()
         })
         .with_collaboration_runtime(Arc::new(StubCollaborationRuntime));
 

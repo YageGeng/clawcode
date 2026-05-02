@@ -134,15 +134,15 @@ fn usage(total_tokens: u64) -> Usage {
     }
 }
 
-/// Extracts plain text from a user message for assertions that inspect prompt context.
-fn first_user_text(message: &Message) -> &str {
+/// Extracts plain text from one user message when the payload is a text item.
+fn user_text(message: &Message) -> Option<&str> {
     let Message::User { content } = message else {
-        panic!("expected user message");
+        return None;
     };
     let UserContent::Text(text) = content.first_ref() else {
-        panic!("expected text user content");
+        return None;
     };
-    text.text()
+    Some(text.text())
 }
 
 /// Creates a filesystem skill root with one SNAFU skill for runtime integration tests.
@@ -3679,17 +3679,15 @@ async fn runner_adds_available_skills_to_system_prompt_and_injects_explicit_ment
     assert!(system_prompt.contains("<available_skills>"));
     assert!(system_prompt.contains("<name>rust-error-snafu</name>"));
     assert!(system_prompt.contains("<description>Typed Rust errors.</description>"));
+    assert!(request.messages.iter().any(|message| {
+        user_text(message).is_some_and(|text| text.contains("<skill_instructions"))
+    }));
     assert!(
         request
             .messages
             .iter()
-            .any(|message| first_user_text(message).contains("<skill_instructions"))
-    );
-    assert!(
-        request
-            .messages
-            .iter()
-            .any(|message| first_user_text(message).contains("Use SNAFU context."))
+            .any(|message| user_text(message)
+                .is_some_and(|text| text.contains("Use SNAFU context.")))
     );
     assert_eq!(
         request.messages.last(),
@@ -3738,17 +3736,15 @@ async fn runner_lists_available_skills_without_injecting_unmentioned_skill_bodie
             .as_ref()
             .is_some_and(|prompt| prompt.contains("rust-error-snafu"))
     );
+    assert!(!request.messages.iter().any(|message| {
+        user_text(message).is_some_and(|text| text.contains("<skill_instructions"))
+    }));
     assert!(
         !request
             .messages
             .iter()
-            .any(|message| first_user_text(message).contains("<skill_instructions"))
-    );
-    assert!(
-        !request
-            .messages
-            .iter()
-            .any(|message| first_user_text(message).contains("Use SNAFU context."))
+            .any(|message| user_text(message)
+                .is_some_and(|text| text.contains("Use SNAFU context.")))
     );
 }
 
@@ -3847,6 +3843,61 @@ async fn runner_rebuilds_system_prompt_after_cache_invalidation() {
             .system_prompt
             .as_deref()
             .is_some_and(|prompt| prompt.contains("project instructions v2"))
+    );
+}
+
+/// Verifies a prompt cache entry is rebuilt when the runtime changes the visible tool policy.
+#[tokio::test]
+async fn runner_rebuilds_system_prompt_when_subagent_depth_policy_changes() {
+    let model = Arc::new(RecordingModel::new(vec![
+        ModelResponse::text("first", usage(4)),
+        ModelResponse::text("second", usage(4)),
+    ]));
+    let store = Arc::new(InMemorySessionStore::default());
+    let mut builder = ToolRegistryBuilder::new();
+    builder.push_handler_spec(Arc::new(tools::builtin::collaboration::SpawnAgentTool));
+    builder.push_handler_spec(Arc::new(tools::builtin::collaboration::WaitAgentTool));
+    let router = Arc::new(builder.build_router());
+    let events = Arc::new(RecordingEventSink::default());
+    let default_runtime = ThreadRuntime::new(
+        Arc::clone(&model),
+        Arc::clone(&store),
+        Arc::clone(&router),
+        Arc::clone(&events),
+    );
+    let restricted_runtime =
+        ThreadRuntime::new(Arc::clone(&model), Arc::clone(&store), router, events)
+            .with_config(AgentLoopConfig::default().with_max_subagent_depth(Some(0)));
+    let thread = ThreadHandle::new(SessionId::new(), ThreadId::new());
+
+    default_runtime
+        .run(&thread, ThreadRunRequest::new("first"))
+        .await
+        .unwrap();
+    restricted_runtime
+        .run(&thread, ThreadRunRequest::new("second"))
+        .await
+        .unwrap();
+
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("spawn_agent"))
+    );
+    assert!(
+        !requests[1]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("spawn_agent"))
+    );
+    assert!(
+        requests[1]
+            .system_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("wait_agent"))
     );
 }
 
@@ -3956,28 +4007,23 @@ async fn runner_injects_structured_skill_input_without_text_mention() {
     let requests = model.requests().await;
     let request = requests.first().expect("model should receive one request");
 
+    assert!(request.messages.iter().any(|message| {
+        user_text(message).is_some_and(|text| text.contains("<skill_instructions"))
+    }));
     assert!(
         request
             .messages
             .iter()
-            .any(|message| first_user_text(message).contains("<skill_instructions"))
-    );
-    assert!(
-        request
-            .messages
-            .iter()
-            .any(|message| first_user_text(message).contains("Use SNAFU context."))
+            .any(|message| user_text(message)
+                .is_some_and(|text| text.contains("Use SNAFU context.")))
     );
     assert_eq!(
         request.messages.last(),
         Some(&Message::user("create an error enum"))
     );
-    assert!(
-        !request
-            .messages
-            .iter()
-            .any(|message| first_user_text(message).contains("[skill:rust-error-snafu]"))
-    );
+    assert!(!request.messages.iter().any(|message| {
+        user_text(message).is_some_and(|text| text.contains("[skill:rust-error-snafu]"))
+    }));
 }
 
 #[tokio::test]

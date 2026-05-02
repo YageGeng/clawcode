@@ -71,17 +71,22 @@ where
     let skill_outcome = skills::SkillsManager::new(config.skills.clone())
         .load()
         .await;
+    let mut turn_context = build_turn_context(store, &request, &prompt_overrides).await;
+    let agent_runtime_context = turn_context.to_agent_runtime_context(config.max_subagent_depth);
     let system_prompt = resolve_system_prompt(
         store,
         router,
+        &agent_runtime_context,
         &request,
         &prompt_overrides,
         &skill_outcome.skills,
         use_system_prompt_cache,
     )
     .await?;
-    let turn_context =
-        build_turn_context(store, &request, &prompt_overrides, system_prompt.clone()).await;
+    turn_context.system_prompt = system_prompt.clone();
+    let context_messages = store
+        .load_context_messages_state(request.session_id, request.thread_id.clone(), &turn_context)
+        .await;
     let skill_inputs = user_inputs_to_skill_inputs(&request.inputs);
     let mention_options = skills::SkillMentionOptions::default();
     let selected_skills = skills::collect_explicit_skill_mentions(
@@ -94,6 +99,7 @@ where
         .context(SkillsSnafu {
             stage: "runner-build-skill-injections".to_string(),
         })?;
+    history.extend(context_messages);
     history.extend(skill_injections);
     history.extend(user_messages);
 
@@ -125,6 +131,7 @@ where
 async fn resolve_system_prompt(
     store: &SessionTaskContext,
     router: &ToolRouter,
+    agent_runtime_context: &tools::AgentRuntimeContext,
     request: &RunRequest,
     prompt_overrides: &SystemPromptOverrides,
     skills: &[skills::SkillMetadata],
@@ -132,16 +139,26 @@ async fn resolve_system_prompt(
 ) -> Result<Option<String>> {
     if use_system_prompt_cache
         && let Some(system_prompt) = store
-            .read_cached_system_prompt(request.session_id, request.thread_id.clone())
+            .read_cached_system_prompt(
+                request.session_id,
+                request.thread_id.clone(),
+                agent_runtime_context,
+            )
             .await
     {
         return Ok(Some(system_prompt));
     }
 
-    let system_prompt = build_system_prompt(router, skills, prompt_overrides)?;
+    let system_prompt =
+        build_system_prompt(router, agent_runtime_context, skills, prompt_overrides)?;
     if use_system_prompt_cache && let Some(prompt) = system_prompt.clone() {
         store
-            .save_cached_system_prompt(request.session_id, request.thread_id.clone(), prompt)
+            .save_cached_system_prompt(
+                request.session_id,
+                request.thread_id.clone(),
+                agent_runtime_context.clone(),
+                prompt,
+            )
             .await;
     }
     Ok(system_prompt)
@@ -152,14 +169,12 @@ async fn build_turn_context(
     store: &SessionTaskContext,
     request: &RunRequest,
     prompt_overrides: &SystemPromptOverrides,
-    system_prompt: Option<String>,
 ) -> TurnContext {
     let mut turn_context = store
         .load_turn_context(request.session_id, request.thread_id.clone())
         .await
         .unwrap_or_else(|| TurnContext::new(request.session_id, request.thread_id.clone()));
 
-    turn_context.system_prompt = system_prompt;
     if let Some(cwd) = prompt_overrides.cwd.as_ref() {
         turn_context.cwd = Some(cwd.to_string_lossy().to_string());
     }

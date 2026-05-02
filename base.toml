@@ -36,6 +36,9 @@ enabled = true
 cwd = "."
 roots = []
 
+[runtime]
+max_subagent_depth = 2
+
 [approval]
 profile = "trust_all"
 

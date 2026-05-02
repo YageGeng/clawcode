@@ -34,9 +34,16 @@ where
         queue,
         mut in_flight,
     } = plan;
+    let agent_runtime_context = input
+        .turn_context
+        .to_agent_runtime_context(config.max_subagent_depth);
     let execution_requests = in_flight.execution_requests_for_calls(queue.into_calls())?;
-    let batches =
-        build_tool_execution_batches(input.router, config.tool_execution_mode, execution_requests);
+    let batches = build_tool_execution_batches(
+        input.router,
+        &agent_runtime_context,
+        config.tool_execution_mode,
+        execution_requests,
+    );
     let total_calls_in_plan = batches.iter().map(|batch| batch.queue.len()).sum::<usize>();
     let mut total_tool_calls = total_tool_calls;
 
@@ -75,14 +82,7 @@ where
                 tool_execution_mode: first.mode,
                 cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
                 tool_context: ToolContext::new(input.session_id, input.thread_id.clone())
-                    .with_agent_runtime_context(tools::AgentRuntimeContext {
-                        agent_id: Some(input.turn_context.agent_id.clone()),
-                        name: input.turn_context.name.clone(),
-                        system_prompt: input.turn_context.system_prompt.clone(),
-                        cwd: input.turn_context.cwd.clone(),
-                        current_date: input.turn_context.current_date.clone(),
-                        timezone: input.turn_context.timezone.clone(),
-                    })
+                    .with_agent_runtime_context(agent_runtime_context.clone())
                     .with_tool_approval_profile(config.tool_approval_profile)
                     .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone())
                     .with_collaboration_runtime_if_needed(input.collaboration_runtime.clone()),
@@ -101,14 +101,7 @@ where
                     tool_execution_mode: batch.mode,
                     cancellation_token: config.cancellation_token.clone().unwrap_or_default(),
                     tool_context: ToolContext::new(input.session_id, input.thread_id.clone())
-                        .with_agent_runtime_context(tools::AgentRuntimeContext {
-                            agent_id: Some(input.turn_context.agent_id.clone()),
-                            name: input.turn_context.name.clone(),
-                            system_prompt: input.turn_context.system_prompt.clone(),
-                            cwd: input.turn_context.cwd.clone(),
-                            current_date: input.turn_context.current_date.clone(),
-                            timezone: input.turn_context.timezone.clone(),
-                        })
+                        .with_agent_runtime_context(agent_runtime_context.clone())
                         .with_tool_approval_profile(config.tool_approval_profile)
                         .with_tool_approval_handler_if_needed(config.tool_approval_handler.clone())
                         .with_collaboration_runtime_if_needed(input.collaboration_runtime.clone()),

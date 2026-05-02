@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tools::{
-    Result, StructuredToolOutput, ToolCallRequest, ToolContext, ToolInvocation, ToolOutput,
-    handler::ToolHandler, registry::ToolRegistryBuilder,
+    AgentRuntimeContext, Result, StructuredToolOutput, ToolCallRequest, ToolContext,
+    ToolInvocation, ToolOutput, handler::ToolHandler, registry::ToolRegistryBuilder,
 };
 
 /// Verifies router-visible specs are owned by the builder output rather than inferred from handlers.
@@ -15,7 +15,7 @@ async fn builder_controls_model_visible_definitions() {
 
     let router = builder.build_router();
     let names = router
-        .definitions()
+        .definitions_for_agent(&AgentRuntimeContext::default())
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
@@ -32,7 +32,7 @@ async fn builder_preserves_prompt_metadata_on_visible_specs() {
     let router = builder.build_router();
 
     let spec = router
-        .find_spec("visible_tool")
+        .find_spec_for_agent("visible_tool", &AgentRuntimeContext::default())
         .expect("visible tool spec should be present");
 
     assert_eq!(

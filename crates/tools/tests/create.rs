@@ -8,14 +8,16 @@ use std::{
     process::id,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tools::{ToolCallRequest, ToolContext, ToolRouter, build_default_tool_registry_plan};
+use tools::{
+    AgentRuntimeContext, ToolCallRequest, ToolContext, ToolRouter, build_default_tool_registry_plan,
+};
 
 /// Verifies the extracted tools crate exposes the default patch and shell tools.
 #[tokio::test]
 async fn default_router_exposes_file_tools() {
     let router = ToolRouter::from_path(".").await;
     let names = router
-        .definitions()
+        .definitions_for_agent(&AgentRuntimeContext::default())
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();

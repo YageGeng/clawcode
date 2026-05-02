@@ -5,14 +5,14 @@ use std::sync::{
 
 use async_trait::async_trait;
 use kernel::{
-    CollaborationSession, Result, ThreadHandle, ThreadRuntime, TurnContext,
+    AgentLoopConfig, CollaborationSession, Result, ThreadHandle, ThreadRuntime, TurnContext,
     events::RecordingEventSink,
     model::{AgentModel, ModelRequest, ModelResponse},
     session::{InMemorySessionStore, SessionId, ThreadId},
 };
 use llm::{completion::Message, usage::Usage};
 use store::{JsonlSessionStore, SessionEvent, load_session_events};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tools::{
     AgentRuntimeContext, AgentStatus, CloseAgentRequest, ListAgentsRequest, MailboxEventKind,
     SendAgentInputRequest, SpawnAgentRequest, WaitAgentRequest,
@@ -94,6 +94,68 @@ impl AgentModel for GatedEchoModel {
 
         Ok(ModelResponse::text(text, Usage::default()))
     }
+}
+
+/// Model double that records each child-agent request before returning queued responses.
+#[derive(Debug, Clone)]
+struct RecordingChildModel {
+    requests: Arc<Mutex<Vec<ModelRequest>>>,
+}
+
+impl RecordingChildModel {
+    /// Builds a model that stores every request so tests can inspect injected context.
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Returns every recorded request observed by the child worker.
+    async fn requests(&self) -> Vec<ModelRequest> {
+        self.requests.lock().await.clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl AgentModel for RecordingChildModel {
+    /// Records the request and replies with the latest visible user text.
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+        self.requests.lock().await.push(request.clone());
+        let text = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User { content } => content.iter().find_map(|part| match part {
+                    llm::completion::message::UserContent::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_else(|| "empty".to_string());
+
+        Ok(ModelResponse::text(text, Usage::default()))
+    }
+}
+
+/// Extracts plain assistant text payloads from one recorded model request.
+fn assistant_texts(request: &ModelRequest) -> Vec<&str> {
+    request
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant { content, .. } => content
+                .iter()
+                .filter_map(|part| match part {
+                    llm::completion::AssistantContent::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .next(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Verifies child agents run on dedicated threads and notify the caller through the mailbox.
@@ -219,6 +281,72 @@ async fn collaboration_runtime_spawns_waits_and_reuses_child_threads() {
     assert_eq!(close.agent.status, AgentStatus::Closed);
 }
 
+/// Verifies a spawned child sees its agent identity in the very first model request.
+#[tokio::test]
+async fn collaboration_runtime_injects_child_identity_into_first_request() {
+    let root_dir = temp_root("collaboration-child-identity");
+    let store = Arc::new(InMemorySessionStore::default());
+    let model = Arc::new(RecordingChildModel::new());
+    let runtime = ThreadRuntime::new(
+        Arc::clone(&model),
+        Arc::clone(&store),
+        Arc::new(tools::ToolRouter::from_path(&root_dir).await),
+        Arc::new(RecordingEventSink::default()),
+    );
+
+    let session_id = SessionId::new();
+    let root_thread = ThreadHandle::new(session_id, ThreadId::new()).with_cwd(&root_dir);
+    let collaboration = runtime.collaboration_runtime_for_thread(&root_thread);
+    let spawned = collaboration
+        .spawn_agent(SpawnAgentRequest {
+            session_id: session_id.to_string(),
+            thread_id: root_thread.thread_id().to_string(),
+            origin: AgentRuntimeContext {
+                cwd: Some(root_dir.to_string_lossy().to_string()),
+                ..AgentRuntimeContext::default()
+            },
+            name: Some("writer".to_string()),
+            task: Some("draft".to_string()),
+            cwd: None,
+            system_prompt: None,
+            current_date: None,
+            timezone: None,
+        })
+        .await
+        .expect("spawn should succeed");
+
+    collaboration
+        .wait_agent(WaitAgentRequest {
+            session_id: session_id.to_string(),
+            thread_id: root_thread.thread_id().to_string(),
+            origin: AgentRuntimeContext {
+                cwd: Some(root_dir.to_string_lossy().to_string()),
+                ..AgentRuntimeContext::default()
+            },
+            targets: vec![spawned.agent.agent_id.clone()],
+            timeout_ms: Some(5_000),
+        })
+        .await
+        .expect("child should finish");
+
+    let requests = model.requests().await;
+    assert_eq!(requests.len(), 1);
+    let assistant_messages = assistant_texts(&requests[0]);
+    let expected_parent_agent_id = format!("root-{}", root_thread.thread_id());
+    assert!(assistant_messages.iter().any(|text| {
+        text.contains("<field>agent_id</field>") && text.contains(spawned.agent.agent_id.as_str())
+    }));
+    assert!(assistant_messages.iter().any(|text| {
+        text.contains("<field>parent_agent_id</field>")
+            && text.contains(expected_parent_agent_id.as_str())
+    }));
+    assert!(
+        assistant_messages
+            .iter()
+            .any(|text| { text.contains("<field>subagent_depth</field>") && text.contains(">1<") })
+    );
+}
+
 /// Verifies child workers publish results through the mailbox only and do not
 /// leak their internal event stream into the parent thread's event sink.
 #[tokio::test]
@@ -335,6 +463,77 @@ async fn collaboration_runtime_lists_agents_in_numeric_path_order() {
     assert_eq!(
         ordered_paths,
         vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+    );
+}
+
+/// Verifies max-depth children cannot spawn another generation even if a caller reaches the runtime directly.
+#[tokio::test]
+async fn collaboration_runtime_rejects_spawns_beyond_configured_max_depth() {
+    let root_dir = temp_root("collaboration-max-depth");
+    let store = Arc::new(InMemorySessionStore::default());
+    let runtime = ThreadRuntime::new(
+        Arc::new(EchoModel),
+        Arc::clone(&store),
+        Arc::new(tools::ToolRouter::from_path(&root_dir).await),
+        Arc::new(RecordingEventSink::default()),
+    )
+    .with_config(AgentLoopConfig::default().with_max_subagent_depth(Some(1)));
+
+    let session_id = SessionId::new();
+    let root_thread = ThreadHandle::new(session_id, ThreadId::new()).with_cwd(&root_dir);
+    let root_collaboration = runtime.collaboration_runtime_for_thread(&root_thread);
+    let root_origin = AgentRuntimeContext {
+        cwd: Some(root_dir.to_string_lossy().to_string()),
+        max_subagent_depth: Some(1),
+        ..AgentRuntimeContext::default()
+    };
+    let child = root_collaboration
+        .spawn_agent(SpawnAgentRequest {
+            session_id: session_id.to_string(),
+            thread_id: root_thread.thread_id().to_string(),
+            origin: root_origin,
+            name: Some("writer".to_string()),
+            task: None,
+            cwd: None,
+            system_prompt: None,
+            current_date: None,
+            timezone: None,
+        })
+        .await
+        .expect("first-generation spawn should succeed");
+
+    let child_thread = ThreadHandle::new(
+        session_id,
+        ThreadId::try_from(child.agent.thread_id.as_str()).expect("child thread id"),
+    )
+    .with_cwd(&root_dir);
+    let child_collaboration = runtime.collaboration_runtime_for_thread(&child_thread);
+    let error = child_collaboration
+        .spawn_agent(SpawnAgentRequest {
+            session_id: session_id.to_string(),
+            thread_id: child.agent.thread_id.clone(),
+            origin: AgentRuntimeContext {
+                agent_id: Some(child.agent.agent_id.clone()),
+                name: child.agent.name.clone(),
+                cwd: Some(root_dir.to_string_lossy().to_string()),
+                subagent_depth: 1,
+                max_subagent_depth: Some(1),
+                ..AgentRuntimeContext::default()
+            },
+            name: Some("nested".to_string()),
+            task: None,
+            cwd: None,
+            system_prompt: None,
+            current_date: None,
+            timezone: None,
+        })
+        .await
+        .expect_err("second-generation spawn should be rejected");
+
+    assert!(
+        error
+            .display_message()
+            .contains("subagent depth limit reached; this agent cannot spawn more subagents")
     );
 }
 

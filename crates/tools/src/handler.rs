@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use crate::{
     Result,
+    collaboration::AgentRuntimeContext,
     context::{ToolCallRequest, ToolContext, ToolInvocation, ToolMetadata, ToolOutput},
     spec::ToolPromptMetadata,
 };
@@ -48,6 +49,13 @@ pub trait ToolHandler: Send + Sync {
             prompt_snippet: self.prompt_snippet(),
             prompt_guidelines: self.prompt_guidelines(),
         }
+    }
+
+    /// Returns an optional visibility predicate evaluated per agent context.
+    /// Tools that should be hidden at certain depths or for certain agents
+    /// override this to return a predicate. `None` means always visible.
+    fn visible_when(&self) -> Option<fn(&AgentRuntimeContext) -> bool> {
+        None
     }
 
     /// Executes one normalized tool invocation.

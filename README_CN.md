@@ -47,5 +47,6 @@ crates/
 
 - 使用 Rust 2024 工具链（`rust-toolchain.toml`）
 - LLM 凭据在 `base.toml` 中配置
+- CLI 运行时限制可在 `base.toml` 的 `[runtime]` 中配置，例如 `max_subagent_depth`
 - `pre-commit` 强制 `rustfmt` 和 `clippy --tests --examples -Dwarnings`
 - 模块边界：协议在 `acp`，编排在 `kernel`，工具在 `tools`，模型在 `llm`，持久化在 `store`

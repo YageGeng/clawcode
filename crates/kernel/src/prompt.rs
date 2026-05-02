@@ -9,7 +9,7 @@ use snafu::ResultExt;
 
 use crate::Result;
 use skills::SkillMetadata;
-use tools::ToolRouter;
+use tools::{AgentRuntimeContext, ToolRouter};
 
 const SYSTEM_FILE_NAME: &str = "SYSTEM.md";
 const AGENTS_FILE_NAME: &str = "AGENTS.md";
@@ -39,6 +39,7 @@ struct RenderInputs {
 /// Builds the full system prompt following the documented prompt spec.
 pub fn build_system_prompt(
     router: &ToolRouter,
+    agent: &AgentRuntimeContext,
     skills: &[SkillMetadata],
     overrides: &SystemPromptOverrides,
 ) -> Result<Option<String>> {
@@ -51,9 +52,9 @@ pub fn build_system_prompt(
     let context_files = collect_context_files(&cwd)?;
     let project_root = find_project_root(&cwd);
     let docs_section = render_docs_section(&project_root)?;
-    let tools_section = render_tools_section(router);
-    let guidelines_section = render_guidelines_section(router);
-    let skills_section = render_visible_skills_section(router, skills);
+    let tools_section = render_tools_section(router, agent);
+    let guidelines_section = render_guidelines_section(router, agent);
+    let skills_section = render_visible_skills_section(router, agent, skills);
 
     Ok(Some(render_system_prompt(RenderInputs {
         cwd,
@@ -234,10 +235,10 @@ fn default_role_section() -> String {
 }
 
 /// Renders the model-visible tool list from prompt snippets.
-fn render_tools_section(router: &ToolRouter) -> String {
+fn render_tools_section(router: &ToolRouter, agent: &AgentRuntimeContext) -> String {
     let mut lines = vec!["Available tools:".to_string()];
     let mut snippets = router
-        .specs()
+        .visible_specs(agent)
         .iter()
         .filter_map(|configured| {
             configured
@@ -259,9 +260,9 @@ fn render_tools_section(router: &ToolRouter) -> String {
 }
 
 /// Renders the merged default prompt guidelines, preserving first-seen order.
-fn render_guidelines_section(router: &ToolRouter) -> String {
-    let mut guidelines = derive_guidelines_from_tools(router);
-    for configured in router.specs() {
+fn render_guidelines_section(router: &ToolRouter, agent: &AgentRuntimeContext) -> String {
+    let mut guidelines = derive_guidelines_from_tools(router, agent);
+    for configured in router.visible_specs(agent) {
         for guideline in configured.spec.prompt_metadata.prompt_guidelines {
             push_unique_line(&mut guidelines, (*guideline).to_string());
         }
@@ -282,9 +283,9 @@ fn render_guidelines_section(router: &ToolRouter) -> String {
 }
 
 /// Derives default guidelines from the currently visible tool set.
-fn derive_guidelines_from_tools(router: &ToolRouter) -> Vec<String> {
+fn derive_guidelines_from_tools(router: &ToolRouter, agent: &AgentRuntimeContext) -> Vec<String> {
     let tool_names = router
-        .specs()
+        .visible_specs(agent)
         .iter()
         .map(|configured| configured.spec.name().to_string())
         .collect::<HashSet<_>>();
@@ -403,8 +404,12 @@ fn render_project_context_section(context_files: Vec<ContextPromptFile>) -> Stri
 }
 
 /// Renders the skills XML section only when a visible read tool exists.
-fn render_visible_skills_section(router: &ToolRouter, skills: &[SkillMetadata]) -> Option<String> {
-    router.find_spec("fs/read_text_file")?;
+fn render_visible_skills_section(
+    router: &ToolRouter,
+    agent: &AgentRuntimeContext,
+    skills: &[SkillMetadata],
+) -> Option<String> {
+    router.find_spec_for_agent("fs/read_text_file", agent)?;
     skills::render_skills_section(skills)
 }
 
@@ -433,8 +438,8 @@ mod tests {
 
     use async_trait::async_trait;
     use tools::{
-        Result as ToolResult, ToolInvocation, ToolOutput, handler::ToolHandler,
-        registry::ToolRegistryBuilder,
+        AgentRuntimeContext, Result as ToolResult, ToolInvocation, ToolOutput,
+        handler::ToolHandler, registry::ToolRegistryBuilder,
     };
 
     /// Renders the default system prompt with tool metadata, project context, and skill XML.
@@ -456,6 +461,7 @@ mod tests {
 
         let prompt = build_system_prompt(
             &router,
+            &AgentRuntimeContext::default(),
             &skills,
             &SystemPromptOverrides {
                 cwd: Some(temp.path().to_path_buf()),
@@ -485,6 +491,7 @@ mod tests {
 
         let prompt = build_system_prompt(
             &router,
+            &AgentRuntimeContext::default(),
             &[],
             &SystemPromptOverrides {
                 custom_prompt: Some("custom system".to_string()),
@@ -518,6 +525,7 @@ mod tests {
 
         let prompt = build_system_prompt(
             &router,
+            &AgentRuntimeContext::default(),
             &skills,
             &SystemPromptOverrides {
                 custom_prompt: None,
@@ -553,6 +561,7 @@ mod tests {
         let router = ToolRegistryBuilder::new().build_router();
         let prompt = build_system_prompt(
             &router,
+            &AgentRuntimeContext::default(),
             &[],
             &SystemPromptOverrides {
                 cwd: Some(temp.path().to_path_buf()),
@@ -567,6 +576,35 @@ mod tests {
         assert!(!prompt.contains("legacy append prompt"));
         assert!(!prompt.contains("global append prompt"));
         assert!(!prompt.contains("global agent instructions"));
+    }
+
+    /// Subagents at the configured maximum depth do not advertise `spawn_agent` in their prompt.
+    #[test]
+    fn build_system_prompt_hides_spawn_agent_when_depth_limit_is_reached() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let mut builder = ToolRegistryBuilder::new();
+        builder.push_handler_spec(Arc::new(tools::builtin::collaboration::SpawnAgentTool));
+        builder.push_handler_spec(Arc::new(tools::builtin::collaboration::WaitAgentTool));
+        let router = builder.build_router();
+        let prompt = build_system_prompt(
+            &router,
+            &AgentRuntimeContext {
+                subagent_depth: 2,
+                max_subagent_depth: Some(2),
+                ..AgentRuntimeContext::default()
+            },
+            &[],
+            &SystemPromptOverrides {
+                cwd: Some(temp.path().to_path_buf()),
+                current_date: Some("2026-04-29".to_string()),
+                ..SystemPromptOverrides::default()
+            },
+        )
+        .expect("prompt should build")
+        .expect("prompt should exist");
+
+        assert!(!prompt.contains("spawn_agent"));
+        assert!(prompt.contains("wait_agent"));
     }
 
     /// Tiny test tool that contributes prompt metadata and a visible read-tool name.

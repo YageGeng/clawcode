@@ -96,17 +96,27 @@ impl ToolRegistryBuilder {
         handler: Arc<dyn ToolHandler>,
         supports_parallel_tool_calls: bool,
     ) {
-        self.push_spec(
+        let visible_when = handler.visible_when();
+        self.specs.push(ConfiguredToolSpec::new(
             ToolSpec::function_with_prompt(handler.definition(), handler.prompt_metadata()),
             supports_parallel_tool_calls,
-        );
+            visible_when,
+        ));
         self.register_handler(handler.name(), handler);
+    }
+
+    /// Pushes a preconfigured visible spec without rewriting its visibility predicate.
+    pub fn push_configured_spec(&mut self, spec: ConfiguredToolSpec) {
+        self.specs.push(spec);
     }
 
     /// Registers a visible tool spec without touching handler registration.
     pub fn push_spec(&mut self, spec: ToolSpec, supports_parallel_tool_calls: bool) {
-        self.specs
-            .push(ConfiguredToolSpec::new(spec, supports_parallel_tool_calls));
+        self.specs.push(ConfiguredToolSpec::new(
+            spec,
+            supports_parallel_tool_calls,
+            None,
+        ));
     }
 
     /// Registers a handler under an explicit dispatch name.

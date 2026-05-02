@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
 
@@ -21,6 +21,9 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     /// Skill discovery configuration forwarded into the kernel runtime.
     pub skills: CliSkillsConfig,
+    /// Runtime policy knobs forwarded into the ACP/kernel loop.
+    #[serde(default)]
+    pub runtime: CliRuntimeConfig,
     /// Tool approval behavior used when the CLI creates ACP approval handlers.
     #[serde(default)]
     pub approval: CliApprovalConfig,
@@ -34,6 +37,14 @@ impl AppConfig {
     pub fn current_model_ref(&self) -> &str {
         &self.current_model
     }
+}
+
+/// CLI-owned runtime configuration loaded from TOML and `APP_RUNTIME__*` overrides.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct CliRuntimeConfig {
+    /// Caps the deepest child-agent generation this CLI allows. `None` means unlimited.
+    #[serde(default)]
+    pub max_subagent_depth: Option<usize>,
 }
 
 /// CLI-owned approval configuration loaded from TOML and `APP_APPROVAL__*` overrides.
@@ -143,13 +154,118 @@ pub fn app_config() -> Arc<AppConfig> {
 
 /// Loads one fresh CLI config snapshot from disk and environment variables.
 pub fn load_config() -> Result<AppConfig, Box<figment::Error>> {
-    let mut figment = Figment::new().merge(Toml::file("base.toml"));
+    load_config_from(Path::new("."))
+}
+
+/// Loads one fresh CLI config snapshot from a specific base directory.
+fn load_config_from(base_dir: &Path) -> Result<AppConfig, Box<figment::Error>> {
+    let mut figment = Figment::new().merge(Toml::file(base_dir.join("base.toml")));
 
     if let Some(profile) = Profile::from_env("APP_PROFILE") {
-        figment = figment.merge(Toml::file(format!("base.{}.toml", profile)));
+        figment = figment.merge(Toml::file(base_dir.join(format!("base.{}.toml", profile))));
     }
 
     Ok(figment
         .merge(Env::prefixed("APP_").split("__"))
         .extract::<AppConfig>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{LazyLock, Mutex};
+    use tempfile::tempdir;
+
+    /// Serializes config tests that temporarily mutate process environment variables.
+    static CONFIG_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Verifies the CLI runtime config can be loaded from TOML.
+    #[test]
+    fn load_config_reads_runtime_max_subagent_depth_from_toml() {
+        let _guard = CONFIG_TEST_LOCK
+            .lock()
+            .expect("config test lock should work");
+        let temp = tempdir().expect("tempdir should be created");
+        std::fs::write(
+            temp.path().join("base.toml"),
+            r#"
+current_model = "openai/gpt-5.4"
+
+[llm]
+providers = []
+
+[skills]
+roots = []
+enabled = true
+cwd = "."
+
+[runtime]
+max_subagent_depth = 2
+
+[approval]
+profile = "default"
+
+[persistence]
+enabled = true
+"#,
+        )
+        .expect("base.toml should be written");
+
+        let config = load_config_from(temp.path()).expect("config should load");
+        assert_eq!(config.runtime.max_subagent_depth, Some(2));
+    }
+
+    /// Verifies `APP_RUNTIME__MAX_SUBAGENT_DEPTH` overrides the TOML runtime setting.
+    #[test]
+    fn load_config_reads_runtime_max_subagent_depth_from_env() {
+        let _guard = CONFIG_TEST_LOCK
+            .lock()
+            .expect("config test lock should work");
+        let temp = tempdir().expect("tempdir should be created");
+        std::fs::write(
+            temp.path().join("base.toml"),
+            r#"
+current_model = "openai/gpt-5.4"
+
+[llm]
+providers = []
+
+[skills]
+roots = []
+enabled = true
+cwd = "."
+
+[runtime]
+max_subagent_depth = 2
+
+[approval]
+profile = "default"
+
+[persistence]
+enabled = true
+"#,
+        )
+        .expect("base.toml should be written");
+
+        let previous = std::env::var("APP_RUNTIME__MAX_SUBAGENT_DEPTH").ok();
+        // SAFETY: this test is the only CLI test mutating this process env var and restores it
+        // before returning, so the temporary override stays scoped to this assertion.
+        unsafe {
+            std::env::set_var("APP_RUNTIME__MAX_SUBAGENT_DEPTH", "1");
+        }
+        let config = load_config_from(temp.path()).expect("config should load");
+        if let Some(previous) = previous {
+            // SAFETY: restore the original process env var value for the same scoped test.
+            unsafe {
+                std::env::set_var("APP_RUNTIME__MAX_SUBAGENT_DEPTH", previous);
+            }
+        } else {
+            // SAFETY: remove the temporary override introduced by this scoped test.
+            unsafe {
+                std::env::remove_var("APP_RUNTIME__MAX_SUBAGENT_DEPTH");
+            }
+        }
+
+        assert_eq!(config.runtime.max_subagent_depth, Some(1));
+    }
 }
