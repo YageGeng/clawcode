@@ -3,4 +3,82 @@ name = "provider"
 edition.workspace = true
 version.workspace = true
 
+[lib]
+doctest = true
+
 [dependencies]
+as-any = { workspace = true }
+async-stream = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+mime_guess = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+http = { workspace = true }
+tracing-futures = { workspace = true, features = ["futures-03"] }
+fastrand = { workspace = true }
+nanoid = { workspace = true }
+getrandom = { workspace = true, optional = true }
+eventsource-stream = { workspace = true }
+pin-project-lite = { workspace = true }
+futures-timer = { workspace = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+mime = { workspace = true }
+reqwest-middleware = { workspace = true, optional = true, features = [
+  "json",
+  "multipart",
+  "charset",
+  "http2",
+] }
+
+# Native-only dependency for OpenAI Responses websocket mode.
+# Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio-test = { workspace = true }
+serde_path_to_error = { workspace = true }
+base64 = { workspace = true }
+
+[features]
+default = ["reqwest", "rustls"]
+all = ["image"]
+image = []
+wasm = [
+  "dep:getrandom",
+  "dep:wasm-bindgen-futures",
+  "futures-timer/wasm-bindgen",
+  "getrandom/js",
+]
+reqwest = [
+  "reqwest/charset",
+  "reqwest/http2",
+  "reqwest/system-proxy",
+]
+websocket = ["websocket-rustls"]
+websocket-rustls = [
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/connect",
+  "rustls",
+]
+websocket-native-tls = [
+  "dep:tokio-tungstenite",
+  "tokio-tungstenite/connect",
+  "native-tls",
+]
+rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
+native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
+reqwest-middleware = ["reqwest-middleware-rustls"]
+reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
+reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]

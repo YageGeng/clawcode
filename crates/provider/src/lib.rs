@@ -1,14 +1,35 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::unreachable
+    )
+)]
+//! Provider-focused LLM client crate.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![allow(dead_code)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+extern crate self as rig;
+
+pub mod client;
+pub mod completion;
+pub mod http_client;
+pub(crate) mod json_utils;
+pub mod markers;
+pub mod model;
+pub mod one_or_many;
+pub mod prelude;
+pub mod providers;
+
+pub mod streaming;
+pub mod wasm_compat;
+
+// Re-export commonly used types and traits
+pub use completion::message;
+pub use one_or_many::{EmptyListError, OneOrMany};
+
+pub mod telemetry;
