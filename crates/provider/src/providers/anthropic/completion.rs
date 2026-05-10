@@ -1392,7 +1392,7 @@ where
             .unwrap_or_else(|| self.model.clone());
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = Ext::PROVIDER_NAME,
@@ -1430,7 +1430,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "Anthropic completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -1466,7 +1466,7 @@ where
                         span.record_token_usage(&completion.usage);
                         if enabled!(Level::TRACE) {
                             tracing::trace!(
-                                target: "rig::completions",
+                                target: "clawcode::completions",
                                 "Anthropic completion response: {}",
                                 serde_json::to_string_pretty(&completion)?
                             );

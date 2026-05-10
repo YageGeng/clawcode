@@ -351,7 +351,7 @@ where
 
         if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "OpenAI websocket request: {}",
                 serde_json::to_string_pretty(&payload)?
             );
@@ -606,7 +606,7 @@ impl<H> Drop for ResponsesWebSocketSession<H> {
     fn drop(&mut self) {
         if !self.closed {
             tracing::warn!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 in_flight = self.in_flight,
                 "Dropping an OpenAI websocket session without calling close(); the connection will end without a close handshake"
             );
@@ -700,7 +700,7 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
         },
         _ => {
             tracing::debug!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 event_type = event_type.kind.as_str(),
                 "Skipping unrecognised OpenAI websocket event"
             );

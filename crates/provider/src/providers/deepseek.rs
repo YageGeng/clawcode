@@ -7,7 +7,7 @@
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = deepseek::Client::new("DEEPSEEK_API_KEY")?;
 //!
-//! let deepseek_chat = client.completion_model(deepseek::DEEPSEEK_CHAT);
+//! let deepseek_chat = client.completion_model(deepseek::DEEPSEEK_V4_FLASH);
 //! # Ok(())
 //! # }
 //! ```
@@ -241,7 +241,7 @@ pub enum Message {
             skip_serializing_if = "Vec::is_empty"
         )]
         tool_calls: Vec<ToolCall>,
-        /// only exists on `deepseek-reasoner` model at time of addition
+        /// only exists on reasoning-capable DeepSeek models at time of addition
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
     },
@@ -586,7 +586,7 @@ where
     > {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = "deepseek",
@@ -608,7 +608,7 @@ where
             DeepseekCompletionRequest::try_from((self.model.as_ref(), completion_request))?;
 
         if enabled!(Level::TRACE) {
-            tracing::trace!(target: "rig::completions",
+            tracing::trace!(target: "clawcode::completions",
                 "DeepSeek completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -645,7 +645,7 @@ where
                                 .unwrap_or(0),
                         );
                         if enabled!(Level::TRACE) {
-                            tracing::trace!(target: "rig::completions",
+                            tracing::trace!(target: "clawcode::completions",
                                 "DeepSeek completion response: {}",
                                 serde_json::to_string_pretty(&response)?
                             );
@@ -683,7 +683,7 @@ where
         request.additional_params = Some(params);
 
         if enabled!(Level::TRACE) {
-            tracing::trace!(target: "rig::completions",
+            tracing::trace!(target: "clawcode::completions",
                 "DeepSeek streaming completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -699,7 +699,7 @@ where
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
                 gen_ai.provider.name = "deepseek",
@@ -908,17 +908,5 @@ where
 // ================================================================
 // DeepSeek Completion API
 // ================================================================
-#[deprecated(
-    note = "The model names `deepseek-chat` and `deepseek-reasoner` will be deprecated on 2026/07/24. \
-    For compatibility, they correspond to the non-thinking mode and thinking mode of `deepseek-v4-flash`, \
-    respectively."
-)]
-pub const DEEPSEEK_CHAT: &str = "deepseek-chat";
-#[deprecated(
-    note = "The model names `deepseek-chat` and `deepseek-reasoner` will be deprecated on 2026/07/24. \
-    For compatibility, they correspond to the non-thinking mode and thinking mode of `deepseek-v4-flash`, \
-    respectively."
-)]
-pub const DEEPSEEK_REASONER: &str = "deepseek-reasoner";
 pub const DEEPSEEK_V4_FLASH: &str = "deepseek-v4-flash";
 pub const DEEPSEEK_V4_PRO: &str = "deepseek-v4-pro";

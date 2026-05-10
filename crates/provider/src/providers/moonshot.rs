@@ -488,7 +488,7 @@ where
     ) -> Result<completion::CompletionResponse<openai::CompletionResponse>, CompletionError> {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = "moonshot",
@@ -510,7 +510,7 @@ where
             MoonshotCompletionRequest::try_from((self.model.as_ref(), completion_request))?;
 
         if tracing::enabled!(tracing::Level::TRACE) {
-            tracing::trace!(target: "rig::completions",
+            tracing::trace!(target: "clawcode::completions",
                 "MoonShot completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -545,7 +545,7 @@ where
                             );
                         }
                         if tracing::enabled!(tracing::Level::TRACE) {
-                            tracing::trace!(target: "rig::completions",
+                            tracing::trace!(target: "clawcode::completions",
                                 "MoonShot completion response: {}",
                                 serde_json::to_string_pretty(&response)?
                             );
@@ -570,7 +570,7 @@ where
     ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "rig::completions",
+                target: "clawcode::completions",
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
                 gen_ai.provider.name = "moonshot",
@@ -597,7 +597,7 @@ where
         request.additional_params = Some(params);
 
         if tracing::enabled!(tracing::Level::TRACE) {
-            tracing::trace!(target: "rig::completions",
+            tracing::trace!(target: "clawcode::completions",
                 "MoonShot streaming completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
