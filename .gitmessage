@@ -1,0 +1,33 @@
+# Commit title format:
+# <type>(<scope>): <short imperative summary>
+#
+# Examples:
+# feat(parser): add wildcard import support
+# fix(cli): handle empty input arguments
+# docs(readme): document local development setup
+#
+# Rules:
+# - Prefer a title only.
+# - Keep the title concise and specific.
+# - Add a body only when it is necessary for review context.
+# - If a body is needed, keep it to one or two short lines.
+# - Do not write long background sections, motivation essays, or repeated change logs.
+#
+# Common types:
+# feat     - new feature
+# fix      - bug fix
+# refactor - code restructuring without behavior change
+# docs     - documentation only
+# test     - tests added or updated
+# chore    - maintenance / tooling / housekeeping
+# ci       - CI configuration and automation
+# perf     - performance improvements
+# style    - formatting / style-only changes
+# build    - build system or dependency changes
+# revert   - revert a previous commit
+#
+# Template:
+# <type>(<scope>): <short imperative summary>
+#
+# Optional body, only if needed:
+# - 

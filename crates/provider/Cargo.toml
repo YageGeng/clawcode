@@ -1,0 +1,11 @@
+[package]
+name = "provider"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kernel = { path = "../kernel" }
+

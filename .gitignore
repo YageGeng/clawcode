@@ -1,0 +1,22 @@
+# Rust build output
+/target
+
+# Editor settings
+.idea/
+.vscode/
+
+# Local environment files
+.direnv/
+.env
+.env.*
+!.env.example
+
+# Local Codex workspace state
+.agents/
+.codex/
+
+# OS and temporary files
+.DS_Store
+*.log
+*.tmp
+*.swp
