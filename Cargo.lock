@@ -1648,6 +1648,7 @@ dependencies = [
  "mime_guess",
  "nanoid",
  "pin-project-lite",
+ "protocol",
  "reqwest",
  "reqwest-middleware",
  "schemars 1.2.1",

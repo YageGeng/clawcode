@@ -22,7 +22,7 @@ use crate::client::{
 };
 use crate::completion::GetTokenUsage;
 use crate::http_client::{self, HttpClientExt};
-use crate::message::{Document, DocumentSourceKind};
+use crate::message::{Document, DocumentSourceKind, TryIntoMany};
 use crate::model::{Model, ModelList, ModelListingError};
 use crate::providers::internal::openai_chat_completions_compatible::{
     self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason, CompatibleStreamProfile,
@@ -290,11 +290,11 @@ impl From<message::ToolCall> for ToolCall {
     }
 }
 
-impl TryFrom<message::Message> for Vec<Message> {
+impl TryIntoMany<Message> for message::Message {
     type Error = message::MessageError;
 
-    fn try_from(message: message::Message) -> Result<Self, Self::Error> {
-        match message {
+    fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
+        match self {
             message::Message::System { content } => Ok(vec![Message::System {
                 content,
                 name: None,
@@ -519,7 +519,7 @@ impl TryFrom<(&str, CompletionRequest)> for DeepseekCompletionRequest {
             .chat_history
             .clone()
             .into_iter()
-            .map(|message| message.try_into())
+            .map(|message| message.try_into_many())
             .collect::<Result<Vec<Vec<Message>>, _>>()?
             .into_iter()
             .flatten()

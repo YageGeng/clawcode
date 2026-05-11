@@ -7,6 +7,7 @@ version.workspace = true
 doctest = true
 
 [dependencies]
+protocol = { path = "../protocol" }
 config = { path = "../config" }
 
 async-stream = { workspace = true }

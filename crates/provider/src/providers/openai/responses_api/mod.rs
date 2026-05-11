@@ -21,6 +21,7 @@ use crate::http_client::HttpClientExt;
 use crate::json_utils;
 use crate::message::{
     Document, DocumentMediaType, DocumentSourceKind, ImageDetail, MessageError, MimeType, Text,
+    TryIntoMany,
 };
 use crate::one_or_many::string_or_one_or_many;
 
@@ -271,11 +272,11 @@ impl From<Message> for InputItem {
     }
 }
 
-impl TryFrom<crate::completion::Message> for Vec<InputItem> {
+impl message::TryIntoMany<InputItem> for crate::completion::Message {
     type Error = CompletionError;
 
-    fn try_from(value: crate::completion::Message) -> Result<Self, Self::Error> {
-        match value {
+    fn try_into_many(self) -> Result<Vec<InputItem>, Self::Error> {
+        match self {
             crate::completion::Message::System { content } => Ok(vec![InputItem {
                 role: Some(Role::System),
                 input: InputContent::Message(Message::System {
@@ -497,9 +498,9 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
     }
 }
 
-impl From<OneOrMany<String>> for Vec<ReasoningSummary> {
-    fn from(value: OneOrMany<String>) -> Self {
-        value.iter().map(|x| ReasoningSummary::new(x)).collect()
+impl message::IntoMany<ReasoningSummary> for OneOrMany<String> {
+    fn into_many(self) -> Vec<ReasoningSummary> {
+        self.iter().map(|x| ReasoningSummary::new(x)).collect()
     }
 }
 
@@ -819,7 +820,7 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
             };
 
             for history_item in partial_history {
-                full_history.extend(<Vec<InputItem>>::try_from(history_item)?);
+                full_history.extend(history_item.try_into_many()?);
             }
 
             full_history
@@ -1680,11 +1681,11 @@ pub enum UserContent {
     },
 }
 
-impl TryFrom<message::Message> for Vec<Message> {
+impl message::TryIntoMany<Message> for message::Message {
     type Error = message::MessageError;
 
-    fn try_from(message: message::Message) -> Result<Self, Self::Error> {
-        match message {
+    fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
+        match self {
             message::Message::System { content } => Ok(vec![Message::System {
                 content: OneOrMany::one(content.into()),
                 name: None,
@@ -2000,7 +2001,7 @@ mod tests {
             })),
         };
 
-        let converted: Vec<Message> = message.try_into().expect("conversion should succeed");
+        let converted: Vec<Message> = message.try_into_many().expect("conversion should succeed");
         let Message::User { content, .. } = &converted[0] else {
             panic!("expected user message");
         };
@@ -2023,7 +2024,7 @@ mod tests {
             })),
         };
 
-        let converted: Vec<InputItem> = message.try_into().expect("conversion should succeed");
+        let converted: Vec<InputItem> = message.try_into_many().expect("conversion should succeed");
         let json = serde_json::to_value(&converted[0]).expect("serialize input item");
 
         assert_eq!(json["type"], "message");

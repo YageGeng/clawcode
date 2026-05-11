@@ -6,15 +6,16 @@ use super::{
     client::{ApiErrorResponse, ApiResponse},
     streaming::StreamingCompletionResponse,
 };
-use crate::completion::{
-    CompletionError, CompletionRequest as CoreCompletionRequest, GetTokenUsage,
-};
 use crate::http_client::{self, HttpClientExt};
 use crate::message::{DocumentSourceKind, ImageDetail, MimeType};
 use crate::one_or_many::string_or_one_or_many;
 use crate::telemetry::{ProviderResponseExt, SpanCombinator};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, completion, json_utils, message};
+use crate::{
+    completion::{CompletionError, CompletionRequest as CoreCompletionRequest, GetTokenUsage},
+    message::TryIntoMany,
+};
 use serde::{Deserialize, Serialize, Serializer};
 use std::convert::Infallible;
 use std::fmt;
@@ -562,11 +563,11 @@ impl TryFrom<message::UserContent> for UserContent {
     }
 }
 
-impl TryFrom<OneOrMany<message::UserContent>> for Vec<Message> {
+impl message::TryIntoMany<Message> for OneOrMany<message::UserContent> {
     type Error = message::MessageError;
 
-    fn try_from(value: OneOrMany<message::UserContent>) -> Result<Self, Self::Error> {
-        let (tool_results, other_content): (Vec<_>, Vec<_>) = value
+    fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
+        let (tool_results, other_content): (Vec<_>, Vec<_>) = self
             .into_iter()
             .partition(|content| matches!(content, message::UserContent::ToolResult(_)));
 
@@ -602,15 +603,15 @@ impl TryFrom<OneOrMany<message::UserContent>> for Vec<Message> {
     }
 }
 
-impl TryFrom<OneOrMany<message::AssistantContent>> for Vec<Message> {
+impl message::TryIntoMany<Message> for OneOrMany<message::AssistantContent> {
     type Error = message::MessageError;
 
-    fn try_from(value: OneOrMany<message::AssistantContent>) -> Result<Self, Self::Error> {
+    fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
         let mut text_content = Vec::new();
         let mut tool_calls = Vec::new();
         let mut reasoning_text = String::new();
 
-        for content in value {
+        for content in self {
             match content {
                 message::AssistantContent::Text(text) => text_content.push(text),
                 message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call),
@@ -650,14 +651,14 @@ impl TryFrom<OneOrMany<message::AssistantContent>> for Vec<Message> {
     }
 }
 
-impl TryFrom<message::Message> for Vec<Message> {
+impl TryIntoMany<Message> for message::Message {
     type Error = message::MessageError;
 
-    fn try_from(message: message::Message) -> Result<Self, Self::Error> {
-        match message {
+    fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
+        match self {
             message::Message::System { content } => Ok(vec![Message::system(&content)]),
-            message::Message::User { content } => content.try_into(),
-            message::Message::Assistant { content, .. } => content.try_into(),
+            message::Message::User { content } => content.try_into_many(),
+            message::Message::Assistant { content, .. } => content.try_into_many(),
         }
     }
 }
@@ -1187,7 +1188,7 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
         full_history.extend(
             partial_history
                 .into_iter()
-                .map(message::Message::try_into)
+                .map(message::Message::try_into_many)
                 .collect::<Result<Vec<Vec<Message>>, _>>()?
                 .into_iter()
                 .flatten()
@@ -1513,7 +1514,7 @@ mod tests {
         let assistant_content = OneOrMany::one(message::AssistantContent::reasoning("hidden"));
 
         let converted: Vec<Message> = assistant_content
-            .try_into()
+            .try_into_many()
             .expect("conversion should work");
 
         assert!(converted.is_empty());
@@ -1537,7 +1538,7 @@ mod tests {
         .expect("non-empty assistant content");
 
         let converted: Vec<Message> = assistant_content
-            .try_into()
+            .try_into_many()
             .expect("conversion should work");
         assert_eq!(converted.len(), 1);
 
@@ -2149,7 +2150,7 @@ mod tests {
             ])
             .expect("non-empty content"),
         };
-        let converted: Vec<Message> = user.try_into().expect("conversion should succeed");
+        let converted: Vec<Message> = user.try_into_many().expect("conversion should succeed");
         assert_eq!(converted.len(), 1);
         let Message::User { content, .. } = &converted[0] else {
             panic!("expected user message");

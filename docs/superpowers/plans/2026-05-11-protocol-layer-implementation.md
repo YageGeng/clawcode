@@ -76,7 +76,7 @@ version.workspace = true
 description = "Internal protocol types for clawcode agent-core / frontend communication"
 
 [lib]
-name = "clawcode_protocol"
+name = "protocol"
 path = "src/lib.rs"
 doctest = false
 
@@ -625,7 +625,7 @@ clawcode-protocol = { path = "../protocol" }
 
 ```rust
 //! OneOrMany container type, re-exported from protocol.
-pub use clawcode_protocol::one_or_many::*;
+pub use protocol::one_or_many::*;
 ```
 
 - [ ] **步骤5：替换 provider 的 completion/message.rs 为 re-export**
@@ -636,7 +636,7 @@ pub use clawcode_protocol::one_or_many::*;
 //! These types are defined in `clawcode-protocol` and re-exported here
 //! for backward compatibility.
 
-pub use clawcode_protocol::message::*;
+pub use protocol::message::*;
 
 // Re-add the From impl that depends on CompletionError (provider-only type)
 use crate::completion::CompletionError;
@@ -660,7 +660,7 @@ pub use completion::message;                       // crate::message 路径继�
 pub use one_or_many::{EmptyListError, OneOrMany};  // crate::OneOrMany 路径继续有效
 ```
 
-因为 `completion::message` 和 `one_or_many` 模块内部已改为 `pub use clawcode_protocol::...`, 
+因为 `completion::message` 和 `one_or_many` 模块内部已改为 `pub use protocol::...`, 
 provider 内部所有 `use crate::message::X` 和 `use crate::OneOrMany` 路径自动跟随，无需逐个文件修改。
 
 - [ ] **步骤7：构建全 workspace 验证**
@@ -1078,8 +1078,8 @@ typed-builder = { workspace = true }
 ```rust
 //! Clawcode agent kernel.
 //!
-//! Implements [`clawcode_protocol::AgentKernel`], orchestrating LLM
-//! calls via [`clawcode_provider::LlmFactory`] and managing session state.
+//! Implements [`protocol::AgentKernel`], orchestrating LLM
+//! calls via [`provider::LlmFactory`] and managing session state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1091,12 +1091,12 @@ use futures::stream;
 use futures::Stream;
 use tokio::sync::Mutex;
 
-use clawcode_protocol::{
+use protocol::{
     AgentKernel, AgentPath, AgentStatus, Event, KernelError,
     Message, ModelInfo, SessionCreated, SessionId, SessionInfo,
     SessionListPage, SessionMode, StopReason,
 };
-use clawcode_provider::factory::{ArcLlm, LlmFactory};
+use provider::factory::{ArcLlm, LlmFactory};
 use config::ConfigHandle;
 
 /// Central kernel struct implementing [`AgentKernel`].
@@ -1377,7 +1377,7 @@ typed-builder = { workspace = true }
 
 use agent_client_protocol as acp;
 use acp::schema;
-use clawcode_protocol as proto;
+use protocol as proto;
 
 // ── StopReason ──
 
@@ -1465,8 +1465,8 @@ use acp::schema::{
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
 
-use clawcode_protocol::{AgentKernel, SessionId};
-use clawcode_provider::factory::LlmFactory;
+use protocol::{AgentKernel, SessionId};
+use provider::factory::LlmFactory;
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
@@ -1823,8 +1823,8 @@ use std::sync::Arc;
 use agent_client_protocol::ByteStreams;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use clawcode_protocol::AgentKernel;
-use clawcode_provider::factory::LlmFactory;
+use protocol::AgentKernel;
+use provider::factory::LlmFactory;
 
 /// Start the ACP agent over stdio transport.
 ///
@@ -1862,8 +1862,8 @@ pub async fn run(
 use std::sync::Arc;
 
 use config::ConfigHandle;
-use clawcode_kernel::Kernel;
-use clawcode_provider::factory::LlmFactory;
+use kernel::Kernel;
+use provider::factory::LlmFactory;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -1871,7 +1871,7 @@ async fn main() -> std::io::Result<()> {
     let llm_factory = Arc::new(LlmFactory::new(config.clone()));
     let kernel = Arc::new(Kernel::new(llm_factory.clone(), config));
 
-    clawcode_acp::run(kernel, llm_factory).await
+    acp::run(kernel, llm_factory).await
 }
 ```
 

@@ -227,7 +227,7 @@ pub(crate) enum ApiResponse<T> {
 #[cfg(test)]
 mod tests {
     use crate::client::CompletionClient;
-    use crate::message::ImageDetail;
+    use crate::message::{ImageDetail, TryIntoMany};
     use crate::providers::openai::{
         AssistantContent, Function, ImageUrl, Message, ToolCall, ToolType, UserContent,
     };
@@ -428,9 +428,9 @@ mod tests {
             content: OneOrMany::one(message::AssistantContent::text("Hi there!")),
         };
 
-        let converted_user_message: Vec<Message> = user_message.clone().try_into().unwrap();
+        let converted_user_message: Vec<Message> = user_message.clone().try_into_many().unwrap();
         let converted_assistant_message: Vec<Message> =
-            assistant_message.clone().try_into().unwrap();
+            assistant_message.clone().try_into_many().unwrap();
 
         match converted_user_message[0].clone() {
             Message::User { content, .. } => {
@@ -505,9 +505,9 @@ mod tests {
             _ => panic!("Expected assistant message"),
         }
 
-        let original_user_message: Vec<Message> = converted_user_message.try_into().unwrap();
+        let original_user_message: Vec<Message> = converted_user_message.try_into_many().unwrap();
         let original_assistant_message: Vec<Message> =
-            converted_assistant_message.try_into().unwrap();
+            converted_assistant_message.try_into_many().unwrap();
 
         assert_eq!(original_user_message[0], user_message);
         assert_eq!(original_assistant_message[0], assistant_message);

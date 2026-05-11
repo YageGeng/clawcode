@@ -27,6 +27,7 @@ use crate::client::{
     ProviderClient,
 };
 use crate::http_client::HttpClientExt;
+use crate::message::TryIntoMany;
 use crate::providers::anthropic::client::{
     AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey, finish_anthropic_builder,
 };
@@ -381,7 +382,7 @@ fn moonshot_history_values(history: Vec<message::Message>) -> Result<Vec<Value>,
             }
             other => {
                 result.extend(
-                    Vec::<openai::Message>::try_from(other)?
+                    TryIntoMany::<openai::Message>::try_into_many(other)?
                         .into_iter()
                         .map(serde_json::to_value)
                         .collect::<Result<Vec<_>, _>>()?,
