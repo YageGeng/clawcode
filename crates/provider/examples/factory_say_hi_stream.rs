@@ -28,17 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Build a minimal provider-agnostic request with one user message.
-    let request = CompletionRequest {
-        model: None,
-        preamble: None,
-        chat_history: provider::OneOrMany::one(Message::user("Say hi in one short sentence.")),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-    };
+    let request = CompletionRequest::builder()
+        .chat_history(provider::OneOrMany::one(Message::user(
+            "Say hi in one short sentence.",
+        )))
+        .build();
 
     println!("provider={} model={}", llm.provider_id(), llm.model_id());
 

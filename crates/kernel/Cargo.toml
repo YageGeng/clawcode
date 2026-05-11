@@ -19,3 +19,4 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 typed-builder = { workspace = true }
+async-stream = { workspace = true }

@@ -3,50 +3,67 @@
 //! Implements [`protocol::AgentKernel`], orchestrating LLM
 //! calls via the provider factory and managing session state.
 
+pub mod context;
+pub mod session;
+pub mod tool;
+pub(crate) mod turn;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use futures::Stream;
 use tokio::sync::Mutex;
 
 use config::ConfigHandle;
 use protocol::{
-    AgentKernel, AgentPath, Event, KernelError, ModelInfo, SessionCreated, SessionId, SessionInfo,
-    SessionListPage, SessionMode, StopReason,
+    AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, SessionCreated, SessionId,
+    SessionInfo, SessionListPage, SessionMode,
 };
 use provider::factory::LlmFactory;
+
+use crate::context::InMemoryContext;
+use crate::session::{Thread, event_stream, spawn_thread};
+use crate::tool::ToolRegistry;
 
 /// Central kernel struct implementing [`AgentKernel`].
 pub struct Kernel {
     /// Shared LLM factory for dispatching provider/model requests.
-    #[allow(dead_code)]
     llm_factory: Arc<LlmFactory>,
     /// Configuration handle for reading provider/model settings.
     config: ConfigHandle,
+    /// Registered tools available to every session.
+    tools: Arc<ToolRegistry>,
     /// Active sessions keyed by [`SessionId`].
-    sessions: Mutex<HashMap<SessionId, SessionHandle>>,
-}
-
-/// Per-session runtime handle.
-struct SessionHandle {
-    /// Working directory for the session.
-    cwd: PathBuf,
-    /// Token used to signal cancellation.
-    cancel_token: tokio::sync::watch::Sender<bool>,
+    sessions: Mutex<HashMap<SessionId, Thread>>,
 }
 
 impl Kernel {
-    /// Create a new kernel instance with the given LLM factory and config.
+    /// Create a new kernel instance with the given LLM factory,
+    /// config, and tool registry.
     #[must_use]
-    pub fn new(llm_factory: Arc<LlmFactory>, config: ConfigHandle) -> Self {
+    pub fn new(
+        llm_factory: Arc<LlmFactory>,
+        config: ConfigHandle,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
         Self {
             llm_factory,
             config,
+            tools,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Resolve the default LLM handle from the `active_model` config value.
+    ///
+    /// The config value is in `provider_id/model_id` format (e.g. "deepseek/deepseek-v4-flash").
+    fn default_llm(&self) -> Option<provider::factory::ArcLlm> {
+        let cfg = self.config.current();
+        let (provider_id, model_id) = cfg.active_model.split_once('/')?;
+        self.llm_factory.get(provider_id, model_id)
     }
 
     /// Build available session modes.
@@ -94,20 +111,30 @@ impl Kernel {
 impl AgentKernel for Kernel {
     async fn new_session(&self, cwd: PathBuf) -> Result<SessionCreated, KernelError> {
         let session_id = SessionId(uuid::Uuid::new_v4().to_string());
-        let (cancel_tx, _) = tokio::sync::watch::channel(false);
+        let llm = self
+            .default_llm()
+            .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("no LLM configured")))?;
 
-        self.sessions.lock().await.insert(
+        let handle = spawn_thread(
             session_id.clone(),
-            SessionHandle {
-                cwd: cwd.clone(),
-                cancel_token: cancel_tx,
-            },
+            cwd.clone(),
+            llm,
+            self.tools.clone(),
+            Box::new(InMemoryContext::new()),
         );
+
+        let modes = self.build_modes();
+        let models = self.build_models();
+
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), handle);
 
         Ok(SessionCreated {
             session_id,
-            modes: self.build_modes(),
-            models: self.build_models(),
+            modes,
+            models,
         })
     }
 
@@ -131,11 +158,11 @@ impl AgentKernel for Kernel {
             .sessions
             .lock()
             .await
-            .iter()
-            .map(|(id, handle)| {
+            .keys()
+            .map(|id| {
                 SessionInfo::builder()
                     .session_id(id.clone())
-                    .cwd(handle.cwd.clone())
+                    .cwd(PathBuf::from("."))
                     .build()
             })
             .collect();
@@ -152,31 +179,29 @@ impl AgentKernel for Kernel {
         text: String,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
     {
-        if !self.sessions.lock().await.contains_key(session_id) {
-            return Err(KernelError::SessionNotFound(session_id.clone()));
-        }
+        let handle = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?
+            .clone();
 
-        // Minimal stub: echoes the input and completes.
-        // Full LLM integration will be added in a subsequent plan.
-        let sid = session_id.clone();
-        let events: Vec<Result<Event, KernelError>> = vec![
-            Ok(Event::AgentMessageChunk {
-                session_id: sid.clone(),
-                text: format!("Echo: {text}"),
-            }),
-            Ok(Event::TurnComplete {
-                session_id: sid,
-                stop_reason: StopReason::EndTurn,
-            }),
-        ];
+        // Send the prompt to the background task
+        let _ = handle.tx_op.send(Op::Prompt {
+            session_id: session_id.clone(),
+            text,
+        });
 
-        Ok(Box::pin(stream::iter(events)))
+        // Take the receiver from the handle and build stream
+        let rx_event = handle.take_rx().await;
+        Ok(event_stream(rx_event, handle.cancel_tx.subscribe()))
     }
 
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError> {
         match self.sessions.lock().await.get(session_id) {
             Some(handle) => {
-                let _ = handle.cancel_token.send(true);
+                let _ = handle.cancel_tx.send(true);
                 Ok(())
             }
             None => Err(KernelError::SessionNotFound(session_id.clone())),
@@ -203,9 +228,16 @@ impl AgentKernel for Kernel {
     }
 
     async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError> {
-        if self.sessions.lock().await.remove(session_id).is_none() {
-            return Err(KernelError::SessionNotFound(session_id.clone()));
-        }
+        let handle = self
+            .sessions
+            .lock()
+            .await
+            .remove(session_id)
+            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
+        // Signal close to the background task
+        let _ = handle.tx_op.send(Op::CloseSession {
+            session_id: session_id.clone(),
+        });
         Ok(())
     }
 

@@ -1457,17 +1457,10 @@ mod tests {
 
     #[test]
     fn test_openai_request_uses_request_model_override() {
-        let request = crate::completion::CompletionRequest {
-            model: Some("gpt-4.1".to_string()),
-            preamble: None,
-            chat_history: crate::OneOrMany::one("Hello".into()),
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = crate::completion::CompletionRequest::builder()
+            .model(Some("gpt-4.1".to_string()))
+            .chat_history(crate::OneOrMany::one("Hello".into()))
+            .build();
 
         let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),
@@ -1484,17 +1477,9 @@ mod tests {
 
     #[test]
     fn test_openai_request_uses_default_model_when_override_unset() {
-        let request = crate::completion::CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: crate::OneOrMany::one("Hello".into()),
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = crate::completion::CompletionRequest::builder()
+            .chat_history(crate::OneOrMany::one("Hello".into()))
+            .build();
 
         let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),
@@ -1662,17 +1647,10 @@ mod tests {
 
     #[test]
     fn test_max_tokens_is_forwarded_to_request() {
-        let request = crate::completion::CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: crate::OneOrMany::one("Hello".into()),
-            tools: vec![],
-            temperature: None,
-            max_tokens: Some(4096),
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = crate::completion::CompletionRequest::builder()
+            .chat_history(crate::OneOrMany::one("Hello".into()))
+            .max_tokens(Some(4096))
+            .build();
 
         let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),
@@ -1689,17 +1667,9 @@ mod tests {
 
     #[test]
     fn test_max_tokens_omitted_when_none() {
-        let request = crate::completion::CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: crate::OneOrMany::one("Hello".into()),
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = crate::completion::CompletionRequest::builder()
+            .chat_history(crate::OneOrMany::one("Hello".into()))
+            .build();
 
         let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),
@@ -1716,20 +1686,12 @@ mod tests {
 
     #[test]
     fn request_conversion_errors_when_all_messages_are_filtered() {
-        let request = CoreCompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: OneOrMany::one(message::Message::Assistant {
+        let request = CoreCompletionRequest::builder()
+            .chat_history(OneOrMany::one(message::Message::Assistant {
                 id: None,
                 content: OneOrMany::one(message::AssistantContent::reasoning("hidden")),
-            }),
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+            }))
+            .build();
 
         let result = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),
@@ -1743,13 +1705,11 @@ mod tests {
 
     #[test]
     fn request_conversion_omits_response_format_on_initial_tool_turn() {
-        let request = CoreCompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: OneOrMany::one(message::Message::user(
+        let request = CoreCompletionRequest::builder()
+            .chat_history(OneOrMany::one(message::Message::user(
                 "Hello, whats the weather in London?",
-            )),
-            tools: vec![completion::ToolDefinition {
+            )))
+            .tools(vec![completion::ToolDefinition {
                 name: "weather".to_string(),
                 description: "Get the weather".to_string(),
                 parameters: serde_json::json!({
@@ -1759,12 +1719,8 @@ mod tests {
                     },
                     "required": ["city"]
                 }),
-            }],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: Some(
+            }])
+            .output_schema(Some(
                 serde_json::from_value(serde_json::json!({
                     "title": "WeatherResponse",
                     "type": "object",
@@ -1775,8 +1731,8 @@ mod tests {
                     "required": ["city", "weather"]
                 }))
                 .expect("schema should deserialize"),
-            ),
-        };
+            ))
+            .build();
 
         let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),
@@ -1797,26 +1753,26 @@ mod tests {
 
     #[test]
     fn request_conversion_restores_response_format_after_tool_result() {
-        let request = CoreCompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: OneOrMany::many(vec![
-                message::Message::user("Hello, whats the weather in London?"),
-                message::Message::Assistant {
-                    id: None,
-                    content: OneOrMany::one(message::AssistantContent::tool_call(
+        let request = CoreCompletionRequest::builder()
+            .chat_history(
+                OneOrMany::many(vec![
+                    message::Message::user("Hello, whats the weather in London?"),
+                    message::Message::Assistant {
+                        id: None,
+                        content: OneOrMany::one(message::AssistantContent::tool_call(
+                            "call_1",
+                            "weather",
+                            serde_json::json!({ "city": "London" }),
+                        )),
+                    },
+                    message::Message::tool_result(
                         "call_1",
-                        "weather",
-                        serde_json::json!({ "city": "London" }),
-                    )),
-                },
-                message::Message::tool_result(
-                    "call_1",
-                    "The weather in London is all fire and brimstone",
-                ),
-            ])
-            .expect("history should be non-empty"),
-            tools: vec![completion::ToolDefinition {
+                        "The weather in London is all fire and brimstone",
+                    ),
+                ])
+                .expect("history should be non-empty"),
+            )
+            .tools(vec![completion::ToolDefinition {
                 name: "weather".to_string(),
                 description: "Get the weather".to_string(),
                 parameters: serde_json::json!({
@@ -1826,12 +1782,8 @@ mod tests {
                     },
                     "required": ["city"]
                 }),
-            }],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: Some(
+            }])
+            .output_schema(Some(
                 serde_json::from_value(serde_json::json!({
                     "title": "WeatherResponse",
                     "type": "object",
@@ -1842,8 +1794,8 @@ mod tests {
                     "required": ["city", "weather"]
                 }))
                 .expect("schema should deserialize"),
-            ),
-        };
+            ))
+            .build();
 
         let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
             model: "gpt-4o-mini".to_string(),

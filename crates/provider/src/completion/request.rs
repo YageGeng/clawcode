@@ -470,30 +470,41 @@ pub trait CompletionModel: Clone + WasmCompatSend + WasmCompatSync {
 }
 
 /// Struct representing a general completion request that can be sent to a completion model provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Uses `typed-builder` per project convention (more than 3 fields).
+#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[builder(builder_type(name = RequestArgs))]
 pub struct CompletionRequest {
     /// Optional model override for this request.
+    #[builder(default)]
     pub model: Option<String>,
     /// Legacy preamble field preserved for backwards compatibility.
     ///
     /// New code should prefer a leading [`Message::System`]
     /// in `chat_history` as the canonical representation of system instructions.
+    #[builder(default)]
     pub preamble: Option<String>,
     /// The chat history to be sent to the completion model provider.
     /// The very last message will always be the prompt (hence why there is *always* one)
     pub chat_history: OneOrMany<Message>,
     /// The tools to be sent to the completion model provider
+    #[builder(default)]
     pub tools: Vec<ToolDefinition>,
     /// The temperature to be sent to the completion model provider
+    #[builder(default)]
     pub temperature: Option<f64>,
     /// The max tokens to be sent to the completion model provider
+    #[builder(default)]
     pub max_tokens: Option<u64>,
     /// Whether tools are required to be used by the model provider or not before providing a response.
+    #[builder(default)]
     pub tool_choice: Option<ToolChoice>,
     /// Additional provider-specific parameters to be sent to the completion model provider
+    #[builder(default)]
     pub additional_params: Option<serde_json::Value>,
     /// Optional JSON Schema for structured output. When set, providers that support
     /// native structured outputs will constrain the model's response to match this schema.
+    #[builder(default)]
     pub output_schema: Option<schemars::Schema>,
 }
 
@@ -814,17 +825,16 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             self.provider_tools,
         );
 
-        CompletionRequest {
-            model: self.request_model,
-            preamble: None,
-            chat_history,
-            tools: self.tools,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            tool_choice: self.tool_choice,
-            additional_params,
-            output_schema: self.output_schema,
-        }
+        CompletionRequest::builder()
+            .model(self.request_model)
+            .chat_history(chat_history)
+            .tools(self.tools)
+            .temperature(self.temperature)
+            .max_tokens(self.max_tokens)
+            .tool_choice(self.tool_choice)
+            .additional_params(additional_params)
+            .output_schema(self.output_schema)
+            .build()
     }
 
     /// Sends the completion request to the completion model provider and returns the completion response.

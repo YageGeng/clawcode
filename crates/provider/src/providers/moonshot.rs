@@ -687,17 +687,10 @@ mod tests {
             .expect("assistant content"),
         };
 
-        let request = CompletionRequest {
-            model: Some("kimi-k2-thinking".to_string()),
-            preamble: None,
-            chat_history: crate::OneOrMany::one(assistant),
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = CompletionRequest::builder()
+            .model(Some("kimi-k2-thinking".to_string()))
+            .chat_history(crate::OneOrMany::one(assistant))
+            .build();
 
         let converted =
             MoonshotCompletionRequest::try_from(("kimi-k2-thinking", request)).expect("convert");
@@ -717,17 +710,11 @@ mod tests {
 
     #[test]
     fn moonshot_required_tool_choice_is_coerced() {
-        let request = CompletionRequest {
-            model: Some("kimi-k2.5".to_string()),
-            preamble: None,
-            chat_history: crate::OneOrMany::one(Message::user("Use a tool.")),
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: Some(ToolChoice::Required),
-            additional_params: None,
-            output_schema: None,
-        };
+        let request = CompletionRequest::builder()
+            .model(Some("kimi-k2.5".to_string()))
+            .chat_history(crate::OneOrMany::one(Message::user("Use a tool.")))
+            .tool_choice(Some(ToolChoice::Required))
+            .build();
 
         let converted =
             MoonshotCompletionRequest::try_from(("kimi-k2.5", request)).expect("convert");

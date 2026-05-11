@@ -1,3 +1,6 @@
+# Active model in "provider_id/model_id" format.
+active_model = "deepseek/deepseek-v4-flash"
+
 [[providers]]
 id = "openai"
 display_name = "OpenAI"

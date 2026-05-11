@@ -710,21 +710,17 @@ data: [DONE]"#;
 
     #[test]
     fn test_normalize_system_messages_into_instructions() {
-        let completion_request = completion::CompletionRequest {
-            model: Some("gpt-5.4".to_string()),
-            preamble: Some("System one".to_string()),
-            chat_history: OneOrMany::many(vec![
-                completion::Message::system("System two"),
-                completion::Message::user("hi"),
-            ])
-            .expect("history"),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-        };
+        let completion_request = completion::CompletionRequest::builder()
+            .model(Some("gpt-5.4".to_string()))
+            .preamble(Some("System one".to_string()))
+            .chat_history(
+                OneOrMany::many(vec![
+                    completion::Message::system("System two"),
+                    completion::Message::user("hi"),
+                ])
+                .expect("history"),
+            )
+            .build();
         let mut request = ResponsesRequest::try_from(("gpt-5.4".to_string(), completion_request))
             .expect("request");
 
@@ -745,17 +741,12 @@ data: [DONE]"#;
         let model = ResponsesCompletionModel::new(client, GPT_5_3_CODEX);
 
         let request = model
-            .create_request(completion::CompletionRequest {
-                model: None,
-                preamble: None,
-                chat_history: OneOrMany::one(completion::Message::user("hello")),
-                tools: Vec::new(),
-                temperature: Some(0.5),
-                max_tokens: None,
-                tool_choice: None,
-                additional_params: None,
-                output_schema: None,
-            })
+            .create_request(
+                completion::CompletionRequest::builder()
+                    .chat_history(OneOrMany::one(completion::Message::user("hello")))
+                    .temperature(Some(0.5))
+                    .build(),
+            )
             .expect("request");
 
         assert!(request.temperature.is_none());

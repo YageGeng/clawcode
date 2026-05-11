@@ -2,15 +2,19 @@
 
 use std::sync::Arc;
 
-use config::{AppConfig, ConfigHandle};
 use kernel::Kernel;
+use kernel::tool::ToolRegistry;
 use provider::factory::LlmFactory;
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let config = ConfigHandle::from_config(AppConfig::default());
-    let llm_factory = Arc::new(LlmFactory::new(config.clone()));
-    let kernel = Arc::new(Kernel::new(llm_factory.clone(), config));
+async fn main() -> anyhow::Result<()> {
+    let config = config::load()?;
 
-    acp::run(kernel, llm_factory).await
+    let llm_factory = Arc::new(LlmFactory::new(config.clone()));
+    let tools = Arc::new(ToolRegistry::new());
+    let kernel = Arc::new(Kernel::new(llm_factory, config, tools));
+
+    acp::run(kernel).await?;
+
+    Ok(())
 }

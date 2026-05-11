@@ -1223,6 +1223,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "config",
  "futures",
@@ -1663,6 +1664,7 @@ dependencies = [
  "tracing",
  "tracing-futures",
  "tracing-subscriber",
+ "typed-builder",
  "url",
  "wasm-bindgen-futures",
 ]

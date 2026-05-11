@@ -4,39 +4,38 @@ use std::sync::{Arc, Mutex};
 
 use acp::schema::{
     AgentAuthCapabilities, AgentCapabilities, AuthenticateRequest, AuthenticateResponse,
-    CancelNotification, ClientCapabilities, CloseSessionRequest, CloseSessionResponse,
-    Implementation, InitializeRequest, InitializeResponse, LogoutCapabilities, McpCapabilities,
-    ModelInfo as AcpModelInfo, NewSessionRequest, NewSessionResponse, PromptCapabilities,
-    PromptRequest, PromptResponse, SessionCapabilities, SessionCloseCapabilities,
-    SessionId as AcpSessionId, SessionListCapabilities, SessionMode as AcpSessionMode,
-    SessionModeState, SessionModelState, SetSessionModeRequest, SetSessionModeResponse,
-    SetSessionModelRequest, SetSessionModelResponse,
+    CancelNotification, ClientCapabilities, CloseSessionRequest, CloseSessionResponse, Content,
+    ContentBlock, ContentChunk, Implementation, InitializeRequest, InitializeResponse,
+    LogoutCapabilities, McpCapabilities, ModelInfo as AcpModelInfo, NewSessionRequest,
+    NewSessionResponse, Plan, PlanEntry, PromptCapabilities, PromptRequest, PromptResponse,
+    SessionCapabilities, SessionCloseCapabilities, SessionId as AcpSessionId,
+    SessionListCapabilities, SessionMode as AcpSessionMode, SessionModeState, SessionModelState,
+    SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
+    SetSessionModelRequest, SetSessionModelResponse, StopReason as AcpStopReason, TextContent,
+    ToolCall, ToolCallContent, ToolCallId, ToolCallStatus as AcpToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, UsageUpdate,
 };
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
+use futures::StreamExt;
 
-use protocol::{AgentKernel, SessionId};
-use provider::factory::LlmFactory;
+use protocol::{AgentKernel, Event, SessionId};
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
     /// Reference to the kernel for session operations.
     kernel: Arc<dyn AgentKernel>,
-    /// LLM factory for model dispatch (used by kernel).
-    #[allow(dead_code)]
-    llm_factory: Arc<LlmFactory>,
     /// Capabilities reported by the connected ACP client.
     #[allow(dead_code)]
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
 }
 
 impl ClawcodeAgent {
-    /// Create a new ACP agent with the given kernel and LLM factory.
+    /// Create a new ACP agent with the given kernel.
     #[must_use]
-    pub fn new(kernel: Arc<dyn AgentKernel>, llm_factory: Arc<LlmFactory>) -> Self {
+    pub fn new(kernel: Arc<dyn AgentKernel>) -> Self {
         Self {
             kernel,
-            llm_factory,
             client_capabilities: Arc::default(),
         }
     }
@@ -97,8 +96,9 @@ impl ClawcodeAgent {
                     let agent = agent.clone();
                     async move |request: PromptRequest, responder, cx: ConnectionTo<Client>| {
                         let agent = agent.clone();
+                        let cx2 = cx.clone();
                         cx.spawn(async move {
-                            responder.respond_with_result(agent.handle_prompt(request).await)
+                            responder.respond_with_result(agent.handle_prompt(request, cx2).await)
                         })?;
                         Ok(())
                     }
@@ -199,7 +199,6 @@ impl ClawcodeAgent {
         &self,
         _request: AuthenticateRequest,
     ) -> Result<AuthenticateResponse, Error> {
-        // Authentication is a no-op for now.
         Ok(AuthenticateResponse::new())
     }
 
@@ -261,11 +260,106 @@ impl ClawcodeAgent {
             .models(model_state))
     }
 
-    async fn handle_prompt(&self, _request: PromptRequest) -> Result<PromptResponse, Error> {
-        // Minimal stub: returns EndTurn without LLM interaction.
-        // Full event translation loop will be implemented in a subsequent plan.
-        let stop_reason = acp::schema::StopReason::EndTurn;
-        Ok(PromptResponse::new(stop_reason))
+    async fn handle_prompt(
+        &self,
+        request: PromptRequest,
+        cx: ConnectionTo<Client>,
+    ) -> Result<PromptResponse, Error> {
+        let session_id = SessionId(request.session_id.0.to_string());
+
+        // Extract text from prompt blocks
+        let text = request
+            .prompt
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let acp_sid = AcpSessionId::new(request.session_id.0.to_string());
+
+        // Call kernel and get event stream
+        let mut events = self
+            .kernel
+            .prompt(&session_id, text)
+            .await
+            .map_err(|e| Error::internal_error().data(e.to_string()))?;
+
+        // Translate events to ACP notifications
+        while let Some(event) = events.next().await {
+            let event = event.map_err(|e| Error::internal_error().data(e.to_string()))?;
+            match event {
+                Event::AgentMessageChunk { text, .. } => {
+                    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                    let update = SessionUpdate::AgentMessageChunk(chunk);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::AgentThoughtChunk { text, .. } => {
+                    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                    let update = SessionUpdate::AgentThoughtChunk(chunk);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::ToolCall {
+                    call_id,
+                    name,
+                    arguments: _,
+                    status,
+                    ..
+                } => {
+                    let acp_status: AcpToolCallStatus = status.into();
+                    let tool_call =
+                        ToolCall::new(ToolCallId::new(call_id), name).status(acp_status);
+                    let update = SessionUpdate::ToolCall(tool_call);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::ToolCallUpdate {
+                    call_id,
+                    output_delta,
+                    status,
+                    ..
+                } => {
+                    let mut fields = ToolCallUpdateFields::default();
+                    if let Some(delta) = output_delta {
+                        fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                            ContentBlock::Text(TextContent::new(delta)),
+                        ))]);
+                    }
+                    if let Some(s) = status {
+                        let acp_status: AcpToolCallStatus = s.into();
+                        fields.status = Some(acp_status);
+                    }
+                    let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
+                    let update = SessionUpdate::ToolCallUpdate(update_val);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::PlanUpdate { entries, .. } => {
+                    let plan_entries: Vec<PlanEntry> = entries
+                        .into_iter()
+                        .map(|e| PlanEntry::new(e.name, e.priority.into(), e.status.into()))
+                        .collect();
+                    let update = SessionUpdate::Plan(Plan::new(plan_entries));
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::UsageUpdate {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
+                    let usage = UsageUpdate::new(input_tokens + output_tokens, 0);
+                    let update = SessionUpdate::UsageUpdate(usage);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::TurnComplete { stop_reason, .. } => {
+                    let reason: AcpStopReason = stop_reason.into();
+                    return Ok(PromptResponse::new(reason));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(PromptResponse::new(AcpStopReason::EndTurn))
     }
 
     async fn handle_cancel(&self, notification: CancelNotification) -> Result<(), Error> {
@@ -293,7 +387,6 @@ impl ClawcodeAgent {
         request: SetSessionModelRequest,
     ) -> Result<SetSessionModelResponse, Error> {
         let session_id = SessionId(request.session_id.0.to_string());
-        // model_id format: "provider_id/model_id"
         let parts: Vec<&str> = request.model_id.0.splitn(2, '/').collect();
         let (provider_id, model_id) = if parts.len() == 2 {
             (parts[0], parts[1])
