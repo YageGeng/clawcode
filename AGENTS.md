@@ -6,5 +6,6 @@
 2. Do not run `git commit` without the user's explicit permission.
 3. Before running `git commit`, run and check the relevant `pre-commit` hooks.
 4. Every commit message must follow the template and constraints defined in `.gitmessage`.
+5. Structs with more than 3 fields must use `typed-builder` and be constructed via the builder pattern. `Option` fields must be annotated with `#[builder(default)]`.
 
 @/home/isbest/.codex/RTK.md
