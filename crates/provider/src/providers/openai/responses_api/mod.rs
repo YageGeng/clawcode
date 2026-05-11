@@ -807,9 +807,6 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
         let model = req.model.clone().unwrap_or(model);
         let input = {
             let mut partial_history = vec![];
-            if let Some(docs) = req.normalized_documents() {
-                partial_history.push(docs);
-            }
             partial_history.extend(req.chat_history);
 
             // Initialize full history with preamble (or empty if non-existent)

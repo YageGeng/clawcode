@@ -32,7 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: None,
         preamble: None,
         chat_history: provider::OneOrMany::one(Message::user("Say hi in one short sentence.")),
-        documents: Vec::new(),
         tools: Vec::new(),
         temperature: None,
         max_tokens: None,

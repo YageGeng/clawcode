@@ -1166,9 +1166,6 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
         } = params;
 
         let mut partial_history = vec![];
-        if let Some(docs) = req.normalized_documents() {
-            partial_history.push(docs);
-        }
         let CoreCompletionRequest {
             model: request_model,
             preamble,
@@ -1463,7 +1460,6 @@ mod tests {
             model: Some("gpt-4.1".to_string()),
             preamble: None,
             chat_history: crate::OneOrMany::one("Hello".into()),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: None,
@@ -1491,7 +1487,6 @@ mod tests {
             model: None,
             preamble: None,
             chat_history: crate::OneOrMany::one("Hello".into()),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: None,
@@ -1670,7 +1665,6 @@ mod tests {
             model: None,
             preamble: None,
             chat_history: crate::OneOrMany::one("Hello".into()),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: Some(4096),
@@ -1698,7 +1692,6 @@ mod tests {
             model: None,
             preamble: None,
             chat_history: crate::OneOrMany::one("Hello".into()),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: None,
@@ -1729,7 +1722,6 @@ mod tests {
                 id: None,
                 content: OneOrMany::one(message::AssistantContent::reasoning("hidden")),
             }),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: None,
@@ -1756,7 +1748,6 @@ mod tests {
             chat_history: OneOrMany::one(message::Message::user(
                 "Hello, whats the weather in London?",
             )),
-            documents: vec![],
             tools: vec![completion::ToolDefinition {
                 name: "weather".to_string(),
                 description: "Get the weather".to_string(),
@@ -1824,7 +1815,6 @@ mod tests {
                 ),
             ])
             .expect("history should be non-empty"),
-            documents: vec![],
             tools: vec![completion::ToolDefinition {
                 name: "weather".to_string(),
                 description: "Get the weather".to_string(),

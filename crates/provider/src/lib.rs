@@ -16,8 +16,8 @@
 extern crate self as rig;
 
 pub mod client;
-pub mod factory;
 pub mod completion;
+pub mod factory;
 pub mod http_client;
 pub(crate) mod json_utils;
 pub mod markers;

@@ -1265,9 +1265,6 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
         };
 
         let mut full_history = vec![];
-        if let Some(docs) = req.normalized_documents() {
-            full_history.push(docs);
-        }
         full_history.extend(req.chat_history);
         let (history_system, full_history) = split_system_messages_from_history(full_history);
 

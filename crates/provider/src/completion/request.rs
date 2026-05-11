@@ -34,15 +34,12 @@
 //! # }
 //! ```
 
-use super::message::{AssistantContent, DocumentMediaType};
+use super::message::AssistantContent;
 use crate::message::ToolChoice;
 use crate::streaming::StreamingCompletionResponse;
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, http_client};
-use crate::{
-    json_utils,
-    message::{Message, UserContent},
-};
+use crate::{json_utils, message::Message};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -485,8 +482,6 @@ pub struct CompletionRequest {
     /// The chat history to be sent to the completion model provider.
     /// The very last message will always be the prompt (hence why there is *always* one)
     pub chat_history: OneOrMany<Message>,
-    /// The documents to be sent to the completion model provider
-    pub documents: Vec<Document>,
     /// The tools to be sent to the completion model provider
     pub tools: Vec<ToolDefinition>,
     /// The temperature to be sent to the completion model provider
@@ -514,32 +509,6 @@ impl CompletionRequest {
                 .unwrap_or("response_schema")
                 .to_string()
         })
-    }
-
-    /// Returns documents normalized into a message (if any).
-    /// Most providers do not accept documents directly as input, so it needs to convert into a
-    /// `Message` so that it can be incorporated into `chat_history`.
-    pub fn normalized_documents(&self) -> Option<Message> {
-        if self.documents.is_empty() {
-            return None;
-        }
-
-        // Most providers will convert documents into a text unless it can handle document messages.
-        // We use `UserContent::document` for those who handle it directly!
-        let messages = self
-            .documents
-            .iter()
-            .map(|doc| {
-                UserContent::document(
-                    doc.to_string(),
-                    // In the future, we can customize `Document` to pass these extra types through.
-                    // Most providers ditch these but they might want to use them.
-                    Some(DocumentMediaType::TXT),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        OneOrMany::from_iter_optional(messages).map(|content| Message::User { content })
     }
 
     /// Adds a provider-hosted tool by storing it in `additional_params.tools`.
@@ -849,7 +818,6 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             model: self.request_model,
             preamble: None,
             chat_history,
-            documents: self.documents,
             tools: self.tools,
             temperature: self.temperature,
             max_tokens: self.max_tokens,

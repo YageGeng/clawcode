@@ -104,7 +104,7 @@ where
                     choice: resp.choice,
                     usage: resp.usage,
                     raw_response: serde_json::to_value(&resp.raw_response)
-                        .map_err(|e| CompletionError::JsonError(e))?,
+                        .map_err(CompletionError::JsonError)?,
                     message_id: resp.message_id,
                 })
             }

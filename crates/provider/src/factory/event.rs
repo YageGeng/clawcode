@@ -100,7 +100,7 @@ where
                 Ok(LlmStreamEvent::ReasoningDelta { id, reasoning })
             }
             StreamedAssistantContent::Final(r) => Ok(LlmStreamEvent::Final {
-                raw: serde_json::to_value(&r).map_err(|e| CompletionError::JsonError(e))?,
+                raw: serde_json::to_value(&r).map_err(CompletionError::JsonError)?,
                 usage: r.token_usage(),
             }),
         }

@@ -718,7 +718,6 @@ data: [DONE]"#;
                 completion::Message::user("hi"),
             ])
             .expect("history"),
-            documents: Vec::new(),
             tools: Vec::new(),
             temperature: None,
             max_tokens: None,
@@ -750,7 +749,6 @@ data: [DONE]"#;
                 model: None,
                 preamble: None,
                 chat_history: OneOrMany::one(completion::Message::user("hello")),
-                documents: Vec::new(),
                 tools: Vec::new(),
                 temperature: Some(0.5),
                 max_tokens: None,

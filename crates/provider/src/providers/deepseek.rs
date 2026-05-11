@@ -515,11 +515,6 @@ impl TryFrom<(&str, CompletionRequest)> for DeepseekCompletionRequest {
             None => vec![],
         };
 
-        if let Some(docs) = req.normalized_documents() {
-            let docs: Vec<Message> = docs.try_into()?;
-            full_history.extend(docs);
-        }
-
         let chat_history: Vec<Message> = req
             .chat_history
             .clone()

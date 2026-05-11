@@ -181,9 +181,6 @@ where
         };
 
         let mut full_history = vec![];
-        if let Some(docs) = completion_request.normalized_documents() {
-            full_history.push(docs);
-        }
         full_history.extend(completion_request.chat_history);
         let (history_system, full_history) = split_system_messages_from_history(full_history);
 

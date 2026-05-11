@@ -319,9 +319,6 @@ impl TryFrom<(&str, CompletionRequest)> for MoonshotCompletionRequest {
         let model = req.model.clone().unwrap_or_else(|| model.to_string());
         // Build up the order of messages (context, chat_history, prompt)
         let mut partial_history = vec![];
-        if let Some(docs) = req.normalized_documents() {
-            partial_history.push(docs);
-        }
         partial_history.extend(req.chat_history);
 
         let mut full_history: Vec<Value> = match &req.preamble {
@@ -693,7 +690,6 @@ mod tests {
             model: Some("kimi-k2-thinking".to_string()),
             preamble: None,
             chat_history: crate::OneOrMany::one(assistant),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: None,
@@ -724,7 +720,6 @@ mod tests {
             model: Some("kimi-k2.5".to_string()),
             preamble: None,
             chat_history: crate::OneOrMany::one(Message::user("Use a tool.")),
-            documents: vec![],
             tools: vec![],
             temperature: None,
             max_tokens: None,
