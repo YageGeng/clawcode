@@ -55,7 +55,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 wasm-bindgen-futures = "0.4.54"
 
 # misc
-as-any = "0.3"
+toml = "0.8"
 arc-swap = "1.7"
 wiremock = "0.6"
 dirs = "5"

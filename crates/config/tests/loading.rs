@@ -7,7 +7,7 @@
 // Jail::expect_with's closure returns `figment::Error` (~208 bytes) which trips
 // `clippy::result_large_err`; we can't change figment's API.
 
-use config::load_from;
+use config::{ApiKeyConfig, load_from};
 use std::path::PathBuf;
 
 /// `load_from` reads a TOML file and populates AppConfig.providers.
@@ -18,21 +18,24 @@ fn load_from_reads_toml_file() {
         jail.create_file(
             "claw.toml",
             r#"
-[[llm.providers]]
+[[providers]]
 id = "deepseek"
 display_name = "DeepSeek"
 base_url = "https://api.deepseek.com"
 api_key = "sk-from-file"
 
-[[llm.providers.models]]
+[[providers.models]]
 id = "deepseek-v4-flash"
 "#,
         )?;
         let handle = load_from([PathBuf::from("claw.toml")]).unwrap();
         let cfg = handle.current();
-        assert_eq!(cfg.llm.providers.len(), 1);
-        assert_eq!(cfg.llm.providers[0].api_key, "sk-from-file");
-        assert_eq!(cfg.llm.providers[0].models[0].id, "deepseek-v4-flash");
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(
+            cfg.providers[0].api_key,
+            ApiKeyConfig::Plaintext("sk-from-file".to_string())
+        );
+        assert_eq!(cfg.providers[0].models[0].id, "deepseek-v4-flash");
         Ok(())
     });
 }
@@ -56,7 +59,7 @@ fn load_uses_claw_config_env_var() {
         jail.create_file(
             "custom.toml",
             r#"
-[[llm.providers]]
+[[providers]]
 id = "deepseek"
 display_name = "DeepSeek"
 base_url = "https://api.deepseek.com"
@@ -67,7 +70,10 @@ api_key = "sk-custom"
         jail.set_env("CLAW_CONFIG", abs.to_str().unwrap());
         let handle = config::load().unwrap();
         let cfg = handle.current();
-        assert_eq!(cfg.llm.providers[0].api_key, "sk-custom");
+        assert_eq!(
+            cfg.providers[0].api_key,
+            ApiKeyConfig::Plaintext("sk-custom".to_string())
+        );
         Ok(())
     });
 }

@@ -82,3 +82,11 @@ macro_rules! if_not_wasm {
 
     };
 }
+
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
+/// Boxed `Stream` that includes `Send` on native targets.
+pub type WasmCompatStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+/// Boxed `Stream` without `Send` on wasm32 with the `wasm` feature.
+pub type WasmCompatStream<T> = Pin<Box<dyn Stream<Item = T>>>;

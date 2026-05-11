@@ -62,7 +62,7 @@ impl ConfigHandle {
 /// which path resolution failed. To make a file optional, omit it from `paths`.
 ///
 /// **Env layer limitation**: figment's `Env::split("__")` cannot index into
-/// array-typed fields (e.g. `llm.providers[N]`); numeric segments are treated
+/// array-typed fields (e.g. `providers[N]`); numeric segments are treated
 /// as map keys, not sequence indices. The env layer is therefore useful for
 /// any future flat scalar fields but cannot override per-provider keys via env.
 /// Provide arrays through TOML files instead.
@@ -81,7 +81,7 @@ where
         }
         fig = fig.merge(Toml::file(p));
     }
-    // Env keys: CLAW_LLM__PROVIDERS__0__API_KEY -> llm.providers[0].api_key
+    // Env keys: CLAW_PROVIDERS__0__API_KEY -> providers[0].api_key
     fig = fig.merge(Env::prefixed("CLAW_").split("__"));
     let cfg: AppConfig = fig.extract()?;
     Ok(ConfigHandle::from_config(cfg))
