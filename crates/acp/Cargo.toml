@@ -1,0 +1,29 @@
+[package]
+name = "acp"
+edition.workspace = true
+version.workspace = true
+description = "ACP bridge for clawcode - translates between internal protocol and Agent Client Protocol"
+
+[[bin]]
+name = "acp"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { path = "../protocol" }
+kernel = { path = "../kernel" }
+provider = { path = "../provider" }
+config = { path = "../config" }
+
+agent-client-protocol = { workspace = true, features = ["unstable"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+typed-builder = { workspace = true }

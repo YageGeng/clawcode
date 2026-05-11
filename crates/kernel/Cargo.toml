@@ -2,3 +2,20 @@
 name = "kernel"
 edition.workspace = true
 version.workspace = true
+description = "Clawcode agent kernel - session management, LLM orchestration, tool execution"
+
+[dependencies]
+protocol = { path = "../protocol" }
+provider = { path = "../provider" }
+config = { path = "../config" }
+
+tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+typed-builder = { workspace = true }
