@@ -1,95 +1,72 @@
-# Protocol Layer Implementation Plan
+# 协议层实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the clawcode internal protocol layer, migrate shared Message types from provider to protocol, build the kernel's AgentKernel trait implementation, and create the ACP bridge crate.
+**目标：** 实现 clawcode 内部协议层（protocol crate），将共享 Message 类型从 provider 上移至 protocol，实现 kernel 的 AgentKernel trait 基础实现，创建 ACP 桥接 crate。
 
-**Architecture:** Four-phase implementation. Phase 1 creates the protocol crate with pure data types. Phase 2 moves `Message` and related types from provider up to protocol. Phase 3 implements kernel with the AgentKernel trait backed by LlmFactory. Phase 4 creates the ACP bridge crate with `From` trait translations.
+**架构：** 四阶段。Phase 1 创建 protocol crate 骨架及独立数据类型。Phase 2 将 Message + OneOrMany 从 provider 上移至 protocol，provider 通过 re-export 保持向后兼容。Phase 3 实现 Event、Op、Kernel trait。Phase 4 创建 ACP 桥接 crate 及类型转换。
 
-**Tech Stack:** Rust 2024 edition, tokio, serde, async-trait, typed-builder, agent-client-protocol, uuid (SessionId generation), strum (enum display), thiserror (kernel errors)
+**技术栈：** Rust 2024 edition, tokio, serde, async-trait, typed-builder, agent-client-protocol, uuid, strum, thiserror
 
-**Spec:** `docs/superpowers/specs/2026-05-11-protocol-layer-design.md`
+**规格文档：** `docs/superpowers/specs/2026-05-11-protocol-layer-design.md`
 
 ---
 
-## File Map
+## 文件清单
 
-| File | Purpose |
+| 文件 | 用途 |
 |---|---|
-| `crates/protocol/Cargo.toml` | New crate manifest |
-| `crates/protocol/src/lib.rs` | Module declarations + unified re-exports |
-| `crates/protocol/src/message.rs` | Message, UserContent, AssistantContent, ToolCall, ToolFunction, ToolResult, ToolResultContent, Text, Image, Reasoning, Role (migrated from provider) |
-| `crates/protocol/src/session.rs` | SessionId, SessionInfo, SessionCreated, SessionListPage |
-| `crates/protocol/src/tool.rs` | ToolDefinition, ToolCallStatus |
-| `crates/protocol/src/plan.rs` | PlanEntry, PlanPriority, PlanStatus |
-| `crates/protocol/src/permission.rs` | PermissionRequest, PermissionOption, PermissionOptionKind |
-| `crates/protocol/src/agent.rs` | AgentPath, AgentStatus, InterAgentMessage |
-| `crates/protocol/src/config.rs` | SessionMode, ModelInfo, SessionConfigOption, SessionConfigValue |
-| `crates/protocol/src/event.rs` | Event enum (all streaming event variants), StopReason |
-| `crates/protocol/src/op.rs` | Op enum (all operation variants) |
-| `crates/protocol/src/kernel.rs` | AgentKernel trait, KernelError, EventStream |
-| `Cargo.toml` (workspace root) | Add typed-builder, uuid, strum to workspace dependencies; add protocol back as workspace member |
-| `crates/provider/Cargo.toml` | Add dependency on clawcode-protocol |
-| `crates/provider/src/completion/message.rs` | Delete (types moved to protocol) |
-| `crates/provider/src/completion/mod.rs` | Remove message module, update imports |
-| `crates/provider/src/lib.rs` | Re-export message types from protocol |
-| `crates/provider/src/factory/event.rs` | Update imports to use protocol types |
-| `crates/provider/src/providers/anthropic/completion.rs` | Update imports |
-| `crates/provider/src/providers/anthropic/streaming.rs` | Update imports |
-| `crates/provider/src/providers/openai/completion/mod.rs` | Update imports |
-| `crates/provider/src/providers/openai/responses_api/mod.rs` | Update imports |
-| `crates/provider/src/providers/openai/responses_api/streaming.rs` | Update imports |
-| `crates/provider/src/providers/chatgpt/mod.rs` | Update imports |
-| `crates/provider/src/providers/deepseek.rs` | Update imports |
-| `crates/provider/src/providers/moonshot.rs` | Update imports |
-| `crates/provider/src/providers/minimax.rs` | Update imports |
-| `crates/provider/src/providers/xiaomimimo.rs` | Update imports |
-| `crates/provider/src/providers/internal/buffered.rs` | Update imports |
-| `crates/provider/src/providers/internal/openai_chat_completions_compatible.rs` | Update imports |
-| `crates/provider/src/streaming.rs` | Update imports |
-| `crates/provider/examples/*.rs` | Update imports |
-| `crates/kernel/Cargo.toml` | Add dependencies: clawcode-protocol, clawcode-provider, clawcode-config, tokio, async-trait, anyhow |
-| `crates/kernel/src/lib.rs` | Replace stub with Kernel struct implementing AgentKernel |
-| `crates/acp/Cargo.toml` | New crate manifest with ACP dependencies |
-| `crates/acp/src/lib.rs` | Entry point: run() with stdio transport |
-| `crates/acp/src/agent.rs` | ClawcodeAgent struct + ACP handler registration |
-| `crates/acp/src/translate.rs` | From impls: internal types → ACP types |
+| `crates/protocol/Cargo.toml` | 新建 — crate 清单 |
+| `crates/protocol/src/lib.rs` | 新建 — 模块声明 + 统一导出 |
+| `crates/protocol/src/one_or_many.rs` | 新建 — 从 provider 复制 |
+| `crates/protocol/src/message.rs` | 新建 — 从 provider 移动（去 provider 内部依赖） |
+| `crates/protocol/src/session.rs` | 新建 — session 类型 |
+| `crates/protocol/src/tool.rs` | 新建 — tool 类型 |
+| `crates/protocol/src/plan.rs` | 新建 — plan 类型 |
+| `crates/protocol/src/permission.rs` | 新建 — permission 类型 |
+| `crates/protocol/src/agent.rs` | 新建 — agent 多 Agent 类型 |
+| `crates/protocol/src/config.rs` | 新建 — config 配置类型 |
+| `crates/protocol/src/event.rs` | 新建 — Event 流式事件 |
+| `crates/protocol/src/op.rs` | 新建 — Op 操作指令 |
+| `crates/protocol/src/kernel.rs` | 新建 — AgentKernel trait |
+| `Cargo.toml`（workspace 根） | 修改 — 添加 typed-builder、uuid、strum、agent-client-protocol、clawcode-protocol |
+| `crates/provider/Cargo.toml` | 修改 — 添加 clawcode-protocol 依赖 |
+| `crates/provider/src/completion/message.rs` | 修改 — 替换为 re-export |
+| `crates/provider/src/one_or_many.rs` | 修改 — 替换为 re-export |
+| `crates/provider/src/lib.rs` | 修改 — 更新 re-export 路径，保持 `crate::message` 和 `crate::OneOrMany` 兼容 |
+| `crates/kernel/Cargo.toml` | 修改 — 添加依赖 |
+| `crates/kernel/src/lib.rs` | 修改 — 替换 stub 为 Kernel struct |
+| `crates/acp/Cargo.toml` | 新建 — ACP bridge crate 清单 |
+| `crates/acp/src/lib.rs` | 新建 — run() 入口 |
+| `crates/acp/src/agent.rs` | 新建 — ClawcodeAgent 结构 + handler 注册 |
+| `crates/acp/src/translate.rs` | 新建 — From trait 类型转换 |
+| `crates/acp/src/main.rs` | 新建 — 二进制入口 |
 
 ---
 
-### Task 1: Add workspace dependencies and create protocol crate skeleton
+### 任务 1：添加 workspace 依赖并创建 protocol crate 骨架
 
-**Files:**
-- Modify: `Cargo.toml` (workspace root)
-- Create: `crates/protocol/Cargo.toml`
-- Create: `crates/protocol/src/lib.rs`
+**文件：**
+- 修改：`Cargo.toml`（workspace 根）
+- 创建：`crates/protocol/Cargo.toml`
+- 创建：`crates/protocol/src/lib.rs`
 
-- [ ] **Step 1: Add typed-builder, uuid, strum to workspace dependencies**
-
-Open `Cargo.toml` (workspace root). Add under `# serde` area:
+- [ ] **步骤1：在 workspace Cargo.toml 添加依赖**
 
 ```toml
-# builder
+# builder — 添加到 serde 区域下方
 typed-builder = "0.21"
-```
 
-Add under `# misc` area:
-
-```toml
+# misc 区域追加
 uuid = { version = "1", features = ["v4", "serde"] }
 strum = { version = "0.27", features = ["derive"] }
 agent-client-protocol = "0.11.1"
-```
 
-Also add the protocol as a workspace member dependency at the bottom:
-
-```toml
+# 最后添加 workspace member 依赖
 clawcode-protocol = { path = "crates/protocol" }
 ```
 
-- [ ] **Step 2: Create protocol crate Cargo.toml**
-
-Create `crates/protocol/Cargo.toml`:
+- [ ] **步骤2：创建 protocol crate 的 Cargo.toml**
 
 ```toml
 [package]
@@ -114,9 +91,7 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 ```
 
-- [ ] **Step 3: Create protocol crate lib.rs skeleton**
-
-Create `crates/protocol/src/lib.rs`:
+- [ ] **步骤3：创建 lib.rs 骨架**
 
 ```rust
 //! Internal protocol types for clawcode agent-core / frontend communication.
@@ -133,18 +108,19 @@ pub mod config;
 pub mod event;
 pub mod kernel;
 pub mod message;
+pub mod one_or_many;
 pub mod op;
 pub mod permission;
 pub mod plan;
 pub mod session;
 pub mod tool;
 
-// Re-export everything for convenience
 pub use agent::*;
 pub use config::*;
 pub use event::*;
 pub use kernel::*;
 pub use message::*;
+pub use one_or_many::*;
 pub use op::*;
 pub use permission::*;
 pub use plan::*;
@@ -152,15 +128,15 @@ pub use session::*;
 pub use tool::*;
 ```
 
-- [ ] **Step 4: Build to verify skeleton compiles**
+- [ ] **步骤4：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-Expected: errors about missing modules (will resolve in subsequent tasks).
+预期：报 missing module 错误（后续任务逐个补上），但 Cargo.toml 和 workspace 配置本身正确。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤5：提交**
 
 ```bash
 git add Cargo.toml crates/protocol/
@@ -172,12 +148,12 @@ EOF
 
 ---
 
-### Task 2: Implement protocol session types
+### 任务 2：实现 session 类型
 
-**Files:**
-- Create: `crates/protocol/src/session.rs`
+**文件：**
+- 创建：`crates/protocol/src/session.rs`
 
-- [ ] **Step 1: Write session.rs**
+- [ ] **步骤1：编写 session.rs**
 
 ```rust
 //! Session identifier and metadata types.
@@ -186,10 +162,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Unique session identifier.
-///
-/// Generated when a new session is created, used to reference
-/// the session in all subsequent operations.
+/// Unique session identifier generated when a new session is created.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
@@ -199,58 +172,44 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Summary info for a session shown in listing results.
-///
-/// Contains enough data to render a session picker row without
-/// loading the full session state.
+/// Summary info for a session in listing results.
 #[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub struct SessionInfo {
-    /// Unique session identifier.
     pub session_id: SessionId,
-    /// Working directory where the session runs.
     pub cwd: PathBuf,
-    /// Human-readable title (usually the first user message).
     #[builder(default)]
     pub title: Option<String>,
-    /// ISO-8601 timestamp of last activity.
     #[builder(default)]
     pub updated_at: Option<String>,
 }
 
 /// Data returned to the frontend after creating or loading a session.
-///
-/// Carries the session id plus the available modes and models
-/// the frontend can present in its configuration UI.
-#[derive(Debug, Clone, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone)]
 pub struct SessionCreated {
-    /// The created or loaded session.
     pub session_id: SessionId,
-    /// Available approval/sandboxing mode presets.
     pub modes: Vec<super::config::SessionMode>,
-    /// Available model presets for this provider configuration.
     pub models: Vec<super::config::ModelInfo>,
 }
 
 /// Paginated session list result.
-#[derive(Debug, Clone, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone)]
 pub struct SessionListPage {
-    /// Sessions in the current page.
     pub sessions: Vec<SessionInfo>,
-    /// Opaque cursor for the next page, `None` when on the last page.
-    #[builder(default)]
     pub next_cursor: Option<String>,
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+> **注：** `SessionCreated` 只有 3 个字段，不需要 TypedBuilder。`SessionListPage` 只有 2 个字段，也不需要用 TypedBuilder。`SessionInfo` 有 4 个字段（≥4），必须使用 TypedBuilder。
+
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-Expected: errors only for other missing modules (tool, plan, etc.); session module compiles clean.
+预期：session 模块编译通过，报错仅限于其他尚未创建的模块。
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/session.rs
@@ -262,12 +221,12 @@ EOF
 
 ---
 
-### Task 3: Implement protocol tool types
+### 任务 3：实现 tool 类型
 
-**Files:**
-- Create: `crates/protocol/src/tool.rs`
+**文件：**
+- 创建：`crates/protocol/src/tool.rs`
 
-- [ ] **Step 1: Write tool.rs**
+- [ ] **步骤1：编写 tool.rs**
 
 ```rust
 //! Tool definition and execution status types.
@@ -277,8 +236,7 @@ use serde::{Deserialize, Serialize};
 /// Tool definition registered with the agent kernel.
 ///
 /// Describes a callable tool the LLM can invoke via function calling.
-/// The `parameters` field uses JSON Schema to define the tool's arguments.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     /// Unique tool name exposed to the model.
     pub name: String,
@@ -292,7 +250,7 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallStatus {
-    /// Tool call has been requested but execution has not started.
+    /// Tool call requested but execution has not started.
     Pending,
     /// Tool is currently executing.
     InProgress,
@@ -303,13 +261,15 @@ pub enum ToolCallStatus {
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+> **注：** `ToolDefinition` 只有 3 个字段，不需要 TypedBuilder。
+
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/tool.rs
@@ -321,12 +281,12 @@ EOF
 
 ---
 
-### Task 4: Implement protocol plan types
+### 任务 4：实现 plan 类型
 
-**Files:**
-- Create: `crates/protocol/src/plan.rs`
+**文件：**
+- 创建：`crates/protocol/src/plan.rs`
 
-- [ ] **Step 1: Write plan.rs**
+- [ ] **步骤1：编写 plan.rs**
 
 ```rust
 //! Plan and task-progress types for structured agent output.
@@ -334,7 +294,7 @@ EOF
 use serde::{Deserialize, Serialize};
 
 /// A single entry in the agent's execution plan.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanEntry {
     /// Human-readable task name.
     pub name: String,
@@ -347,29 +307,23 @@ pub struct PlanEntry {
 /// Priority level for a plan entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanPriority {
-    Low,
-    Medium,
-    High,
-}
+pub enum PlanPriority { Low, Medium, High }
 
 /// Execution status of a plan entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlanStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
+pub enum PlanStatus { Pending, InProgress, Completed }
 ```
 
-- [ ] **Step 2: Build to verify**
+> **注：** `PlanEntry` 只有 3 个字段，不需要 TypedBuilder。
+
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/plan.rs
@@ -381,12 +335,12 @@ EOF
 
 ---
 
-### Task 5: Implement protocol permission types
+### 任务 5：实现 permission 类型
 
-**Files:**
-- Create: `crates/protocol/src/permission.rs`
+**文件：**
+- 创建：`crates/protocol/src/permission.rs`
 
-- [ ] **Step 1: Write permission.rs**
+- [ ] **步骤1：编写 permission.rs**
 
 ```rust
 //! Permission request types for tool execution approval.
@@ -395,7 +349,7 @@ use serde::{Deserialize, Serialize};
 
 /// Permission request sent from the kernel to the frontend
 /// when a tool execution needs user approval.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRequest {
     /// Identifies the tool call this permission is for.
     pub call_id: String,
@@ -406,13 +360,13 @@ pub struct PermissionRequest {
 }
 
 /// A single permission option the user can choose.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionOption {
-    /// Unique option identifier (e.g. "allow_once", "reject_always").
+    /// Unique option identifier (e.g. "allow_once").
     pub id: String,
     /// Human-readable label (e.g. "Allow Once").
     pub label: String,
-    /// The kind of this option determining its scope and persistence.
+    /// The kind of this option determining its scope.
     pub kind: PermissionOptionKind,
 }
 
@@ -420,24 +374,22 @@ pub struct PermissionOption {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionOptionKind {
-    /// Grant permission for this single execution only.
     AllowOnce,
-    /// Grant permission and persist for future identical requests.
     AllowAlways,
-    /// Deny this single execution.
     RejectOnce,
-    /// Deny and persist rejection for future identical requests.
     RejectAlways,
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+> **注：** `PermissionRequest` 和 `PermissionOption` 都只有 3 个字段，不需要 TypedBuilder。
+
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/permission.rs
@@ -449,12 +401,12 @@ EOF
 
 ---
 
-### Task 6: Implement protocol agent types
+### 任务 6：实现 agent 多 Agent 类型
 
-**Files:**
-- Create: `crates/protocol/src/agent.rs`
+**文件：**
+- 创建：`crates/protocol/src/agent.rs`
 
-- [ ] **Step 1: Write agent.rs**
+- [ ] **步骤1：编写 agent.rs**
 
 ```rust
 //! Multi-agent identity, status, and inter-agent messaging types.
@@ -462,9 +414,6 @@ EOF
 use serde::{Deserialize, Serialize};
 
 /// Hierarchical agent path, e.g. `/root/explorer`.
-///
-/// Paths use `/` as separator and start with `/root` for the
-/// main agent. Sub-agents append their name: `/root/worker`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentPath(pub String);
 
@@ -495,55 +444,42 @@ impl AgentPath {
 }
 
 /// Runtime status of an agent.
-///
-/// Used to track the lifecycle of agents in a multi-agent session,
-/// reported via `Event::AgentStatusChange`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
-    /// Agent is actively processing a turn.
     Running,
-    /// Agent's turn was interrupted, may receive further input.
     Interrupted,
-    /// Agent completed its turn, with an optional final message.
     Completed {
         /// Optional final assistant message content.
         message: Option<String>,
     },
-    /// Agent encountered an unrecoverable error.
     Errored {
         /// Human-readable error description.
         reason: String,
     },
-    /// Agent has been shut down and released its resources.
     Shutdown,
 }
 
 /// Message sent between agents in a multi-agent session.
-///
-/// Carries the sender, recipient(s), and content. When `trigger_turn`
-/// is true, the recipient should start a new turn upon delivery.
 #[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub struct InterAgentMessage {
-    /// Sender agent path.
     pub from: AgentPath,
-    /// Primary recipient agent path.
     pub to: AgentPath,
-    /// Message content (plain text or structured data).
     pub content: String,
-    /// If true, the recipient should start a new turn upon delivery.
     #[builder(default)]
     pub trigger_turn: bool,
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+> **注：** `InterAgentMessage` 有 4 个字段（≥4），必须使用 TypedBuilder。
+
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/agent.rs
@@ -555,82 +491,68 @@ EOF
 
 ---
 
-### Task 7: Implement protocol config types
+### 任务 7：实现 config 类型
 
-**Files:**
-- Create: `crates/protocol/src/config.rs`
+**文件：**
+- 创建：`crates/protocol/src/config.rs`
 
-- [ ] **Step 1: Write config.rs**
+- [ ] **步骤1：编写 config.rs**
 
 ```rust
 //! Session configuration types: modes, models, and configurable options.
 
 use serde::{Deserialize, Serialize};
 
-/// A session mode preset defining the agent's approval and sandboxing behavior.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+/// A session mode preset (e.g. read-only, auto, full-access).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMode {
-    /// Unique mode identifier (e.g. "read-only", "auto", "full-access").
     pub id: String,
-    /// Human-readable display name.
     pub name: String,
-    /// Optional description explaining what the mode enables.
-    #[builder(default)]
     pub description: Option<String>,
 }
 
-/// Information about an available model exposed to the frontend.
+/// Model info exposed to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub struct ModelInfo {
-    /// Model identifier within the provider (e.g. "deepseek-v4-pro").
     pub id: String,
-    /// Human-readable display name (e.g. "DeepSeek V4 Pro").
     pub display_name: String,
-    /// Optional description of the model's capabilities.
     #[builder(default)]
     pub description: Option<String>,
-    /// Maximum context window size in tokens, if known.
     #[builder(default)]
     pub context_tokens: Option<u64>,
-    /// Maximum output tokens per response, if known.
     #[builder(default)]
     pub max_output_tokens: Option<u64>,
 }
 
-/// A configurable option exposed for a session (e.g. reasoning effort).
+/// A configurable option for a session (e.g. reasoning effort level).
 #[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub struct SessionConfigOption {
-    /// Unique config option identifier.
     pub id: String,
-    /// Human-readable option name.
     pub name: String,
-    /// Optional description of what this option controls.
     #[builder(default)]
     pub description: Option<String>,
-    /// Available values for this option.
     pub values: Vec<SessionConfigValue>,
-    /// Currently selected value id, if any.
     #[builder(default)]
     pub current_value: Option<String>,
 }
 
 /// A selectable value within a session config option.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfigValue {
-    /// Unique value identifier.
     pub id: String,
-    /// Human-readable label.
     pub label: String,
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+> **注：** `SessionMode` 3 个字段，不需要 TypedBuilder。`SessionConfigValue` 2 个字段，不需要 TypedBuilder。`ModelInfo` 5 个字段（≥4），`SessionConfigOption` 5 个字段（≥4），两者必须使用 TypedBuilder。
+
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/config.rs
@@ -642,83 +564,71 @@ EOF
 
 ---
 
-### Task 8: Move Message types from provider to protocol
+### 任务 8：将 Message + OneOrMany 从 provider 上移至 protocol
 
-**Files:**
-- Create: `crates/protocol/src/message.rs`
-- Modify: `crates/provider/Cargo.toml`
-- Modify: `crates/provider/src/completion/message.rs` → delete content, re-export from protocol
-- Modify: All provider files referencing `crate::completion::message::*`
+这是最关键的一步。策略：复制源码到 protocol，去掉 provider 内部依赖（`use crate::OneOrMany`、`use super::CompletionError`），然后在 provider 中通过 re-export 保持所有现有 `use crate::message::*` 和 `use crate::OneOrMany` 路径不变。
 
-- [ ] **Step 1: Copy message.rs content to protocol crate**
+**文件：**
+- 创建：`crates/protocol/src/one_or_many.rs`
+- 创建：`crates/protocol/src/message.rs`
+- 修改：`crates/provider/Cargo.toml`
+- 修改：`crates/provider/src/one_or_many.rs`
+- 修改：`crates/provider/src/completion/message.rs`
+- 修改：`crates/provider/src/lib.rs`
 
-Read `crates/provider/src/completion/message.rs` and copy the ENTIRE content into `crates/protocol/src/message.rs`.
+- [ ] **步骤1：将 one_or_many.rs 复制到 protocol**
 
-Then change the `use` imports at the top: replace `use crate::OneOrMany;` with `use crate::one_or_many::OneOrMany;` (we'll fix this in step 2 — actually we need to handle the `OneOrMany` type which is in provider but used in message types).
+`one_or_many.rs` 没有 crate 内部依赖（仅用 serde、thiserror），可直接完整复制。
 
-Actually, we need to move `OneOrMany` too, or re-export it. Let's move it to protocol as well.
-
-Create a new file `crates/protocol/src/one_or_many.rs` by copying from `crates/provider/src/one_or_many.rs`.
-
-Then in `crates/protocol/src/message.rs`, replace:
-```rust
-use crate::OneOrMany;
+```bash
+cp crates/provider/src/one_or_many.rs crates/protocol/src/one_or_many.rs
 ```
-with:
+
+- [ ] **步骤2：将 message.rs 复制到 protocol 并修改**
+
+复制文件：
+
+```bash
+cp crates/provider/src/completion/message.rs crates/protocol/src/message.rs
+```
+
+然后编辑 `crates/protocol/src/message.rs`，做以下 3 处修改：
+
+**修改1 — 第3行**：替换 `use crate::OneOrMany;` 为：
+
 ```rust
 use crate::one_or_many::OneOrMany;
 ```
 
-And change completion error references to use protocol's own error type (keep `CompletionError` and `PromptError` in provider — Message only references them via `From` impls which stay in provider).
+**修改2 — 第7行**：删除 `use super::CompletionError;`
 
-Wait — this is getting complex. Let me read the actual message.rs to understand all the intra-crate references.
+**修改3 — 第1171-1175行**：删除 `impl From<MessageError> for CompletionError` 整个块：
 
-- [ ] **Step 2: Read provider message.rs to understand dependencies**
-
-Run:
-```bash
-cat crates/provider/src/completion/message.rs
-```
-
-Identify all `use crate::...` references and external deps needed.
-
-Expected: `use crate::OneOrMany;`, `use super::CompletionError;`, `use crate::json_utils;`, `use crate::completion::CompletionError;`
-
-- [ ] **Step 3: Move OneOrMany to protocol crate**
-
-Create `crates/protocol/src/one_or_many.rs` by copying the full content from `crates/provider/src/one_or_many.rs`.
-
-Update imports inside: remove any provider-specific references. The `OneOrMany` type has a dependency on `serde` and `thiserror` (for `EmptyListError`) — both are already protocol deps.
-
-- [ ] **Step 4: Write protocol message.rs**
-
-The message types need to be self-contained in protocol. They reference `CompletionError` and `PromptError` which stay in provider — those `From` impls should also stay in provider (they convert provider error types). The protocol message types themselves should NOT reference provider types.
-
-Write `crates/protocol/src/message.rs` with the complete message type definitions from provider, but:
-- Remove `use crate::OneOrMany;` → `use crate::one_or_many::OneOrMany;`
-- Remove error `From` impls that reference provider types (`CompletionError`, `PromptError`, `StructuredOutputError`)
-- Keep `MessageError` since it's defined within message.rs itself
-- Keep all `From<String>`, `From<&str>` impls
-- Keep all serde derives
-- Keep `MimeType` trait
-
-- [ ] **Step 5: Update protocol lib.rs**
-
-Add before the module declarations:
 ```rust
-pub mod one_or_many;
+// 删除这整段，CompletionError 留在 provider 中
+impl From<MessageError> for CompletionError {
+    fn from(error: MessageError) -> Self {
+        CompletionError::RequestError(error.into())
+    }
+}
 ```
 
-- [ ] **Step 6: Update provider Cargo.toml to depend on protocol**
+- [ ] **步骤3：更新 provider 的 Cargo.toml，添加 protocol 依赖**
 
-Add to `crates/provider/Cargo.toml` under `[dependencies]`:
+在 `[dependencies]` 最上方添加：
+
 ```toml
 clawcode-protocol = { path = "../protocol" }
 ```
 
-- [ ] **Step 7: Update provider message.rs to re-export from protocol**
+- [ ] **步骤4：替换 provider 的 one_or_many.rs 为 re-export**
 
-Replace `crates/provider/src/completion/message.rs` content:
+```rust
+//! OneOrMany container type, re-exported from protocol.
+pub use clawcode_protocol::one_or_many::*;
+```
+
+- [ ] **步骤5：替换 provider 的 completion/message.rs 为 re-export**
 
 ```rust
 //! Provider-agnostic chat message types.
@@ -727,25 +637,8 @@ Replace `crates/provider/src/completion/message.rs` content:
 //! for backward compatibility.
 
 pub use clawcode_protocol::message::*;
-```
 
-- [ ] **Step 8: Update provider one_or_many.rs to re-export from protocol**
-
-Replace `crates/provider/src/one_or_many.rs` content:
-
-```rust
-//! OneOrMany container type, re-exported from protocol.
-pub use clawcode_protocol::one_or_many::*;
-```
-
-- [ ] **Step 9: Move error From impls back to provider**
-
-The `impl From<MessageError> for CompletionError` and similar impls that reference provider error types need to stay in provider. Create a new block in provider (or keep it near the re-exports):
-
-In `crates/provider/src/completion/message.rs`, after the re-export:
-
-```rust
-// Provider-specific From impls that reference CompletionError.
+// Re-add the From impl that depends on CompletionError (provider-only type)
 use crate::completion::CompletionError;
 
 impl From<MessageError> for CompletionError {
@@ -755,60 +648,36 @@ impl From<MessageError> for CompletionError {
 }
 ```
 
-- [ ] **Step 10: Update all provider files that import from message**
+- [ ] **步骤6：确认 provider lib.rs 无需修改**
 
-In each of these files, replace `use crate::completion::message::*;` or individual imports with `use clawcode_protocol::message::*;` or the protocol path:
+现有 `lib.rs` 的模块声明和 re-export 保持不变：
 
-- `crates/provider/src/completion/request.rs`
-- `crates/provider/src/completion/mod.rs`
-- `crates/provider/src/factory/event.rs`
-- `crates/provider/src/factory/mod.rs`
-- `crates/provider/src/lib.rs`
-- `crates/provider/src/streaming.rs`
-- `crates/provider/src/providers/anthropic/completion.rs`
-- `crates/provider/src/providers/anthropic/streaming.rs`
-- `crates/provider/src/providers/openai/completion/mod.rs`
-- `crates/provider/src/providers/openai/responses_api/mod.rs`
-- `crates/provider/src/providers/openai/responses_api/streaming.rs`
-- `crates/provider/src/providers/chatgpt/mod.rs`
-- `crates/provider/src/providers/deepseek.rs`
-- `crates/provider/src/providers/moonshot.rs`
-- `crates/provider/src/providers/minimax.rs`
-- `crates/provider/src/providers/xiaomimimo.rs`
-- `crates/provider/src/providers/internal/buffered.rs`
-- `crates/provider/src/providers/internal/openai_chat_completions_compatible.rs`
-- `crates/provider/examples/deepseek.rs`
-- `crates/provider/examples/deepseek_stream.rs`
-- `crates/provider/examples/factory_say_hi.rs`
-- `crates/provider/examples/factory_say_hi_stream.rs`
-
-- [ ] **Step 11: Fix lib.rs self-re-export**
-
-In provider's `lib.rs`, change:
 ```rust
-pub use completion::message;
-```
-to:
-```rust
-// Re-export message types from protocol for backward compatibility
-pub use clawcode_protocol::{message, one_or_many};
+// 这些都不需要改
+pub mod completion;                                // completion/message.rs 内部已 re-export
+pub mod one_or_many;                               // one_or_many.rs 内部已 re-export
+pub use completion::message;                       // crate::message 路径继续有效
+pub use one_or_many::{EmptyListError, OneOrMany};  // crate::OneOrMany 路径继续有效
 ```
 
-- [ ] **Step 12: Build entire workspace to verify**
+因为 `completion::message` 和 `one_or_many` 模块内部已改为 `pub use clawcode_protocol::...`, 
+provider 内部所有 `use crate::message::X` 和 `use crate::OneOrMany` 路径自动跟随，无需逐个文件修改。
+
+- [ ] **步骤7：构建全 workspace 验证**
 
 ```bash
 cargo check
 ```
 
-Fix any import errors.
+修复任何编译错误。如果有 provider 内部文件报了类型找不到的错误，检查对应的 `use` 路径是否需要从 `use crate::completion::message::X` 改为 `use crate::message::X`（后者更短，且因为 lib.rs 的 `pub use completion::message` 而有效）。
 
-- [ ] **Step 13: Run provider tests**
+- [ ] **步骤8：运行 provider 测试**
 
 ```bash
 cargo test -p provider
 ```
 
-- [ ] **Step 14: Commit**
+- [ ] **步骤9：提交**
 
 ```bash
 git add -A
@@ -820,17 +689,15 @@ EOF
 
 ---
 
-### Task 9: Implement protocol event types
+### 任务 9：实现 Event 流式事件类型
 
-**Files:**
-- Create: `crates/protocol/src/event.rs`
+**文件：**
+- 创建：`crates/protocol/src/event.rs`
 
-- [ ] **Step 1: Write event.rs**
+- [ ] **步骤1：编写 event.rs**
 
 ```rust
 //! Streaming event types emitted from the kernel to the frontend.
-
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -849,23 +716,20 @@ use crate::tool::ToolCallStatus;
 pub enum Event {
     /// Text delta from the assistant message.
     AgentMessageChunk {
-        /// Owning session.
         session_id: SessionId,
         /// Incremental text to append.
         text: String,
     },
     /// Reasoning / thinking delta from the assistant.
     AgentThoughtChunk {
-        /// Owning session.
         session_id: SessionId,
         /// Incremental thinking text to append.
         text: String,
     },
     /// A tool call was initiated by the assistant.
     ToolCall {
-        /// Owning session.
         session_id: SessionId,
-        /// Agent that made the tool call (relevant for sub-agents).
+        /// Agent that made the tool call.
         agent_path: AgentPath,
         /// Unique call identifier within the turn.
         call_id: String,
@@ -878,25 +742,22 @@ pub enum Event {
     },
     /// Incremental update to an active tool call.
     ToolCallUpdate {
-        /// Owning session.
         session_id: SessionId,
         /// The tool call being updated.
         call_id: String,
-        /// New output delta to append to the tool's terminal/log view.
+        /// New output delta to append.
         output_delta: Option<String>,
         /// Updated status, if changed.
         status: Option<ToolCallStatus>,
     },
     /// The agent's execution plan was created or updated.
     PlanUpdate {
-        /// Owning session.
         session_id: SessionId,
         /// Complete list of plan entries (replaces previous plan).
         entries: Vec<PlanEntry>,
     },
     /// Token usage information for the current turn.
     UsageUpdate {
-        /// Owning session.
         session_id: SessionId,
         /// Number of input (prompt) tokens consumed.
         input_tokens: u64,
@@ -905,14 +766,12 @@ pub enum Event {
     },
     /// The kernel is requesting user permission for a tool execution.
     PermissionRequested {
-        /// Owning session.
         session_id: SessionId,
         /// The permission request details.
         request: PermissionRequest,
     },
     /// A sub-agent's runtime status changed.
     AgentStatusChange {
-        /// Owning (parent) session.
         session_id: SessionId,
         /// The agent whose status changed.
         agent_path: AgentPath,
@@ -921,7 +780,6 @@ pub enum Event {
     },
     /// The current turn has completed.
     TurnComplete {
-        /// Owning session.
         session_id: SessionId,
         /// Reason the turn stopped.
         stop_reason: StopReason,
@@ -932,7 +790,7 @@ pub enum Event {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
-    /// Turn finished naturally (model returned a final response).
+    /// Turn finished normally.
     EndTurn,
     /// Turn was cancelled by the user.
     Cancelled,
@@ -941,13 +799,13 @@ pub enum StopReason {
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/event.rs
@@ -959,12 +817,12 @@ EOF
 
 ---
 
-### Task 10: Implement protocol op types
+### 任务 10：实现 Op 操作指令类型
 
-**Files:**
-- Create: `crates/protocol/src/op.rs`
+**文件：**
+- 创建：`crates/protocol/src/op.rs`
 
-- [ ] **Step 1: Write op.rs**
+- [ ] **步骤1：编写 op.rs**
 
 ```rust
 //! Operation types submitted from the frontend / client to the kernel.
@@ -980,83 +838,57 @@ use crate::session::SessionId;
 /// Operation submitted from the frontend / client to the kernel.
 ///
 /// Each variant represents a command the kernel should execute.
-/// Responses come back as streaming [`Event`](crate::event::Event)s.
+/// Responses come as streaming [`Event`](crate::event::Event)s.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     /// Create a new session at the given working directory.
-    NewSession {
-        /// Working directory for the session.
-        cwd: PathBuf,
-    },
+    NewSession { cwd: PathBuf },
     /// Load a previously persisted session.
-    LoadSession {
-        /// Session to load.
-        session_id: SessionId,
-    },
+    LoadSession { session_id: SessionId },
     /// Submit a user prompt to an active session.
     Prompt {
-        /// Target session.
         session_id: SessionId,
-        /// The user's message.
         message: Message,
     },
     /// Cancel the currently running turn in a session.
-    Cancel {
-        /// Target session.
-        session_id: SessionId,
-    },
+    Cancel { session_id: SessionId },
     /// Change the session's approval/sandboxing mode.
     SetMode {
-        /// Target session.
         session_id: SessionId,
-        /// New mode identifier.
         mode: String,
     },
     /// Switch the model for a session.
     SetModel {
-        /// Target session.
         session_id: SessionId,
-        /// Provider identifier.
         provider_id: String,
-        /// Model identifier within the provider.
         model_id: String,
     },
     /// Close a session and release its resources.
-    CloseSession {
-        /// Session to close.
-        session_id: SessionId,
-    },
+    CloseSession { session_id: SessionId },
     /// Spawn a sub-agent from a parent session.
     SpawnAgent {
-        /// Parent session that owns the new agent.
         parent_session: SessionId,
-        /// Hierarchical path for the new agent.
         agent_path: AgentPath,
-        /// Role preset to apply ("explorer", "worker", etc.).
         role: String,
-        /// Initial prompt for the sub-agent.
         prompt: String,
     },
     /// Deliver a message between agents.
     InterAgentMessage {
-        /// Sender agent path.
         from: AgentPath,
-        /// Recipient agent path.
         to: AgentPath,
-        /// Message content.
         content: String,
     },
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/op.rs
@@ -1068,12 +900,12 @@ EOF
 
 ---
 
-### Task 11: Implement kernel trait
+### 任务 11：实现 AgentKernel trait
 
-**Files:**
-- Create: `crates/protocol/src/kernel.rs`
+**文件：**
+- 创建：`crates/protocol/src/kernel.rs`
 
-- [ ] **Step 1: Write kernel.rs**
+- [ ] **步骤1：编写 kernel.rs**
 
 ```rust
 //! Agent kernel trait and associated error/stream types.
@@ -1085,7 +917,8 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use crate::agent::AgentPath;
-use crate::config::{ModelInfo, SessionMode};
+use crate::config::SessionMode;
+use crate::config::ModelInfo;
 use crate::event::Event;
 use crate::message::Message;
 use crate::session::{SessionCreated, SessionId, SessionInfo, SessionListPage};
@@ -1104,18 +937,12 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + S
 #[async_trait]
 pub trait AgentKernel: Send + Sync {
     /// Create a new session and return its ID plus available config.
-    ///
-    /// The kernel allocates a session with the given working directory
-    /// and optional MCP server configurations.
     async fn new_session(
         &self,
         cwd: PathBuf,
     ) -> Result<SessionCreated, KernelError>;
 
     /// Load a previously persisted session.
-    ///
-    /// Restores the session from its rollout history so the user can
-    /// continue an earlier conversation.
     async fn load_session(
         &self,
         session_id: &SessionId,
@@ -1131,7 +958,6 @@ pub trait AgentKernel: Send + Sync {
     /// Submit a user prompt, returning a stream of events.
     ///
     /// The stream yields events until the turn completes, then terminates.
-    /// Callers should poll the stream until it returns `None`.
     async fn prompt(
         &self,
         session_id: &SessionId,
@@ -1139,8 +965,6 @@ pub trait AgentKernel: Send + Sync {
     ) -> Result<EventStream, KernelError>;
 
     /// Cancel the currently running turn in a session.
-    ///
-    /// This interrupts the event stream returned by [`prompt`].
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError>;
 
     /// Set the session's approval/sandboxing mode.
@@ -1159,14 +983,9 @@ pub trait AgentKernel: Send + Sync {
     ) -> Result<(), KernelError>;
 
     /// Close a session and release its resources.
-    ///
-    /// After closing, the session ID is no longer valid.
     async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError>;
 
     /// Spawn a sub-agent in a parent session.
-    ///
-    /// The sub-agent runs independently and reports status changes
-    /// via [`Event::AgentStatusChange`] on the parent's event stream.
     async fn spawn_agent(
         &self,
         parent_session: &SessionId,
@@ -1175,50 +994,42 @@ pub trait AgentKernel: Send + Sync {
         prompt: &str,
     ) -> Result<(), KernelError>;
 
-    /// Get available modes for the kernel.
-    ///
-    /// Returns the list of approval/sandboxing mode presets the frontend
-    /// can offer for session configuration.
+    /// Return the available approval/sandboxing mode presets.
     fn available_modes(&self) -> Vec<SessionMode>;
 
-    /// Get available models from the configured providers.
+    /// Return the available models from configured providers.
     fn available_models(&self) -> Vec<ModelInfo>;
 }
 
 /// Error type for kernel operations.
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
-    /// The requested session was not found (never existed or already closed).
     #[error("session not found: {0}")]
     SessionNotFound(SessionId),
 
-    /// The requested agent was not found.
     #[error("agent not found: {0}")]
     AgentNotFound(AgentPath),
 
-    /// Authentication is required before this operation.
     #[error("authentication required")]
     AuthRequired,
 
-    /// The operation was cancelled by user request.
     #[error("operation cancelled")]
     Cancelled,
 
-    /// An unexpected internal error occurred.
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
 ```
 
-- [ ] **Step 2: Build to verify**
+- [ ] **步骤2：构建验证**
 
 ```bash
 cargo check -p clawcode-protocol
 ```
 
-Expected: Protocol crate fully compiles.
+预期：protocol crate 完全编译通过。
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤3：提交**
 
 ```bash
 git add crates/protocol/src/kernel.rs
@@ -1230,15 +1041,13 @@ EOF
 
 ---
 
-### Task 12: Implement kernel crate
+### 任务 12：实现 kernel crate
 
-**Files:**
-- Modify: `crates/kernel/Cargo.toml`
-- Modify: `crates/kernel/src/lib.rs`
+**文件：**
+- 修改：`crates/kernel/Cargo.toml`
+- 修改：`crates/kernel/src/lib.rs`
 
-- [ ] **Step 1: Update kernel Cargo.toml**
-
-Replace `crates/kernel/Cargo.toml`:
+- [ ] **步骤1：更新 kernel Cargo.toml**
 
 ```toml
 [package]
@@ -1264,9 +1073,7 @@ anyhow = { workspace = true }
 typed-builder = { workspace = true }
 ```
 
-- [ ] **Step 2: Write kernel lib.rs**
-
-Replace `crates/kernel/src/lib.rs`:
+- [ ] **步骤2：编写 kernel lib.rs**
 
 ```rust
 //! Clawcode agent kernel.
@@ -1280,43 +1087,33 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use futures::stream;
+use futures::Stream;
 use tokio::sync::Mutex;
 
 use clawcode_protocol::{
-    AgentKernel, AgentPath, AgentStatus, Event, KernelError, Message,
-    ModelInfo, SessionCreated, SessionId, SessionInfo, SessionListPage,
-    SessionMode, StopReason,
+    AgentKernel, AgentPath, AgentStatus, Event, KernelError,
+    Message, ModelInfo, SessionCreated, SessionId, SessionInfo,
+    SessionListPage, SessionMode, StopReason,
 };
 use clawcode_provider::factory::{ArcLlm, LlmFactory};
 use config::ConfigHandle;
 
-/// Central kernel struct that implements [`AgentKernel`].
-///
-/// Holds the LLM factory for model dispatch and a session registry
-/// for tracking active sessions.
+/// Central kernel struct implementing [`AgentKernel`].
 pub struct Kernel {
-    /// Shared LLM factory for dispatching provider/model requests.
     llm_factory: Arc<LlmFactory>,
-    /// Configuration handle for reading provider/model settings.
     config: ConfigHandle,
-    /// Active sessions keyed by [`SessionId`].
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
 }
 
 /// Per-session runtime handle.
 struct SessionHandle {
-    /// Working directory for the session.
     cwd: PathBuf,
-    /// Token used to signal cancellation.
     cancel_token: tokio::sync::watch::Sender<bool>,
 }
 
 impl Kernel {
-    /// Create a new kernel instance.
-    ///
-    /// The kernel is initialized with the given LLM factory and configuration
-    /// handle. No sessions are active on creation.
+    /// Create a new kernel instance with the given LLM factory and config.
     #[must_use]
     pub fn new(llm_factory: Arc<LlmFactory>, config: ConfigHandle) -> Self {
         Self {
@@ -1326,28 +1123,28 @@ impl Kernel {
         }
     }
 
-    /// Build the list of session modes from configuration.
+    /// Build available session modes.
     fn build_modes(&self) -> Vec<SessionMode> {
         vec![
-            SessionMode::builder()
-                .id("read-only".to_string())
-                .name("Read Only".to_string())
-                .description(Some("Agent cannot modify files".to_string()))
-                .build(),
-            SessionMode::builder()
-                .id("auto".to_string())
-                .name("Auto".to_string())
-                .description(Some("Agent asks for approval before making changes".to_string()))
-                .build(),
-            SessionMode::builder()
-                .id("full-access".to_string())
-                .name("Full Access".to_string())
-                .description(Some("Agent can modify files without approval".to_string()))
-                .build(),
+            SessionMode {
+                id: "read-only".to_string(),
+                name: "Read Only".to_string(),
+                description: Some("Agent cannot modify files".to_string()),
+            },
+            SessionMode {
+                id: "auto".to_string(),
+                name: "Auto".to_string(),
+                description: Some("Agent asks for approval before making changes".to_string()),
+            },
+            SessionMode {
+                id: "full-access".to_string(),
+                name: "Full Access".to_string(),
+                description: Some("Agent can modify files without approval".to_string()),
+            },
         ]
     }
 
-    /// Build the list of available models from the LLM configuration.
+    /// Build available models from LLM configuration.
     fn build_models(&self) -> Vec<ModelInfo> {
         let cfg = self.config.current();
         cfg.providers
@@ -1368,41 +1165,34 @@ impl Kernel {
 
 #[async_trait]
 impl AgentKernel for Kernel {
-    async fn new_session(
-        &self,
-        cwd: PathBuf,
-    ) -> Result<SessionCreated, KernelError> {
+    async fn new_session(&self, cwd: PathBuf) -> Result<SessionCreated, KernelError> {
         let session_id = SessionId(uuid::Uuid::new_v4().to_string());
         let (cancel_tx, _) = tokio::sync::watch::channel(false);
 
-        let handle = SessionHandle {
-            cwd: cwd.clone(),
-            cancel_token: cancel_tx,
-        };
+        self.sessions.lock().await.insert(
+            session_id.clone(),
+            SessionHandle {
+                cwd: cwd.clone(),
+                cancel_token: cancel_tx,
+            },
+        );
 
-        self.sessions.lock().await.insert(session_id.clone(), handle);
-
-        Ok(SessionCreated::builder()
-            .session_id(session_id)
-            .modes(self.build_modes())
-            .models(self.build_models())
-            .build())
+        Ok(SessionCreated {
+            session_id,
+            modes: self.build_modes(),
+            models: self.build_models(),
+        })
     }
 
-    async fn load_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionCreated, KernelError> {
-        // Check if session exists in our registry
+    async fn load_session(&self, session_id: &SessionId) -> Result<SessionCreated, KernelError> {
         if !self.sessions.lock().await.contains_key(session_id) {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         }
-
-        Ok(SessionCreated::builder()
-            .session_id(session_id.clone())
-            .modes(self.build_modes())
-            .models(self.build_models())
-            .build())
+        Ok(SessionCreated {
+            session_id: session_id.clone(),
+            modes: self.build_modes(),
+            models: self.build_models(),
+        })
     }
 
     async fn list_sessions(
@@ -1415,17 +1205,16 @@ impl AgentKernel for Kernel {
             .lock()
             .await
             .iter()
-            .map(|(id, handle)| {
-                SessionInfo::builder()
-                    .session_id(id.clone())
-                    .cwd(handle.cwd.clone())
-                    .build()
-            })
+            .map(|(id, handle)| SessionInfo::builder()
+                .session_id(id.clone())
+                .cwd(handle.cwd.clone())
+                .build())
             .collect();
 
-        Ok(SessionListPage::builder()
-            .sessions(sessions)
-            .build())
+        Ok(SessionListPage {
+            sessions,
+            next_cursor: None,
+        })
     }
 
     async fn prompt(
@@ -1436,13 +1225,12 @@ impl AgentKernel for Kernel {
         Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>,
         KernelError,
     > {
-        // Verify session exists
         if !self.sessions.lock().await.contains_key(session_id) {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         }
 
-        // For now return a simple stream that echoes back and completes
-        // Full LLM integration will be added in a subsequent plan
+        // Minimal stub: echoes input and completes.
+        // Full LLM integration will be added in a subsequent plan.
         let sid = session_id.clone();
         let events: Vec<Result<Event, KernelError>> = vec![
             Ok(Event::AgentMessageChunk {
@@ -1459,24 +1247,19 @@ impl AgentKernel for Kernel {
     }
 
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError> {
-        if let Some(handle) = self.sessions.lock().await.get(session_id) {
-            // Signal cancellation
-            let _ = handle.cancel_token.send(true);
-            Ok(())
-        } else {
-            Err(KernelError::SessionNotFound(session_id.clone()))
+        match self.sessions.lock().await.get(session_id) {
+            Some(handle) => {
+                let _ = handle.cancel_token.send(true);
+                Ok(())
+            }
+            None => Err(KernelError::SessionNotFound(session_id.clone())),
         }
     }
 
-    async fn set_mode(
-        &self,
-        session_id: &SessionId,
-        _mode: &str,
-    ) -> Result<(), KernelError> {
+    async fn set_mode(&self, session_id: &SessionId, _mode: &str) -> Result<(), KernelError> {
         if !self.sessions.lock().await.contains_key(session_id) {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         }
-        // Mode changes will be wired in subsequent implementation
         Ok(())
     }
 
@@ -1489,7 +1272,6 @@ impl AgentKernel for Kernel {
         if !self.sessions.lock().await.contains_key(session_id) {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         }
-        // Model changes will be wired in subsequent implementation
         Ok(())
     }
 
@@ -1510,7 +1292,7 @@ impl AgentKernel for Kernel {
         if !self.sessions.lock().await.contains_key(parent_session) {
             return Err(KernelError::SessionNotFound(parent_session.clone()));
         }
-        // Sub-agent spawning will be implemented in a subsequent plan
+        // Sub-agent spawning will be implemented in a subsequent plan.
         Ok(())
     }
 
@@ -1524,13 +1306,13 @@ impl AgentKernel for Kernel {
 }
 ```
 
-- [ ] **Step 3: Build to verify**
+- [ ] **步骤3：构建验证**
 
 ```bash
 cargo check -p kernel
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **步骤4：提交**
 
 ```bash
 git add crates/kernel/
@@ -1542,17 +1324,16 @@ EOF
 
 ---
 
-### Task 13: Create ACP bridge crate
+### 任务 13：创建 ACP 桥接 crate
 
-**Files:**
-- Create: `crates/acp/Cargo.toml`
-- Create: `crates/acp/src/lib.rs`
-- Create: `crates/acp/src/agent.rs`
-- Create: `crates/acp/src/translate.rs`
+**文件：**
+- 创建：`crates/acp/Cargo.toml`
+- 创建：`crates/acp/src/lib.rs`
+- 创建：`crates/acp/src/translate.rs`
+- 创建：`crates/acp/src/agent.rs`
+- 创建：`crates/acp/src/main.rs`
 
-- [ ] **Step 1: Create ACP crate Cargo.toml**
-
-Create `crates/acp/Cargo.toml`:
+- [ ] **步骤1：创建 Cargo.toml**
 
 ```toml
 [package]
@@ -1586,65 +1367,7 @@ thiserror = { workspace = true }
 typed-builder = { workspace = true }
 ```
 
-- [ ] **Step 2: Create ACP lib.rs**
-
-Create `crates/acp/src/lib.rs`:
-
-```rust
-//! Clawcode ACP bridge.
-//!
-//! Implements the Agent Client Protocol (ACP) over stdio,
-//! translating between the clawcode internal protocol and
-//! the ACP schema types for Zed editor integration.
-
-#![deny(clippy::print_stdout, clippy::print_stderr)]
-
-pub mod agent;
-pub mod translate;
-
-use std::sync::Arc;
-
-use agent_client_protocol::ByteStreams;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
-use clawcode_kernel::Kernel;
-use clawcode_protocol::AgentKernel;
-use clawcode_provider::factory::LlmFactory;
-
-/// Start the ACP agent over stdio transport.
-///
-/// This function initializes tracing, builds the ACP agent,
-/// and blocks until the transport closes.
-///
-/// # Errors
-///
-/// Returns an error if the ACP transport fails or the kernel
-/// encounters an unrecoverable error.
-pub async fn run(
-    kernel: Arc<dyn AgentKernel>,
-    llm_factory: Arc<LlmFactory>,
-) -> std::io::Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env(),
-        )
-        .init();
-
-    let stdin = tokio::io::stdin().compat();
-    let stdout = tokio::io::stdout().compat_write();
-
-    let agent = Arc::new(agent::ClawcodeAgent::new(kernel, llm_factory));
-    agent
-        .serve(ByteStreams::new(stdout, stdin))
-        .await
-        .map_err(|e| std::io::Error::other(format!("ACP error: {e}")))
-}
-```
-
-- [ ] **Step 3: Create ACP translate.rs**
-
-Create `crates/acp/src/translate.rs`:
+- [ ] **步骤2：创建 translate.rs**
 
 ```rust
 //! Type translation from clawcode internal types to ACP schema types.
@@ -1654,94 +1377,90 @@ Create `crates/acp/src/translate.rs`:
 
 use agent_client_protocol as acp;
 use acp::schema;
+use clawcode_protocol as proto;
 
 // ── StopReason ──
 
-impl From<clawcode_protocol::StopReason> for schema::StopReason {
-    fn from(r: clawcode_protocol::StopReason) -> Self {
+impl From<proto::StopReason> for schema::StopReason {
+    fn from(r: proto::StopReason) -> Self {
         match r {
-            clawcode_protocol::StopReason::EndTurn => Self::EndTurn,
-            clawcode_protocol::StopReason::Cancelled => Self::Cancelled,
-            clawcode_protocol::StopReason::Error => Self::Error,
+            proto::StopReason::EndTurn => Self::EndTurn,
+            proto::StopReason::Cancelled => Self::Cancelled,
+            proto::StopReason::Error => Self::Error,
         }
     }
 }
 
 // ── ToolCallStatus ──
 
-impl From<clawcode_protocol::ToolCallStatus> for schema::ToolCallStatus {
-    fn from(s: clawcode_protocol::ToolCallStatus) -> Self {
+impl From<proto::ToolCallStatus> for schema::ToolCallStatus {
+    fn from(s: proto::ToolCallStatus) -> Self {
         match s {
-            clawcode_protocol::ToolCallStatus::Pending => Self::Pending,
-            clawcode_protocol::ToolCallStatus::InProgress => Self::InProgress,
-            clawcode_protocol::ToolCallStatus::Completed => Self::Completed,
-            clawcode_protocol::ToolCallStatus::Failed => Self::Failed,
+            proto::ToolCallStatus::Pending => Self::Pending,
+            proto::ToolCallStatus::InProgress => Self::InProgress,
+            proto::ToolCallStatus::Completed => Self::Completed,
+            proto::ToolCallStatus::Failed => Self::Failed,
         }
     }
 }
 
 // ── PlanPriority ──
 
-impl From<clawcode_protocol::PlanPriority> for schema::PlanEntryPriority {
-    fn from(p: clawcode_protocol::PlanPriority) -> Self {
+impl From<proto::PlanPriority> for schema::PlanEntryPriority {
+    fn from(p: proto::PlanPriority) -> Self {
         match p {
-            clawcode_protocol::PlanPriority::Low => Self::Low,
-            clawcode_protocol::PlanPriority::Medium => Self::Medium,
-            clawcode_protocol::PlanPriority::High => Self::High,
+            proto::PlanPriority::Low => Self::Low,
+            proto::PlanPriority::Medium => Self::Medium,
+            proto::PlanPriority::High => Self::High,
         }
     }
 }
 
 // ── PlanStatus ──
 
-impl From<clawcode_protocol::PlanStatus> for schema::PlanEntryStatus {
-    fn from(s: clawcode_protocol::PlanStatus) -> Self {
+impl From<proto::PlanStatus> for schema::PlanEntryStatus {
+    fn from(s: proto::PlanStatus) -> Self {
         match s {
-            clawcode_protocol::PlanStatus::Pending => Self::Pending,
-            clawcode_protocol::PlanStatus::InProgress => Self::InProgress,
-            clawcode_protocol::PlanStatus::Completed => Self::Completed,
+            proto::PlanStatus::Pending => Self::Pending,
+            proto::PlanStatus::InProgress => Self::InProgress,
+            proto::PlanStatus::Completed => Self::Completed,
         }
     }
 }
 
 // ── PermissionOptionKind ──
 
-impl From<clawcode_protocol::PermissionOptionKind> for schema::PermissionOptionKind {
-    fn from(k: clawcode_protocol::PermissionOptionKind) -> Self {
+impl From<proto::PermissionOptionKind> for schema::PermissionOptionKind {
+    fn from(k: proto::PermissionOptionKind) -> Self {
         match k {
-            clawcode_protocol::PermissionOptionKind::AllowOnce => Self::AllowOnce,
-            clawcode_protocol::PermissionOptionKind::AllowAlways => Self::AllowAlways,
-            clawcode_protocol::PermissionOptionKind::RejectOnce => Self::RejectOnce,
-            clawcode_protocol::PermissionOptionKind::RejectAlways => Self::RejectAlways,
+            proto::PermissionOptionKind::AllowOnce => Self::AllowOnce,
+            proto::PermissionOptionKind::AllowAlways => Self::AllowAlways,
+            proto::PermissionOptionKind::RejectOnce => Self::RejectOnce,
+            proto::PermissionOptionKind::RejectAlways => Self::RejectAlways,
         }
     }
 }
 ```
 
-- [ ] **Step 4: Create ACP agent.rs**
-
-Create `crates/acp/src/agent.rs`:
+- [ ] **步骤3：创建 agent.rs**
 
 ```rust
-//! ACP Agent implementation bridging the clawcode kernel.
+//! ACP Agent bridging the clawcode kernel to the ACP protocol.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use acp::schema::{
-    AgentAuthCapabilities, AgentCapabilities, AuthMethod, AuthMethodEnvVar,
-    AuthEnvVar, AuthMethodId, AuthenticateRequest, AuthenticateResponse,
-    CancelNotification, ClientCapabilities, CloseSessionRequest,
-    CloseSessionResponse, Implementation, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LogoutCapabilities, LogoutRequest, LogoutResponse, McpCapabilities,
-    NewSessionRequest, NewSessionResponse, PromptCapabilities,
-    PromptRequest, PromptResponse, SessionCapabilities, SessionCloseCapabilities,
-    SessionListCapabilities, SessionId as AcpSessionId, SessionInfo as AcpSessionInfo,
+    AgentAuthCapabilities, AgentCapabilities, AuthenticateRequest,
+    AuthenticateResponse, CancelNotification, ClientCapabilities,
+    CloseSessionRequest, CloseSessionResponse, Implementation,
+    InitializeRequest, InitializeResponse, LogoutCapabilities,
+    McpCapabilities, NewSessionRequest, NewSessionResponse,
+    PromptCapabilities, PromptRequest, PromptResponse,
+    SessionCapabilities, SessionCloseCapabilities,
+    SessionListCapabilities, SessionId as AcpSessionId,
     SessionMode as AcpSessionMode, ModelInfo as AcpModelInfo,
     SetSessionModeRequest, SetSessionModeResponse,
     SetSessionModelRequest, SetSessionModelResponse,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
 };
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
@@ -1749,16 +1468,12 @@ use agent_client_protocol as acp;
 use clawcode_protocol::{AgentKernel, SessionId};
 use clawcode_provider::factory::LlmFactory;
 
-use crate::translate::*;
-
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
-///
-/// Wraps a kernel reference and LLM factory, registers handlers
-/// for all ACP request/notification methods, and translates
-/// between ACP schema types and internal protocol types.
 pub struct ClawcodeAgent {
     kernel: Arc<dyn AgentKernel>,
+    #[allow(dead_code)]
     llm_factory: Arc<LlmFactory>,
+    #[allow(dead_code)]
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
 }
 
@@ -1776,15 +1491,12 @@ impl ClawcodeAgent {
         }
     }
 
-    /// Convert an internal `SessionId` to an ACP `SessionId`.
+    /// Convert an internal SessionId to an ACP SessionId.
     fn to_acp_session_id(id: &SessionId) -> AcpSessionId {
         AcpSessionId::new(id.0.clone())
     }
 
     /// Build and serve the ACP agent over the given transport.
-    ///
-    /// Registers handlers for all supported ACP methods and connects
-    /// to the transport. Blocks until the transport closes.
     pub async fn serve(
         self: Arc<Self>,
         transport: impl ConnectTo<Agent> + 'static,
@@ -1862,8 +1574,11 @@ impl ClawcodeAgent {
                                 cx: ConnectionTo<Client>| {
                         let agent = agent.clone();
                         cx.spawn(async move {
-                            if let Err(e) = agent.handle_cancel(notification).await {
-                                tracing::error!("Error handling cancel: {:?}", e);
+                            if let Err(e) = agent.handle_cancel(notification).await
+                            {
+                                tracing::error!(
+                                    "Error handling cancel: {:?}", e
+                                );
                             }
                             Ok(())
                         })?;
@@ -1935,7 +1650,7 @@ impl ClawcodeAgent {
     ) -> Result<InitializeResponse, Error> {
         let protocol_version = acp::schema::ProtocolVersion::V1;
 
-        let agent_capabilities = AgentCapabilities::new()
+        let mut caps = AgentCapabilities::new()
             .prompt_capabilities(
                 PromptCapabilities::new()
                     .embedded_context(true)
@@ -1948,8 +1663,6 @@ impl ClawcodeAgent {
                     .logout(LogoutCapabilities::new()),
             );
 
-        let agent_capabilities = agent_capabilities;
-        let mut caps = agent_capabilities;
         caps.session_capabilities = SessionCapabilities::new()
             .close(SessionCloseCapabilities::new())
             .list(SessionListCapabilities::new());
@@ -1957,8 +1670,11 @@ impl ClawcodeAgent {
         Ok(InitializeResponse::new(protocol_version)
             .agent_capabilities(caps)
             .agent_info(
-                Implementation::new("clawcode-acp", env!("CARGO_PKG_VERSION"))
-                    .title("Clawcode"),
+                Implementation::new(
+                    "clawcode-acp",
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .title("Clawcode"),
             ))
     }
 
@@ -1966,8 +1682,6 @@ impl ClawcodeAgent {
         &self,
         _request: AuthenticateRequest,
     ) -> Result<AuthenticateResponse, Error> {
-        // For now, authentication is a no-op
-        // Future: integrate API key validation
         Ok(AuthenticateResponse::new())
     }
 
@@ -2024,20 +1738,14 @@ impl ClawcodeAgent {
         &self,
         request: PromptRequest,
     ) -> Result<PromptResponse, Error> {
-        let session_id = SessionId(request.session_id.0.clone());
+        let _session_id = SessionId(request.session_id.0.clone());
 
-        let message = clawcode_protocol::Message::user("prompt");
-        let stop_reason = self
-            .kernel
-            .prompt(&session_id, message)
-            .await
-            .map_err(|e| Error::internal_error().data(e.to_string()))?;
+        // Minimal stub: echoes back via a user message.
+        // Full event translation loop will be implemented in a subsequent plan.
+        let stop_reason =
+            acp::schema::StopReason::EndTurn;
 
-        // TODO: Full event translation loop — consume EventStream
-        // and convert each Event to ACP SessionUpdate notifications
-        drop(stop_reason);
-
-        Ok(PromptResponse::new(acp::schema::StopReason::EndTurn))
+        Ok(PromptResponse::new(stop_reason))
     }
 
     async fn handle_cancel(
@@ -2068,7 +1776,7 @@ impl ClawcodeAgent {
         request: SetSessionModelRequest,
     ) -> Result<SetSessionModelResponse, Error> {
         let session_id = SessionId(request.session_id.0.clone());
-        // model_id format is "provider_id/model_id"
+        // model_id format: "provider_id/model_id"
         let parts: Vec<&str> = request.model_id.0.splitn(2, '/').collect();
         let (provider_id, model_id) = if parts.len() == 2 {
             (parts[0], parts[1])
@@ -2096,9 +1804,57 @@ impl ClawcodeAgent {
 }
 ```
 
-- [ ] **Step 5: Create ACP main.rs**
+- [ ] **步骤4：创建 lib.rs**
 
-Create `crates/acp/src/main.rs`:
+```rust
+//! Clawcode ACP bridge.
+//!
+//! Implements the Agent Client Protocol (ACP) over stdio,
+//! translating between the clawcode internal protocol and
+//! the ACP schema types for Zed editor integration.
+
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
+pub mod agent;
+pub mod translate;
+
+use std::sync::Arc;
+
+use agent_client_protocol::ByteStreams;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+use clawcode_protocol::AgentKernel;
+use clawcode_provider::factory::LlmFactory;
+
+/// Start the ACP agent over stdio transport.
+///
+/// # Errors
+///
+/// Returns an error if the ACP transport fails or the kernel
+/// encounters an unrecoverable error.
+pub async fn run(
+    kernel: Arc<dyn AgentKernel>,
+    llm_factory: Arc<LlmFactory>,
+) -> std::io::Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env(),
+        )
+        .init();
+
+    let stdin = tokio::io::stdin().compat();
+    let stdout = tokio::io::stdout().compat_write();
+
+    let agent = Arc::new(agent::ClawcodeAgent::new(kernel, llm_factory));
+    agent
+        .serve(ByteStreams::new(stdout, stdin))
+        .await
+        .map_err(|e| std::io::Error::other(format!("ACP error: {e}")))
+}
+```
+
+- [ ] **步骤5：创建 main.rs**
 
 ```rust
 //! Entry point for the clawcode ACP binary.
@@ -2119,18 +1875,16 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-- [ ] **Step 6: Build entire workspace**
+- [ ] **步骤6：构建全 workspace**
 
 ```bash
 cargo check
 ```
 
-Fix any compilation errors.
-
-- [ ] **Step 7: Commit**
+- [ ] **步骤7：提交**
 
 ```bash
-git add crates/acp/ crates/kernel/Cargo.toml
+git add crates/acp/
 git commit -m "$(cat <<'EOF'
 feat(acp): add ACP bridge crate with handler registration and type translations
 EOF
@@ -2139,27 +1893,27 @@ EOF
 
 ---
 
-### Task 14: Final workspace verification
+### 任务 14：最终验证
 
-- [ ] **Step 1: Build entire workspace**
+- [ ] **步骤1：构建全 workspace**
 
 ```bash
 cargo build
 ```
 
-- [ ] **Step 2: Run all tests**
+- [ ] **步骤2：运行全部测试**
 
 ```bash
 cargo test
 ```
 
-- [ ] **Step 3: Run clippy**
+- [ ] **步骤3：运行 clippy**
 
 ```bash
 cargo clippy -- -D warnings
 ```
 
-- [ ] **Step 4: Commit any fixes**
+- [ ] **步骤4：修复并提交**
 
 ```bash
 git add -A && git commit -m "$(cat <<'EOF'
