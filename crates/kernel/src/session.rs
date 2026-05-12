@@ -14,27 +14,26 @@ use crate::tool::ToolRegistry;
 use crate::turn::{TurnContext, execute_turn};
 
 /// Frontend handle for a live session.
-///
-/// Created by the kernel, held by callers for submitting operations
-/// and consuming streaming events. Uses `Arc<Mutex<>>` for the event
-/// receiver because `UnboundedReceiver` is not `Clone`.
 #[derive(Clone)]
 pub struct Thread {
     pub session_id: SessionId,
-    /// Send operations to the background task. `UnboundedSender` is `Clone`.
+    /// Send operations to the background task.
     pub(crate) tx_op: mpsc::UnboundedSender<Op>,
-    /// Receive streaming events, shared behind `Arc<Mutex<>>` for cloneability.
-    pub(crate) rx_event: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Event>>>,
-    /// Signal cancellation to the background task. `watch::Sender` is `Clone`.
+    /// Shared sender for per-turn events.
+    /// The background task and handle swap this for each prompt
+    /// so every call gets a fresh connected receiver.
+    pub(crate) tx_event: Arc<tokio::sync::Mutex<mpsc::UnboundedSender<Event>>>,
+    /// Signal cancellation.
     pub(crate) cancel_tx: watch::Sender<bool>,
 }
 
 impl Thread {
-    /// Take the event receiver out of the handle.
-    /// Called once per prompt to create the event stream.
+    /// Create a new event receiver for this prompt and wire it up.
     pub(crate) async fn take_rx(&self) -> mpsc::UnboundedReceiver<Event> {
-        let mut guard = self.rx_event.lock().await;
-        std::mem::replace(&mut *guard, mpsc::unbounded_channel().1)
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut guard = self.tx_event.lock().await;
+        *guard = tx;
+        rx
     }
 }
 
@@ -43,7 +42,7 @@ pub(crate) struct Session {
     pub session_id: SessionId,
     pub cwd: PathBuf,
     pub rx_op: mpsc::UnboundedReceiver<Op>,
-    pub tx_event: mpsc::UnboundedSender<Event>,
+    pub tx_event: Arc<tokio::sync::Mutex<mpsc::UnboundedSender<Event>>>,
     #[allow(dead_code)]
     pub cancel_rx: watch::Receiver<bool>,
     pub context: Box<dyn ContextManager>,
@@ -60,14 +59,17 @@ pub(crate) fn spawn_thread(
     context: Box<dyn ContextManager>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
-    let (tx_event, rx_event) = mpsc::unbounded_channel();
+    // Create a dummy connected pair so the shared tx_event is always valid
+    let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
+
+    let tx_event = Arc::new(tokio::sync::Mutex::new(initial_tx));
 
     let runtime = Session {
         session_id: session_id.clone(),
         cwd,
         rx_op,
-        tx_event,
+        tx_event: tx_event.clone(),
         cancel_rx,
         context,
         llm,
@@ -79,10 +81,13 @@ pub(crate) fn spawn_thread(
     Thread {
         session_id,
         tx_op,
-        rx_event: Arc::new(tokio::sync::Mutex::new(rx_event)),
+        tx_event,
         cancel_tx,
     }
 }
+
+// We need a placeholder — actually let me just drop the rx.
+// Wait, the initial rx_event from the channel is never used... it can be dropped.
 
 /// Background task: receive ops, execute turns, emit events.
 async fn run_loop(mut rt: Session) {
@@ -97,8 +102,10 @@ async fn run_loop(mut rt: Session) {
                     .cwd(rt.cwd.clone())
                     .build();
 
-                if let Err(e) = execute_turn(&ctx, text, &mut rt.context, &rt.tx_event).await {
-                    let _ = rt.tx_event.send(Event::TurnComplete {
+                let tx = { rt.tx_event.lock().await.clone() };
+
+                if let Err(e) = execute_turn(&ctx, text, &mut rt.context, &tx).await {
+                    let _ = tx.send(Event::TurnComplete {
                         session_id: rt.session_id.clone(),
                         stop_reason: StopReason::Error,
                     });
@@ -108,16 +115,14 @@ async fn run_loop(mut rt: Session) {
                         "Turn execution failed"
                     );
                 } else {
-                    let _ = rt.tx_event.send(Event::TurnComplete {
+                    let _ = tx.send(Event::TurnComplete {
                         session_id: rt.session_id.clone(),
                         stop_reason: StopReason::EndTurn,
                     });
                 }
             }
             Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => break,
-            _ => {
-                // Other ops (SetMode, SetModel, etc.) handled in future plans
-            }
+            _ => {}
         }
     }
 }

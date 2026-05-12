@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("\n{} ({:?})", tc.title, tc.status);
                     }
                     SessionUpdate::UsageUpdate(u) => {
-                        eprintln!("\n[usage] {} tokens", u.used);
+                        eprintln!("\n{} tokens", u.used);
                     }
                     other => {
                         eprintln!("\n[debug] unhandled: {:?}", other);
