@@ -6,12 +6,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent,
-};
+use agent_client_protocol::schema::*;
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
 use kernel::Kernel;
 use provider::factory::LlmFactory;
@@ -71,13 +66,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     SessionUpdate::ToolCall(tc) => {
-                        eprintln!(
-                            "\n  [{status}] {name}",
-                            status = format!("{:?}", tc.status).to_lowercase(),
-                            name = tc.title,
-                        );
+                        let status = format!("{:?}", tc.status).to_lowercase();
+                        let args = tc
+                            .raw_input
+                            .as_ref()
+                            .map(|v| format!(" {}", v))
+                            .unwrap_or_default();
+                        eprintln!("\n  [{status}] {name}{args}", name = tc.title,);
                     }
                     SessionUpdate::ToolCallUpdate(u) => {
+                        if let Some(s) = &u.fields.status {
+                            let s = format!("{:?}", s).to_lowercase();
+                            eprintln!("  [{s}] {id}", id = u.tool_call_id);
+                        }
                         if let Some(content) = &u.fields.content {
                             for c in content {
                                 let agent_client_protocol::schema::ToolCallContent::Content(ct) = c
@@ -87,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let ContentBlock::Text(t) = &ct.content else {
                                     continue;
                                 };
-                                eprintln!("  -> {}", t.text);
+                                eprint!("{}", t.text);
                             }
                         }
                     }
@@ -106,8 +107,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                   _cx| {
                 let stdin = stdin_approval.clone();
                 async move {
-                    eprintln!("\n  == Approval Request ==");
-                    eprintln!("  Tool: {}", req.tool_call.tool_call_id);
+                    let title = req.tool_call.fields.title.as_deref().unwrap_or("?");
+                    let desc = req
+                        .tool_call
+                        .fields
+                        .content
+                        .as_ref()
+                        .and_then(|c| {
+                            c.first().and_then(|cc| match cc {
+                                agent_client_protocol::schema::ToolCallContent::Content(ct) => {
+                                    match &ct.content {
+                                        ContentBlock::Text(t) => Some(t.text.as_str()),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or("");
+                    eprintln!("\n  ══ Approve: {title} ══");
+                    if !desc.is_empty() {
+                        eprintln!("  {desc}");
+                    }
                     for opt in &req.options {
                         eprintln!("    [{}] {}", opt.option_id, opt.name);
                     }

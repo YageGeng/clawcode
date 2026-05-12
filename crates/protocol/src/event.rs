@@ -10,6 +10,29 @@ use crate::plan::PlanEntry;
 use crate::session::SessionId;
 use crate::tool::ToolCallStatus;
 
+/// The content of a streamed tool-call delta.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolCallDeltaContent {
+    /// Tool/function name delivered by the provider.
+    Name(String),
+    /// Partial JSON argument data delivered by the provider.
+    Delta(String),
+}
+
+impl ToolCallDeltaContent {
+    /// Create a `Name` content from a string.
+    #[inline(always)]
+    pub fn name(name: impl Into<String>) -> Self {
+        ToolCallDeltaContent::Name(name.into())
+    }
+
+    /// Create a `Delta` content from a string.
+    #[inline(always)]
+    pub fn delta(delta: impl Into<String>) -> Self {
+        ToolCallDeltaContent::Delta(delta.into())
+    }
+}
+
 /// Streaming event emitted from the kernel to the frontend.
 ///
 /// Each event carries a `session_id` and represents a discrete update
@@ -42,6 +65,14 @@ pub enum Event {
         arguments: serde_json::Value,
         /// Current execution status.
         status: ToolCallStatus,
+    },
+    /// Incremental tool call parameter streaming from the LLM.
+    ToolCallDelta {
+        session_id: SessionId,
+        /// Matches the upcoming ToolCall event id.
+        call_id: String,
+        /// Tool name or arguments fragment.
+        content: ToolCallDeltaContent,
     },
     /// Incremental update to an active tool call.
     ToolCallUpdate {
@@ -99,6 +130,152 @@ pub enum Event {
         /// Reason the turn stopped.
         stop_reason: StopReason,
     },
+}
+
+impl Event {
+    /// Create an `AgentMessageChunk` event.
+    #[inline(always)]
+    pub fn message_chunk(session_id: impl Into<SessionId>, text: impl Into<String>) -> Self {
+        Event::AgentMessageChunk {
+            session_id: session_id.into(),
+            text: text.into(),
+        }
+    }
+
+    /// Create an `AgentThoughtChunk` event for reasoning / thinking deltas.
+    #[inline(always)]
+    pub fn thought_chunk(session_id: impl Into<SessionId>, text: impl Into<String>) -> Self {
+        Event::AgentThoughtChunk {
+            session_id: session_id.into(),
+            text: text.into(),
+        }
+    }
+
+    /// Create a `ToolCall` event.
+    #[inline(always)]
+    pub fn tool_call(
+        session_id: impl Into<SessionId>,
+        agent_path: impl Into<AgentPath>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<serde_json::Value>,
+        status: ToolCallStatus,
+    ) -> Self {
+        Event::ToolCall {
+            session_id: session_id.into(),
+            agent_path: agent_path.into(),
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            status,
+        }
+    }
+
+    /// Create a `ToolCallDelta` event for streaming tool call parameter updates.
+    #[inline(always)]
+    pub fn tool_call_delta(
+        session_id: impl Into<SessionId>,
+        call_id: impl Into<String>,
+        content: ToolCallDeltaContent,
+    ) -> Self {
+        Event::ToolCallDelta {
+            session_id: session_id.into(),
+            call_id: call_id.into(),
+            content,
+        }
+    }
+
+    /// Create a `ToolCallUpdate` event for incremental tool output or status changes.
+    #[inline(always)]
+    pub fn tool_call_update(
+        session_id: impl Into<SessionId>,
+        call_id: impl Into<String>,
+        output_delta: Option<String>,
+        status: Option<ToolCallStatus>,
+    ) -> Self {
+        Event::ToolCallUpdate {
+            session_id: session_id.into(),
+            call_id: call_id.into(),
+            output_delta,
+            status,
+        }
+    }
+
+    /// Create a `UsageUpdate` event with token consumption info.
+    #[inline(always)]
+    pub fn usage_update(
+        session_id: impl Into<SessionId>,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Self {
+        Event::UsageUpdate {
+            session_id: session_id.into(),
+            input_tokens,
+            output_tokens,
+        }
+    }
+
+    /// Create a `TurnComplete` event.
+    #[inline(always)]
+    pub fn turn_complete(session_id: impl Into<SessionId>, stop_reason: StopReason) -> Self {
+        Event::TurnComplete {
+            session_id: session_id.into(),
+            stop_reason,
+        }
+    }
+
+    /// Create an `ExecApprovalRequested` event to request user approval before tool execution.
+    #[inline(always)]
+    pub fn exec_approval(
+        session_id: impl Into<SessionId>,
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: impl Into<serde_json::Value>,
+        cwd: impl Into<PathBuf>,
+    ) -> Self {
+        Event::ExecApprovalRequested {
+            session_id: session_id.into(),
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            arguments: arguments.into(),
+            cwd: cwd.into(),
+        }
+    }
+
+    /// Create a `PlanUpdate` event.
+    #[inline(always)]
+    pub fn plan_update(session_id: impl Into<SessionId>, entries: Vec<PlanEntry>) -> Self {
+        Event::PlanUpdate {
+            session_id: session_id.into(),
+            entries,
+        }
+    }
+
+    /// Create a `PermissionRequested` event.
+    #[inline(always)]
+    pub fn permission_requested(
+        session_id: impl Into<SessionId>,
+        request: PermissionRequest,
+    ) -> Self {
+        Event::PermissionRequested {
+            session_id: session_id.into(),
+            request,
+        }
+    }
+
+    /// Create an `AgentStatusChange` event for sub-agent lifecycle tracking.
+    #[inline(always)]
+    pub fn agent_status_change(
+        session_id: impl Into<SessionId>,
+        agent_path: impl Into<AgentPath>,
+        status: AgentStatus,
+    ) -> Self {
+        Event::AgentStatusChange {
+            session_id: session_id.into(),
+            agent_path: agent_path.into(),
+            status,
+        }
+    }
 }
 
 /// Reason a turn completed.

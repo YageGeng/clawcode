@@ -3,19 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use acp::schema::{
-    AgentAuthCapabilities, AgentCapabilities, AuthenticateRequest, AuthenticateResponse,
-    CancelNotification, ClientCapabilities, CloseSessionRequest, CloseSessionResponse, Content,
-    ContentBlock, ContentChunk, Implementation, InitializeRequest, InitializeResponse,
-    LogoutCapabilities, McpCapabilities, ModelInfo as AcpModelInfo, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
-    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
-    SessionCloseCapabilities, SessionId as AcpSessionId, SessionListCapabilities,
-    SessionMode as AcpSessionMode, SessionModeState, SessionModelState, SessionNotification,
-    SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
-    SetSessionModelResponse, StopReason as AcpStopReason, TextContent, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallStatus, ToolCallStatus as AcpToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, UsageUpdate,
+    ModelInfo as AcpModelInfo, SessionId as AcpSessionId, SessionMode as AcpSessionMode,
+    StopReason as AcpStopReason, ToolCallStatus as AcpToolCallStatus, *,
 };
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
@@ -312,16 +301,36 @@ impl ClawcodeAgent {
                     let update = SessionUpdate::AgentThoughtChunk(chunk);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }
+                Event::ToolCallDelta {
+                    call_id, content, ..
+                } => {
+                    // Stream incremental tool call building to the client.
+                    let mut fields = ToolCallUpdateFields::default();
+                    match content {
+                        protocol::event::ToolCallDeltaContent::Name(n) => {
+                            fields.title = Some(n);
+                        }
+                        protocol::event::ToolCallDeltaContent::Delta(d) => {
+                            fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                                ContentBlock::Text(TextContent::new(d)),
+                            ))]);
+                        }
+                    }
+                    let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
+                    let update = SessionUpdate::ToolCallUpdate(update_val);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
                 Event::ToolCall {
                     call_id,
                     name,
-                    arguments: _,
+                    arguments,
                     status,
                     ..
                 } => {
                     let acp_status: AcpToolCallStatus = status.into();
-                    let tool_call =
-                        ToolCall::new(ToolCallId::new(call_id), name).status(acp_status);
+                    let tool_call = ToolCall::new(ToolCallId::new(call_id), name)
+                        .status(acp_status)
+                        .raw_input(arguments);
                     let update = SessionUpdate::ToolCall(tool_call);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }

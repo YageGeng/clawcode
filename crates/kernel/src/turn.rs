@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent};
 use protocol::one_or_many::OneOrMany;
-use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId, ToolCallStatus};
+use protocol::{
+    AgentPath, Event, KernelError, ReviewDecision, SessionId, ToolCallDeltaContent, ToolCallStatus,
+};
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
 
@@ -28,7 +30,8 @@ pub(crate) struct TurnContext {
     pub tools: Arc<ToolRegistry>,
     /// Working directory for the session.
     pub cwd: PathBuf,
-    /// Pending approval channels shared with the session background task.
+    /// Pending approval channels. execute_turn inserts a oneshot sender;
+    /// the session background task resolves it when the user responds.
     #[builder(default)]
     pub pending_approvals:
         Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
@@ -44,12 +47,11 @@ pub(crate) async fn execute_turn(
     context: &mut Box<dyn ContextManager>,
     tx_event: &mpsc::UnboundedSender<Event>,
 ) -> Result<(), KernelError> {
-    // Push user message
     context.push(Message::user(user_text));
 
     let tool_defs = ctx.tools.definitions();
+    let sid = &ctx.session_id;
 
-    // Multi-turn tool loop — runs until the LLM responds without tool calls
     loop {
         let history = context.history();
         let history = OneOrMany::many(history).map_err(|e| KernelError::Internal(e.into()))?;
@@ -76,35 +78,30 @@ pub(crate) async fn execute_turn(
 
             match event {
                 LlmStreamEvent::Text(text) => {
-                    assistant_content.push(AssistantContent::Text(text.clone()));
-                    let _ = tx_event.send(Event::AgentMessageChunk {
-                        session_id: ctx.session_id.clone(),
-                        text: text.text,
-                    });
+                    assistant_content.push(AssistantContent::text(&text.text));
+                    let _ = tx_event.send(Event::message_chunk(sid.clone(), text.text));
                 }
                 LlmStreamEvent::ToolCall {
                     mut tool_call,
                     internal_call_id,
                 } => {
-                    // DeepSeek/OpenAI-compatible streams may omit the provider id; use the
-                    // internal id so assistant tool_calls and tool results still pair.
                     if tool_call.id.is_empty() {
                         tool_call.id = internal_call_id.clone();
                     }
 
-                    let _ = tx_event.send(Event::ToolCall {
-                        session_id: ctx.session_id.clone(),
-                        agent_path: AgentPath::root(),
-                        call_id: internal_call_id.clone(),
-                        name: tool_call.function.name.clone(),
-                        arguments: tool_call.function.arguments.clone(),
-                        status: ToolCallStatus::Pending,
-                    });
+                    let _ = tx_event.send(Event::tool_call(
+                        sid.clone(),
+                        AgentPath::root(),
+                        internal_call_id.clone(),
+                        tool_call.function.name.clone(),
+                        tool_call.function.arguments.clone(),
+                        ToolCallStatus::Pending,
+                    ));
 
                     let needs_approval = ctx
                         .tools
                         .get(&tool_call.function.name)
-                        .is_some_and(|t| t.needs_approval(&tool_call.function.arguments));
+                        .is_some_and(|tool| tool.needs_approval(&tool_call.function.arguments));
 
                     let output = if needs_approval {
                         match request_tool_approval(
@@ -125,14 +122,8 @@ pub(crate) async fn execute_turn(
                                     )
                                     .await
                             }
-                            ReviewDecision::Abort => {
-                                return Err(KernelError::Cancelled);
-                            }
-                            _ => {
-                                // Rejected: still register the tool call + result
-                                // so the API history is consistent
-                                Err("rejected by user".to_string())
-                            }
+                            ReviewDecision::Abort => return Err(KernelError::Cancelled),
+                            _ => Err("rejected by user".to_string()),
                         }
                     } else {
                         ctx.tools
@@ -144,60 +135,65 @@ pub(crate) async fn execute_turn(
                             .await
                     };
 
-                    match output {
-                        Ok(out) => {
-                            assistant_content.push(AssistantContent::ToolCall(tool_call.clone()));
-                            tool_outputs.push(ToolOutput {
-                                id: tool_call.id.clone(),
-                                call_id: tool_call.call_id.clone(),
-                                output: out.clone(),
-                            });
-                            let _ = tx_event.send(Event::ToolCallUpdate {
-                                session_id: ctx.session_id.clone(),
-                                call_id: internal_call_id,
-                                output_delta: Some(out),
-                                status: Some(ToolCallStatus::Completed),
-                            });
-                        }
-                        Err(err) => {
-                            assistant_content.push(AssistantContent::ToolCall(tool_call.clone()));
-                            tool_outputs.push(ToolOutput {
-                                id: tool_call.id.clone(),
-                                call_id: tool_call.call_id.clone(),
-                                output: err.clone(),
-                            });
-                            let _ = tx_event.send(Event::ToolCallUpdate {
-                                session_id: ctx.session_id.clone(),
-                                call_id: internal_call_id,
-                                output_delta: Some(err),
-                                status: Some(ToolCallStatus::Failed),
-                            });
-                        }
-                    }
+                    let succeeded = output.is_ok();
+
+                    let text = output.as_ref().map_or_else(|e| e.clone(), Clone::clone);
+
+                    assistant_content.push(AssistantContent::ToolCall(tool_call.clone()));
+                    tool_outputs.push(ToolOutput {
+                        id: tool_call.id.clone(),
+                        call_id: tool_call.call_id.clone(),
+                        output: text.clone(),
+                    });
+                    let _ = tx_event.send(Event::tool_call_update(
+                        sid.clone(),
+                        internal_call_id,
+                        Some(text),
+                        Some(if succeeded {
+                            ToolCallStatus::Completed
+                        } else {
+                            ToolCallStatus::Failed
+                        }),
+                    ));
                 }
                 LlmStreamEvent::Reasoning(reasoning) => {
                     let text = reasoning.display_text();
                     assistant_content.push(AssistantContent::Reasoning(reasoning));
-                    let _ = tx_event.send(Event::AgentThoughtChunk {
-                        session_id: ctx.session_id.clone(),
-                        text,
-                    });
+                    let _ = tx_event.send(Event::thought_chunk(sid.clone(), text));
                 }
                 LlmStreamEvent::ReasoningDelta { reasoning, .. } => {
                     reasoning_text.push_str(&reasoning);
-                    let _ = tx_event.send(Event::AgentThoughtChunk {
-                        session_id: ctx.session_id.clone(),
-                        text: reasoning,
-                    });
+                    let _ = tx_event.send(Event::thought_chunk(sid.clone(), reasoning));
+                }
+                LlmStreamEvent::ToolCallDelta {
+                    internal_call_id,
+                    content,
+                    ..
+                } => {
+                    let content = match content {
+                        provider::streaming::ToolCallDeltaContent::Name(name) => {
+                            ToolCallDeltaContent::name(name)
+                        }
+                        provider::streaming::ToolCallDeltaContent::Delta(delta) => {
+                            ToolCallDeltaContent::delta(delta)
+                        }
+                    };
+
+                    // Forward incremental tool call arguments to the frontend.
+                    let _ = tx_event.send(Event::tool_call_delta(
+                        sid.clone(),
+                        internal_call_id,
+                        content,
+                    ));
                 }
                 LlmStreamEvent::Final {
                     usage: Some(usage), ..
                 } => {
-                    let _ = tx_event.send(Event::UsageUpdate {
-                        session_id: ctx.session_id.clone(),
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                    });
+                    let _ = tx_event.send(Event::usage_update(
+                        sid.clone(),
+                        usage.input_tokens,
+                        usage.output_tokens,
+                    ));
                 }
                 _ => {}
             }
@@ -254,6 +250,8 @@ struct ToolOutput {
 }
 
 /// Request approval for a tool call and return the frontend decision.
+/// Blocks on a oneshot channel until the session background task
+/// receives the user's response.
 async fn request_tool_approval(
     ctx: &TurnContext,
     tx_event: &mpsc::UnboundedSender<Event>,
@@ -267,13 +265,13 @@ async fn request_tool_approval(
         approvals.insert(call_id.to_string(), tx_approve);
     }
 
-    let event = Event::ExecApprovalRequested {
-        session_id: ctx.session_id.clone(),
-        call_id: call_id.to_string(),
-        tool_name: tool_name.to_string(),
+    let event = Event::exec_approval(
+        ctx.session_id.clone(),
+        call_id.to_string(),
+        tool_name.to_string(),
         arguments,
-        cwd: ctx.cwd.clone(),
-    };
+        ctx.cwd.clone(),
+    );
 
     if tx_event.send(event).is_err() {
         ctx.pending_approvals.lock().await.remove(call_id);

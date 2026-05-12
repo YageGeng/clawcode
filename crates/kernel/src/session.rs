@@ -126,36 +126,36 @@ async fn run_loop(mut rt: Session) {
 
                 let turn = execute_turn(&ctx, text, &mut rt.context, &tx);
                 tokio::pin!(turn);
+
                 loop {
                     tokio::select! {
                         result = &mut turn => {
                             if let Err(e) = result {
-                                let _ = tx.send(Event::TurnComplete {
-                                    session_id: rt.session_id.clone(),
-                                    stop_reason: StopReason::Error,
-                                });
+                                let _ = tx.send(Event::turn_complete(
+                                    rt.session_id.clone(),
+                                    StopReason::Error,
+                                ));
                                 tracing::error!(
                                     session_id = %rt.session_id,
                                     error = %e,
                                     "Turn execution failed"
                                 );
                             } else {
-                                let _ = tx.send(Event::TurnComplete {
-                                    session_id: rt.session_id.clone(),
-                                    stop_reason: StopReason::EndTurn,
-                                });
+                                let _ = tx.send(Event::turn_complete(
+                                    rt.session_id.clone(),
+                                    StopReason::EndTurn,
+                                ));
                             }
                             break;
                         }
                         op = rt.rx_op.recv() => match op {
                             Some(Op::ExecApprovalResponse { call_id, decision })
                             | Some(Op::PatchApprovalResponse { call_id, decision }) => {
-                                resolve_pending_approval(
-                                    &rt.pending_approvals,
-                                    &call_id,
-                                    decision,
-                                )
-                                .await;
+                                if let Some(tx) =
+                                    rt.pending_approvals.lock().await.remove(&call_id)
+                                {
+                                    let _ = tx.send(decision);
+                                }
                             }
                             Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
                                 return;
@@ -167,26 +167,15 @@ async fn run_loop(mut rt: Session) {
                     }
                 }
             }
-            Some(Op::ExecApprovalResponse { call_id, decision }) => {
-                resolve_pending_approval(&rt.pending_approvals, &call_id, decision).await;
-            }
-            Some(Op::PatchApprovalResponse { call_id, decision }) => {
-                resolve_pending_approval(&rt.pending_approvals, &call_id, decision).await;
+            Some(Op::ExecApprovalResponse { call_id, decision })
+            | Some(Op::PatchApprovalResponse { call_id, decision }) => {
+                if let Some(tx) = rt.pending_approvals.lock().await.remove(&call_id) {
+                    let _ = tx.send(decision);
+                }
             }
             Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => break,
             _ => {}
         }
-    }
-}
-
-/// Resolve and remove a pending approval channel for the given call id.
-async fn resolve_pending_approval(
-    pending_approvals: &Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
-    call_id: &str,
-    decision: ReviewDecision,
-) {
-    if let Some(tx) = pending_approvals.lock().await.remove(call_id) {
-        let _ = tx.send(decision);
     }
 }
 
