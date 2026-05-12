@@ -9,6 +9,7 @@ use futures::Stream;
 use crate::agent::AgentPath;
 use crate::config::{ModelInfo, SessionMode};
 use crate::event::Event;
+use crate::permission::ReviewDecision;
 use crate::session::{SessionCreated, SessionId, SessionListPage};
 
 /// Boxed, pinned stream of kernel events.
@@ -70,6 +71,15 @@ pub trait AgentKernel: Send + Sync {
         agent_path: AgentPath,
         role: &str,
         prompt: &str,
+    ) -> Result<(), KernelError>;
+
+    /// Deliver a tool approval decision to a waiting turn.
+    /// Used by frontend adapters (e.g. ACP) to resolve approval requests.
+    async fn resolve_approval(
+        &self,
+        session_id: &SessionId,
+        call_id: &str,
+        decision: ReviewDecision,
     ) -> Result<(), KernelError>;
 
     /// Return the available approval/sandboxing mode presets.

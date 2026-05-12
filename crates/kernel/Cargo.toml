@@ -8,6 +8,7 @@ description = "Clawcode agent kernel - session management, LLM orchestration, to
 protocol = { path = "../protocol" }
 provider = { path = "../provider" }
 config = { path = "../config" }
+tools = { path = "../tools" }
 
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 async-trait = { workspace = true }

@@ -166,15 +166,8 @@ impl std::fmt::Display for Document {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct ToolDefinition {
-    /// Tool name exposed to the model. It must match the registered tool name.
-    pub name: String,
-    /// Human-readable description sent to the model.
-    pub description: String,
-    /// JSON Schema describing tool arguments.
-    pub parameters: serde_json::Value,
-}
+/// Re-exported from protocol — both crates use the same definition.
+pub type ToolDefinition = protocol::ToolDefinition;
 
 /// Provider-native tool definition.
 ///

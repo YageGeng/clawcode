@@ -8,11 +8,16 @@ description = "ACP bridge for clawcode - translates between internal protocol an
 name = "acp"
 path = "src/main.rs"
 
+[[bin]]
+name = "claw"
+path = "src/bin/client.rs"
+
 [dependencies]
 protocol = { path = "../protocol" }
 kernel = { path = "../kernel" }
 provider = { path = "../provider" }
 config = { path = "../config" }
+tools = { path = "../tools" }
 
 agent-client-protocol = { workspace = true, features = ["unstable"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
@@ -27,7 +32,3 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 typed-builder = { workspace = true }
-
-[[example]]
-name = "simple_client"
-path = "examples/simple_client.rs"

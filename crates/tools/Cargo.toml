@@ -1,0 +1,17 @@
+[package]
+name = "tools"
+edition.workspace = true
+version.workspace = true
+description = "Built-in agent tools: shell execution, file I/O, MCP stub"
+
+[dependencies]
+protocol = { path = "../protocol" }
+
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs", "time"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

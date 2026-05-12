@@ -1,5 +1,7 @@
 //! Streaming event types emitted from the kernel to the frontend.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentPath, AgentStatus};
@@ -70,6 +72,18 @@ pub enum Event {
         session_id: SessionId,
         /// The permission request details.
         request: PermissionRequest,
+    },
+    /// The kernel requests user approval before executing a tool.
+    ExecApprovalRequested {
+        session_id: SessionId,
+        /// Identifies the tool call awaiting approval.
+        call_id: String,
+        /// Name of the tool being requested.
+        tool_name: String,
+        /// JSON arguments for the tool invocation.
+        arguments: serde_json::Value,
+        /// Working directory for the tool execution.
+        cwd: PathBuf,
     },
     /// A sub-agent's runtime status changed.
     AgentStatusChange {

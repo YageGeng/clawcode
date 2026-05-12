@@ -34,3 +34,19 @@ pub enum PermissionOptionKind {
     RejectOnce,
     RejectAlways,
 }
+
+/// User's decision in response to a tool approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    /// Allow this single execution.
+    AllowOnce,
+    /// Allow and persist for future identical requests.
+    AllowAlways,
+    /// Reject this single execution.
+    RejectOnce,
+    /// Reject and persist for future identical requests.
+    RejectAlways,
+    /// Abort the entire turn.
+    Abort,
+}

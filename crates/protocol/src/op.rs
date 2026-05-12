@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentPath;
+use crate::permission::ReviewDecision;
 use crate::session::SessionId;
 
 /// Operation submitted from the frontend / client to the kernel.
@@ -48,5 +49,17 @@ pub enum Op {
         from: AgentPath,
         to: AgentPath,
         content: String,
+    },
+    /// User's response to an exec approval request.
+    ExecApprovalResponse {
+        /// Matches the `call_id` from ExecApprovalRequested.
+        call_id: String,
+        /// User's decision.
+        decision: ReviewDecision,
+    },
+    /// User's response to a patch approval request.
+    PatchApprovalResponse {
+        call_id: String,
+        decision: ReviewDecision,
     },
 }

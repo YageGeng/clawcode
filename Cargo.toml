@@ -81,3 +81,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 strum = { version = "0.27", features = ["derive"] }
 agent-client-protocol = "0.11.1"
 protocol = { path = "crates/protocol" }
+tools = { path = "crates/tools" }

@@ -5,7 +5,7 @@
 
 pub mod context;
 pub mod session;
-pub mod tool;
+// tool module moved to tools crate
 pub(crate) mod turn;
 
 use std::collections::HashMap;
@@ -19,14 +19,14 @@ use tokio::sync::Mutex;
 
 use config::ConfigHandle;
 use protocol::{
-    AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, SessionCreated, SessionId,
-    SessionInfo, SessionListPage, SessionMode,
+    AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, ReviewDecision, SessionCreated,
+    SessionId, SessionInfo, SessionListPage, SessionMode,
 };
 use provider::factory::LlmFactory;
 
 use crate::context::InMemoryContext;
 use crate::session::{Thread, event_stream, spawn_thread};
-use crate::tool::ToolRegistry;
+use tools::ToolRegistry;
 
 /// Central kernel struct implementing [`AgentKernel`].
 pub struct Kernel {
@@ -179,23 +179,21 @@ impl AgentKernel for Kernel {
         text: String,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
     {
-        let handle = self
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?
-            .clone();
+        // Extract what we need without cloning the whole Thread
+        let (tx_op, rx_event, cancel_rx) = {
+            let sessions = self.sessions.lock().await;
+            let h = sessions
+                .get(session_id)
+                .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
+            (h.tx_op.clone(), h.take_rx().await, h.cancel_tx.subscribe())
+        };
 
-        // Send the prompt to the background task
-        let _ = handle.tx_op.send(Op::Prompt {
+        let _ = tx_op.send(Op::Prompt {
             session_id: session_id.clone(),
             text,
         });
 
-        // Take the receiver from the handle and build stream
-        let rx_event = handle.take_rx().await;
-        Ok(event_stream(rx_event, handle.cancel_tx.subscribe()))
+        Ok(event_stream(rx_event, cancel_rx))
     }
 
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError> {
@@ -261,5 +259,32 @@ impl AgentKernel for Kernel {
 
     fn available_models(&self) -> Vec<ModelInfo> {
         self.build_models()
+    }
+
+    async fn resolve_approval(
+        &self,
+        session_id: &SessionId,
+        call_id: &str,
+        decision: ReviewDecision,
+    ) -> Result<(), KernelError> {
+        // Clone the Arc so we can drop the sessions lock before awaiting
+        let pending = {
+            self.sessions
+                .lock()
+                .await
+                .get(session_id)
+                .map(|h| Arc::clone(&h.pending_approvals))
+                .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?
+        };
+
+        let tx = pending.lock().await.remove(call_id).ok_or_else(|| {
+            KernelError::Internal(anyhow::anyhow!(
+                "approval request not found for tool call {call_id}"
+            ))
+        })?;
+
+        let _ = tx.send(decision);
+
+        Ok(())
     }
 }

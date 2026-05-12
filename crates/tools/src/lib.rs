@@ -1,4 +1,7 @@
-//! Tool registration and execution for agent turns.
+//! Agent tool registry and built-in tools.
+
+pub mod builtin;
+pub mod mcp;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,6 +20,12 @@ pub trait Tool: Send + Sync {
 
     /// JSON Schema describing the tool's arguments.
     fn parameters(&self) -> serde_json::Value;
+
+    /// Whether this specific invocation requires user approval.
+    /// Default: `true` (safe-by-default).
+    fn needs_approval(&self, _arguments: &serde_json::Value) -> bool {
+        true
+    }
 
     /// Execute the tool with the given JSON arguments.
     /// Returns the output string on success, or an error message on failure.
@@ -42,6 +51,12 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Look up a tool by name.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.get(name).cloned()
+    }
+
     /// Build tool definitions for the LLM completion request.
     #[must_use]
     pub fn definitions(&self) -> Vec<protocol::ToolDefinition> {
@@ -62,7 +77,7 @@ impl ToolRegistry {
         arguments: serde_json::Value,
         cwd: &Path,
     ) -> Result<String, String> {
-        match self.tools.get(name) {
+        match self.get(name) {
             Some(tool) => tool.execute(arguments, cwd).await,
             None => Err(format!("unknown tool: {name}")),
         }
@@ -72,70 +87,5 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ── Mock tools for testing ──
-
-/// A mock tool that echoes its arguments — useful for testing the tool pipeline.
-pub struct MockEchoTool {
-    /// Tool name.
-    pub name: String,
-    /// Tool description.
-    pub description: String,
-}
-
-#[async_trait]
-impl Tool for MockEchoTool {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The message to echo"
-                }
-            },
-            "required": ["message"]
-        })
-    }
-
-    async fn execute(&self, arguments: serde_json::Value, _cwd: &Path) -> Result<String, String> {
-        let msg = arguments["message"].as_str().unwrap_or("(no message)");
-        Ok(format!("echo: {msg}"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registry_register_and_definitions() {
-        let mut reg = ToolRegistry::new();
-        let tool = Arc::new(MockEchoTool {
-            name: "echo".to_string(),
-            description: "Echoes a message".to_string(),
-        });
-        reg.register(tool);
-        let defs = reg.definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "echo");
-    }
-
-    #[test]
-    fn registry_execute_unknown_tool() {
-        let reg = ToolRegistry::new();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(reg.execute("nonexistent", serde_json::json!({}), Path::new(".")));
-        assert!(result.is_err());
     }
 }

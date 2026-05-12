@@ -7,12 +7,14 @@ use acp::schema::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, CloseSessionResponse, Content,
     ContentBlock, ContentChunk, Implementation, InitializeRequest, InitializeResponse,
     LogoutCapabilities, McpCapabilities, ModelInfo as AcpModelInfo, NewSessionRequest,
-    NewSessionResponse, Plan, PlanEntry, PromptCapabilities, PromptRequest, PromptResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionId as AcpSessionId,
-    SessionListCapabilities, SessionMode as AcpSessionMode, SessionModeState, SessionModelState,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
-    SetSessionModelRequest, SetSessionModelResponse, StopReason as AcpStopReason, TextContent,
-    ToolCall, ToolCallContent, ToolCallId, ToolCallStatus as AcpToolCallStatus, ToolCallUpdate,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
+    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionId as AcpSessionId, SessionListCapabilities,
+    SessionMode as AcpSessionMode, SessionModeState, SessionModelState, SessionNotification,
+    SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
+    SetSessionModelResponse, StopReason as AcpStopReason, TextContent, ToolCall, ToolCallContent,
+    ToolCallId, ToolCallStatus, ToolCallStatus as AcpToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, UsageUpdate,
 };
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
@@ -207,6 +209,15 @@ impl ClawcodeAgent {
         request: NewSessionRequest,
     ) -> Result<NewSessionResponse, Error> {
         let NewSessionRequest { cwd, .. } = request;
+        // ACP clients may send a relative cwd; resolve it in the agent process
+        // before passing it to tool execution.
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else {
+            std::env::current_dir()
+                .map_err(|e| Error::internal_error().data(e.to_string()))?
+                .join(cwd)
+        };
 
         let created = self
             .kernel
@@ -350,6 +361,56 @@ impl ClawcodeAgent {
                     let usage = UsageUpdate::new(input_tokens + output_tokens, 0);
                     let update = SessionUpdate::UsageUpdate(usage);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::ExecApprovalRequested {
+                    call_id,
+                    tool_name,
+                    arguments,
+                    ..
+                } => {
+                    // Build a minimal ToolCallUpdate to describe the permission request
+                    let mut tc_fields = ToolCallUpdateFields::default();
+                    tc_fields.status = Some(ToolCallStatus::Pending);
+                    tc_fields.title = Some(tool_name.clone());
+                    tc_fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                        ContentBlock::Text(TextContent::new(format!("{tool_name}: {arguments}"))),
+                    ))]);
+
+                    let tc_update =
+                        ToolCallUpdate::new(ToolCallId::new(call_id.clone()), tc_fields);
+
+                    let perm_req = RequestPermissionRequest::new(
+                        acp_sid.clone(),
+                        tc_update,
+                        vec![
+                            PermissionOption::new(
+                                "allow_once",
+                                "Allow Once",
+                                PermissionOptionKind::AllowOnce,
+                            ),
+                            PermissionOption::new(
+                                "reject_once",
+                                "Reject",
+                                PermissionOptionKind::RejectOnce,
+                            ),
+                        ],
+                    );
+
+                    let resp: RequestPermissionResponse =
+                        cx.send_request(perm_req).block_task().await?;
+
+                    let decision = match &resp.outcome {
+                        RequestPermissionOutcome::Selected(sel) => match sel.option_id.0.as_ref() {
+                            "allow_once" | "allow_always" => protocol::ReviewDecision::AllowOnce,
+                            _ => protocol::ReviewDecision::RejectOnce,
+                        },
+                        _ => protocol::ReviewDecision::RejectOnce,
+                    };
+
+                    let _ = self
+                        .kernel
+                        .resolve_approval(&session_id, &call_id, decision)
+                        .await;
                 }
                 Event::TurnComplete { stop_reason, .. } => {
                     let reason: AcpStopReason = stop_reason.into();
