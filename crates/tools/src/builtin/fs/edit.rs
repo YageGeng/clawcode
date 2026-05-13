@@ -7,15 +7,15 @@ use tokio::fs;
 
 use crate::Tool;
 
-const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files. 
+const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files.
 
 Usage:
-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
+- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + tab. Everything after that is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
 - The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
-- The edit will FAIL if `oldString` is found multiple times in the file with an error "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match." Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`. 
+- The edit will FAIL if `oldString` is found multiple times in the file with an error "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match." Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.
 - Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."#;
 
 /// Performs exact string replacements in files.
@@ -67,24 +67,27 @@ impl Tool for EditFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let file_path = arguments["filePath"]
-            .as_str()
-            .ok_or("missing 'filePath' argument")?;
-        let old_string = arguments["oldString"]
-            .as_str()
-            .ok_or("missing 'oldString' argument")?;
-        let new_string = arguments["newString"]
-            .as_str()
-            .ok_or("missing 'newString' argument")?;
-        let replace_all = arguments["replaceAll"].as_bool().unwrap_or(false);
-        let resolved = resolve_file_path(&ctx.cwd, file_path);
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            file_path: String,
+            old_string: String,
+            new_string: String,
+            #[serde(default)]
+            replace_all: bool,
+        }
 
-        if old_string == new_string {
+        let args: Args =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+
+        let resolved = resolve_file_path(&ctx.cwd, &args.file_path);
+
+        if args.old_string == args.new_string {
             return Err("oldString and newString must be different".to_string());
         }
 
-        if old_string.is_empty() {
-            let content = normalize_for_existing_line_endings(&resolved, new_string).await?;
+        if args.old_string.is_empty() {
+            let content = normalize_for_existing_line_endings(&resolved, &args.new_string).await?;
             write_full_file(&resolved, &content).await?;
             return Ok(format!(
                 "edited {}: wrote {} bytes",
@@ -96,15 +99,23 @@ impl Tool for EditFile {
         let resolved = fs::canonicalize(&resolved)
             .await
             .map_err(|e| format!("failed to resolve {}: {e}", resolved.display()))?;
+
+        // Read the file and normalize line endings so CRLF/LF mismatches
+        // between the model-supplied oldString and the on-disk content
+        // do not cause spurious failures.
         let original = fs::read_to_string(&resolved)
             .await
             .map_err(|e| format!("failed to read {}: {e}", resolved.display()))?;
-        let line_ending = detect_line_ending(&original);
-        let old_string = normalize_line_endings(old_string, line_ending);
-        let new_string = normalize_line_endings(new_string, line_ending);
 
-        let (result, match_count) = if replace_all {
+        let line_ending = detect_line_ending(&original);
+        let old_string = normalize_line_endings(&args.old_string, line_ending);
+        let new_string = normalize_line_endings(&args.new_string, line_ending);
+
+        // Run the 9-level matching pipeline. When replaceAll is set,
+        // collect every occurrence; otherwise demand a single unique match.
+        let (result, match_count) = if args.replace_all {
             let candidates = find_replace_all_matches(&original, &old_string)?;
+            // Apply from back to front so earlier byte offsets stay valid.
             (
                 apply_replacements(&original, &candidates, &new_string),
                 candidates.len(),
