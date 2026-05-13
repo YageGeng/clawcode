@@ -11,7 +11,7 @@ use crate::session::SessionId;
 use crate::tool::ToolCallStatus;
 
 /// The content of a streamed tool-call delta.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ToolCallDeltaContent {
     /// Tool/function name delivered by the provider.
     Name(String),

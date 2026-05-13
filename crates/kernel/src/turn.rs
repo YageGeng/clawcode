@@ -10,9 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent};
 use protocol::one_or_many::OneOrMany;
-use protocol::{
-    AgentPath, Event, KernelError, ReviewDecision, SessionId, ToolCallDeltaContent, ToolCallStatus,
-};
+use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId, ToolCallStatus};
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
 
@@ -170,15 +168,6 @@ pub(crate) async fn execute_turn(
                     content,
                     ..
                 } => {
-                    let content = match content {
-                        provider::streaming::ToolCallDeltaContent::Name(name) => {
-                            ToolCallDeltaContent::name(name)
-                        }
-                        provider::streaming::ToolCallDeltaContent::Delta(delta) => {
-                            ToolCallDeltaContent::delta(delta)
-                        }
-                    };
-
                     // Forward incremental tool call arguments to the frontend.
                     let _ = tx_event.send(Event::tool_call_delta(
                         sid.clone(),

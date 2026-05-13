@@ -11,6 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll};
 use tokio::sync::watch;
 
+/// Re-exports the [`ToolCallDeltaContent`] enum from the protocol crate.
+pub use protocol::ToolCallDeltaContent;
+
 /// Control handle for pausing and resuming a streaming response.
 pub struct PauseControl {
     pub(crate) paused_tx: watch::Sender<bool>,
@@ -47,15 +50,6 @@ impl Default for PauseControl {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// The content of a streamed tool-call delta.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub enum ToolCallDeltaContent {
-    /// Tool/function name emitted by the provider.
-    Name(String),
-    /// Partial JSON argument data emitted by the provider.
-    Delta(String),
 }
 
 /// A raw streaming choice emitted by a provider parser.
