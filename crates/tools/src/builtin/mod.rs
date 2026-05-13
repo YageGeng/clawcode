@@ -1,7 +1,7 @@
 //! Built-in tool implementations and registration.
 
 pub mod agents;
-pub mod file;
+pub mod fs;
 pub mod shell;
 
 use std::sync::Arc;
@@ -13,9 +13,7 @@ impl ToolRegistry {
     /// callers can register through `Arc<ToolRegistry>` after passing it to Kernel.
     pub fn register_builtins(&self) {
         self.register(Arc::new(shell::ShellCommand::new()));
-        self.register(Arc::new(file::ReadFile::new()));
-        self.register(Arc::new(file::WriteFile::new()));
-        self.register(Arc::new(file::ApplyPatch::new()));
+        self.register_fs_tools();
     }
 
     /// Register agent management tools. Separate from `register_builtins` so
@@ -27,5 +25,20 @@ impl ToolRegistry {
         self.register(Arc::new(agents::WaitAgent::new(Arc::clone(&agent_ctrl))));
         self.register(Arc::new(agents::ListAgents::new(Arc::clone(&agent_ctrl))));
         self.register(Arc::new(agents::CloseAgent::new(Arc::clone(&agent_ctrl))));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that basic built-ins expose both edit and apply_patch tools.
+    #[test]
+    fn register_builtins_includes_edit_and_apply_patch() {
+        let registry = ToolRegistry::new();
+        registry.register_builtins();
+
+        assert!(registry.get("edit").is_some());
+        assert!(registry.get("apply_patch").is_some());
     }
 }
