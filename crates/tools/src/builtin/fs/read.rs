@@ -53,14 +53,18 @@ impl Tool for ReadFile {
             .is_some_and(|p| Path::new(p).is_absolute() || p.contains(".."))
     }
 
-    async fn execute(&self, arguments: serde_json::Value, cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let path = arguments["path"]
             .as_str()
             .ok_or("missing 'path' argument")?;
         let resolved = if Path::new(path).is_absolute() {
             PathBuf::from(path)
         } else {
-            cwd.join(path)
+            ctx.cwd.join(path)
         };
         // Canonicalize to detect symlink escapes even on absolute paths.
         let resolved = fs::canonicalize(&resolved)
@@ -87,6 +91,7 @@ impl Tool for ReadFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContext;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -105,7 +110,10 @@ mod tests {
 
         let tool = ReadFile::new();
         let result = tool
-            .execute(serde_json::json!({"path": path}), dir.path())
+            .execute(
+                serde_json::json!({"path": path}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await
             .unwrap();
 
@@ -129,7 +137,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"path": path, "offset": 1, "limit": 2}),
-                dir.path(),
+                &ToolContext::for_test(dir.path()),
             )
             .await
             .unwrap();
@@ -150,7 +158,10 @@ mod tests {
         let tool = ReadFile::new();
         assert!(tool.needs_approval(&serde_json::json!({"path": "/etc/passwd"})));
         let result = tool
-            .execute(serde_json::json!({"path": "/etc/hostname"}), Path::new("."))
+            .execute(
+                serde_json::json!({"path": "/etc/hostname"}),
+                &ToolContext::for_test(Path::new(".")),
+            )
             .await;
         let _ = result;
     }

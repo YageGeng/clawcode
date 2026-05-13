@@ -28,6 +28,8 @@ impl AgentControlAdapter {
 impl AgentControlRef for AgentControlAdapter {
     /// Delegates to [`AgentControl::spawn`] and returns a JSON summary
     /// with the new agent's path and nickname.
+    /// Delegates to [`AgentControl::spawn`] and returns a JSON summary
+    /// with the new agent's path and nickname.
     ///
     /// Note: `task_name` is currently hardcoded to `"task"` because the
     /// tools crate does not yet receive the task name from the LLM's
@@ -35,13 +37,14 @@ impl AgentControlRef for AgentControlAdapter {
     async fn spawn_agent(
         &self,
         parent_path: &AgentPath,
+        task_name: &str,
         role: &str,
         prompt: &str,
         cwd: PathBuf,
     ) -> Result<String, String> {
         let live = self
             .inner
-            .spawn(parent_path, "task", role, prompt, cwd)
+            .spawn(parent_path, task_name, role, prompt, cwd)
             .await?;
 
         let path = live
@@ -57,6 +60,10 @@ impl AgentControlRef for AgentControlAdapter {
             "nickname": nick
         })
         .to_string())
+    }
+
+    async fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+        self.inner.resolve_target(target)
     }
 
     async fn send_message_to(

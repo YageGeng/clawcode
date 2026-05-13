@@ -174,6 +174,11 @@ impl AgentControl {
         })
     }
 
+    /// Resolve a target string (path or nickname) to an AgentPath.
+    pub(crate) fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+        self.registry.resolve_target(target)
+    }
+
     /// Send a message to a target agent via its mailbox.
     ///
     /// Resolves the target agent's `SessionId` from the registry, then

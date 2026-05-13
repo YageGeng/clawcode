@@ -15,7 +15,7 @@ use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
 
 use crate::context::ContextManager;
-use tools::ToolRegistry;
+use tools::{ToolContext, ToolRegistry};
 
 /// Immutable snapshot of all context needed to execute a single turn.
 #[derive(Clone, typed_builder::TypedBuilder)]
@@ -52,6 +52,11 @@ pub(crate) async fn execute_turn(
 
     let tool_defs = ctx.tools.definitions();
     let sid = &ctx.session_id;
+
+    let tool_ctx = ToolContext {
+        cwd: ctx.cwd.clone(),
+        agent_path: ctx.agent_path.clone(),
+    };
 
     loop {
         let history = context.history();
@@ -119,7 +124,7 @@ pub(crate) async fn execute_turn(
                                     .execute(
                                         &tool_call.function.name,
                                         tool_call.function.arguments.clone(),
-                                        &ctx.cwd,
+                                        &tool_ctx,
                                     )
                                     .await
                             }
@@ -131,7 +136,7 @@ pub(crate) async fn execute_turn(
                             .execute(
                                 &tool_call.function.name,
                                 tool_call.function.arguments.clone(),
-                                &ctx.cwd,
+                                &tool_ctx,
                             )
                             .await
                     };

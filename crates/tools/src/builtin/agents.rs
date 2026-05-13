@@ -5,7 +5,6 @@
 //! The actual agent operations are performed through the [`AgentControlRef`]
 //! trait, which is implemented by the kernel crate.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,10 +20,14 @@ pub trait AgentControlRef: Send + Sync {
     async fn spawn_agent(
         &self,
         parent_path: &protocol::AgentPath,
+        task_name: &str,
         role: &str,
         prompt: &str,
         cwd: std::path::PathBuf,
     ) -> Result<String, String>;
+
+    /// Resolve a target string (nickname or path) to an AgentPath.
+    async fn resolve_target(&self, target: &str) -> Result<protocol::AgentPath, String>;
 
     /// Send a message to another agent.
     async fn send_message_to(
@@ -95,14 +98,45 @@ impl Tool for SpawnAgent {
         false
     }
 
-    async fn execute(&self, arguments: serde_json::Value, cwd: &Path) -> Result<String, String> {
-        let _task_name = arguments["task_name"].as_str().unwrap_or("task");
-        let role = arguments["role"].as_str().unwrap_or("default");
-        let prompt = arguments["prompt"].as_str().unwrap_or("");
-        let parent_path = protocol::AgentPath::root();
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
+        #[derive(serde::Deserialize)]
+        #[serde(default)]
+        struct Args {
+            task_name: String,
+            #[serde(default = "default_role")]
+            role: String,
+            prompt: String,
+        }
+
+        fn default_role() -> String {
+            "default".to_string()
+        }
+
+        impl Default for Args {
+            fn default() -> Self {
+                Self {
+                    task_name: "task".to_string(),
+                    role: "default".to_string(),
+                    prompt: String::new(),
+                }
+            }
+        }
+
+        let args: Args =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
 
         self.agent_control
-            .spawn_agent(&parent_path, role, prompt, cwd.to_path_buf())
+            .spawn_agent(
+                &ctx.agent_path,
+                &args.task_name,
+                &args.role,
+                &args.prompt,
+                ctx.cwd.clone(),
+            )
             .await
     }
 }
@@ -147,13 +181,17 @@ impl Tool for SendMessage {
         false
     }
 
-    async fn execute(&self, arguments: serde_json::Value, _cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let to_str = arguments["to"].as_str().ok_or("missing 'to' argument")?;
         let content = arguments["content"]
             .as_str()
             .ok_or("missing 'content' argument")?;
-        let to = protocol::AgentPath(to_str.to_string());
-        let from = protocol::AgentPath::root();
+        let to = self.agent_control.resolve_target(to_str).await?;
+        let from = ctx.agent_path.clone();
 
         self.agent_control
             .send_message_to(from, to, content.to_string(), false)
@@ -201,13 +239,17 @@ impl Tool for FollowupTask {
         false
     }
 
-    async fn execute(&self, arguments: serde_json::Value, _cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let to_str = arguments["to"].as_str().ok_or("missing 'to' argument")?;
         let content = arguments["content"]
             .as_str()
             .ok_or("missing 'content' argument")?;
-        let to = protocol::AgentPath(to_str.to_string());
-        let from = protocol::AgentPath::root();
+        let to = self.agent_control.resolve_target(to_str).await?;
+        let from = ctx.agent_path.clone();
 
         self.agent_control
             .send_message_to(from, to, content.to_string(), true)
@@ -256,7 +298,11 @@ impl Tool for WaitAgent {
         false
     }
 
-    async fn execute(&self, arguments: serde_json::Value, _cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let prefix = arguments["agent_path"]
             .as_str()
             .map(|s| protocol::AgentPath(s.to_string()));
@@ -306,7 +352,11 @@ impl Tool for ListAgents {
         false
     }
 
-    async fn execute(&self, arguments: serde_json::Value, _cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let prefix = arguments["path_prefix"]
             .as_str()
             .map(|s| protocol::AgentPath(s.to_string()));
@@ -354,12 +404,16 @@ impl Tool for CloseAgent {
         true
     }
 
-    async fn execute(&self, arguments: serde_json::Value, _cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let path_str = arguments["agent_path"]
             .as_str()
             .ok_or("missing 'agent_path' argument")?;
-        let path = protocol::AgentPath(path_str.to_string());
+        let path = self.agent_control.resolve_target(path_str).await?;
         self.agent_control.close_agent(&path).await?;
-        Ok(format!("agent {path_str} closed"))
+        Ok(format!("agent {path} closed"))
     }
 }

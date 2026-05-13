@@ -49,7 +49,11 @@ impl Tool for WriteFile {
         true
     }
 
-    async fn execute(&self, arguments: serde_json::Value, cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let path = arguments["path"]
             .as_str()
             .ok_or("missing 'path' argument")?;
@@ -61,7 +65,7 @@ impl Tool for WriteFile {
         let resolved = if Path::new(path).is_absolute() {
             PathBuf::from(path)
         } else {
-            cwd.join(path)
+            ctx.cwd.join(path)
         };
 
         if let Some(parent) = resolved.parent() {
@@ -85,6 +89,7 @@ impl Tool for WriteFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContext;
     use crate::builtin::fs::read::ReadFile;
 
     /// Verifies that written content can be read back.
@@ -96,14 +101,17 @@ mod tests {
         write
             .execute(
                 serde_json::json!({"path": "test.txt", "content": "hello world"}),
-                dir.path(),
+                &ToolContext::for_test(dir.path()),
             )
             .await
             .unwrap();
 
         let read = ReadFile::new();
         let result = read
-            .execute(serde_json::json!({"path": "test.txt"}), dir.path())
+            .execute(
+                serde_json::json!({"path": "test.txt"}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await
             .unwrap();
 
@@ -118,7 +126,7 @@ mod tests {
         let tool = WriteFile::new();
         tool.execute(
             serde_json::json!({"path": "nested/test.txt", "content": "cwd scoped"}),
-            dir.path(),
+            &ToolContext::for_test(dir.path()),
         )
         .await
         .unwrap();

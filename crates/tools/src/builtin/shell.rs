@@ -61,13 +61,17 @@ impl Tool for ShellCommand {
         true
     }
 
-    async fn execute(&self, arguments: serde_json::Value, cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let command = arguments["command"]
             .as_str()
             .ok_or("missing 'command' argument")?
             .to_string();
 
-        let work_dir = arguments["cwd"].as_str().map(Path::new).unwrap_or(cwd);
+        let work_dir = arguments["cwd"].as_str().map(Path::new).unwrap_or(&ctx.cwd);
 
         let result = timeout(
             Duration::from_secs(SHELL_TIMEOUT_SECS),
@@ -116,12 +120,16 @@ fn truncate(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContext;
 
     #[tokio::test]
     async fn shell_echo_hello() {
         let tool = ShellCommand::new();
         let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}), Path::new("."))
+            .execute(
+                serde_json::json!({"command": "echo hello"}),
+                &ToolContext::for_test(Path::new(".")),
+            )
             .await;
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -132,7 +140,12 @@ mod tests {
     #[tokio::test]
     async fn shell_missing_command() {
         let tool = ShellCommand::new();
-        let result = tool.execute(serde_json::json!({}), Path::new(".")).await;
+        let result = tool
+            .execute(
+                serde_json::json!({}),
+                &ToolContext::for_test(Path::new(".")),
+            )
+            .await;
         assert!(result.is_err());
     }
 

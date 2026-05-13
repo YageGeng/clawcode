@@ -133,6 +133,33 @@ impl AgentRegistry {
             });
     }
 
+    /// Resolve a target string (path or nickname) to an AgentPath.
+    ///
+    /// If the target starts with `/`, it is treated as an agent path and
+    /// verified against the registry. Otherwise it is treated as a nickname
+    /// and the corresponding agent path is looked up.
+    pub(crate) fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+        let agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if target.starts_with('/') {
+            if agents.agent_tree.contains_key(target) {
+                return Ok(AgentPath(target.to_string()));
+            }
+        } else {
+            for meta in agents.agent_tree.values() {
+                if meta.agent_nickname.as_deref() == Some(target) {
+                    return meta
+                        .agent_path
+                        .clone()
+                        .ok_or_else(|| format!("agent {target} has no path"));
+                }
+            }
+        }
+        Err(format!("agent not found: {target}"))
+    }
+
     /// Look up an agent's thread id by path.
     pub(crate) fn agent_id_for_path(&self, agent_path: &AgentPath) -> Option<SessionId> {
         self.active_agents

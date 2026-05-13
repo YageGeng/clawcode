@@ -14,7 +14,7 @@ impl ToolRegistry {
     pub fn register_fs_tools(&self) {
         self.register(Arc::new(read::ReadFile::new()));
         self.register(Arc::new(write::WriteFile::new()));
-        // self.register(Arc::new(edit::EditFile::new()));
+        self.register(Arc::new(edit::EditFile::new()));
         self.register(Arc::new(patch::ApplyPatch::new()));
     }
 }

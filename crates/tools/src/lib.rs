@@ -4,10 +4,31 @@ pub mod builtin;
 pub mod mcp;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use protocol::AgentPath;
+
+/// Per-turn context passed to every tool execution.
+#[derive(Clone, Debug)]
+pub struct ToolContext {
+    /// Working directory for this turn.
+    pub cwd: PathBuf,
+    /// Path of the agent executing this turn.
+    pub agent_path: AgentPath,
+}
+
+impl ToolContext {
+    /// Create a test context rooted at `cwd` with the root agent path.
+    #[must_use]
+    pub fn for_test(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            agent_path: AgentPath::root(),
+        }
+    }
+}
 
 /// A tool that can be invoked by the LLM during a turn.
 #[async_trait]
@@ -27,9 +48,13 @@ pub trait Tool: Send + Sync {
         true
     }
 
-    /// Execute the tool with the given JSON arguments.
+    /// Execute the tool with the given JSON arguments and turn context.
     /// Returns the output string on success, or an error message on failure.
-    async fn execute(&self, arguments: serde_json::Value, cwd: &Path) -> Result<String, String>;
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<String, String>;
 }
 
 /// Registry of available tools, keyed by tool name.
@@ -87,10 +112,10 @@ impl ToolRegistry {
         &self,
         name: &str,
         arguments: serde_json::Value,
-        cwd: &Path,
+        ctx: &ToolContext,
     ) -> Result<String, String> {
         match self.get(name) {
-            Some(tool) => tool.execute(arguments, cwd).await,
+            Some(tool) => tool.execute(arguments, ctx).await,
             None => Err(format!("unknown tool: {name}")),
         }
     }

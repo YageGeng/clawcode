@@ -125,7 +125,11 @@ impl Tool for ApplyPatch {
         true
     }
 
-    async fn execute(&self, arguments: serde_json::Value, cwd: &Path) -> Result<String, String> {
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<String, String> {
         let patch_text = arguments["patchText"]
             .as_str()
             .ok_or("missing 'patchText' argument")?;
@@ -134,7 +138,7 @@ impl Tool for ApplyPatch {
         }
 
         let hunks = parse_patch(patch_text)?;
-        let prepared = prepare_hunks(cwd, &hunks).await?;
+        let prepared = prepare_hunks(&ctx.cwd, &hunks).await?;
         let summary = prepared
             .iter()
             .map(PreparedHunk::summary_line)
@@ -705,6 +709,7 @@ fn build_replacement_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContext;
 
     /// Verifies that parser keeps all supported operation kinds in order.
     #[test]
@@ -853,7 +858,10 @@ mod tests {
         let patch = "*** Begin Patch\n*** Add File: exists.txt\n+new\n*** End Patch";
 
         let error = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await
             .unwrap_err();
 
@@ -867,7 +875,10 @@ mod tests {
         let patch = "*** Begin Patch\n*** Delete File: missing.txt\n*** End Patch";
 
         let result = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await;
 
         assert!(result.is_err());
@@ -881,7 +892,10 @@ mod tests {
         let patch = "*** Begin Patch\n*** Add File: created.txt\n+created\n*** Delete File: missing.txt\n*** Delete File: delete.txt\n*** End Patch";
 
         let result = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await;
 
         assert!(result.is_err());
@@ -898,7 +912,10 @@ mod tests {
             "*** Begin Patch\n*** Update File: move.txt\n*** Move to: moved.txt\n*** End Patch";
 
         let error = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await
             .unwrap_err();
 
@@ -914,7 +931,10 @@ mod tests {
         let patch = "*** Begin Patch\n*** Update File: one.txt\n@@\n-a\n+A\n*** Update File: two.txt\n@@\n-y\n+Y\n*** End Patch";
 
         ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await
             .unwrap();
 
@@ -935,7 +955,10 @@ mod tests {
         let patch = "*** Begin Patch\n*** Add File: created.txt\n+created\n*** Delete File: missing.txt\n*** End Patch";
 
         let result = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await;
 
         assert!(result.is_err());
@@ -952,7 +975,10 @@ mod tests {
 
         let patch = "*** Begin Patch\n*** Add File: nested/new.txt\n+created\n*** Update File: modify.txt\n@@ two\n two\n-three\n+THREE\n*** Delete File: delete.txt\n*** Update File: move.txt\n*** Move to: moved/renamed.txt\n@@\n move me\n*** End Patch";
         let result = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await
             .unwrap();
 
@@ -990,7 +1016,10 @@ mod tests {
             "*** Begin Patch\n*** Update File: modify.txt\n@@\n-missing\n+new\n*** End Patch";
 
         let result = ApplyPatch::new()
-            .execute(serde_json::json!({"patchText": patch}), dir.path())
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
             .await;
 
         assert!(result.is_err());
