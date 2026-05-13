@@ -39,3 +39,15 @@ pub struct SessionListPage {
     pub sessions: Vec<SessionInfo>,
     pub next_cursor: Option<String>,
 }
+
+impl From<SessionId> for String {
+    fn from(session_id: SessionId) -> Self {
+        session_id.0
+    }
+}
+
+impl From<&SessionId> for String {
+    fn from(session_id: &SessionId) -> Self {
+        session_id.0.clone()
+    }
+}

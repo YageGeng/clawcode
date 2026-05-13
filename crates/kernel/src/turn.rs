@@ -10,9 +10,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent};
 use protocol::one_or_many::OneOrMany;
-use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId, ToolCallStatus};
+use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId};
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
+use provider::message::ToolCall;
 
 use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
@@ -96,87 +97,22 @@ pub(crate) async fn execute_turn(
                     mut tool_call,
                     internal_call_id,
                 } => {
+                    // If the tool call ID is empty, use the internal call ID as a fallback
                     if tool_call.id.is_empty() {
                         tool_call.id = internal_call_id.clone();
                     }
 
-                    let _ = tx_event.send(Event::tool_call(
-                        sid.clone(),
-                        ctx.agent_path.clone(),
-                        internal_call_id.clone(),
-                        tool_call.function.name.clone(),
-                        tool_call.function.arguments.clone(),
-                        ToolCallStatus::Pending,
-                    ));
-
-                    let needs_approval =
-                        ctx.tools.get(&tool_call.function.name).is_some_and(|tool| {
-                            tool.needs_approval(&tool_call.function.arguments, &tool_ctx)
-                        });
-
-                    let output = if needs_approval {
-                        // In YOLO mode, auto-approve without prompting the user.
-                        if ctx.approval.mode() == ApprovalMode::Yolo {
-                            ctx.tools
-                                .execute(
-                                    &tool_call.function.name,
-                                    tool_call.function.arguments.clone(),
-                                    &tool_ctx,
-                                )
-                                .await
-                        } else {
-                            match request_tool_approval(
-                                ctx,
-                                tx_event,
-                                &internal_call_id,
-                                &tool_call.function.name,
-                                tool_call.function.arguments.clone(),
-                            )
-                            .await?
-                            {
-                                ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {
-                                    ctx.tools
-                                        .execute(
-                                            &tool_call.function.name,
-                                            tool_call.function.arguments.clone(),
-                                            &tool_ctx,
-                                        )
-                                        .await
-                                }
-                                ReviewDecision::Abort => return Err(KernelError::Cancelled),
-                                _ => Err("rejected by user".to_string()),
-                            }
-                        }
-                    } else {
-                        ctx.tools
-                            .execute(
-                                &tool_call.function.name,
-                                tool_call.function.arguments.clone(),
-                                &tool_ctx,
-                            )
-                            .await
-                    };
-
-                    let succeeded = output.is_ok();
-
-                    let text = output.as_ref().map_or_else(|e| e.clone(), Clone::clone);
+                    let (text, _succeeded) =
+                        dispatch_tool(ctx, tx_event, &internal_call_id, &tool_call, &tool_ctx)
+                            .await?;
 
                     assistant_content.push(AssistantContent::ToolCall(tool_call.clone()));
+
                     tool_outputs.push(ToolOutput {
-                        id: tool_call.id.clone(),
-                        call_id: tool_call.call_id.clone(),
-                        output: text.clone(),
+                        id: tool_call.id,
+                        call_id: tool_call.call_id,
+                        output: text,
                     });
-                    let _ = tx_event.send(Event::tool_call_update(
-                        sid.clone(),
-                        internal_call_id,
-                        Some(text),
-                        Some(if succeeded {
-                            ToolCallStatus::Completed
-                        } else {
-                            ToolCallStatus::Failed
-                        }),
-                    ));
                 }
                 LlmStreamEvent::Reasoning(reasoning) => {
                     let text = reasoning.display_text();
@@ -262,6 +198,90 @@ struct ToolOutput {
     output: String,
 }
 
+/// Dispatch a tool call, handling events, approval, and execution.
+///
+/// Emits `Pending` → `InProgress` → `Completed`/`Failed` status events,
+/// respecting the session's approval policy.
+///
+/// Returns `(output_text, succeeded)` on completion, or
+/// `Err(KernelError::Cancelled)` on abort.
+async fn dispatch_tool(
+    ctx: &TurnContext,
+    tx_event: &mpsc::UnboundedSender<Event>,
+    call_id: &str,
+    tool_call: &ToolCall,
+    tool_ctx: &ToolContext,
+) -> Result<(String, bool), KernelError> {
+    use protocol::ToolCallStatus;
+    let tool_name = &tool_call.function.name;
+    let arguments = &tool_call.function.arguments;
+
+    let needs_approval = ctx
+        .tools
+        .get(tool_name)
+        .is_some_and(|tool| tool.needs_approval(arguments, tool_ctx));
+
+    if needs_approval && ctx.approval.mode() != ApprovalMode::Yolo {
+        // Emit Pending event before any approval check.
+        let _ = tx_event.send(Event::tool_call(
+            ctx.session_id.clone(),
+            ctx.agent_path.clone(),
+            call_id,
+            tool_name,
+            arguments.clone(),
+            ToolCallStatus::Pending,
+        ));
+
+        match request_tool_approval(ctx, tx_event, call_id, tool_name, arguments.clone()).await? {
+            ReviewDecision::Abort => return Err(KernelError::Cancelled),
+            ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {}
+            _ => {
+                let msg = "rejected by user".to_string();
+                let _ = tx_event.send(Event::tool_call_update(
+                    ctx.session_id.clone(),
+                    call_id,
+                    Some(msg.clone()),
+                    Some(ToolCallStatus::Failed),
+                ));
+                return Ok((msg, false));
+            }
+        }
+    }
+
+    // Emit InProgress and execute.
+    let _ = tx_event.send(Event::tool_call(
+        ctx.session_id.clone(),
+        ctx.agent_path.clone(),
+        call_id,
+        tool_name,
+        arguments.clone(),
+        ToolCallStatus::InProgress,
+    ));
+
+    let output = ctx
+        .tools
+        .execute(tool_name, arguments.clone(), tool_ctx)
+        .await;
+
+    let (text, succeeded) = match output {
+        Ok(text) => (text, true),
+        Err(err) => (err, false),
+    };
+
+    let _ = tx_event.send(Event::tool_call_update(
+        ctx.session_id.clone(),
+        call_id,
+        Some(text.clone()),
+        Some(if succeeded {
+            ToolCallStatus::Completed
+        } else {
+            ToolCallStatus::Failed
+        }),
+    ));
+
+    Ok((text, succeeded))
+}
+
 /// Request approval for a tool call and return the frontend decision.
 /// Blocks on a oneshot channel until the session background task
 /// receives the user's response.
@@ -280,10 +300,10 @@ async fn request_tool_approval(
 
     let event = Event::exec_approval(
         ctx.session_id.clone(),
-        call_id.to_string(),
-        tool_name.to_string(),
+        call_id,
+        tool_name,
         arguments,
-        ctx.cwd.clone(),
+        &ctx.cwd,
     );
 
     if tx_event.send(event).is_err() {

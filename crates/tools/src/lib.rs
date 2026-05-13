@@ -3,36 +3,11 @@
 pub mod builtin;
 pub mod mcp;
 
+use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use protocol::AgentPath;
-
-/// Per-turn context passed to every tool execution.
-#[derive(Clone, Debug)]
-pub struct ToolContext {
-    /// Working directory for this turn.
-    pub cwd: PathBuf,
-    /// Path of the agent executing this turn.
-    pub agent_path: AgentPath,
-    /// Current tool-approval mode for the session.
-    pub approval_mode: protocol::ApprovalMode,
-}
-
-impl ToolContext {
-    /// Create a test context rooted at `cwd` with the root agent path
-    /// and the default approval mode.
-    #[must_use]
-    pub fn for_test(cwd: impl Into<PathBuf>) -> Self {
-        Self {
-            cwd: cwd.into(),
-            agent_path: AgentPath::root(),
-            approval_mode: protocol::ApprovalMode::default(),
-        }
-    }
-}
+pub use protocol::ToolContext;
 
 /// A tool that can be invoked by the LLM during a turn.
 #[async_trait]

@@ -1,6 +1,10 @@
 //! Session configuration types: modes, models, and configurable options.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
+
+use crate::AgentPath;
 
 /// Tool-approval behaviour for a session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +16,30 @@ pub enum ApprovalMode {
     RequestApproval,
     /// Auto-approve all tool calls without prompting the user.
     Yolo,
+}
+
+/// Per-turn context passed to every tool execution.
+#[derive(Clone, Debug)]
+pub struct ToolContext {
+    /// Working directory for this turn.
+    pub cwd: PathBuf,
+    /// Path of the agent executing this turn.
+    pub agent_path: AgentPath,
+    /// Current tool-approval mode for the session.
+    pub approval_mode: ApprovalMode,
+}
+
+impl ToolContext {
+    /// Create a test context rooted at `cwd` with the root agent path
+    /// and the default approval mode.
+    #[must_use]
+    pub fn for_test(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            agent_path: AgentPath::root(),
+            approval_mode: ApprovalMode::default(),
+        }
+    }
 }
 
 /// A session mode preset (e.g. read-only, auto, full-access).
