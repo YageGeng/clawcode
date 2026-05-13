@@ -3,6 +3,7 @@
 //! Implements [`protocol::AgentKernel`], orchestrating LLM
 //! calls via the provider factory and managing session state.
 
+pub mod agent;
 pub mod context;
 pub mod session;
 // tool module moved to tools crate
@@ -24,37 +25,66 @@ use protocol::{
 };
 use provider::factory::LlmFactory;
 
+use crate::agent::adapter::AgentControlAdapter;
+use crate::agent::control::AgentControl;
 use crate::context::InMemoryContext;
 use crate::session::{Thread, event_stream, spawn_thread};
 use tools::ToolRegistry;
 
 /// Central kernel struct implementing [`AgentKernel`].
+///
+/// Construct via [`Kernel::builder()`] to satisfy the typed-builder
+/// requirement for structs with more than 3 fields.
+#[derive(typed_builder::TypedBuilder)]
 pub struct Kernel {
     /// Shared LLM factory for dispatching provider/model requests.
-    llm_factory: Arc<LlmFactory>,
+    pub llm_factory: Arc<LlmFactory>,
     /// Configuration handle for reading provider/model settings.
-    config: ConfigHandle,
+    pub config: ConfigHandle,
     /// Registered tools available to every session.
-    tools: Arc<ToolRegistry>,
-    /// Active sessions keyed by [`SessionId`].
+    pub tools: Arc<ToolRegistry>,
+    #[builder(default)]
     sessions: Mutex<HashMap<SessionId, Thread>>,
+    /// Shared agent control for multi-agent operations across all sessions.
+    /// Constructed from the same llm_factory, config, and tools passed to
+    /// the builder — must not be `#[builder(default)]`.
+    pub agent_control: Arc<AgentControl>,
 }
 
 impl Kernel {
-    /// Create a new kernel instance with the given LLM factory,
-    /// config, and tool registry.
+    /// Create a new kernel, constructing `AgentControl` internally from
+    /// the provided config and tools. Use [`Kernel::builder()`] if you
+    /// need to pre-construct the `AgentControl` separately.
     #[must_use]
     pub fn new(
         llm_factory: Arc<LlmFactory>,
         config: ConfigHandle,
         tools: Arc<ToolRegistry>,
     ) -> Self {
-        Self {
-            llm_factory,
-            config,
-            tools,
-            sessions: Mutex::new(HashMap::new()),
-        }
+        let cfg = config.current();
+        let agent_control = AgentControl::new(
+            Arc::clone(&llm_factory),
+            config.clone(),
+            Arc::clone(&tools),
+            cfg.multi_agent.clone(),
+        );
+
+        Kernel::builder()
+            .llm_factory(llm_factory)
+            .config(config)
+            .tools(tools)
+            .agent_control(agent_control)
+            .build()
+    }
+
+    /// Register agent management tools using this kernel's `AgentControl`.
+    ///
+    /// Must be called after construction, before any sessions use the tools.
+    /// Internally creates an [`AgentControlAdapter`] and registers it with
+    /// the tool registry.
+    pub fn register_agent_tools(&self) {
+        let adapter = Arc::new(AgentControlAdapter::new(Arc::clone(&self.agent_control)));
+        self.tools.register_agent_tools(adapter);
     }
 
     /// Resolve the default LLM handle from the `active_model` config value.
@@ -115,13 +145,27 @@ impl AgentKernel for Kernel {
             .default_llm()
             .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("no LLM configured")))?;
 
+        // Use the kernel-wide AgentControl shared across all sessions.
+        let agent_ctrl = Arc::clone(&self.agent_control);
+        // Register the root thread so it can be the parent of sub-agents.
+        agent_ctrl.registry.register_root_thread(session_id.clone());
+
         let handle = spawn_thread(
             session_id.clone(),
             cwd.clone(),
             llm,
-            self.tools.clone(),
+            Arc::clone(&self.tools),
             Box::new(InMemoryContext::new()),
+            AgentPath::root(),
+            Some(Arc::clone(&agent_ctrl)),
         );
+
+        // Register root thread mailbox for inter-agent message routing.
+        let sid_for_ctrl = session_id.clone();
+        let mb = handle.mailbox.clone();
+        tokio::spawn(async move {
+            agent_ctrl.register_mailbox(sid_for_ctrl, mb).await;
+        });
 
         let modes = self.build_modes();
         let models = self.build_models();

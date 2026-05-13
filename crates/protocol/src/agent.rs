@@ -30,12 +30,26 @@ impl AgentPath {
     pub fn name(&self) -> &str {
         self.0.rsplit('/').next().unwrap_or(&self.0)
     }
+
+    /// Return the inner path as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns `true` if this is the root agent path (`/root`).
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.0 == "/root"
+    }
 }
 
 /// Runtime status of an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
+    /// Agent reserved but not yet started.
+    PendingInit,
     Running,
     Interrupted,
     Completed {
@@ -47,6 +61,8 @@ pub enum AgentStatus {
         reason: String,
     },
     Shutdown,
+    /// Agent path or nickname not found in registry.
+    NotFound,
 }
 
 /// Message sent between agents in a multi-agent session.

@@ -24,11 +24,18 @@ fn err(e: impl std::fmt::Display) -> agent_client_protocol::Error {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::load()?;
-    let llm_factory = Arc::new(LlmFactory::new(config.clone()));
-    let mut tools = ToolRegistry::new();
+
+    let tools = ToolRegistry::new();
     tools.register_builtins();
-    let kernel = Arc::new(Kernel::new(llm_factory, config, Arc::new(tools)));
-    let agent = Arc::new(acp::agent::ClawcodeAgent::new(kernel));
+
+    let kernel = Kernel::new(
+        Arc::new(LlmFactory::new(config.clone())),
+        config,
+        Arc::new(tools),
+    );
+    kernel.register_agent_tools();
+
+    let agent = Arc::new(acp::agent::ClawcodeAgent::new(Arc::new(kernel)));
 
     // Use two one-way in-memory pipes so the interactive client always talks to
     // the exact agent implementation built in this process, not a stale binary.

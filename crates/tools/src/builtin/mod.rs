@@ -1,5 +1,6 @@
 //! Built-in tool implementations and registration.
 
+pub mod agents;
 pub mod file;
 pub mod shell;
 
@@ -8,11 +9,23 @@ use std::sync::Arc;
 use crate::ToolRegistry;
 
 impl ToolRegistry {
-    /// Register all built-in tools.
-    pub fn register_builtins(&mut self) {
+    /// Register basic built-in tools (shell, file I/O). Takes `&self` so
+    /// callers can register through `Arc<ToolRegistry>` after passing it to Kernel.
+    pub fn register_builtins(&self) {
         self.register(Arc::new(shell::ShellCommand::new()));
         self.register(Arc::new(file::ReadFile::new()));
         self.register(Arc::new(file::WriteFile::new()));
         self.register(Arc::new(file::ApplyPatch::new()));
+    }
+
+    /// Register agent management tools. Separate from `register_builtins` so
+    /// callers control the composition order.
+    pub fn register_agent_tools(&self, agent_ctrl: Arc<dyn agents::AgentControlRef>) {
+        self.register(Arc::new(agents::SpawnAgent::new(Arc::clone(&agent_ctrl))));
+        self.register(Arc::new(agents::SendMessage::new(Arc::clone(&agent_ctrl))));
+        self.register(Arc::new(agents::FollowupTask::new(Arc::clone(&agent_ctrl))));
+        self.register(Arc::new(agents::WaitAgent::new(Arc::clone(&agent_ctrl))));
+        self.register(Arc::new(agents::ListAgents::new(Arc::clone(&agent_ctrl))));
+        self.register(Arc::new(agents::CloseAgent::new(Arc::clone(&agent_ctrl))));
     }
 }

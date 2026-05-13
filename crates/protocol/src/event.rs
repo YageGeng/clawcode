@@ -124,6 +124,16 @@ pub enum Event {
         /// New status.
         status: AgentStatus,
     },
+    /// A sub-agent was spawned.
+    AgentSpawned {
+        session_id: SessionId,
+        /// Canonical path of the new agent.
+        agent_path: AgentPath,
+        /// Human-readable nickname.
+        agent_nickname: String,
+        /// Role assigned at spawn.
+        agent_role: String,
+    },
     /// The current turn has completed.
     TurnComplete {
         session_id: SessionId,
@@ -274,6 +284,22 @@ impl Event {
             session_id: session_id.into(),
             agent_path: agent_path.into(),
             status,
+        }
+    }
+
+    /// Create an `AgentSpawned` event.
+    #[inline(always)]
+    pub fn agent_spawned(
+        session_id: impl Into<SessionId>,
+        agent_path: impl Into<AgentPath>,
+        agent_nickname: impl Into<String>,
+        agent_role: impl Into<String>,
+    ) -> Self {
+        Event::AgentSpawned {
+            session_id: session_id.into(),
+            agent_path: agent_path.into(),
+            agent_nickname: agent_nickname.into(),
+            agent_role: agent_role.into(),
         }
     }
 }

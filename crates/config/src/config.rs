@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmProvider;
+use crate::multi_agent::MultiAgentConfig;
 
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -13,6 +14,9 @@ pub struct AppConfig {
     /// Active model in `provider_id/model_id` format (e.g. "deepseek/deepseek-v4-flash").
     #[serde(default = "default_active_model")]
     pub active_model: String,
+    /// Multi-agent subsystem configuration.
+    #[serde(default)]
+    pub multi_agent: MultiAgentConfig,
 }
 
 fn default_active_model() -> String {
@@ -24,6 +28,7 @@ impl Default for AppConfig {
         Self {
             providers: Vec::new(),
             active_model: default_active_model(),
+            multi_agent: MultiAgentConfig::default(),
         }
     }
 }

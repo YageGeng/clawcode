@@ -11,10 +11,11 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load()?;
 
     let llm_factory = Arc::new(LlmFactory::new(config.clone()));
-    let mut tools = ToolRegistry::new();
+    let tools = Arc::new(ToolRegistry::new());
     tools.register_builtins();
-    let tools = Arc::new(tools);
+
     let kernel = Arc::new(Kernel::new(llm_factory, config, tools));
+    kernel.register_agent_tools();
 
     acp::run(kernel).await?;
 

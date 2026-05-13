@@ -28,6 +28,9 @@ pub(crate) struct TurnContext {
     pub tools: Arc<ToolRegistry>,
     /// Working directory for the session.
     pub cwd: PathBuf,
+    /// Path of the agent executing this turn.
+    #[builder(default = AgentPath::root())]
+    pub agent_path: AgentPath,
     /// Pending approval channels. execute_turn inserts a oneshot sender;
     /// the session background task resolves it when the user responds.
     #[builder(default)]
@@ -89,7 +92,7 @@ pub(crate) async fn execute_turn(
 
                     let _ = tx_event.send(Event::tool_call(
                         sid.clone(),
-                        AgentPath::root(),
+                        ctx.agent_path.clone(),
                         internal_call_id.clone(),
                         tool_call.function.name.clone(),
                         tool_call.function.arguments.clone(),

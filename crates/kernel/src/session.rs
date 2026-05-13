@@ -6,10 +6,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
-use protocol::{Event, KernelError, Op, ReviewDecision, SessionId, StopReason};
+use protocol::{AgentPath, Event, KernelError, Op, ReviewDecision, SessionId, StopReason};
 use provider::factory::ArcLlm;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::agent::control::AgentControl;
+use crate::agent::mailbox::{Mailbox, MailboxReceiver, mailbox_pair};
 use crate::context::ContextManager;
 use crate::turn::{TurnContext, execute_turn};
 use tools::ToolRegistry;
@@ -30,6 +32,12 @@ pub struct Thread {
         Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
     /// Signal cancellation.
     pub(crate) cancel_tx: watch::Sender<bool>,
+    /// AgentControl for multi-agent operations.
+    #[allow(dead_code)]
+    pub(crate) agent_control: Option<Arc<AgentControl>>,
+    /// Mailbox for receiving inter-agent messages.
+    #[allow(dead_code)]
+    pub(crate) mailbox: Mailbox,
 }
 
 impl Thread {
@@ -66,19 +74,35 @@ pub(crate) struct Session {
     /// oneshot::Sender keyed by call_id; run_loop sends the user's decision.
     pub pending_approvals:
         Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
+    /// Agent path for this session.
+    pub agent_path: AgentPath,
+    /// Mailbox receiver for inter-agent messages.
+    #[allow(dead_code)]
+    pub mailbox_rx: MailboxReceiver,
+    /// AgentControl shared across session tree.
+    #[builder(default)]
+    #[allow(dead_code)]
+    pub agent_control: Option<Arc<AgentControl>>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
+///
+/// Creates all channel pairs (ops, events, approval, cancel, mailbox) and
+/// wires them into the [`Session`] and [`Thread`] halves. If `agent_control`
+/// is provided, the session participates in multi-agent routing.
 pub(crate) fn spawn_thread(
     session_id: SessionId,
     cwd: PathBuf,
     llm: ArcLlm,
     tools: Arc<ToolRegistry>,
     context: Box<dyn ContextManager>,
+    agent_path: AgentPath,
+    agent_control: Option<Arc<AgentControl>>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (mailbox, mailbox_rx) = mailbox_pair();
 
     let tx_event = Arc::new(tokio::sync::Mutex::new(initial_tx));
     let pending_approvals: Arc<
@@ -89,12 +113,15 @@ pub(crate) fn spawn_thread(
         .session_id(session_id.clone())
         .cwd(cwd)
         .rx_op(rx_op)
-        .tx_event(tx_event.clone())
+        .tx_event(Arc::clone(&tx_event))
         .cancel_rx(cancel_rx)
         .context(context)
         .llm(llm)
         .tools(tools)
-        .pending_approvals(pending_approvals.clone())
+        .pending_approvals(Arc::clone(&pending_approvals))
+        .agent_path(agent_path)
+        .mailbox_rx(mailbox_rx)
+        .agent_control(agent_control.as_ref().map(Arc::clone))
         .build();
 
     tokio::spawn(run_loop(runtime));
@@ -105,6 +132,8 @@ pub(crate) fn spawn_thread(
         .tx_event(tx_event)
         .pending_approvals(pending_approvals)
         .cancel_tx(cancel_tx)
+        .agent_control(agent_control)
+        .mailbox(mailbox)
         .build()
 }
 
@@ -113,13 +142,71 @@ async fn run_loop(mut rt: Session) {
     loop {
         let op = rt.rx_op.recv().await;
         match op {
+            // Inter-agent messages are processed identically to user prompts.
+            // The content is injected as the turn input, and the turn loop
+            // handles tool calls, approvals, and cancellation the same way.
+            Some(Op::InterAgentMessage { content, .. }) => {
+                let ctx = TurnContext::builder()
+                    .session_id(rt.session_id.clone())
+                    .llm(Arc::clone(&rt.llm))
+                    .tools(Arc::clone(&rt.tools))
+                    .cwd(rt.cwd.clone())
+                    .pending_approvals(Arc::clone(&rt.pending_approvals))
+                    .agent_path(rt.agent_path.clone())
+                    .build();
+
+                let tx = { rt.tx_event.lock().await.clone() };
+                let turn = execute_turn(&ctx, content, &mut rt.context, &tx);
+                tokio::pin!(turn);
+
+                loop {
+                    tokio::select! {
+                        result = &mut turn => {
+                            if let Err(e) = result {
+                                let _ = tx.send(Event::turn_complete(
+                                    rt.session_id.clone(),
+                                    StopReason::Error,
+                                ));
+                                tracing::error!(
+                                    session_id = %rt.session_id,
+                                    error = %e,
+                                    "Turn execution failed"
+                                );
+                            } else {
+                                let _ = tx.send(Event::turn_complete(
+                                    rt.session_id.clone(),
+                                    StopReason::EndTurn,
+                                ));
+                            }
+                            break;
+                        }
+                        op = rt.rx_op.recv() => match op {
+                            Some(Op::ExecApprovalResponse { call_id, decision })
+                            | Some(Op::PatchApprovalResponse { call_id, decision }) => {
+                                if let Some(tx) =
+                                    rt.pending_approvals.lock().await.remove(&call_id)
+                                {
+                                    let _ = tx.send(decision);
+                                }
+                            }
+                            Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
+                                return;
+                            }
+                            Some(other) => {
+                                tracing::debug!(?other, "Ignoring operation while turn is running");
+                            }
+                        }
+                    }
+                }
+            }
             Some(Op::Prompt { text, .. }) => {
                 let ctx = TurnContext::builder()
                     .session_id(rt.session_id.clone())
-                    .llm(rt.llm.clone())
-                    .tools(rt.tools.clone())
+                    .llm(Arc::clone(&rt.llm))
+                    .tools(Arc::clone(&rt.tools))
                     .cwd(rt.cwd.clone())
-                    .pending_approvals(rt.pending_approvals.clone())
+                    .pending_approvals(Arc::clone(&rt.pending_approvals))
+                    .agent_path(rt.agent_path.clone())
                     .build();
 
                 let tx = { rt.tx_event.lock().await.clone() };

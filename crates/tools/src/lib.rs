@@ -33,8 +33,11 @@ pub trait Tool: Send + Sync {
 }
 
 /// Registry of available tools, keyed by tool name.
+///
+/// Uses interior mutability via [`std::sync::Mutex`] so callers can
+/// register tools through a shared `Arc<ToolRegistry>` reference.
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: std::sync::Mutex<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl ToolRegistry {
@@ -42,25 +45,34 @@ impl ToolRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    /// Register a tool.
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    /// Register a tool. Takes `&self` so it can be called through `Arc<ToolRegistry>`.
+    pub fn register(&self, tool: Arc<dyn Tool>) {
+        self.tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tool.name().to_string(), tool);
     }
 
     /// Look up a tool by name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        self.tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .cloned()
     }
 
     /// Build tool definitions for the LLM completion request.
     #[must_use]
     pub fn definitions(&self) -> Vec<protocol::ToolDefinition> {
         self.tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
             .map(|t| protocol::ToolDefinition {
                 name: t.name().to_string(),
