@@ -94,7 +94,7 @@ impl Tool for SpawnAgent {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         false
     }
 
@@ -177,7 +177,7 @@ impl Tool for SendMessage {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         false
     }
 
@@ -235,7 +235,7 @@ impl Tool for FollowupTask {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         false
     }
 
@@ -294,7 +294,7 @@ impl Tool for WaitAgent {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         false
     }
 
@@ -348,7 +348,7 @@ impl Tool for ListAgents {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         false
     }
 
@@ -400,7 +400,7 @@ impl Tool for CloseAgent {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         true
     }
 

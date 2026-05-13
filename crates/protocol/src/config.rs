@@ -2,6 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Tool-approval behaviour for a session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Ask the user before each tool call that needs confirmation.
+    #[default]
+    #[serde(rename = "request_approval")]
+    RequestApproval,
+    /// Auto-approve all tool calls without prompting the user.
+    Yolo,
+}
+
 /// A session mode preset (e.g. read-only, auto, full-access).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMode {

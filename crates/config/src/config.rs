@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use protocol::ApprovalMode;
+
 use crate::llm::LlmProvider;
 use crate::multi_agent::MultiAgentConfig;
 
@@ -14,6 +16,9 @@ pub struct AppConfig {
     /// Active model in `provider_id/model_id` format (e.g. "deepseek/deepseek-v4-flash").
     #[serde(default = "default_active_model")]
     pub active_model: String,
+    /// Tool-approval behaviour.
+    #[serde(default)]
+    pub approval: ApprovalMode,
     /// Multi-agent subsystem configuration.
     #[serde(default)]
     pub multi_agent: MultiAgentConfig,
@@ -28,6 +33,7 @@ impl Default for AppConfig {
         Self {
             providers: Vec::new(),
             active_model: default_active_model(),
+            approval: ApprovalMode::default(),
             multi_agent: MultiAgentConfig::default(),
         }
     }

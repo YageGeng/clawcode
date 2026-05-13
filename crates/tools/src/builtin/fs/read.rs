@@ -46,7 +46,7 @@ impl Tool for ReadFile {
         })
     }
 
-    fn needs_approval(&self, arguments: &serde_json::Value) -> bool {
+    fn needs_approval(&self, arguments: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         // Require approval only when the path escapes cwd.
         arguments["path"]
             .as_str()
@@ -149,14 +149,20 @@ mod tests {
     #[tokio::test]
     async fn read_file_needs_no_approval() {
         let tool = ReadFile::new();
-        assert!(!tool.needs_approval(&serde_json::json!({"path": "x"})));
+        assert!(!tool.needs_approval(
+            &serde_json::json!({"path": "x"}),
+            &ToolContext::for_test(Path::new("."))
+        ));
     }
 
     /// Verifies that absolute paths request approval without local rejection.
     #[tokio::test]
     async fn read_file_requires_approval_for_absolute_path() {
         let tool = ReadFile::new();
-        assert!(tool.needs_approval(&serde_json::json!({"path": "/etc/passwd"})));
+        assert!(tool.needs_approval(
+            &serde_json::json!({"path": "/etc/passwd"}),
+            &ToolContext::for_test(Path::new("."))
+        ));
         let result = tool
             .execute(
                 serde_json::json!({"path": "/etc/hostname"}),
@@ -170,6 +176,9 @@ mod tests {
     #[tokio::test]
     async fn read_file_requires_approval_for_parent_escape() {
         let tool = ReadFile::new();
-        assert!(tool.needs_approval(&serde_json::json!({"path": "../secret"})));
+        assert!(tool.needs_approval(
+            &serde_json::json!({"path": "../secret"}),
+            &ToolContext::for_test(Path::new("."))
+        ));
     }
 }

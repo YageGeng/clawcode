@@ -58,7 +58,7 @@ impl Tool for EditFile {
         })
     }
 
-    fn needs_approval(&self, _: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         true
     }
 
@@ -679,11 +679,14 @@ mod tests {
     #[tokio::test]
     async fn edit_file_always_requires_approval() {
         let tool = EditFile::new();
-        assert!(tool.needs_approval(&serde_json::json!({
-            "filePath": "test.txt",
-            "oldString": "t",
-            "newString": "r"
-        })));
+        assert!(tool.needs_approval(
+            &serde_json::json!({
+                "filePath": "test.txt",
+                "oldString": "t",
+                "newString": "r"
+            }),
+            &ToolContext::for_test(Path::new(".")),
+        ));
     }
 
     /// Verifies that edit writes the whole file when oldString is empty.

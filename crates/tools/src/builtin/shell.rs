@@ -57,7 +57,7 @@ impl Tool for ShellCommand {
         })
     }
 
-    fn needs_approval(&self, _: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         true
     }
 
@@ -152,6 +152,9 @@ mod tests {
     #[tokio::test]
     async fn shell_needs_approval() {
         let tool = ShellCommand::new();
-        assert!(tool.needs_approval(&serde_json::json!({"command": "ls"})));
+        assert!(tool.needs_approval(
+            &serde_json::json!({"command": "ls"}),
+            &ToolContext::for_test(Path::new("."))
+        ));
     }
 }

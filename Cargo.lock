@@ -304,6 +304,7 @@ dependencies = [
  "arc-swap",
  "dirs",
  "figment",
+ "protocol",
  "serde",
  "serde_json",
  "tempfile",

@@ -9,3 +9,4 @@ pub use config::AppConfig;
 pub use llm::{ApiKeyConfig, LlmModel, LlmProvider, ProviderId, ProviderType};
 pub use loader::{ConfigError, ConfigHandle, load, load_from};
 pub use multi_agent::MultiAgentConfig;
+pub use protocol::ApprovalMode;

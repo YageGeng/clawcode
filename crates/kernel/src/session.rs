@@ -76,6 +76,8 @@ pub(crate) struct Session {
         Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
     /// Agent path for this session.
     pub agent_path: AgentPath,
+    /// Approval policy — controls tool confirmation behaviour.
+    pub approval: Arc<crate::approval::ApprovalPolicy>,
     /// Mailbox receiver for inter-agent messages.
     #[allow(dead_code)]
     pub mailbox_rx: MailboxReceiver,
@@ -90,6 +92,7 @@ pub(crate) struct Session {
 /// Creates all channel pairs (ops, events, approval, cancel, mailbox) and
 /// wires them into the [`Session`] and [`Thread`] halves. If `agent_control`
 /// is provided, the session participates in multi-agent routing.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_thread(
     session_id: SessionId,
     cwd: PathBuf,
@@ -98,6 +101,7 @@ pub(crate) fn spawn_thread(
     context: Box<dyn ContextManager>,
     agent_path: AgentPath,
     agent_control: Option<Arc<AgentControl>>,
+    approval: Arc<crate::approval::ApprovalPolicy>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
@@ -120,6 +124,7 @@ pub(crate) fn spawn_thread(
         .tools(tools)
         .pending_approvals(Arc::clone(&pending_approvals))
         .agent_path(agent_path)
+        .approval(approval)
         .mailbox_rx(mailbox_rx)
         .agent_control(agent_control.as_ref().map(Arc::clone))
         .build();
@@ -153,6 +158,7 @@ async fn run_loop(mut rt: Session) {
                     .cwd(rt.cwd.clone())
                     .pending_approvals(Arc::clone(&rt.pending_approvals))
                     .agent_path(rt.agent_path.clone())
+                    .approval(Arc::clone(&rt.approval))
                     .build();
 
                 let tx = { rt.tx_event.lock().await.clone() };
@@ -207,6 +213,7 @@ async fn run_loop(mut rt: Session) {
                     .cwd(rt.cwd.clone())
                     .pending_approvals(Arc::clone(&rt.pending_approvals))
                     .agent_path(rt.agent_path.clone())
+                    .approval(Arc::clone(&rt.approval))
                     .build();
 
                 let tx = { rt.tx_event.lock().await.clone() };

@@ -121,7 +121,7 @@ impl Tool for ApplyPatch {
         })
     }
 
-    fn needs_approval(&self, _: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         true
     }
 
@@ -1029,8 +1029,11 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_always_requires_approval() {
         let tool = ApplyPatch::new();
-        assert!(tool.needs_approval(&serde_json::json!({
-            "patchText": "*** Begin Patch\n*** End Patch"
-        })));
+        assert!(tool.needs_approval(
+            &serde_json::json!({
+                "patchText": "*** Begin Patch\n*** End Patch"
+            }),
+            &ToolContext::for_test(Path::new(".")),
+        ));
     }
 }

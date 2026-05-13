@@ -4,12 +4,14 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
-arc-swap.workspace = true
-dirs.workspace = true
-figment.workspace = true
+protocol = { path = "../protocol" }
+
+arc-swap = { workspace = true }
+dirs = { workspace = true }
+figment = { workspace = true }
 serde = { workspace = true }
-serde_json.workspace = true
-thiserror.workspace = true
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }

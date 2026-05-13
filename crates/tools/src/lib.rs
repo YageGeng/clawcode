@@ -17,15 +17,19 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     /// Path of the agent executing this turn.
     pub agent_path: AgentPath,
+    /// Current tool-approval mode for the session.
+    pub approval_mode: protocol::ApprovalMode,
 }
 
 impl ToolContext {
-    /// Create a test context rooted at `cwd` with the root agent path.
+    /// Create a test context rooted at `cwd` with the root agent path
+    /// and the default approval mode.
     #[must_use]
     pub fn for_test(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
             agent_path: AgentPath::root(),
+            approval_mode: protocol::ApprovalMode::default(),
         }
     }
 }
@@ -44,7 +48,7 @@ pub trait Tool: Send + Sync {
 
     /// Whether this specific invocation requires user approval.
     /// Default: `true` (safe-by-default).
-    fn needs_approval(&self, _arguments: &serde_json::Value) -> bool {
+    fn needs_approval(&self, _arguments: &serde_json::Value, _ctx: &ToolContext) -> bool {
         true
     }
 

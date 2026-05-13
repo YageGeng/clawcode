@@ -4,6 +4,7 @@
 //! calls via the provider factory and managing session state.
 
 pub mod agent;
+pub mod approval;
 pub mod context;
 pub mod session;
 // tool module moved to tools crate
@@ -27,6 +28,7 @@ use provider::factory::LlmFactory;
 
 use crate::agent::adapter::AgentControlAdapter;
 use crate::agent::control::AgentControl;
+use crate::approval::ApprovalPolicy;
 use crate::context::InMemoryContext;
 use crate::session::{Thread, event_stream, spawn_thread};
 use tools::ToolRegistry;
@@ -150,6 +152,8 @@ impl AgentKernel for Kernel {
         // Register the root thread so it can be the parent of sub-agents.
         agent_ctrl.registry.register_root_thread(session_id.clone());
 
+        let app_cfg = self.config.current();
+        let approval = Arc::new(ApprovalPolicy::new(app_cfg.approval));
         let handle = spawn_thread(
             session_id.clone(),
             cwd.clone(),
@@ -158,6 +162,7 @@ impl AgentKernel for Kernel {
             Box::new(InMemoryContext::new()),
             AgentPath::root(),
             Some(Arc::clone(&agent_ctrl)),
+            approval,
         );
 
         // Register root thread mailbox for inter-agent message routing.

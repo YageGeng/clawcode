@@ -14,6 +14,7 @@ use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId, ToolCal
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
 
+use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
 use tools::{ToolContext, ToolRegistry};
 
@@ -31,6 +32,9 @@ pub(crate) struct TurnContext {
     /// Path of the agent executing this turn.
     #[builder(default = AgentPath::root())]
     pub agent_path: AgentPath,
+    /// Approval policy — controls whether tools require user confirmation.
+    #[builder(default)]
+    pub approval: Arc<ApprovalPolicy>,
     /// Pending approval channels. execute_turn inserts a oneshot sender;
     /// the session background task resolves it when the user responds.
     #[builder(default)]
@@ -56,6 +60,7 @@ pub(crate) async fn execute_turn(
     let tool_ctx = ToolContext {
         cwd: ctx.cwd.clone(),
         agent_path: ctx.agent_path.clone(),
+        approval_mode: ctx.approval.mode(),
     };
 
     loop {
@@ -104,32 +109,43 @@ pub(crate) async fn execute_turn(
                         ToolCallStatus::Pending,
                     ));
 
-                    let needs_approval = ctx
-                        .tools
-                        .get(&tool_call.function.name)
-                        .is_some_and(|tool| tool.needs_approval(&tool_call.function.arguments));
+                    let needs_approval =
+                        ctx.tools.get(&tool_call.function.name).is_some_and(|tool| {
+                            tool.needs_approval(&tool_call.function.arguments, &tool_ctx)
+                        });
 
                     let output = if needs_approval {
-                        match request_tool_approval(
-                            ctx,
-                            tx_event,
-                            &internal_call_id,
-                            &tool_call.function.name,
-                            tool_call.function.arguments.clone(),
-                        )
-                        .await?
-                        {
-                            ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {
-                                ctx.tools
-                                    .execute(
-                                        &tool_call.function.name,
-                                        tool_call.function.arguments.clone(),
-                                        &tool_ctx,
-                                    )
-                                    .await
+                        // In YOLO mode, auto-approve without prompting the user.
+                        if ctx.approval.mode() == ApprovalMode::Yolo {
+                            ctx.tools
+                                .execute(
+                                    &tool_call.function.name,
+                                    tool_call.function.arguments.clone(),
+                                    &tool_ctx,
+                                )
+                                .await
+                        } else {
+                            match request_tool_approval(
+                                ctx,
+                                tx_event,
+                                &internal_call_id,
+                                &tool_call.function.name,
+                                tool_call.function.arguments.clone(),
+                            )
+                            .await?
+                            {
+                                ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {
+                                    ctx.tools
+                                        .execute(
+                                            &tool_call.function.name,
+                                            tool_call.function.arguments.clone(),
+                                            &tool_ctx,
+                                        )
+                                        .await
+                                }
+                                ReviewDecision::Abort => return Err(KernelError::Cancelled),
+                                _ => Err("rejected by user".to_string()),
                             }
-                            ReviewDecision::Abort => return Err(KernelError::Cancelled),
-                            _ => Err("rejected by user".to_string()),
                         }
                     } else {
                         ctx.tools
