@@ -70,7 +70,7 @@ pub struct MultiAgentConfig {
 ### 数据结构
 
 - `AgentMetadata { agent_id, agent_path, agent_nickname, agent_role, last_task_message }`
-- `ActiveAgents` — `HashMap<ThreadId, AgentMetadata>` + 路径索引 `HashMap<AgentPath, ThreadId>` + 昵称索引 `HashMap<String, ThreadId>`
+- `ActiveAgents` — `HashMap<ThreadId, AgentMetadata>` + 路径索引 `HashMap<AgentPath, ThreadId>` + 昵称索引 `HashMap<String, ThreadId>` + `used_agent_nicknames: HashSet<String>` + `nickname_reset_count: usize`
 - `AgentRegistry` — `Mutex<ActiveAgents>` + `AtomicUsize total_count` + 配置 `max_threads`
 - `SpawnReservation` — 两阶段提交 guard（持有 slot + nickname + path），`commit()` 注册，`Drop` 时自动释放
 
@@ -88,7 +88,16 @@ pub struct MultiAgentConfig {
 
 ### 昵称池
 
-从静态候选列表（内嵌 ~50 个名字）中随机分配。当所有名字都已使用时，追加数字后缀重置。不依赖外部 `agent_names.txt` 文件，保持自包含。
+从编译时嵌入的 `agent_names.txt`（101 个科学家/哲学家名字，通过 `include_str!` 加载）中随机选取。
+
+**唯一性保证**：维护 `used_agent_nicknames: HashSet<String>`，每次分配时过滤已用名字后随机选取。确保同一时刻昵称不重复。
+
+**池耗尽重置**：当所有名字都已被占用时，清空 `used_agent_nicknames`，递增 `nickname_reset_count`，并给名字追加英语序数后缀：
+
+- 第 1 轮：`Euclid`, `Archimedes`, `Hypatia`, ...
+- 第 2 轮：`Euclid the 2nd`, `Archimedes the 2nd`, `Hypatia the 2nd`, ...
+- 第 3 轮：`Euclid the 3rd`, `Archimedes the 3rd`, ...
+- 以此类推（11-13 特殊处理为 `11th/12th/13th`）
 
 ## 5. AgentControl（代理控制面）
 
