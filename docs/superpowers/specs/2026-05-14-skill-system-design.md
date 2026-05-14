@@ -365,13 +365,23 @@ impl SkillRegistry {
 
 ### 7.1 输出格式
 
-采用 Markdown 格式（与现有 `DEFAULT_SYSTEM_PROMPT` 风格一致，token 消耗少）：
+采用 XML 格式（与 OpenCode 参考实现一致），包含 `<available_skills>` 包装和每个 skill 的 `<skill>` 条目：
 
-```markdown
-## Skills
-### Available skills
-- `$skill-creator` (repo): Guide for creating effective skills. File: /path/to/skill-creator/SKILL.md
-- `$my-skill` (user): Custom user-level workflow. File: /home/user/.agents/skills/my-skill/SKILL.md
+```xml
+<available_skills>
+  <skill>
+    <name>skill-creator</name>
+    <description>Guide for creating effective skills</description>
+    <location>file:///path/to/skill-creator/SKILL.md</location>
+    <scope>repo</scope>
+  </skill>
+  <skill>
+    <name>my-skill</name>
+    <description>Custom user-level workflow</description>
+    <location>file:///home/user/.agents/skills/my-skill/SKILL.md</location>
+    <scope>user</scope>
+  </skill>
+</available_skills>
 
 ### How to use skills
 - Discovery: The list above shows available skills (name + description + file path).
@@ -379,6 +389,12 @@ impl SkillRegistry {
 - Usage: After deciding to use a skill, read its SKILL.md with the Read tool.
 - Paths: Relative paths in SKILL.md resolve relative to the skill directory.
 ```
+
+每个 `<skill>` 包含四个子元素：
+- `<name>` — skill 名称，用于 `$name` 提及匹配
+- `<description>` — 单行描述，帮助 LLM 判断是否适用
+- `<location>` — SKILL.md 的 `file://` URL
+- `<scope>` — 来源范围（`repo` 或 `user`）
 
 ### 7.2 渲染函数
 
@@ -389,12 +405,12 @@ impl SkillRegistry {
 pub fn render_catalog(skills: &[SkillMetadata], roots: &[SkillRoot]) -> String { ... }
 ```
 
-### 7.3 scope 标记
+### 7.3 scope 元素
 
-| scope | 标记 | 含义 |
+| scope | 值 | 含义 |
 |-------|------|------|
-| Repo | `(repo)` | 项目级，位于当前仓库的 .agents/skills/ |
-| User | `(user)` | 用户级，位于 $HOME/.agents/skills/ |
+| Repo | `<scope>repo</scope>` | 项目级，位于当前仓库的 .agents/skills/ |
+| User | `<scope>user</scope>` | 用户级，位于 $HOME/.agents/skills/ |
 
 ## 8. 提及检测与匹配
 
@@ -559,4 +575,4 @@ kernel/prompt/mod      ──→ 无新增依赖（skills_xml 字段已存在）
 - `load_body()`: 正确读取 SKILL.md 全文；文件不存在返回 None
 - `SkillsConfig`: 空配置默认所有 skill 启用；按 name 禁用生效；按 path 禁用生效；无效 rules 条目触发警告不崩溃；后发规则覆盖先发规则
 - `config_rules::resolve_disabled_paths()`: name 选择器匹配所有同名 skill；path 选择器精确匹配；enabled=true 的规则重新启用之前的禁用
-- 集成: `execute_turn()` 的 preamble 在 skill 存在时包含 `## Skills` section；无 skill 时不包含；`include_instructions = false` 时不包含
+- 集成: `execute_turn()` 的 preamble 在 skill 存在时包含 `<available_skills>` 块；无 skill 时不包含；`include_instructions = false` 时不包含
