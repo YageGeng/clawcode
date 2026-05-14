@@ -118,7 +118,7 @@ pub(crate) fn spawn_thread(
     let (mailbox, mailbox_rx) = mailbox_pair();
 
     let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
-    tools.register_skill_tool(Arc::clone(&skill_registry));
+    tools.register_skill_tools(Arc::clone(&skill_registry));
 
     let tx_event = Arc::new(tokio::sync::Mutex::new(initial_tx));
     let pending_approvals: Arc<

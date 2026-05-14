@@ -14,13 +14,13 @@ impl ToolRegistry {
     /// callers can register through `Arc<ToolRegistry>` after passing it to Kernel.
     pub fn register_builtins(&self) {
         self.register(Arc::new(shell::ShellCommand::new()));
-        self.register_fs_tools();
+        self.register_fs_tools(false);
     }
 
     /// Register the skill tool, backed by the given registry.
     /// Separate from `register_builtins` because the registry is created
     /// per-session in the kernel and passed in here.
-    pub fn register_skill_tool(&self, registry: Arc<skills::SkillRegistry>) {
+    pub fn register_skill_tools(&self, registry: Arc<skills::SkillRegistry>) {
         self.register(Arc::new(skill::SkillTool::new(registry)));
     }
 
