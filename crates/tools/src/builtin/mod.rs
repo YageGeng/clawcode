@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod fs;
 pub mod shell;
+pub mod skill;
 
 use std::sync::Arc;
 
@@ -14,6 +15,13 @@ impl ToolRegistry {
     pub fn register_builtins(&self) {
         self.register(Arc::new(shell::ShellCommand::new()));
         self.register_fs_tools();
+    }
+
+    /// Register the skill tool, backed by the given registry.
+    /// Separate from `register_builtins` because the registry is created
+    /// per-session in the kernel and passed in here.
+    pub fn register_skill_tool(&self, registry: Arc<skills::SkillRegistry>) {
+        self.register(Arc::new(skill::SkillTool::new(registry)));
     }
 
     /// Register agent management tools. Separate from `register_builtins` so

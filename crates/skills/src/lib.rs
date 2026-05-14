@@ -155,11 +155,37 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// Render the skill catalog as system prompt text.
+    /// Render the skill catalog as an XML block for the system prompt.
     /// Returns `None` when there are no enabled skills.
     pub fn render_catalog(&self) -> Option<String> {
         let enabled = self.enabled_skills();
         render::render_catalog(&enabled)
+    }
+
+    /// Render the skill list as a Markdown block for tool descriptions.
+    ///
+    /// Format matches OpenCode's `Skill.fmt(list, { verbose: false })`:
+    /// `## Available Skills` followed by `- **name**: description` bullets.
+    /// Skills without a description are omitted.  Returns `"No skills are
+    /// currently available."` when the list is empty.
+    pub fn render_markdown_catalog(&self) -> String {
+        let described: Vec<_> = self
+            .enabled_skills()
+            .into_iter()
+            .filter(|s| !s.description.is_empty())
+            .collect();
+
+        if described.is_empty() {
+            return "No skills are currently available.".to_string();
+        }
+
+        let mut lines: Vec<String> = Vec::with_capacity(2 + described.len());
+        lines.push("## Available Skills".to_string());
+        for skill in &described {
+            lines.push(format!("- **{}**: {}", skill.name, skill.description));
+        }
+
+        lines.join("\n")
     }
 
     /// Scan `text` for `$skill-name` tokens and resolve them to enabled
@@ -167,6 +193,14 @@ impl SkillRegistry {
     /// unambiguous name resolution.
     pub fn resolve_mentions(&self, text: &str) -> Vec<&SkillMetadata> {
         injection::MentionMatcher::resolve(self, text)
+    }
+
+    /// Look up an enabled skill by name (case-insensitive).
+    /// Returns `None` when the name is unknown or the skill is disabled.
+    pub fn lookup(&self, name: &str) -> Option<&SkillMetadata> {
+        self.enabled_skills()
+            .into_iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
     }
 
     /// Load the full body of `SKILL.md` for a skill by name.

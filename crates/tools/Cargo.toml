@@ -6,6 +6,7 @@ description = "Built-in agent tools: shell execution, file I/O, MCP stub"
 
 [dependencies]
 protocol = { path = "../protocol" }
+skills = { path = "../skills" }
 
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
