@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod approval;
 pub mod context;
+pub(crate) mod persistence;
 pub(crate) mod prompt;
 pub mod session;
 // tool module moved to tools crate
@@ -31,6 +32,9 @@ use crate::agent::adapter::AgentControlAdapter;
 use crate::agent::control::AgentControl;
 use crate::approval::ApprovalPolicy;
 use crate::context::InMemoryContext;
+use crate::persistence::{CreateSessionParams, SessionStore};
+use crate::prompt::environment::EnvironmentInfo;
+use crate::prompt::{Instructions, SystemPrompt};
 use crate::session::{Thread, event_stream, spawn_thread};
 use tools::ToolRegistry;
 
@@ -48,6 +52,9 @@ pub struct Kernel {
     pub tools: Arc<ToolRegistry>,
     #[builder(default)]
     sessions: Mutex<HashMap<SessionId, Thread>>,
+    /// File-backed session persistence store.
+    #[builder(default = Arc::new(SessionStore::new_default()))]
+    session_store: Arc<SessionStore>,
     /// Shared agent control for multi-agent operations across all sessions.
     /// Constructed from the same llm_factory, config, and tools passed to
     /// the builder — must not be `#[builder(default)]`.
@@ -77,6 +84,9 @@ impl Kernel {
             .config(config)
             .tools(tools)
             .agent_control(agent_control)
+            .session_store(Arc::new(SessionStore::from_config(
+                &cfg.session_persistence,
+            )))
             .build()
     }
 
@@ -97,6 +107,64 @@ impl Kernel {
         let cfg = self.config.current();
         let (provider_id, model_id) = cfg.active_model.split_once('/')?;
         self.llm_factory.get(provider_id, model_id)
+    }
+
+    /// Return the active provider/model pair from configuration.
+    fn active_provider_model(&self) -> Option<(String, String)> {
+        let cfg = self.config.current();
+        let (provider_id, model_id) = cfg.active_model.split_once('/')?;
+        Some((provider_id.to_string(), model_id.to_string()))
+    }
+
+    /// Render the base prompt snapshot stored in the session metadata record.
+    fn render_base_system_prompt(
+        &self,
+        cwd: &Path,
+        model_id: &str,
+        app_cfg: &config::AppConfig,
+    ) -> String {
+        let skill_registry = skills::SkillRegistry::discover(cwd, &app_cfg.skills);
+        let skills_xml = if app_cfg.skills.include_instructions {
+            skill_registry.render_catalog()
+        } else {
+            None
+        };
+        SystemPrompt::builder()
+            .environment(EnvironmentInfo::capture(
+                model_id.to_string(),
+                cwd.to_path_buf(),
+            ))
+            .instructions(Instructions::load(cwd))
+            .skills_xml(skills_xml)
+            .build()
+            .render()
+    }
+
+    /// Spawn a live thread from already constructed context and persistence state.
+    fn spawn_live_thread(
+        &self,
+        session_id: SessionId,
+        cwd: PathBuf,
+        context: Box<dyn crate::context::ContextManager>,
+        recorder: Option<crate::persistence::SessionRecorder>,
+        app_cfg: Arc<config::AppConfig>,
+    ) -> Result<Thread, KernelError> {
+        let llm = self
+            .default_llm()
+            .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("no LLM configured")))?;
+        let approval = Arc::new(ApprovalPolicy::new(app_cfg.approval));
+        Ok(spawn_thread(
+            session_id,
+            cwd,
+            llm,
+            Arc::clone(&self.tools),
+            context,
+            AgentPath::root(),
+            Some(Arc::clone(&self.agent_control)),
+            approval,
+            app_cfg,
+            recorder,
+        ))
     }
 
     /// Build available session modes.
@@ -144,28 +212,39 @@ impl Kernel {
 impl AgentKernel for Kernel {
     async fn new_session(&self, cwd: PathBuf) -> Result<SessionCreated, KernelError> {
         let session_id = SessionId(uuid::Uuid::new_v4().to_string());
-        let llm = self
-            .default_llm()
-            .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("no LLM configured")))?;
+        let (provider_id, model_id) = self.active_provider_model().ok_or_else(|| {
+            KernelError::Internal(anyhow::anyhow!("active model must be provider/model"))
+        })?;
 
         // Use the kernel-wide AgentControl shared across all sessions.
         let agent_ctrl = Arc::clone(&self.agent_control);
-        // Register the root thread so it can be the parent of sub-agents.
-        agent_ctrl.registry.register_root_thread(session_id.clone());
 
         let app_cfg = self.config.current();
-        let approval = Arc::new(ApprovalPolicy::new(app_cfg.approval));
-        let handle = spawn_thread(
+        let base_system_prompt = self.render_base_system_prompt(&cwd, &model_id, &app_cfg);
+        let recorder = self
+            .session_store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(session_id.clone())
+                    .agent_path(AgentPath::root())
+                    .cwd(cwd.clone())
+                    .provider_id(provider_id)
+                    .model_id(model_id)
+                    .base_system_prompt(base_system_prompt)
+                    .build(),
+            )
+            .await
+            .map_err(|error| KernelError::Internal(error.into()))?;
+        let handle = self.spawn_live_thread(
             session_id.clone(),
             cwd.clone(),
-            llm,
-            Arc::clone(&self.tools),
             Box::new(InMemoryContext::new()),
-            AgentPath::root(),
-            Some(Arc::clone(&agent_ctrl)),
-            approval,
+            recorder,
             app_cfg,
-        );
+        )?;
+
+        // Register root only after session creation succeeds, avoiding stale registry entries.
+        agent_ctrl.registry.register_root_thread(session_id.clone());
 
         // Register root thread mailbox for inter-agent message routing.
         let sid_for_ctrl = session_id.clone();
@@ -182,41 +261,88 @@ impl AgentKernel for Kernel {
             .await
             .insert(session_id.clone(), handle);
 
-        Ok(SessionCreated {
-            session_id,
-            modes,
-            models,
-        })
+        Ok(SessionCreated::builder()
+            .session_id(session_id)
+            .modes(modes)
+            .models(models)
+            .build())
     }
 
     async fn load_session(&self, session_id: &SessionId) -> Result<SessionCreated, KernelError> {
-        if !self.sessions.lock().await.contains_key(session_id) {
-            return Err(KernelError::SessionNotFound(session_id.clone()));
+        if self.sessions.lock().await.contains_key(session_id) {
+            return Ok(SessionCreated::builder()
+                .session_id(session_id.clone())
+                .modes(self.build_modes())
+                .models(self.build_models())
+                .build());
         }
-        Ok(SessionCreated {
-            session_id: session_id.clone(),
-            modes: self.build_modes(),
-            models: self.build_models(),
-        })
+        let Some((replayed, recorder)) = self
+            .session_store
+            .load_session(session_id)
+            .map_err(|error| KernelError::Internal(error.into()))?
+        else {
+            return Err(KernelError::SessionNotFound(session_id.clone()));
+        };
+        let app_cfg = self.config.current();
+        let history = replayed.messages;
+        let handle = self.spawn_live_thread(
+            session_id.clone(),
+            replayed.meta.cwd.clone(),
+            Box::new(InMemoryContext::from_messages(history.clone())),
+            Some(recorder),
+            app_cfg,
+        )?;
+        let agent_ctrl = Arc::clone(&self.agent_control);
+        // Restored root sessions must be available for agent routing just like new sessions.
+        agent_ctrl.registry.register_root_thread(session_id.clone());
+        let sid_for_ctrl = session_id.clone();
+        let mb = handle.mailbox.clone();
+        tokio::spawn(async move {
+            agent_ctrl.register_mailbox(sid_for_ctrl, mb).await;
+        });
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), handle);
+        Ok(SessionCreated::builder()
+            .session_id(session_id.clone())
+            .modes(self.build_modes())
+            .models(self.build_models())
+            .history(history)
+            .build())
     }
 
     async fn list_sessions(
         &self,
-        _cwd: Option<&Path>,
+        cwd: Option<&Path>,
         _cursor: Option<&str>,
     ) -> Result<SessionListPage, KernelError> {
-        let sessions: Vec<SessionInfo> = self
+        let mut sessions: Vec<SessionInfo> = self
             .sessions
             .lock()
             .await
-            .keys()
-            .map(|id| {
+            .values()
+            .filter(|thread| cwd.is_none_or(|cwd| thread.cwd == cwd))
+            .map(|thread| {
                 SessionInfo::builder()
-                    .session_id(id.clone())
-                    .cwd(PathBuf::from("."))
+                    .session_id(thread.session_id.clone())
+                    .cwd(thread.cwd.clone())
                     .build()
             })
             .collect();
+        let live_ids: std::collections::HashSet<SessionId> = sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect();
+        for session in self
+            .session_store
+            .list_sessions(cwd)
+            .map_err(|error| KernelError::Internal(error.into()))?
+        {
+            if !live_ids.contains(&session.session_id) {
+                sessions.push(session);
+            }
+        }
 
         Ok(SessionListPage {
             sessions,
@@ -278,16 +404,26 @@ impl AgentKernel for Kernel {
     }
 
     async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError> {
-        let handle = self
-            .sessions
-            .lock()
+        let handle = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .cloned()
+                .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?
+        };
+
+        self.session_store
+            .close_session(session_id, handle.recorder.as_ref())
             .await
-            .remove(session_id)
-            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
-        // Signal close to the background task
-        let _ = handle.tx_op.send(Op::CloseSession {
-            session_id: session_id.clone(),
-        });
+            .map_err(|error| KernelError::Internal(error.into()))?;
+
+        let removed = self.sessions.lock().await.remove(session_id);
+        if let Some(handle) = removed {
+            // Signal close only after persistence succeeds so close can be retried on failure.
+            let _ = handle.tx_op.send(Op::CloseSession {
+                session_id: session_id.clone(),
+            });
+        }
         Ok(())
     }
 

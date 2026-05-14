@@ -50,6 +50,12 @@ impl InMemoryContext {
             messages: Vec::new(),
         }
     }
+
+    /// Create a context from replayed persisted messages.
+    #[must_use]
+    pub(crate) fn from_messages(messages: Vec<Message>) -> Self {
+        Self { messages }
+    }
 }
 
 impl Default for InMemoryContext {

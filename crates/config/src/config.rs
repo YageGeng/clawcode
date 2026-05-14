@@ -9,6 +9,26 @@ use crate::llm::LlmProvider;
 use crate::mcp::McpServerConfig;
 use crate::skills::SkillsConfig;
 
+/// File-backed session persistence settings.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SessionPersistenceConfig {
+    /// Whether sessions should be written to and restored from data home.
+    #[serde(default = "default_session_persistence_enabled")]
+    pub enabled: bool,
+    /// Optional override for the data directory that stores session transcripts.
+    #[serde(default)]
+    pub data_home: Option<String>,
+}
+
+impl Default for SessionPersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_session_persistence_enabled(),
+            data_home: None,
+        }
+    }
+}
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AppConfig {
@@ -30,6 +50,14 @@ pub struct AppConfig {
     /// MCP server configurations.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// File-backed session persistence configuration.
+    #[serde(default)]
+    pub session_persistence: SessionPersistenceConfig,
+}
+
+/// Return the default session persistence enablement.
+fn default_session_persistence_enabled() -> bool {
+    true
 }
 
 fn default_active_model() -> String {
@@ -45,6 +73,7 @@ impl Default for AppConfig {
             multi_agent: MultiAgentConfig::default(),
             skills: SkillsConfig::default(),
             mcp_servers: Vec::new(),
+            session_persistence: SessionPersistenceConfig::default(),
         }
     }
 }

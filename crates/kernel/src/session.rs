@@ -15,6 +15,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::agent::control::AgentControl;
 use crate::agent::mailbox::{Mailbox, MailboxReceiver, mailbox_pair};
 use crate::context::ContextManager;
+use crate::persistence::{
+    PersistedPayload, SessionRecorder, TurnAbortedRecord, TurnCompleteRecord, TurnKindRecord,
+};
 use crate::turn::{TurnContext, execute_turn};
 use tools::ToolRegistry;
 
@@ -23,6 +26,8 @@ use tools::ToolRegistry;
 pub struct Thread {
     /// Session identifier owned by this handle.
     pub session_id: SessionId,
+    /// Working directory associated with this live session.
+    pub cwd: PathBuf,
     /// Send operations to the background task.
     pub(crate) tx_op: mpsc::UnboundedSender<Op>,
     /// Shared sender for per-turn events.
@@ -40,6 +45,9 @@ pub struct Thread {
     /// Mailbox for receiving inter-agent messages.
     #[allow(dead_code)]
     pub(crate) mailbox: Mailbox,
+    /// Optional file-backed recorder for canonical session history.
+    #[builder(default, setter(strip_option))]
+    pub(crate) recorder: Option<SessionRecorder>,
 }
 
 impl Thread {
@@ -97,6 +105,9 @@ pub(crate) struct Session {
     /// Held to keep server connections alive — tool dispatch goes through ToolRegistry.
     #[allow(dead_code)]
     pub mcp_manager: Arc<mcp::McpConnectionManager>,
+    /// Optional file-backed recorder for canonical session history.
+    #[builder(default, setter(strip_option))]
+    pub recorder: Option<SessionRecorder>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
@@ -115,6 +126,7 @@ pub(crate) fn spawn_thread(
     agent_control: Option<Arc<AgentControl>>,
     approval: Arc<crate::approval::ApprovalPolicy>,
     app_config: Arc<AppConfig>,
+    recorder: Option<SessionRecorder>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
@@ -162,7 +174,8 @@ pub(crate) fn spawn_thread(
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
     > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
-    let runtime = Session::builder()
+    let thread_cwd = cwd.clone();
+    let mut runtime = Session::builder()
         .session_id(session_id.clone())
         .cwd(cwd)
         .rx_op(rx_op)
@@ -180,18 +193,22 @@ pub(crate) fn spawn_thread(
         .skill_registry(skill_registry)
         .mcp_manager(mcp_manager)
         .build();
+    runtime.recorder = recorder.clone();
 
     tokio::spawn(run_loop(runtime));
 
-    Thread::builder()
+    let mut thread = Thread::builder()
         .session_id(session_id)
+        .cwd(thread_cwd)
         .tx_op(tx_op)
         .tx_event(tx_event)
         .pending_approvals(pending_approvals)
         .cancel_tx(cancel_tx)
         .agent_control(agent_control)
         .mailbox(mailbox)
-        .build()
+        .build();
+    thread.recorder = recorder;
+    thread
 }
 
 /// Background task: receive ops, execute turns, emit events.
@@ -203,17 +220,22 @@ async fn run_loop(mut rt: Session) {
             // The content is injected as the turn input, and the turn loop
             // handles tool calls, approvals, and cancellation the same way.
             Some(Op::InterAgentMessage { content, .. }) => {
+                let turn_id = uuid::Uuid::new_v4().to_string();
                 let ctx = TurnContext::builder()
                     .session_id(rt.session_id.clone())
+                    .turn_id(turn_id.clone())
+                    .turn_kind(TurnKindRecord::InterAgentMessage)
                     .llm(Arc::clone(&rt.llm))
                     .tools(Arc::clone(&rt.tools))
                     .cwd(rt.cwd.clone())
+                    .provider_id(active_provider_id(&rt.app_config))
                     .pending_approvals(Arc::clone(&rt.pending_approvals))
                     .agent_path(rt.agent_path.clone())
                     .approval(Arc::clone(&rt.approval))
                     .app_config(Arc::clone(&rt.app_config))
                     .skill_registry(Arc::clone(&rt.skill_registry))
                     .build();
+                let ctx = with_recorder(ctx, rt.recorder.clone());
 
                 let tx = { rt.tx_event.lock().await.clone() };
                 let turn = execute_turn(&ctx, content, &mut rt.context, &tx);
@@ -223,6 +245,7 @@ async fn run_loop(mut rt: Session) {
                     tokio::select! {
                         result = &mut turn => {
                             if let Err(e) = result {
+                                persist_turn_aborted(&rt.recorder, &turn_id, e.to_string()).await;
                                 let _ = tx.send(Event::turn_complete(
                                     rt.session_id.clone(),
                                     StopReason::Error,
@@ -233,6 +256,7 @@ async fn run_loop(mut rt: Session) {
                                     "Turn execution failed"
                                 );
                             } else {
+                                persist_turn_complete(&rt.recorder, &turn_id, StopReason::EndTurn).await;
                                 let _ = tx.send(Event::turn_complete(
                                     rt.session_id.clone(),
                                     StopReason::EndTurn,
@@ -260,11 +284,15 @@ async fn run_loop(mut rt: Session) {
                 }
             }
             Some(Op::Prompt { text, system, .. }) => {
+                let turn_id = uuid::Uuid::new_v4().to_string();
                 let ctx = TurnContext::builder()
                     .session_id(rt.session_id.clone())
+                    .turn_id(turn_id.clone())
+                    .turn_kind(TurnKindRecord::Prompt)
                     .llm(Arc::clone(&rt.llm))
                     .tools(Arc::clone(&rt.tools))
                     .cwd(rt.cwd.clone())
+                    .provider_id(active_provider_id(&rt.app_config))
                     .pending_approvals(Arc::clone(&rt.pending_approvals))
                     .agent_path(rt.agent_path.clone())
                     .approval(Arc::clone(&rt.approval))
@@ -272,6 +300,7 @@ async fn run_loop(mut rt: Session) {
                     .app_config(Arc::clone(&rt.app_config))
                     .skill_registry(Arc::clone(&rt.skill_registry))
                     .build();
+                let ctx = with_recorder(ctx, rt.recorder.clone());
 
                 let tx = { rt.tx_event.lock().await.clone() };
 
@@ -282,6 +311,7 @@ async fn run_loop(mut rt: Session) {
                     tokio::select! {
                         result = &mut turn => {
                             if let Err(e) = result {
+                                persist_turn_aborted(&rt.recorder, &turn_id, e.to_string()).await;
                                 let _ = tx.send(Event::turn_complete(
                                     rt.session_id.clone(),
                                     StopReason::Error,
@@ -292,6 +322,7 @@ async fn run_loop(mut rt: Session) {
                                     "Turn execution failed"
                                 );
                             } else {
+                                persist_turn_complete(&rt.recorder, &turn_id, StopReason::EndTurn).await;
                                 let _ = tx.send(Event::turn_complete(
                                     rt.session_id.clone(),
                                     StopReason::EndTurn,
@@ -327,6 +358,59 @@ async fn run_loop(mut rt: Session) {
             Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => break,
             _ => {}
         }
+    }
+}
+
+/// Attach an optional recorder to a turn context after typed-builder construction.
+fn with_recorder(mut ctx: TurnContext, recorder: Option<SessionRecorder>) -> TurnContext {
+    ctx.recorder = recorder;
+    ctx
+}
+
+/// Return the provider id portion of the configured active model.
+fn active_provider_id(app_config: &AppConfig) -> String {
+    app_config
+        .active_model
+        .split_once('/')
+        .map(|(provider_id, _)| provider_id.to_string())
+        .unwrap_or_default()
+}
+
+/// Persist a successful turn completion marker, logging but not failing the live turn.
+async fn persist_turn_complete(
+    recorder: &Option<SessionRecorder>,
+    turn_id: &str,
+    stop_reason: StopReason,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let record = TurnCompleteRecord::builder()
+        .turn_id(turn_id.to_string())
+        .stop_reason(stop_reason)
+        .build();
+    if let Err(error) = recorder
+        .append(&[PersistedPayload::TurnComplete(record)])
+        .await
+    {
+        tracing::warn!(%error, "failed to persist turn completion");
+    }
+}
+
+/// Persist an interrupted turn marker, logging but not failing shutdown/error handling.
+async fn persist_turn_aborted(recorder: &Option<SessionRecorder>, turn_id: &str, reason: String) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let record = TurnAbortedRecord::builder()
+        .turn_id(turn_id.to_string())
+        .reason(reason)
+        .build();
+    if let Err(error) = recorder
+        .append(&[PersistedPayload::TurnAborted(record)])
+        .await
+    {
+        tracing::warn!(%error, "failed to persist turn abort");
     }
 }
 

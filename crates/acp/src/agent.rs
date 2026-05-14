@@ -10,6 +10,7 @@ use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
 use futures::StreamExt;
 
+use protocol::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use protocol::{AgentKernel, Event, SessionId};
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
@@ -34,6 +35,183 @@ impl ClawcodeAgent {
     /// Convert an internal SessionId to an ACP SessionId.
     fn to_acp_session_id(id: &SessionId) -> AcpSessionId {
         AcpSessionId::new(id.0.clone())
+    }
+
+    /// Convert kernel session modes into ACP mode state.
+    fn to_acp_mode_state(modes: Vec<protocol::SessionMode>) -> SessionModeState {
+        let acp_modes: Vec<AcpSessionMode> = modes
+            .into_iter()
+            .map(|mode| {
+                let mut acp_mode =
+                    AcpSessionMode::new(acp::schema::SessionModeId::new(mode.id), mode.name);
+                if let Some(description) = mode.description {
+                    acp_mode = acp_mode.description(description);
+                }
+                acp_mode
+            })
+            .collect();
+
+        let first_mode_id = acp_modes
+            .first()
+            .map(|mode| mode.id.clone())
+            .unwrap_or_else(|| acp::schema::SessionModeId::new("auto".to_string()));
+
+        SessionModeState::new(first_mode_id, acp_modes)
+    }
+
+    /// Convert kernel model metadata into ACP model state.
+    fn to_acp_model_state(models: Vec<protocol::ModelInfo>) -> SessionModelState {
+        let acp_models: Vec<AcpModelInfo> = models
+            .into_iter()
+            .map(|model| {
+                let mut info =
+                    AcpModelInfo::new(acp::schema::ModelId::new(model.id), model.display_name);
+                if let Some(description) = model.description {
+                    info = info.description(description);
+                }
+                info
+            })
+            .collect();
+
+        let first_model_id = acp_models
+            .first()
+            .map(|model| model.model_id.clone())
+            .unwrap_or_else(|| acp::schema::ModelId::new("".to_string()));
+
+        SessionModelState::new(first_model_id, acp_models)
+    }
+
+    /// Convert a persisted message into terminal-friendly transcript text.
+    fn history_message_text(message: &Message) -> Option<String> {
+        match message {
+            Message::System { .. } => None,
+            Message::User { content } => {
+                let parts = content
+                    .iter()
+                    .filter_map(Self::user_content_text)
+                    .collect::<Vec<_>>();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(format!("\n> {}\n", parts.join("\n")))
+                }
+            }
+            Message::Assistant { content, .. } => {
+                let mut text = String::new();
+                for content in content.iter() {
+                    match content {
+                        AssistantContent::Text(part) => text.push_str(&part.text),
+                        _ => {
+                            if let Some(part) = Self::assistant_content_text(content) {
+                                if !text.is_empty() && !text.ends_with('\n') {
+                                    text.push('\n');
+                                }
+                                text.push_str(&part);
+                                text.push('\n');
+                            }
+                        }
+                    }
+                }
+                if text.trim().is_empty() {
+                    None
+                } else {
+                    Some(format!("{}\n", text.trim_end()))
+                }
+            }
+        }
+    }
+
+    /// Convert persisted user content into transcript text.
+    fn user_content_text(content: &UserContent) -> Option<String> {
+        match content {
+            UserContent::Text(text) => Some(text.text.clone()),
+            UserContent::ToolResult(result) => {
+                let parts = result
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        ToolResultContent::Text(text) => Some(text.text.clone()),
+                        ToolResultContent::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(format!("[tool result {}] {}", result.id, parts.join("\n")))
+                }
+            }
+            UserContent::Image(_) => Some("[image]".to_string()),
+            UserContent::Document(_) => Some("[document]".to_string()),
+        }
+    }
+
+    /// Convert persisted assistant content into transcript text.
+    fn assistant_content_text(content: &AssistantContent) -> Option<String> {
+        match content {
+            AssistantContent::Text(text) => Some(text.text.clone()),
+            AssistantContent::ToolCall(tool_call) => Some(format!(
+                "  [tool call] {} {}",
+                tool_call.function.name, tool_call.function.arguments
+            )),
+            AssistantContent::Reasoning(reasoning) => {
+                let parts = reasoning
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        protocol::message::ReasoningContent::Text { text, .. } => {
+                            Some(text.clone())
+                        }
+                        protocol::message::ReasoningContent::Summary(text) => Some(text.clone()),
+                        protocol::message::ReasoningContent::Encrypted(_)
+                        | protocol::message::ReasoningContent::Redacted { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(format!("[thought] {}", parts.join("\n")))
+                }
+            }
+            AssistantContent::Image(_) => Some("[assistant image]".to_string()),
+        }
+    }
+
+    /// Replay restored history to the ACP client as message chunks.
+    async fn replay_history(
+        session_id: &AcpSessionId,
+        history: &[Message],
+        cx: &ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        if history.is_empty() {
+            return Ok(());
+        }
+
+        let header = ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "\n--- restored history ---\n",
+        )));
+        cx.send_notification(SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::AgentMessageChunk(header),
+        ))?;
+
+        for message in history {
+            if let Some(text) = Self::history_message_text(message) {
+                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                cx.send_notification(SessionNotification::new(
+                    session_id.clone(),
+                    SessionUpdate::AgentMessageChunk(chunk),
+                ))?;
+            }
+        }
+
+        let footer = ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "--- end restored history ---\n",
+        )));
+        cx.send_notification(SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::AgentMessageChunk(footer),
+        ))?;
+        Ok(())
     }
 
     /// Build and serve the ACP agent over the given transport.
@@ -76,6 +254,36 @@ impl ClawcodeAgent {
                         let agent = agent.clone();
                         cx.spawn(async move {
                             responder.respond_with_result(agent.handle_new_session(request).await)
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = agent.clone();
+                    async move |request: LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
+                        let agent = agent.clone();
+                        let cx2 = cx.clone();
+                        cx.spawn(async move {
+                            responder
+                                .respond_with_result(agent.handle_load_session(request, cx2).await)
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = agent.clone();
+                    async move |request: ListSessionsRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = agent.clone();
+                        cx.spawn(async move {
+                            responder.respond_with_result(agent.handle_list_sessions(request).await)
                         })?;
                         Ok(())
                     }
@@ -215,49 +423,60 @@ impl ClawcodeAgent {
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
 
         let acp_session_id = Self::to_acp_session_id(&created.session_id);
-
-        let acp_modes: Vec<AcpSessionMode> = created
-            .modes
-            .into_iter()
-            .map(|m| {
-                let mut acp_mode =
-                    AcpSessionMode::new(acp::schema::SessionModeId::new(m.id), m.name);
-                if let Some(desc) = m.description {
-                    acp_mode = acp_mode.description(desc);
-                }
-                acp_mode
-            })
-            .collect();
-
-        let first_mode_id = acp_modes
-            .first()
-            .map(|m| m.id.clone())
-            .unwrap_or_else(|| acp::schema::SessionModeId::new("auto".to_string()));
-
-        let mode_state = SessionModeState::new(first_mode_id, acp_modes);
-
-        let acp_models: Vec<AcpModelInfo> = created
-            .models
-            .into_iter()
-            .map(|m| {
-                let mut info = AcpModelInfo::new(acp::schema::ModelId::new(m.id), m.display_name);
-                if let Some(desc) = m.description {
-                    info = info.description(desc);
-                }
-                info
-            })
-            .collect();
-
-        let first_model_id = acp_models
-            .first()
-            .map(|m| m.model_id.clone())
-            .unwrap_or_else(|| acp::schema::ModelId::new("".to_string()));
-
-        let model_state = SessionModelState::new(first_model_id, acp_models);
+        let mode_state = Self::to_acp_mode_state(created.modes);
+        let model_state = Self::to_acp_model_state(created.models);
 
         Ok(NewSessionResponse::new(acp_session_id)
             .modes(mode_state)
             .models(model_state))
+    }
+
+    /// Load a persisted session through the kernel and return initial ACP state.
+    async fn handle_load_session(
+        &self,
+        request: LoadSessionRequest,
+        cx: ConnectionTo<Client>,
+    ) -> Result<LoadSessionResponse, Error> {
+        let session_id = SessionId(request.session_id.0.to_string());
+        let created = self
+            .kernel
+            .load_session(&session_id)
+            .await
+            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+
+        let acp_session_id = Self::to_acp_session_id(&created.session_id);
+        Self::replay_history(&acp_session_id, &created.history, &cx).await?;
+
+        let mode_state = Self::to_acp_mode_state(created.modes);
+        let model_state = Self::to_acp_model_state(created.models);
+
+        Ok(LoadSessionResponse::new()
+            .modes(mode_state)
+            .models(model_state))
+    }
+
+    /// List persisted sessions through the kernel and convert them into ACP session summaries.
+    async fn handle_list_sessions(
+        &self,
+        request: ListSessionsRequest,
+    ) -> Result<ListSessionsResponse, Error> {
+        let page = self
+            .kernel
+            .list_sessions(request.cwd.as_deref(), request.cursor.as_deref())
+            .await
+            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+
+        let sessions = page
+            .sessions
+            .into_iter()
+            .map(|session| {
+                SessionInfo::new(Self::to_acp_session_id(&session.session_id), session.cwd)
+                    .title(session.title)
+                    .updated_at(session.updated_at)
+            })
+            .collect();
+
+        Ok(ListSessionsResponse::new(sessions).next_cursor(page.next_cursor))
     }
 
     async fn handle_prompt(

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::message::Message;
+
 /// Unique session identifier generated when a new session is created.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -26,11 +28,17 @@ pub struct SessionInfo {
 }
 
 /// Data returned to the frontend after creating or loading a session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, typed_builder::TypedBuilder)]
 pub struct SessionCreated {
+    /// Session id that was created or restored.
     pub session_id: SessionId,
+    /// Available session mode presets.
     pub modes: Vec<super::config::SessionMode>,
+    /// Available model selections.
     pub models: Vec<super::config::ModelInfo>,
+    /// Replayed message history when loading an existing session.
+    #[builder(default)]
+    pub history: Vec<Message>,
 }
 
 /// Paginated session list result.

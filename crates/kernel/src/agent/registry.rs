@@ -116,21 +116,20 @@ impl AgentRegistry {
         }
     }
 
-    /// Register the root thread.
+    /// Register or replace the root thread mapping.
     pub(crate) fn register_root_thread(&self, thread_id: SessionId) {
         let mut agents = self
             .active_agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        agents
-            .agent_tree
-            .entry(AgentPath::root().to_string())
-            .or_insert_with(|| {
-                AgentMetadata::builder()
-                    .agent_id(thread_id)
-                    .agent_path(AgentPath::root())
-                    .build()
-            });
+        // Root sessions can be closed and later restored, so the root path must not retain stale ids.
+        agents.agent_tree.insert(
+            AgentPath::root().to_string(),
+            AgentMetadata::builder()
+                .agent_id(thread_id)
+                .agent_path(AgentPath::root())
+                .build(),
+        );
     }
 
     /// Resolve a target string (path or nickname) to an AgentPath.

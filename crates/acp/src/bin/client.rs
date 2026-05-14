@@ -4,10 +4,12 @@
 //! Start with: `cargo run --bin claw`
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::*;
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Responder};
+use clap::Parser;
 use kernel::Kernel;
 use provider::factory::LlmFactory;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -15,14 +17,80 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tools::ToolRegistry;
 
-/// Convert a displayable error into an ACP internal error.
-fn err(e: impl std::fmt::Display) -> agent_client_protocol::Error {
-    agent_client_protocol::util::internal_error(e.to_string())
+/// Command-line options for the interactive claw client.
+#[derive(Clone, Debug, Parser)]
+#[command(name = "claw", version, about = "Interactive clawcode ACP client")]
+struct Cli {
+    /// List persisted sessions for the current working directory and exit.
+    #[arg(long, conflicts_with = "resume")]
+    list_sessions: bool,
+
+    /// Resume a persisted session id instead of creating a new session.
+    #[arg(long, value_name = "SESSION_ID")]
+    resume: Option<String>,
+}
+
+/// Print session list results returned by the ACP agent.
+fn print_sessions(response: ListSessionsResponse) {
+    if response.sessions.is_empty() {
+        println!("No sessions found for this working directory.");
+        return;
+    }
+
+    for session in response.sessions {
+        let updated = session.updated_at.as_deref().unwrap_or("-");
+        let title = session.title.as_deref().unwrap_or("");
+        println!(
+            "{}\t{}\t{}\t{}",
+            session.session_id,
+            updated,
+            session.cwd.display(),
+            title
+        );
+    }
+}
+
+/// Request persisted sessions for `cwd` from the in-process ACP agent.
+async fn list_sessions(
+    conn: &ConnectionTo<Agent>,
+    cwd: PathBuf,
+) -> Result<(), agent_client_protocol::Error> {
+    let response: ListSessionsResponse = conn
+        .send_request(ListSessionsRequest::new().cwd(cwd))
+        .block_task()
+        .await?;
+    print_sessions(response);
+    Ok(())
+}
+
+/// Create a new session or load the requested persisted session.
+async fn open_session(
+    conn: &ConnectionTo<Agent>,
+    cli: &Cli,
+    cwd: PathBuf,
+) -> Result<agent_client_protocol::schema::SessionId, agent_client_protocol::Error> {
+    if let Some(session_id) = &cli.resume {
+        let acp_session_id = agent_client_protocol::schema::SessionId::new(session_id.clone());
+        let _: LoadSessionResponse = conn
+            .send_request(LoadSessionRequest::new(acp_session_id.clone(), cwd))
+            .block_task()
+            .await?;
+        eprintln!("resumed session: {acp_session_id}\n");
+        return Ok(acp_session_id);
+    }
+
+    let session_resp: NewSessionResponse = conn
+        .send_request(NewSessionRequest::new(cwd))
+        .block_task()
+        .await?;
+    eprintln!("session: {}\n", session_resp.session_id);
+    Ok(session_resp.session_id)
 }
 
 /// Run the interactive ACP client process.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
     let config = config::load()?;
 
     let tools = ToolRegistry::new();
@@ -175,12 +243,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("agent: {:?} v{:?}", info.title, info.version);
             }
 
-            let cwd = std::env::current_dir().map_err(err)?;
-            let session_resp: NewSessionResponse = conn
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await?;
-            eprintln!("session: {}\n", session_resp.session_id);
+            let cwd =
+                std::env::current_dir().map_err(agent_client_protocol::util::internal_error)?;
+            if cli.list_sessions {
+                list_sessions(&conn, cwd).await?;
+                return Ok(());
+            }
+
+            let session_id = open_session(&conn, &cli, cwd).await?;
 
             loop {
                 eprint!("> ");
@@ -189,7 +259,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut input = String::new();
                 let n = {
                     let mut reader = stdin_main.lock().await;
-                    reader.read_line(&mut input).await.map_err(err)?
+                    reader
+                        .read_line(&mut input)
+                        .await
+                        .map_err(agent_client_protocol::util::internal_error)?
                 };
                 if n == 0 {
                     break;
@@ -199,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let prompt_req = PromptRequest::new(
-                    session_resp.session_id.clone(),
+                    session_id.clone(),
                     vec![ContentBlock::Text(TextContent::new(&input))],
                 );
                 let prompt_resp: PromptResponse =

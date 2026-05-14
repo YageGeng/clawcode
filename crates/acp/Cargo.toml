@@ -32,3 +32,4 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 typed-builder = { workspace = true }
+clap = { workspace = true }
