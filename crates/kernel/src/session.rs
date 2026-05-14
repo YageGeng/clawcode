@@ -205,7 +205,7 @@ async fn run_loop(mut rt: Session) {
                     }
                 }
             }
-            Some(Op::Prompt { text, .. }) => {
+            Some(Op::Prompt { text, system, .. }) => {
                 let ctx = TurnContext::builder()
                     .session_id(rt.session_id.clone())
                     .llm(Arc::clone(&rt.llm))
@@ -214,6 +214,7 @@ async fn run_loop(mut rt: Session) {
                     .pending_approvals(Arc::clone(&rt.pending_approvals))
                     .agent_path(rt.agent_path.clone())
                     .approval(Arc::clone(&rt.approval))
+                    .user_system_prompt(system)
                     .build();
 
                 let tx = { rt.tx_event.lock().await.clone() };

@@ -57,7 +57,11 @@ typed-builder = "0.21"
 # wasm
 wasm-bindgen-futures = "0.4.54"
 
+# date & time
+chrono = { version = "0.4", default-features = false }
+
 # misc
+tempfile = "3"
 toml = "0.8"
 arc-swap = "1.7"
 wiremock = "0.6"

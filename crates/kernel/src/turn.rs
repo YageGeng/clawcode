@@ -17,6 +17,8 @@ use provider::message::ToolCall;
 
 use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
+use crate::prompt::environment::EnvironmentInfo;
+use crate::prompt::{Instructions, SystemPrompt};
 use tools::{ToolContext, ToolRegistry};
 
 /// Immutable snapshot of all context needed to execute a single turn.
@@ -41,6 +43,12 @@ pub(crate) struct TurnContext {
     #[builder(default)]
     pub pending_approvals:
         Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
+    /// ① Agent-specific system prompt. `None` means use the default.
+    #[builder(default)]
+    pub agent_prompt: Option<String>,
+    /// ③ Temporary user-provided system prompt. Lowest priority.
+    #[builder(default)]
+    pub user_system_prompt: Option<String>,
 }
 
 /// Execute a single turn with multi-turn tool loop support:
@@ -54,6 +62,21 @@ pub(crate) async fn execute_turn(
     tx_event: &mpsc::UnboundedSender<Event>,
 ) -> Result<(), KernelError> {
     context.push(Message::user(user_text));
+
+    // Build the system prompt preamble once per turn.
+    // The preamble is injected into every LLM request via CompletionRequest::preamble
+    // and converted to a leading Message::System at build() time.
+    let env_info = EnvironmentInfo::capture(ctx.llm.model_id().to_string(), ctx.cwd.clone());
+    let instructions = Instructions::load(&ctx.cwd);
+
+    let system_prompt = SystemPrompt::builder()
+        .environment(env_info)
+        .agent_prompt(ctx.agent_prompt.clone())
+        .instructions(instructions)
+        .user_prompt(ctx.user_system_prompt.clone())
+        .build();
+
+    let preamble = system_prompt.render();
 
     let tool_defs = ctx.tools.definitions();
     let sid = &ctx.session_id;
@@ -70,6 +93,7 @@ pub(crate) async fn execute_turn(
 
         let request = CompletionRequest::builder()
             .model(Some(ctx.llm.model_id().to_string()))
+            .preamble(Some(preamble.clone()))
             .chat_history(history)
             .tools(tool_defs.clone())
             .build();

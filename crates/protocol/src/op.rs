@@ -24,6 +24,10 @@ pub enum Op {
         session_id: SessionId,
         /// The user's text input.
         text: String,
+        /// Optional ad-hoc system prompt appended at lowest priority.
+        /// Does NOT override agent or environment prompt layers.
+        #[serde(default)]
+        system: Option<String>,
     },
     /// Cancel the currently running turn in a session.
     Cancel { session_id: SessionId },

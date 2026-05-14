@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod approval;
 pub mod context;
+pub(crate) mod prompt;
 pub mod session;
 // tool module moved to tools crate
 pub(crate) mod turn;
@@ -240,6 +241,7 @@ impl AgentKernel for Kernel {
         let _ = tx_op.send(Op::Prompt {
             session_id: session_id.clone(),
             text,
+            system: None,
         });
 
         Ok(event_stream(rx_event, cancel_rx))

@@ -17,6 +17,10 @@ pub struct AgentRole {
     /// Supported keys: "model", "reasoning_effort".
     #[builder(default)]
     pub config_overrides: HashMap<String, String>,
+    /// Agent-specific system prompt. When `Some`, completely replaces the
+    /// default system prompt. When `None`, the default is used.
+    #[builder(default, setter(strip_option))]
+    pub prompt: Option<String>,
 }
 
 /// A set of agent roles, keyed by role name.
@@ -44,6 +48,7 @@ impl AgentRoleSet {
                     m.insert("reasoning_effort".to_string(), "low".to_string());
                     m
                 })
+                .prompt(include_str!("../prompts/explorer.txt").to_string())
                 .build(),
         );
         set.insert(
