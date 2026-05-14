@@ -44,7 +44,7 @@ pub struct Kernel {
     pub llm_factory: Arc<LlmFactory>,
     /// Configuration handle for reading provider/model settings.
     pub config: ConfigHandle,
-    /// Registered tools available to every session.
+    /// Shared tool registry owned by this kernel.
     pub tools: Arc<ToolRegistry>,
     #[builder(default)]
     sessions: Mutex<HashMap<SessionId, Thread>>,

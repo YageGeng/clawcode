@@ -4,6 +4,7 @@ pub mod agent;
 pub mod config;
 pub mod llm;
 pub mod loader;
+pub mod mcp;
 pub mod skills;
 
 pub use agent::MultiAgentConfig;

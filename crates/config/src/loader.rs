@@ -23,6 +23,9 @@ pub enum ConfigError {
     /// IO failure while reading a config file.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// MCP config failed validation after TOML/env extraction.
+    #[error("mcp config error: {0}")]
+    Mcp(#[from] crate::mcp::McpConfigError),
 }
 
 /// Convenience: turn a bare `figment::Error` into our boxed variant via `?`.
@@ -84,6 +87,7 @@ where
     // Env keys: CLAW_PROVIDERS__0__API_KEY -> providers[0].api_key
     fig = fig.merge(Env::prefixed("CLAW_").split("__"));
     let cfg: AppConfig = fig.extract()?;
+    cfg.validate()?;
     Ok(ConfigHandle::from_config(cfg))
 }
 

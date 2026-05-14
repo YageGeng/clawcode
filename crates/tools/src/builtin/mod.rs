@@ -40,13 +40,12 @@ impl ToolRegistry {
 mod tests {
     use super::*;
 
-    /// Verifies that basic built-ins expose both edit and apply_patch tools.
+    /// Verifies that basic built-ins expose apply_patch (edit is gated by is_anthropic).
     #[test]
-    fn register_builtins_includes_edit_and_apply_patch() {
+    fn register_builtins_includes_apply_patch() {
         let registry = ToolRegistry::new();
         registry.register_builtins();
 
-        assert!(registry.get("edit").is_some());
         assert!(registry.get("apply_patch").is_some());
     }
 }

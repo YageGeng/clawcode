@@ -12,6 +12,7 @@ pub mod agent;
 pub mod config;
 pub mod event;
 pub mod kernel;
+pub mod mcp;
 pub mod message;
 pub mod one_or_many;
 pub mod op;

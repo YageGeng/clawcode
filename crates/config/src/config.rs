@@ -6,6 +6,7 @@ pub use protocol::ApprovalMode;
 
 use crate::agent::MultiAgentConfig;
 use crate::llm::LlmProvider;
+use crate::mcp::McpServerConfig;
 use crate::skills::SkillsConfig;
 
 /// Top-level application configuration.
@@ -26,6 +27,9 @@ pub struct AppConfig {
     /// Skill subsystem configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// MCP server configurations.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 fn default_active_model() -> String {
@@ -40,7 +44,19 @@ impl Default for AppConfig {
             approval: ApprovalMode::default(),
             multi_agent: MultiAgentConfig::default(),
             skills: SkillsConfig::default(),
+            mcp_servers: Vec::new(),
         }
+    }
+}
+
+impl AppConfig {
+    /// Validate cross-field invariants that serde cannot express directly.
+    pub fn validate(&self) -> Result<(), crate::mcp::McpConfigError> {
+        for server in &self.mcp_servers {
+            server.validate()?;
+        }
+
+        Ok(())
     }
 }
 

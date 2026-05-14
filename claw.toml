@@ -43,3 +43,9 @@ id = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 context_tokens = 1000000
 max_output_tokens = 384000
+
+[[mcp_servers]]
+enabled = false
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]

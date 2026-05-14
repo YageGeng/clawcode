@@ -93,6 +93,10 @@ pub(crate) struct Session {
     /// Skill registry for this session's working directory.
     #[builder(default)]
     pub skill_registry: Arc<SkillRegistry>,
+    /// MCP connection manager for this session.
+    /// Held to keep server connections alive — tool dispatch goes through ToolRegistry.
+    #[allow(dead_code)]
+    pub mcp_manager: Arc<mcp::McpConnectionManager>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
@@ -120,6 +124,39 @@ pub(crate) fn spawn_thread(
     let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
     tools.register_skill_tools(Arc::clone(&skill_registry));
 
+    let mcp_manager = {
+        let configs: Vec<mcp::McpServerConfig> = app_config
+            .mcp_servers
+            .iter()
+            .filter(|c| c.enabled)
+            .cloned()
+            .filter_map(|config| match config.try_into() {
+                Ok(config) => Some(config),
+                Err(error) => {
+                    // Config loading validates MCP entries, so this only guards test-built configs.
+                    tracing::warn!(%error, "skipping invalid MCP server config");
+                    None
+                }
+            })
+            .collect();
+
+        let manager = Arc::new(mcp::McpConnectionManager::new(
+            configs,
+            mcp::default_auth_dir(),
+        ));
+        let rx = manager.spawn_background();
+
+        // Register MCP tools once all servers finish connecting.
+        let mgr = Arc::clone(&manager);
+        let tools_ref = Arc::clone(&tools);
+        tokio::spawn(async move {
+            let _ = rx.await;
+            tools_ref.register_mcp_tools(mgr);
+        });
+
+        manager
+    };
+
     let tx_event = Arc::new(tokio::sync::Mutex::new(initial_tx));
     let pending_approvals: Arc<
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
@@ -141,6 +178,7 @@ pub(crate) fn spawn_thread(
         .agent_control(agent_control.as_ref().map(Arc::clone))
         .app_config(app_config)
         .skill_registry(skill_registry)
+        .mcp_manager(mcp_manager)
         .build();
 
     tokio::spawn(run_loop(runtime));
