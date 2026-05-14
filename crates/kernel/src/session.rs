@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use config::AppConfig;
 use futures::Stream;
 use protocol::{AgentPath, Event, KernelError, Op, ReviewDecision, SessionId, StopReason};
 use provider::factory::ArcLlm;
+use skills::SkillRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::agent::control::AgentControl;
@@ -85,6 +87,12 @@ pub(crate) struct Session {
     #[builder(default)]
     #[allow(dead_code)]
     pub agent_control: Option<Arc<AgentControl>>,
+    /// Application configuration.
+    #[builder(default)]
+    pub app_config: Arc<AppConfig>,
+    /// Skill registry for this session's working directory.
+    #[builder(default)]
+    pub skill_registry: Arc<SkillRegistry>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
@@ -102,11 +110,14 @@ pub(crate) fn spawn_thread(
     agent_path: AgentPath,
     agent_control: Option<Arc<AgentControl>>,
     approval: Arc<crate::approval::ApprovalPolicy>,
+    app_config: Arc<AppConfig>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let (mailbox, mailbox_rx) = mailbox_pair();
+
+    let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
 
     let tx_event = Arc::new(tokio::sync::Mutex::new(initial_tx));
     let pending_approvals: Arc<
@@ -127,6 +138,8 @@ pub(crate) fn spawn_thread(
         .approval(approval)
         .mailbox_rx(mailbox_rx)
         .agent_control(agent_control.as_ref().map(Arc::clone))
+        .app_config(app_config)
+        .skill_registry(skill_registry)
         .build();
 
     tokio::spawn(run_loop(runtime));
@@ -159,6 +172,8 @@ async fn run_loop(mut rt: Session) {
                     .pending_approvals(Arc::clone(&rt.pending_approvals))
                     .agent_path(rt.agent_path.clone())
                     .approval(Arc::clone(&rt.approval))
+                    .app_config(Arc::clone(&rt.app_config))
+                    .skill_registry(Arc::clone(&rt.skill_registry))
                     .build();
 
                 let tx = { rt.tx_event.lock().await.clone() };
@@ -215,6 +230,8 @@ async fn run_loop(mut rt: Session) {
                     .agent_path(rt.agent_path.clone())
                     .approval(Arc::clone(&rt.approval))
                     .user_system_prompt(system)
+                    .app_config(Arc::clone(&rt.app_config))
+                    .skill_registry(Arc::clone(&rt.skill_registry))
                     .build();
 
                 let tx = { rt.tx_event.lock().await.clone() };

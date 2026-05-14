@@ -143,6 +143,7 @@ impl AgentControl {
             child_path.clone(),
             Some(Arc::clone(self)),
             Arc::new(crate::approval::ApprovalPolicy::default()),
+            Arc::new(config::AppConfig::default()),
         );
 
         // Step 6: register mailbox so other agents can send messages here

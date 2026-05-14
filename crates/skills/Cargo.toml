@@ -1,0 +1,17 @@
+[package]
+name = "skills"
+edition.workspace = true
+version.workspace = true
+description = "Skill discovery, loading, catalog rendering, and mention matching"
+
+[dependencies]
+config = { path = "../config" }
+
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

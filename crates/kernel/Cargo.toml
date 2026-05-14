@@ -9,6 +9,7 @@ protocol = { path = "../protocol" }
 provider = { path = "../provider" }
 config = { path = "../config" }
 tools = { path = "../tools" }
+skills = { path = "../skills" }
 
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 async-trait = { workspace = true }

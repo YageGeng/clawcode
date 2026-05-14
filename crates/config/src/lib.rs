@@ -1,12 +1,14 @@
 //! Configuration crate: typed config + figment loader + ArcSwap-shared handle.
 
+pub mod agent;
 pub mod config;
 pub mod llm;
 pub mod loader;
-pub mod multi_agent;
+pub mod skills;
 
+pub use agent::MultiAgentConfig;
 pub use config::AppConfig;
 pub use llm::{ApiKeyConfig, LlmModel, LlmProvider, ProviderId, ProviderType};
 pub use loader::{ConfigError, ConfigHandle, load, load_from};
-pub use multi_agent::MultiAgentConfig;
 pub use protocol::ApprovalMode;
+pub use skills::SkillsConfig;

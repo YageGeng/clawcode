@@ -15,6 +15,9 @@ use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
 use provider::message::ToolCall;
 
+use config::AppConfig;
+use skills::SkillRegistry;
+
 use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
 use crate::prompt::environment::EnvironmentInfo;
@@ -49,6 +52,11 @@ pub(crate) struct TurnContext {
     /// ③ Temporary user-provided system prompt. Lowest priority.
     #[builder(default)]
     pub user_system_prompt: Option<String>,
+    /// Application configuration.
+    #[builder(default)]
+    pub app_config: Arc<AppConfig>,
+    /// Skill registry for this turn's working directory.
+    pub skill_registry: Arc<SkillRegistry>,
 }
 
 /// Execute a single turn with multi-turn tool loop support:
@@ -69,10 +77,18 @@ pub(crate) async fn execute_turn(
     let env_info = EnvironmentInfo::capture(ctx.llm.model_id().to_string(), ctx.cwd.clone());
     let instructions = Instructions::load(&ctx.cwd);
 
+    // Render skill catalog for system prompt injection.
+    let skills_xml = if ctx.app_config.skills.include_instructions {
+        ctx.skill_registry.render_catalog()
+    } else {
+        None
+    };
+
     let system_prompt = SystemPrompt::builder()
         .environment(env_info)
         .agent_prompt(ctx.agent_prompt.clone())
         .instructions(instructions)
+        .skills_xml(skills_xml)
         .user_prompt(ctx.user_system_prompt.clone())
         .build();
 

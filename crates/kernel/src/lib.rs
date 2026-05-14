@@ -164,6 +164,7 @@ impl AgentKernel for Kernel {
             AgentPath::root(),
             Some(Arc::clone(&agent_ctrl)),
             approval,
+            app_cfg,
         );
 
         // Register root thread mailbox for inter-agent message routing.

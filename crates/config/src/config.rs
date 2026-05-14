@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 pub use protocol::ApprovalMode;
 
+use crate::agent::MultiAgentConfig;
 use crate::llm::LlmProvider;
-use crate::multi_agent::MultiAgentConfig;
+use crate::skills::SkillsConfig;
 
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -22,6 +23,9 @@ pub struct AppConfig {
     /// Multi-agent subsystem configuration.
     #[serde(default)]
     pub multi_agent: MultiAgentConfig,
+    /// Skill subsystem configuration.
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 fn default_active_model() -> String {
@@ -35,6 +39,7 @@ impl Default for AppConfig {
             active_model: default_active_model(),
             approval: ApprovalMode::default(),
             multi_agent: MultiAgentConfig::default(),
+            skills: SkillsConfig::default(),
         }
     }
 }
