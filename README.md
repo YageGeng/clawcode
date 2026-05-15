@@ -112,4 +112,6 @@ Project skills take priority over user skills with the same name.
 
 ## License
 
+Licensed under either of [MIT](./LICENSE-MIT) or [Apache 2.0](./LICENSE-APACHE), at your option.
+
 See [LICENSES](./LICENSES/) and [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

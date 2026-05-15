@@ -109,4 +109,6 @@ cargo run --bin claw -- --resume <SESSION_ID>
 
 ## 许可证
 
+本项目以 [MIT](./LICENSE-MIT) 或 [Apache 2.0](./LICENSE-APACHE) 双协议授权，任选其一。
+
 参见 [LICENSES](./LICENSES/) 与 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
