@@ -30,6 +30,10 @@ pub fn normalize_tool_name(raw: &str) -> String {
             }
         })
         .collect();
+
+    // SAFETY: sanitized contains only ASCII characters (filtered by is_ascii_alphanumeric,
+    // '-', '_'), so any byte offset is a valid UTF-8 boundary.
+    #[allow(clippy::string_slice)]
     if sanitized.len() > 64 {
         sanitized[..64].to_string()
     } else {

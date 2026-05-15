@@ -215,6 +215,7 @@ impl PreparedHunk {
 }
 
 /// Parse a complete patch payload into structured hunks.
+#[allow(clippy::string_slice)]
 fn parse_patch(text: &str) -> Result<Vec<Hunk>, String> {
     let text = strip_heredoc_wrappers(text).replace("\r\n", "\n");
     let begin = text
@@ -693,6 +694,7 @@ fn line_start_byte_offsets(content: &str) -> Vec<usize> {
 }
 
 /// Build replacement text and preserve the replaced region's trailing newline when present.
+#[allow(clippy::string_slice)]
 fn build_replacement_text(
     content: &str,
     start_byte: usize,

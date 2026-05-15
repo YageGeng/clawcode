@@ -189,6 +189,7 @@ fn find_replace_all_matches<'content>(
 }
 
 /// Apply one replacement by byte offset and original matched text.
+#[allow(clippy::string_slice)]
 fn apply_single_replacement(
     content: &str,
     offset: usize,
@@ -291,6 +292,7 @@ fn indentation_flexible_replacer<'content>(
 }
 
 /// Match after interpreting common escaped sequences in both pattern and content.
+#[allow(clippy::string_slice)]
 fn escape_normalized_replacer<'content>(
     content: &'content str,
     old_str: &str,
@@ -383,6 +385,7 @@ where
 }
 
 /// Search line windows and keep a score for strategies that need ranking.
+#[allow(clippy::string_slice)]
 fn find_line_windows_with_score<'content, F>(
     content: &'content str,
     old_str: &str,
@@ -414,6 +417,7 @@ where
 }
 
 /// Return line spans as start, content-end, next-line-start, and text without line endings.
+#[allow(clippy::string_slice)]
 fn line_spans(content: &str) -> Vec<(usize, usize, usize, &str)> {
     let mut spans = Vec::new();
     let mut offset = 0;

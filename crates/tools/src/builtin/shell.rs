@@ -109,9 +109,14 @@ impl Tool for ShellCommand {
 }
 
 /// Truncate command output to the per-stream display budget.
+///
+/// Uses [`str::floor_char_boundary`] to avoid panicking when the byte limit
+/// falls in the middle of a multi-byte UTF-8 character.
+#[allow(clippy::string_slice)]
 fn truncate(s: &str) -> &str {
     if s.len() > OUTPUT_MAX_LEN / 2 {
-        &s[..OUTPUT_MAX_LEN / 2]
+        let boundary = s.floor_char_boundary(OUTPUT_MAX_LEN / 2);
+        &s[..boundary]
     } else {
         s
     }
@@ -156,5 +161,34 @@ mod tests {
             &serde_json::json!({"command": "ls"}),
             &ToolContext::for_test(Path::new("."))
         ));
+    }
+
+    #[test]
+    fn truncate_utf8_boundary_does_not_panic() {
+        // 2047 ASCII bytes + CJK chars: byte 2048 lands mid-char.
+        let s = format!("{}{}", "a".repeat(2047), "你好世界");
+        let result = truncate(&s);
+        assert!(
+            result.len() <= OUTPUT_MAX_LEN / 2,
+            "len {} > budget {}",
+            result.len(),
+            OUTPUT_MAX_LEN / 2
+        );
+        assert!(
+            s.is_char_boundary(result.len()) || result == s,
+            "slice ends at non-char-boundary"
+        );
+    }
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_boundary_ascii() {
+        let s = "a".repeat(OUTPUT_MAX_LEN);
+        let result = truncate(&s);
+        assert_eq!(result.len(), OUTPUT_MAX_LEN / 2);
     }
 }

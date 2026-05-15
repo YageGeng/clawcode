@@ -55,6 +55,7 @@ impl SSEDecoder {
     }
 
     /// Decode a line of SSE text, returning an event if complete
+    #[allow(clippy::string_slice)]
     pub fn decode(&mut self, line: &str) -> Option<ServerSentEvent> {
         let mut line = line.to_string();
 

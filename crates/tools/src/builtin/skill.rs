@@ -135,16 +135,21 @@ impl Tool for SkillTool {
 /// Frontmatter is delimited by `---` on its own line at the start and end.
 /// Returns the body content after the closing `---`, or the full content if
 /// no frontmatter is detected.
+#[allow(clippy::string_slice)]
 fn strip_frontmatter(content: &str) -> &str {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
         return trimmed;
     }
     // Find the closing `---` delimiter.
+    // SAFETY: trimmed starts with "---" (3 ASCII bytes), so slicing at byte 3 is always
+    // on a valid UTF-8 boundary.
     let after_first = &trimmed[3..];
     // The closing delimiter must be at the start of a line.
     if let Some(pos) = after_first.find("\n---") {
         let body_start = pos + 5; // skip "\n---\n" or "\n---\r\n"
+        // SAFETY: body_start = pos + 5. pos is the byte index of "n---" (4 ASCII bytes),
+        // so body_start is always a valid UTF-8 boundary.
         let body = &after_first[body_start..];
         return body.trim_start();
     }

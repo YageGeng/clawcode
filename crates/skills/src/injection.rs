@@ -47,6 +47,7 @@ impl MentionMatcher {
     /// Identifiers may contain ASCII letters, digits, hyphens, and underscores.
     /// Known environment variable names are excluded.  Results are deduplicated
     /// in first-occurrence order.
+    #[allow(clippy::string_slice)]
     pub fn extract(text: &str) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::new();
@@ -65,6 +66,9 @@ impl MentionMatcher {
                     break;
                 }
             }
+            // SAFETY: start is the byte index of '$' (ASCII, 1 byte), so start+1 points
+            // to the next char. The following chars are all ASCII (is_ascii_alphanumeric
+            // or '-'/'_'), and end is accumulated via len_utf8() — always a valid boundary.
             let captured = &text[start + 1..end];
             if captured.is_empty() {
                 continue;
