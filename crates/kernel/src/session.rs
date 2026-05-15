@@ -15,10 +15,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::agent::control::AgentControl;
 use crate::agent::mailbox::{Mailbox, MailboxReceiver, mailbox_pair};
 use crate::context::ContextManager;
-use crate::persistence::{
+use crate::turn::{TurnContext, execute_turn};
+use store::{
     PersistedPayload, SessionRecorder, TurnAbortedRecord, TurnCompleteRecord, TurnKindRecord,
 };
-use crate::turn::{TurnContext, execute_turn};
 use tools::ToolRegistry;
 
 /// Frontend handle for a live session.
@@ -47,7 +47,7 @@ pub struct Thread {
     pub(crate) mailbox: Mailbox,
     /// Optional file-backed recorder for canonical session history.
     #[builder(default, setter(strip_option))]
-    pub(crate) recorder: Option<SessionRecorder>,
+    pub(crate) recorder: Option<Arc<dyn SessionRecorder>>,
 }
 
 impl Thread {
@@ -107,7 +107,7 @@ pub(crate) struct Session {
     pub mcp_manager: Arc<mcp::McpConnectionManager>,
     /// Optional file-backed recorder for canonical session history.
     #[builder(default, setter(strip_option))]
-    pub recorder: Option<SessionRecorder>,
+    pub recorder: Option<Arc<dyn SessionRecorder>>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
@@ -126,7 +126,7 @@ pub(crate) fn spawn_thread(
     agent_control: Option<Arc<AgentControl>>,
     approval: Arc<crate::approval::ApprovalPolicy>,
     app_config: Arc<AppConfig>,
-    recorder: Option<SessionRecorder>,
+    recorder: Option<Arc<dyn SessionRecorder>>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
@@ -362,7 +362,7 @@ async fn run_loop(mut rt: Session) {
 }
 
 /// Attach an optional recorder to a turn context after typed-builder construction.
-fn with_recorder(mut ctx: TurnContext, recorder: Option<SessionRecorder>) -> TurnContext {
+fn with_recorder(mut ctx: TurnContext, recorder: Option<Arc<dyn SessionRecorder>>) -> TurnContext {
     ctx.recorder = recorder;
     ctx
 }
@@ -378,7 +378,7 @@ fn active_provider_id(app_config: &AppConfig) -> String {
 
 /// Persist a successful turn completion marker, logging but not failing the live turn.
 async fn persist_turn_complete(
-    recorder: &Option<SessionRecorder>,
+    recorder: &Option<Arc<dyn SessionRecorder>>,
     turn_id: &str,
     stop_reason: StopReason,
 ) {
@@ -398,7 +398,11 @@ async fn persist_turn_complete(
 }
 
 /// Persist an interrupted turn marker, logging but not failing shutdown/error handling.
-async fn persist_turn_aborted(recorder: &Option<SessionRecorder>, turn_id: &str, reason: String) {
+async fn persist_turn_aborted(
+    recorder: &Option<Arc<dyn SessionRecorder>>,
+    turn_id: &str,
+    reason: String,
+) {
     let Some(recorder) = recorder else {
         return;
     };

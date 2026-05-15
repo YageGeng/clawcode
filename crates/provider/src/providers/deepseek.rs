@@ -459,7 +459,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             )),
         }?;
 
-        let choice = OneOrMany::many(content).map_err(|_| {
+        let choice = OneOrMany::many(content).map_err(|_e| {
             CompletionError::ResponseError(
                 "Response contained no message or tool call (empty)".to_owned(),
             )

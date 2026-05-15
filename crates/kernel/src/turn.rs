@@ -20,11 +20,9 @@ use skills::SkillRegistry;
 
 use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
-use crate::persistence::{
-    MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord, TurnKindRecord,
-};
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
+use store::{MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord, TurnKindRecord};
 use tools::{ToolContext, ToolRegistry};
 
 /// Immutable snapshot of all context needed to execute a single turn.
@@ -68,7 +66,7 @@ pub(crate) struct TurnContext {
     pub skill_registry: Arc<SkillRegistry>,
     /// Optional file-backed recorder for canonical turn history.
     #[builder(default, setter(strip_option))]
-    pub recorder: Option<SessionRecorder>,
+    pub recorder: Option<Arc<dyn SessionRecorder>>,
 }
 
 impl TurnContext {
@@ -412,7 +410,7 @@ async fn request_tool_approval(
         )));
     }
 
-    rx_approve.await.map_err(|_| {
+    rx_approve.await.map_err(|_e| {
         KernelError::Internal(anyhow::anyhow!(
             "approval channel closed for tool call {call_id}"
         ))

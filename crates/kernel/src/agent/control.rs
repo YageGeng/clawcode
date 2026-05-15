@@ -16,6 +16,9 @@ use crate::agent::role::AgentRoleSet;
 use crate::context::InMemoryContext;
 use config::MultiAgentConfig;
 use provider::factory::ArcLlm;
+use store::{
+    AgentEdgeRecord, AgentEdgeStatusRecord, CreateSessionParams, SessionRecorder, SessionStore,
+};
 use tools::ToolRegistry;
 
 /// Fork mode for sub-agent history (reserved for future).
@@ -57,6 +60,12 @@ pub struct AgentControl {
     pub llm_factory: Arc<provider::factory::LlmFactory>,
     pub tools: Arc<ToolRegistry>,
     pub config_handle: config::ConfigHandle,
+    /// Session persistence store for writing subagent AgentEdge records.
+    #[builder(default)]
+    pub session_store: Option<Arc<dyn SessionStore>>,
+    /// Recorder handles for live sessions, used to write AgentEdge records on spawn/close.
+    #[builder(default)]
+    recorders: Mutex<HashMap<SessionId, Arc<dyn SessionRecorder>>>,
 }
 
 impl AgentControl {
@@ -68,6 +77,7 @@ impl AgentControl {
         config_handle: config::ConfigHandle,
         tools: Arc<ToolRegistry>,
         config: MultiAgentConfig,
+        session_store: Option<Arc<dyn SessionStore>>,
     ) -> Arc<Self> {
         Arc::new(
             AgentControl::builder()
@@ -75,8 +85,26 @@ impl AgentControl {
                 .llm_factory(llm_factory)
                 .tools(tools)
                 .config_handle(config_handle)
+                .session_store(session_store)
                 .build(),
         )
+    }
+
+    /// Register a session's recorder handle for writing AgentEdge records.
+    pub(crate) async fn register_recorder(
+        &self,
+        session_id: SessionId,
+        recorder: Arc<dyn SessionRecorder>,
+    ) {
+        self.recorders.lock().await.insert(session_id, recorder);
+    }
+
+    /// Remove a session's recorder handle.
+    pub(crate) async fn unregister_recorder(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<dyn SessionRecorder>> {
+        self.recorders.lock().await.remove(session_id)
     }
 
     /// Spawn a sub-agent under `parent_path` and kick off its first turn.
@@ -121,8 +149,12 @@ impl AgentControl {
 
         let session_id = SessionId(uuid::Uuid::new_v4().to_string());
 
+        // Resolve parent session id before commit so it can be stored in metadata.
+        let parent_sid = self.registry.agent_id_for_path(parent_path);
         // Step 4: resolve LLM (role override or fallback to active model)
-        let llm = self.resolve_llm_for_role(role_name);
+        let llm = self
+            .resolve_llm_for_role(role_name)
+            .ok_or_else(|| "no LLM configured for agent spawn".to_string())?;
 
         let context: Box<dyn crate::context::ContextManager> = Box::new(InMemoryContext::new());
 
@@ -134,6 +166,7 @@ impl AgentControl {
             .insert(session_id.clone(), status_tx);
 
         // Step 5: create the child session thread
+        let child_cwd = cwd.clone();
         let handle = crate::session::spawn_thread(
             session_id.clone(),
             cwd,
@@ -154,21 +187,81 @@ impl AgentControl {
             .insert(session_id.clone(), handle.mailbox.clone());
 
         // Step 7: commit — publishes agent metadata to registry
-        let metadata = AgentMetadata::builder()
-            .agent_id(session_id.clone())
-            .agent_path(child_path.clone())
-            .agent_nickname(nickname.clone())
-            .agent_role(role_name.to_string())
-            .build();
+        let metadata = {
+            let builder = AgentMetadata::builder()
+                .agent_id(session_id.clone())
+                .agent_path(child_path.clone())
+                .agent_nickname(nickname.clone())
+                .agent_role(role_name.to_string());
+            if let Some(ref psid) = parent_sid {
+                builder.parent_session_id(psid.clone()).build()
+            } else {
+                builder.build()
+            }
+        };
 
         reservation.commit(metadata.clone());
 
         // Step 8: send initial prompt to kick off first turn
         let _ = handle.tx_op.send(Op::InterAgentMessage {
             from: parent_path.clone(),
-            to: child_path,
+            to: child_path.clone(),
             content: prompt.to_string(),
         });
+
+        // Persist subagent: create child session file and write parent edge.
+        let parent_sid_owned = parent_sid.clone();
+        if let Some(ref store) = self.session_store
+            && let Some(parent_sid) = parent_sid_owned
+        {
+            let store = Arc::clone(store);
+            let sid = session_id.clone();
+            let sid2 = session_id.clone();
+            let cp = child_path.clone();
+            let cp2 = child_path.clone();
+            let cd = child_cwd;
+            let rn = role_name.to_string();
+            let nn = nickname.clone();
+            let parent_agent_ctrl = Arc::clone(self);
+            let psid = parent_sid;
+            tokio::spawn(async move {
+                let child_recorder = store
+                    .create_session(
+                        CreateSessionParams::builder()
+                            .session_id(sid)
+                            .agent_path(cp)
+                            .cwd(cd)
+                            .provider_id(String::new())
+                            .model_id(String::new())
+                            .base_system_prompt(String::new())
+                            .parent_session_id(psid.clone())
+                            .agent_role(rn)
+                            .agent_nickname(nn)
+                            .build(),
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(rec) = child_recorder {
+                    let rec: Arc<dyn SessionRecorder> = Arc::from(rec);
+                    // Write parent edge
+                    let edge = AgentEdgeRecord::builder()
+                        .parent_session_id(psid.clone())
+                        .child_session_id(sid2.clone())
+                        .child_agent_path(cp2)
+                        .child_role(String::new())
+                        .status(AgentEdgeStatusRecord::Open)
+                        .build();
+                    let parent_rec = parent_agent_ctrl.recorders.lock().await.get(&psid).cloned();
+                    if let Some(parent_recorder) = parent_rec {
+                        let _ = parent_recorder
+                            .append(&[store::PersistedPayload::AgentEdge(edge)])
+                            .await;
+                    }
+                    parent_agent_ctrl.recorders.lock().await.insert(sid2, rec);
+                }
+            });
+        }
 
         Ok(LiveAgent {
             thread_id: session_id,
@@ -244,6 +337,40 @@ impl AgentControl {
             .collect()
     }
 
+    /// Write AgentEdge(Closed) to the parent session's recorder before closing a subagent.
+    async fn write_closed_agent_edge(&self, thread_id: &SessionId) {
+        let parent_sid = {
+            let metadata = self.registry.agent_metadata_for_thread(thread_id.clone());
+            metadata.and_then(|m| m.parent_session_id)
+        };
+        let Some(parent_sid) = parent_sid else {
+            return;
+        };
+        let parent_recorder = { self.recorders.lock().await.get(&parent_sid).cloned() };
+        let Some(parent_recorder) = parent_recorder else {
+            return;
+        };
+        let child_agent_path = self
+            .registry
+            .live_agents()
+            .into_iter()
+            .find(|m| m.agent_id.as_ref() == Some(thread_id))
+            .and_then(|m| m.agent_path);
+        let Some(child_agent_path) = child_agent_path else {
+            return;
+        };
+        let edge = AgentEdgeRecord::builder()
+            .parent_session_id(parent_sid)
+            .child_session_id(thread_id.clone())
+            .child_agent_path(child_agent_path)
+            .child_role(String::new())
+            .status(AgentEdgeStatusRecord::Closed)
+            .build();
+        let _ = parent_recorder
+            .append(&[store::PersistedPayload::AgentEdge(edge)])
+            .await;
+    }
+
     /// Close an agent and all its descendants.
     ///
     /// Identifies descendant agents by path prefix matching
@@ -270,6 +397,23 @@ impl AgentControl {
             })
             .filter_map(|m| m.agent_id)
             .collect();
+
+        // Persist close: close child session file and write closed edges.
+        if let Some(ref store) = self.session_store {
+            // Write AgentEdge(Closed) to parent before removing the child recorder.
+            self.write_closed_agent_edge(&thread_id).await;
+            let child_recorder = self.unregister_recorder(&thread_id).await;
+            if let Some(rec) = child_recorder {
+                let _ = store.close_session(&thread_id, Some(rec.as_ref())).await;
+            }
+            // Also handle descendants
+            for desc_id in &descendants {
+                self.write_closed_agent_edge(desc_id).await;
+                if let Some(r) = self.unregister_recorder(desc_id).await {
+                    let _ = store.close_session(desc_id, Some(r.as_ref())).await;
+                }
+            }
+        }
 
         // Release descendants first, then self
         for desc_id in &descendants {
@@ -317,23 +461,23 @@ impl AgentControl {
     ///
     /// Panics if no LLM can be resolved — callers should ensure at
     /// least one provider is configured before calling spawn.
-    fn resolve_llm_for_role(&self, role_name: &str) -> ArcLlm {
+    fn resolve_llm_for_role(&self, role_name: &str) -> Option<ArcLlm> {
         // Try role-specific model override (e.g. "deepseek/deepseek-v4-flash")
         if let Some(role) = self.roles.get(role_name)
             && let Some(model_spec) = role.model_override()
             && let Some((provider_id, model_id)) = model_spec.split_once('/')
             && let Some(llm) = self.llm_factory.get(provider_id, model_id)
         {
-            return llm;
+            return Some(llm);
         }
         // Fall back to active_model from config
         let cfg = self.config_handle.current();
         if let Some((provider_id, model_id)) = cfg.active_model.split_once('/')
             && let Some(llm) = self.llm_factory.get(provider_id, model_id)
         {
-            return llm;
+            return Some(llm);
         }
-        panic!("no LLM configured for agent spawn")
+        None
     }
 }
 

@@ -244,7 +244,7 @@ impl McpConnectionManager {
 
         let result = timeout(Duration::from_secs(tool_timeout_secs), call_future)
             .await
-            .map_err(|_| {
+            .map_err(|_e| {
                 format!("tool '{tool_name}' on '{server}' timed out after {tool_timeout_secs}s",)
             })?
             .map_err(|e| format!("tool call failed on '{server}': {e}"))?;

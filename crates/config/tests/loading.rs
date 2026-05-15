@@ -46,7 +46,7 @@ fn missing_file_yields_error() {
     #[allow(clippy::result_large_err)]
     figment::Jail::expect_with(|_jail| {
         let res = load_from([PathBuf::from("/nonexistent/claw.toml")]);
-        assert!(res.is_err());
+        res.unwrap_err();
         Ok(())
     });
 }

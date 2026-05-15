@@ -179,7 +179,7 @@ fn extract_sse_chunk(buffer: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
         return None;
     }
 
-    let pattern_index = pattern_index as usize;
+    let pattern_index = pattern_index.unsigned_abs();
     let chunk = buffer.get(..pattern_index)?.to_vec();
     let remaining = buffer.get(pattern_index..)?.to_vec();
 

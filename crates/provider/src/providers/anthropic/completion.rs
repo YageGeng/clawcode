@@ -230,7 +230,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             }
         } else {
             OneOrMany::many(content)
-                .map_err(|_| CompletionError::ResponseError(EMPTY_RESPONSE_ERROR.to_owned()))?
+                .map_err(|_e| CompletionError::ResponseError(EMPTY_RESPONSE_ERROR.to_owned()))?
         };
 
         let usage = completion::Usage {
@@ -734,7 +734,7 @@ impl TryFrom<message::Message> for Message {
                 )?;
 
                 Message {
-                    content: OneOrMany::many(converted_content).map_err(|_| {
+                    content: OneOrMany::many(converted_content).map_err(|_e| {
                         MessageError::ConversionError(
                             "Assistant message did not contain Anthropic-compatible content"
                                 .to_owned(),

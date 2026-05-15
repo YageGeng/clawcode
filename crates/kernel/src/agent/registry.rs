@@ -29,6 +29,9 @@ pub struct AgentMetadata {
     pub(crate) agent_role: Option<String>,
     #[builder(default, setter(strip_option))]
     pub(crate) last_task_message: Option<String>,
+    /// Parent session id for subagent edge tracking.
+    #[builder(default, setter(strip_option))]
+    pub(crate) parent_session_id: Option<SessionId>,
 }
 
 /// Internal mutable state of the registry.
@@ -130,6 +133,52 @@ impl AgentRegistry {
                 .agent_path(AgentPath::root())
                 .build(),
         );
+    }
+
+    /// Restore a persisted subagent into the registry, bypassing slot counting
+    /// and depth checks. Used when resuming a session with existing subagents.
+    pub(crate) fn restore_agent(
+        &self,
+        agent_id: SessionId,
+        agent_path: AgentPath,
+        nickname: Option<String>,
+        role: Option<String>,
+        parent_session_id: Option<SessionId>,
+    ) -> Result<(), String> {
+        let mut agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if agents.agent_tree.contains_key(agent_path.as_str()) {
+            return Err(format!("agent path already exists: {agent_path}"));
+        }
+
+        let final_nickname = if let Some(nick) = nickname {
+            if agents.used_agent_nicknames.contains(&nick) {
+                let variant = format!("{nick}_r");
+                agents.used_agent_nicknames.insert(variant.clone());
+                Some(variant)
+            } else {
+                agents.used_agent_nicknames.insert(nick.clone());
+                Some(nick)
+            }
+        } else {
+            None
+        };
+
+        agents.agent_tree.insert(agent_path.to_string(), {
+            let mut meta = AgentMetadata::builder()
+                .agent_id(agent_id)
+                .agent_path(agent_path)
+                .build();
+            meta.agent_nickname = final_nickname;
+            meta.agent_role = role;
+            meta.parent_session_id = parent_session_id;
+            meta
+        });
+
+        Ok(())
     }
 
     /// Resolve a target string (path or nickname) to an AgentPath.

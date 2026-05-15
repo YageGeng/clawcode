@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 description = "Internal protocol types for clawcode agent-core / frontend communication"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

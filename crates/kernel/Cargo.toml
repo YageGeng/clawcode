@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 description = "Clawcode agent kernel - session management, LLM orchestration, tool execution"
 
+[lints]
+workspace = true
+
 [dependencies]
 protocol = { path = "../protocol" }
 provider = { path = "../provider" }
@@ -11,6 +14,7 @@ config = { path = "../config" }
 tools = { path = "../tools" }
 skills = { path = "../skills" }
 mcp = { path = "../mcp" }
+store = { path = "../store" }
 
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
 async-trait = { workspace = true }

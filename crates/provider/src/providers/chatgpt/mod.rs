@@ -633,7 +633,7 @@ fn normalize_system_messages_into_instructions(
         }
     }
 
-    request.input = OneOrMany::many(filtered_items).map_err(|_| {
+    request.input = OneOrMany::many(filtered_items).map_err(|_e| {
         CompletionError::RequestError(
             "ChatGPT responses request input must contain at least one non-system item".into(),
         )

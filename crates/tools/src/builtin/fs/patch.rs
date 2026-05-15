@@ -881,7 +881,7 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     /// Verifies that a later validation failure prevents earlier writes.
@@ -898,7 +898,7 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err());
+        result.unwrap_err();
         assert!(!dir.path().join("created.txt").exists());
         assert!(dir.path().join("delete.txt").exists());
     }
@@ -961,7 +961,7 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err());
+        result.unwrap_err();
         assert!(!dir.path().join("created.txt").exists());
     }
 
@@ -1022,7 +1022,7 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     /// Verifies that patch operations always go through approval.

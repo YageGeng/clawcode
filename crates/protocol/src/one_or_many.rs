@@ -340,7 +340,7 @@ where
         {
             type Value = OneOrMany<T>;
 
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a sequence of at least one element")
             }
 
@@ -391,7 +391,7 @@ where
     {
         type Value = OneOrMany<T>;
 
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("a string or sequence")
         }
 
@@ -445,7 +445,7 @@ where
     {
         type Value = Option<OneOrMany<T>>;
 
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("null, a string, or a sequence")
         }
 
@@ -612,7 +612,7 @@ mod test {
 
     #[test]
     fn test_one_or_many_error() {
-        assert!(OneOrMany::<String>::many(vec![]).is_err())
+        OneOrMany::<String>::many(vec![]).unwrap_err();
     }
 
     #[test]

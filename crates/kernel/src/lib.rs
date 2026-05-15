@@ -6,10 +6,8 @@
 pub mod agent;
 pub mod approval;
 pub mod context;
-pub(crate) mod persistence;
 pub(crate) mod prompt;
 pub mod session;
-// tool module moved to tools crate
 pub(crate) mod turn;
 
 use std::collections::HashMap;
@@ -32,10 +30,12 @@ use crate::agent::adapter::AgentControlAdapter;
 use crate::agent::control::AgentControl;
 use crate::approval::ApprovalPolicy;
 use crate::context::InMemoryContext;
-use crate::persistence::{CreateSessionParams, SessionStore};
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
 use crate::session::{Thread, event_stream, spawn_thread};
+use store::{
+    AgentEdgeStatusRecord, CreateSessionParams, FileSessionStore, SessionRecorder, SessionStore,
+};
 use tools::ToolRegistry;
 
 /// Central kernel struct implementing [`AgentKernel`].
@@ -52,9 +52,9 @@ pub struct Kernel {
     pub tools: Arc<ToolRegistry>,
     #[builder(default)]
     sessions: Mutex<HashMap<SessionId, Thread>>,
-    /// File-backed session persistence store.
-    #[builder(default = Arc::new(SessionStore::new_default()))]
-    session_store: Arc<SessionStore>,
+    /// Session persistence store.
+    #[builder(default = Arc::new(FileSessionStore::new_default()))]
+    session_store: Arc<dyn SessionStore>,
     /// Shared agent control for multi-agent operations across all sessions.
     /// Constructed from the same llm_factory, config, and tools passed to
     /// the builder — must not be `#[builder(default)]`.
@@ -72,21 +72,23 @@ impl Kernel {
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let cfg = config.current();
+        let store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::new(
+            cfg.session_persistence.enabled,
+            cfg.session_persistence.data_home.as_deref(),
+        ));
         let agent_control = AgentControl::new(
             Arc::clone(&llm_factory),
             config.clone(),
             Arc::clone(&tools),
             cfg.multi_agent.clone(),
+            Some(Arc::clone(&store) as Arc<dyn SessionStore>),
         );
-
         Kernel::builder()
             .llm_factory(llm_factory)
             .config(config)
             .tools(tools)
             .agent_control(agent_control)
-            .session_store(Arc::new(SessionStore::from_config(
-                &cfg.session_persistence,
-            )))
+            .session_store(store)
             .build()
     }
 
@@ -146,7 +148,7 @@ impl Kernel {
         session_id: SessionId,
         cwd: PathBuf,
         context: Box<dyn crate::context::ContextManager>,
-        recorder: Option<crate::persistence::SessionRecorder>,
+        recorder: Option<Arc<dyn SessionRecorder>>,
         app_cfg: Arc<config::AppConfig>,
     ) -> Result<Thread, KernelError> {
         let llm = self
@@ -206,6 +208,79 @@ impl Kernel {
             })
             .collect()
     }
+
+    /// Recursively restore subagents from persisted agent edges.
+    async fn restore_subagent_tree(
+        &self,
+        edges: &[store::AgentEdgeRecord],
+        agent_control: &Arc<AgentControl>,
+        app_cfg: &Arc<config::AppConfig>,
+    ) {
+        for edge in edges
+            .iter()
+            .filter(|e| e.status == AgentEdgeStatusRecord::Open)
+        {
+            if agent_control
+                .registry
+                .agent_id_for_path(&edge.child_agent_path)
+                .is_some()
+            {
+                continue;
+            }
+            let Some((child_replayed, child_recorder)) = self
+                .session_store
+                .load_session(&edge.child_session_id)
+                .unwrap_or(None)
+            else {
+                tracing::warn!(child_id = %edge.child_session_id, "failed to load subagent session");
+                continue;
+            };
+            let child_recorder: Arc<dyn SessionRecorder> = Arc::from(child_recorder);
+            let handle = match self.spawn_live_thread(
+                edge.child_session_id.clone(),
+                child_replayed.meta.cwd.clone(),
+                Box::new(InMemoryContext::from_messages(
+                    child_replayed.messages.clone(),
+                )),
+                Some(Arc::clone(&child_recorder)),
+                Arc::clone(app_cfg),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(child_id = %edge.child_session_id, error = %e, "failed to restore subagent thread");
+                    continue;
+                }
+            };
+            if let Err(e) = agent_control.registry.restore_agent(
+                edge.child_session_id.clone(),
+                edge.child_agent_path.clone(),
+                child_replayed.meta.agent_nickname.clone(),
+                child_replayed.meta.agent_role.clone(),
+                Some(edge.parent_session_id.clone()),
+            ) {
+                tracing::warn!(child_id = %edge.child_session_id, error = %e, "failed to register restored subagent");
+                continue;
+            }
+            let sid = edge.child_session_id.clone();
+            let mb = handle.mailbox.clone();
+            let ag = Arc::clone(agent_control);
+            let rec = Arc::clone(&child_recorder);
+            tokio::spawn(async move {
+                ag.register_mailbox(sid.clone(), mb).await;
+                ag.register_recorder(sid, rec).await;
+            });
+            self.sessions
+                .lock()
+                .await
+                .insert(edge.child_session_id.clone(), handle);
+            Box::pin(self.restore_subagent_tree(
+                &child_replayed.agent_edges,
+                agent_control,
+                app_cfg,
+            ))
+            .await;
+        }
+    }
 }
 
 #[async_trait]
@@ -235,6 +310,13 @@ impl AgentKernel for Kernel {
             )
             .await
             .map_err(|error| KernelError::Internal(error.into()))?;
+        let recorder: Option<Arc<dyn SessionRecorder>> = recorder.map(Arc::from);
+        // Register root recorder so subagent spawns can write AgentEdge to parent.
+        if let Some(ref rec) = recorder {
+            agent_ctrl
+                .register_recorder(session_id.clone(), Arc::clone(rec))
+                .await;
+        }
         let handle = self.spawn_live_thread(
             session_id.clone(),
             cwd.clone(),
@@ -285,25 +367,32 @@ impl AgentKernel for Kernel {
         };
         let app_cfg = self.config.current();
         let history = replayed.messages;
+        let agent_edges = replayed.agent_edges;
+        let recorder: Arc<dyn SessionRecorder> = Arc::from(recorder);
         let handle = self.spawn_live_thread(
             session_id.clone(),
             replayed.meta.cwd.clone(),
             Box::new(InMemoryContext::from_messages(history.clone())),
-            Some(recorder),
-            app_cfg,
+            Some(Arc::clone(&recorder)),
+            Arc::clone(&app_cfg),
         )?;
         let agent_ctrl = Arc::clone(&self.agent_control);
-        // Restored root sessions must be available for agent routing just like new sessions.
         agent_ctrl.registry.register_root_thread(session_id.clone());
+        agent_ctrl
+            .register_recorder(session_id.clone(), recorder)
+            .await;
         let sid_for_ctrl = session_id.clone();
         let mb = handle.mailbox.clone();
+        let ag = Arc::clone(&agent_ctrl);
         tokio::spawn(async move {
-            agent_ctrl.register_mailbox(sid_for_ctrl, mb).await;
+            ag.register_mailbox(sid_for_ctrl, mb).await;
         });
         self.sessions
             .lock()
             .await
             .insert(session_id.clone(), handle);
+        self.restore_subagent_tree(&agent_edges, &agent_ctrl, &app_cfg)
+            .await;
         Ok(SessionCreated::builder()
             .session_id(session_id.clone())
             .modes(self.build_modes())
@@ -413,7 +502,7 @@ impl AgentKernel for Kernel {
         };
 
         self.session_store
-            .close_session(session_id, handle.recorder.as_ref())
+            .close_session(session_id, handle.recorder.as_deref())
             .await
             .map_err(|error| KernelError::Internal(error.into()))?;
 

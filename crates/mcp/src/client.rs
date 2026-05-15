@@ -55,7 +55,7 @@ impl ManagedClient {
                     serve_client(Handler, t),
                 )
                 .await
-                .map_err(|_| McpError::Startup {
+                .map_err(|_e| McpError::Startup {
                     server: config.name.clone(),
                     reason: format!("timed out after {}s", config.startup_timeout_secs),
                 })?
@@ -91,7 +91,7 @@ impl ManagedClient {
                         headers.insert(
                             HeaderName::from_static("authorization"),
                             HeaderValue::from_str(&format!("Bearer {token}"))
-                                .map_err(|_| McpError::Transport("bad bearer token".into()))?,
+                                .map_err(|_e| McpError::Transport("bad bearer token".into()))?,
                         );
                     }
                 }
@@ -111,7 +111,7 @@ impl ManagedClient {
                     serve_client(Handler, t),
                 )
                 .await
-                .map_err(|_| McpError::Startup {
+                .map_err(|_e| McpError::Startup {
                     server: config.name.clone(),
                     reason: format!("timed out after {}s", config.startup_timeout_secs),
                 })?
@@ -148,7 +148,7 @@ impl ManagedClient {
                     serve_client(Handler, t),
                 )
                 .await
-                .map_err(|_| McpError::Startup {
+                .map_err(|_e| McpError::Startup {
                     server: config.name.clone(),
                     reason: format!("timed out after {}s", config.startup_timeout_secs),
                 })?

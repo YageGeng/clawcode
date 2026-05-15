@@ -826,7 +826,7 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
             full_history
         };
 
-        let input = OneOrMany::many(input).map_err(|_| {
+        let input = OneOrMany::many(input).map_err(|_e| {
             CompletionError::RequestError(
                 "OpenAI Responses request input must contain at least one item".into(),
             )
@@ -1517,7 +1517,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             .flat_map(<Vec<completion::AssistantContent>>::from)
             .collect();
 
-        let choice = OneOrMany::many(content).map_err(|_| {
+        let choice = OneOrMany::many(content).map_err(|_e| {
             CompletionError::ResponseError(
                 "Response contained no message or tool call (empty)".to_owned(),
             )
@@ -1820,7 +1820,7 @@ impl message::TryIntoMany<Message> for message::Message {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
 
-                    let other_content = OneOrMany::many(other_content).map_err(|_| {
+                    let other_content = OneOrMany::many(other_content).map_err(|_e| {
                         MessageError::ConversionError(
                             "User message did not contain OpenAI Responses-compatible content"
                                 .to_string(),

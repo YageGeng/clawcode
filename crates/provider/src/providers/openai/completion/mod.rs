@@ -589,7 +589,7 @@ impl message::TryIntoMany<Message> for OneOrMany<message::UserContent> {
                 .map(|content| content.try_into())
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let other_content = OneOrMany::many(other_content).map_err(|_| {
+            let other_content = OneOrMany::many(other_content).map_err(|_e| {
                 message::MessageError::ConversionError(
                     "OpenAI user message did not contain any non-tool content".into(),
                 )
@@ -729,7 +729,7 @@ impl TryFrom<Message> for message::Message {
 
                 message::Message::Assistant {
                     id: None,
-                    content: OneOrMany::many(assistant_content).map_err(|_| {
+                    content: OneOrMany::many(assistant_content).map_err(|_e| {
                         message::MessageError::ConversionError(
                             "Neither `content` nor `tool_calls` was provided to the Message"
                                 .to_owned(),
@@ -911,7 +911,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             )),
         }?;
 
-        let choice = OneOrMany::many(content).map_err(|_| {
+        let choice = OneOrMany::many(content).map_err(|_e| {
             CompletionError::ResponseError(
                 "Response contained no message or tool call (empty)".to_owned(),
             )

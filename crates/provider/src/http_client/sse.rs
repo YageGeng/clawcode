@@ -378,8 +378,8 @@ fn check_response<T>(
 
     if content_type
         .to_str()
-        .map_err(|_| ())
-        .and_then(|s| s.parse::<mime::Mime>().map_err(|_| ()))
+        .map_err(|_e| ())
+        .and_then(|s| s.parse::<mime::Mime>().map_err(|_e| ()))
         .map(|mime_type| {
             matches!(
                 (mime_type.type_(), mime_type.subtype()),

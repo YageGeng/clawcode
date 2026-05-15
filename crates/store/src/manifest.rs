@@ -11,13 +11,13 @@ const MANIFEST_FILE: &str = "session_manifest.jsonl";
 
 /// Append-only manifest entry for locating session rollout files.
 #[derive(Clone, Debug, Serialize, Deserialize, typed_builder::TypedBuilder)]
-pub(crate) struct SessionManifestRecord {
+pub struct SessionManifestRecord {
     /// Session id mapped by this entry.
     pub session_id: SessionId,
     /// Path to the session JSONL file, relative to data home when possible.
     pub path: PathBuf,
     /// Optional parent session id for subagent discovery.
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     pub parent_session_id: Option<SessionId>,
     /// Agent path for display and routing after restore.
     pub agent_path: AgentPath,
@@ -33,7 +33,7 @@ pub(crate) struct SessionManifestRecord {
 /// Manifest lifecycle status.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionManifestStatus {
+pub enum SessionManifestStatus {
     /// Session is available for loading.
     Active,
     /// Session was closed by the user.
@@ -43,15 +43,12 @@ pub(crate) enum SessionManifestStatus {
 }
 
 /// Return the manifest path under the configured data home.
-pub(crate) fn manifest_path(data_home: &Path) -> PathBuf {
+pub fn manifest_path(data_home: &Path) -> PathBuf {
     data_home.join(MANIFEST_FILE)
 }
 
 /// Append one manifest record to the append-only manifest file.
-pub(crate) fn append_manifest_record(
-    data_home: &Path,
-    record: &SessionManifestRecord,
-) -> io::Result<()> {
+pub fn append_manifest_record(data_home: &Path, record: &SessionManifestRecord) -> io::Result<()> {
     std::fs::create_dir_all(data_home)?;
     let path = manifest_path(data_home);
     let mut file = std::fs::OpenOptions::new()
@@ -67,12 +64,13 @@ pub(crate) fn append_manifest_record(
 }
 
 /// Build an active manifest record for a session file.
-pub(crate) fn active_manifest_record(
+pub fn active_manifest_record(
     data_home: &Path,
     session_id: SessionId,
     path: PathBuf,
     agent_path: AgentPath,
     cwd: PathBuf,
+    parent_session_id: Option<SessionId>,
 ) -> SessionManifestRecord {
     SessionManifestRecord::builder()
         .session_id(session_id)
@@ -81,11 +79,12 @@ pub(crate) fn active_manifest_record(
         .cwd(cwd)
         .status(SessionManifestStatus::Active)
         .updated_at(timestamp_now())
+        .parent_session_id(parent_session_id)
         .build()
 }
 
 /// Build a closed manifest record for an existing manifest entry.
-pub(crate) fn closed_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
+pub fn closed_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
     SessionManifestRecord::builder()
         .session_id(record.session_id.clone())
         .path(record.path.clone())
@@ -97,7 +96,7 @@ pub(crate) fn closed_manifest_record(record: &SessionManifestRecord) -> SessionM
 }
 
 /// Read the manifest and return the latest record per session id.
-pub(crate) fn read_latest_manifest(
+pub fn read_latest_manifest(
     data_home: &Path,
 ) -> io::Result<HashMap<SessionId, SessionManifestRecord>> {
     let path = manifest_path(data_home);
@@ -122,7 +121,7 @@ pub(crate) fn read_latest_manifest(
 }
 
 /// Convert a manifest path into an absolute path under data home when needed.
-pub(crate) fn resolve_manifest_path(data_home: &Path, path: &Path) -> PathBuf {
+pub fn resolve_manifest_path(data_home: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }

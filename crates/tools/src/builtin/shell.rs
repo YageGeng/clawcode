@@ -146,7 +146,7 @@ mod tests {
                 &ToolContext::for_test(Path::new(".")),
             )
             .await;
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     #[tokio::test]

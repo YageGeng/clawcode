@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 description = "Skill discovery, loading, catalog rendering, and mention matching"
 
+[lints]
+workspace = true
+
 [dependencies]
 config = { path = "../config" }
 

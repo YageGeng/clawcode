@@ -6,6 +6,45 @@ resolver = "3"
 edition = "2024"
 version = "0.1.0"
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_import_braces = "deny"
+elided_lifetimes_in_paths = "deny"
+
+[workspace.lints.clippy]
+# Panic prevention
+string_slice = "allow"
+indexing_slicing = "allow"
+
+unwrap_used = "warn"
+panic = "warn"
+get_unwrap = "warn"
+unchecked_time_subtraction = "warn"
+panic_in_result_fn = "warn"
+
+# Silent failure prevention
+let_underscore_future = "warn"
+let_underscore_must_use = "allow"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+assertions_on_result_states = "warn"
+
+# Async/concurrency safety
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+large_futures = "warn"
+
+# Numeric safety
+float_cmp = "warn"
+float_cmp_const = "warn"
+cast_sign_loss = "warn"
+invalid_upcast_comparisons = "warn"
+
+# Unsafe code safety
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+mem_forget = "warn"
+
 [workspace.dependencies]
 # error
 anyhow = "1"

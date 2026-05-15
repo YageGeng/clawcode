@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 description = "ACP bridge for clawcode - translates between internal protocol and Agent Client Protocol"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "acp"
 path = "src/main.rs"

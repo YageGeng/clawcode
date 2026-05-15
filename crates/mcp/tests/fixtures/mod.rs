@@ -98,8 +98,11 @@ where
 {
     let (server_tx, client_rx) = tokio::io::duplex(8192);
     let handle = tokio::spawn(async move {
-        let running = server.serve(server_tx).await.unwrap();
-        running.waiting().await.ok();
+        let running = server
+            .serve(server_tx)
+            .await
+            .expect("server failed to start");
+        let _ = running.waiting().await.ok();
     });
     (client_rx, ServerGuard { _handle: handle })
 }

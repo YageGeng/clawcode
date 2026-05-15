@@ -29,15 +29,15 @@ pub(crate) fn build_http_headers(
         headers.insert(
             reqwest::header::AUTHORIZATION,
             reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|_| McpError::Transport("bad bearer token".into()))?,
+                .map_err(|_e| McpError::Transport("bad bearer token".into()))?,
         );
     }
 
     for (k, v) in http_headers {
         let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-            .map_err(|_| McpError::Transport(format!("bad header name '{k}'")))?;
+            .map_err(|_e| McpError::Transport(format!("bad header name '{k}'")))?;
         let value = reqwest::header::HeaderValue::from_str(v)
-            .map_err(|_| McpError::Transport(format!("bad header value '{v}'")))?;
+            .map_err(|_e| McpError::Transport(format!("bad header value '{v}'")))?;
         headers.insert(name, value);
     }
 

@@ -1,0 +1,9 @@
+# Rustfmt configuration
+# Docs: https://rust-lang.github.io/rustfmt/
+
+edition = "2024"
+
+max_width = 100
+hard_tabs = false
+reorder_imports = true
+reorder_modules = true

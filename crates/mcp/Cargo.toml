@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 description = "MCP client — server connection management, tool discovery, and tool calls"
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { workspace = true, features = ["process", "time", "sync"] }
 serde = { workspace = true, features = ["derive"] }

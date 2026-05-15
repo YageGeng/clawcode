@@ -1,0 +1,26 @@
+# Clippy configuration — project-specific tuning
+# Docs: https://doc.rust-lang.org/clippy/configuration.html
+
+# Project-specific terms that are valid in documentation comments
+doc-valid-idents = [
+    "Clawcode", "TCP", "JSONL", "QuickJS",
+    "Deserialize", "Serde", "Tokio", "Claude", "Anthropic",
+    "LLM", "MCP", "ACP", "CLI", "TUI",
+    "OpenCode", "Opus", "Sonnet", "Haiku",
+    "UUID",
+]
+
+# This codebase has legitimate functions with many parameters
+# (e.g. spawn_thread constructs many channel pairs at once)
+too-many-arguments-threshold = 6
+
+# Allow higher cognitive complexity — async turn execution is inherently complex
+cognitive-complexity-threshold = 25
+
+# Recognise .clawcode as a directory name in lints
+allowed-dotfiles = [".clawcode"]
+
+# Allow unwrap() in tests
+allow-unwrap-in-tests = true
+# Allow panic() in tests
+allow-panic-in-tests = true
