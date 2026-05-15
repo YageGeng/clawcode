@@ -24,3 +24,5 @@ allowed-dotfiles = [".clawcode"]
 allow-unwrap-in-tests = true
 # Allow panic() in tests
 allow-panic-in-tests = true
+# Allow indexing/slicing in tests
+allow-indexing-slicing-in-tests = true

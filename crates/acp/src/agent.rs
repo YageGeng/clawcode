@@ -677,6 +677,9 @@ impl ClawcodeAgent {
     ) -> Result<SetSessionModelResponse, Error> {
         let session_id = SessionId(request.session_id.0.to_string());
         let parts: Vec<&str> = request.model_id.0.splitn(2, '/').collect();
+        // SAFETY: splitn(2, '/') guarantees the Vec has at least 1 element.
+        // The len == 2 check ensures both parts[0] and parts[1] are valid.
+        #[allow(clippy::indexing_slicing)]
         let (provider_id, model_id) = if parts.len() == 2 {
             (parts[0], parts[1])
         } else {

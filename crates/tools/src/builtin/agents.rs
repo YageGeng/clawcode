@@ -186,9 +186,13 @@ impl Tool for SendMessage {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let to_str = arguments["to"].as_str().ok_or("missing 'to' argument")?;
-        let content = arguments["content"]
-            .as_str()
+        let to_str = arguments
+            .get("to")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'to' argument")?;
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'content' argument")?;
         let to = self.agent_control.resolve_target(to_str).await?;
         let from = ctx.agent_path.clone();
@@ -244,9 +248,13 @@ impl Tool for FollowupTask {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let to_str = arguments["to"].as_str().ok_or("missing 'to' argument")?;
-        let content = arguments["content"]
-            .as_str()
+        let to_str = arguments
+            .get("to")
+            .and_then(|v| v.as_str())
+            .ok_or("missing 'to' argument")?;
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'content' argument")?;
         let to = self.agent_control.resolve_target(to_str).await?;
         let from = ctx.agent_path.clone();
@@ -303,8 +311,9 @@ impl Tool for WaitAgent {
         arguments: serde_json::Value,
         _ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let prefix = arguments["agent_path"]
-            .as_str()
+        let prefix = arguments
+            .get("agent_path")
+            .and_then(|v| v.as_str())
             .map(|s| protocol::AgentPath(s.to_string()));
 
         let agents = self.agent_control.list_agents(prefix.as_ref());
@@ -357,8 +366,9 @@ impl Tool for ListAgents {
         arguments: serde_json::Value,
         _ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let prefix = arguments["path_prefix"]
-            .as_str()
+        let prefix = arguments
+            .get("path_prefix")
+            .and_then(|v| v.as_str())
             .map(|s| protocol::AgentPath(s.to_string()));
 
         let agents = self.agent_control.list_agents(prefix.as_ref());
@@ -409,8 +419,9 @@ impl Tool for CloseAgent {
         arguments: serde_json::Value,
         _ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let path_str = arguments["agent_path"]
-            .as_str()
+        let path_str = arguments
+            .get("agent_path")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'agent_path' argument")?;
         let path = self.agent_control.resolve_target(path_str).await?;
         self.agent_control.close_agent(&path).await?;

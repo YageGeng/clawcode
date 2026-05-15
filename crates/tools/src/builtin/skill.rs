@@ -77,8 +77,9 @@ impl Tool for SkillTool {
         arguments: serde_json::Value,
         _ctx: &ToolContext,
     ) -> Result<String, String> {
-        let name = arguments["name"]
-            .as_str()
+        let name = arguments
+            .get("name")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'name' argument")?;
 
         // Look up the skill by name (case-insensitive).

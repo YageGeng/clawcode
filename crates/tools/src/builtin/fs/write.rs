@@ -54,11 +54,13 @@ impl Tool for WriteFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let path = arguments["path"]
-            .as_str()
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'path' argument")?;
-        let content = arguments["content"]
-            .as_str()
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'content' argument")?;
 
         // Approval is handled by the caller before execute reaches disk mutation.

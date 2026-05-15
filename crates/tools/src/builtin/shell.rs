@@ -66,12 +66,17 @@ impl Tool for ShellCommand {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let command = arguments["command"]
-            .as_str()
+        let command = arguments
+            .get("command")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'command' argument")?
             .to_string();
 
-        let work_dir = arguments["cwd"].as_str().map(Path::new).unwrap_or(&ctx.cwd);
+        let work_dir = arguments
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(Path::new)
+            .unwrap_or(&ctx.cwd);
 
         let result = timeout(
             Duration::from_secs(SHELL_TIMEOUT_SECS),

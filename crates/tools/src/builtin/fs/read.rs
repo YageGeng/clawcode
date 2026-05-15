@@ -58,8 +58,9 @@ impl Tool for ReadFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let path = arguments["path"]
-            .as_str()
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'path' argument")?;
         let resolved = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -76,14 +77,22 @@ impl Tool for ReadFile {
             .map_err(|e| format!("failed to read {}: {e}", resolved.display()))?;
 
         let lines: Vec<&str> = content.lines().collect();
-        let offset = arguments["offset"].as_u64().unwrap_or(0) as usize;
-        let limit = arguments["limit"].as_u64().map(|n| n as usize);
+        let offset = arguments
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = arguments
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
 
         let start = offset.min(lines.len());
         let end = limit
             .map(|line_count| (start + line_count).min(lines.len()))
             .unwrap_or(lines.len());
 
+        // SAFETY: both `start` and `end` are clamped to `lines.len()` above.
+        #[allow(clippy::indexing_slicing)]
         Ok(lines[start..end].join("\n"))
     }
 }

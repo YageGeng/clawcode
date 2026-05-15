@@ -160,7 +160,9 @@ impl McpConnectionManager {
                 }
             }
 
-            let _ = tx.send(());
+            if tx.send(()).is_err() {
+                tracing::warn!("mcp startup notification receiver dropped before completion");
+            }
         });
         rx
     }

@@ -142,6 +142,9 @@ type ReplacerFn = for<'content> fn(&'content str, &str) -> Vec<(usize, &'content
 const MULTIPLE_MATCHES_ERROR: &str = "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.";
 
 /// Find a unique match by trying increasingly permissive replacer strategies.
+/// SAFETY: `candidates[0]` is guarded by the `candidates.len() == 1` check
+/// immediately above, so this index is always valid.
+#[allow(clippy::indexing_slicing)]
 fn find_unique_match<'content>(
     content: &'content str,
     old_str: &str,
@@ -326,6 +329,10 @@ fn trimmed_boundary_replacer<'content>(
 }
 
 /// Match blocks using first/last context and at least half of middle non-empty lines.
+/// SAFETY: `old_lines.len() < 3` early-return ensures both `old_lines` and
+/// `block` (which matches `old_lines` in length) have at least 3 elements,
+/// so `[1..len()-1]` is always a non-empty, valid slice.
+#[allow(clippy::indexing_slicing)]
 fn context_aware_replacer<'content>(
     content: &'content str,
     old_str: &str,
@@ -385,7 +392,7 @@ where
 }
 
 /// Search line windows and keep a score for strategies that need ranking.
-#[allow(clippy::string_slice)]
+#[allow(clippy::string_slice, clippy::indexing_slicing)]
 fn find_line_windows_with_score<'content, F>(
     content: &'content str,
     old_str: &str,
@@ -436,6 +443,9 @@ fn line_spans(content: &str) -> Vec<(usize, usize, usize, &str)> {
 }
 
 /// Choose whether a matched line block should include the trailing line ending.
+/// SAFETY: indices are bounded by the caller `find_line_windows_with_score`,
+/// which verifies `line_count > 0` and `start_index + line_count <= spans.len()`.
+#[allow(clippy::indexing_slicing)]
 fn matched_line_end(
     spans: &[(usize, usize, usize, &str)],
     start_index: usize,
@@ -473,12 +483,16 @@ fn strip_min_common_indentation(value: &str) -> String {
 
 /// Compute a normalized similarity score for middle lines in a block.
 fn middle_similarity(old_lines: &[&str], content_lines: &[&str]) -> f64 {
-    let old_middle = old_lines[1..old_lines.len() - 1]
+    let old_middle = old_lines
+        .get(1..old_lines.len().saturating_sub(1))
+        .unwrap_or(&[])
         .iter()
         .map(|line| line.trim())
         .collect::<Vec<_>>()
         .join("\n");
-    let content_middle = content_lines[1..content_lines.len() - 1]
+    let content_middle = content_lines
+        .get(1..content_lines.len().saturating_sub(1))
+        .unwrap_or(&[])
         .iter()
         .map(|line| line.trim())
         .collect::<Vec<_>>()
@@ -564,6 +578,10 @@ fn normalize_escaped_content(content: &str) -> (String, Vec<(usize, usize)>) {
 }
 
 /// Compute Levenshtein edit distance with a standard dynamic-programming table.
+/// SAFETY: all array accesses use indices bounded by the DP table allocation:
+/// `prev` and `curr` are allocated as `vec![_; b_chars.len() + 1]`,
+/// and the loops iterate over `a_chars` and `b_chars` respectively.
+#[allow(clippy::indexing_slicing)]
 fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();

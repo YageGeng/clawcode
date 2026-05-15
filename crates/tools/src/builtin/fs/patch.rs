@@ -130,8 +130,9 @@ impl Tool for ApplyPatch {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let patch_text = arguments["patchText"]
-            .as_str()
+        let patch_text = arguments
+            .get("patchText")
+            .and_then(|v| v.as_str())
             .ok_or("missing 'patchText' argument")?;
         if patch_text.trim().is_empty() {
             return Err("patchText is empty".to_string());
@@ -216,6 +217,9 @@ impl PreparedHunk {
 
 /// Parse a complete patch payload into structured hunks.
 #[allow(clippy::string_slice)]
+/// SAFETY: the loop guard `index + 1 < lines.len()` ensures `index` is always
+/// a valid index into `lines`.
+#[allow(clippy::indexing_slicing)]
 fn parse_patch(text: &str) -> Result<Vec<Hunk>, String> {
     let text = strip_heredoc_wrappers(text).replace("\r\n", "\n");
     let begin = text
@@ -407,6 +411,9 @@ fn parse_change_context(line: &str) -> Option<String> {
 }
 
 /// Parse the body for an `Add File` operation.
+/// SAFETY: the loop guard `index < lines.len()` ensures `index` is always
+/// a valid index into `lines`.
+#[allow(clippy::indexing_slicing)]
 fn parse_add_file(lines: &[&str], mut index: usize) -> Result<(String, usize), String> {
     let mut content = Vec::new();
     while index < lines.len() {
@@ -537,7 +544,9 @@ fn compute_replacements(content: &str, chunks: &[UpdateChunk]) -> Result<Vec<Rep
 
     for chunk in chunks {
         if let Some(context) = &chunk.change_context
-            && let Some(context_index) = content_lines[line_index..]
+            && let Some(context_index) = content_lines
+                .get(line_index..)
+                .unwrap_or(&[])
                 .iter()
                 .position(|line| line.contains(context))
         {
@@ -559,8 +568,14 @@ fn compute_replacements(content: &str, chunks: &[UpdateChunk]) -> Result<Vec<Rep
                 .ok_or_else(|| "Could not find matching lines for update chunk".to_string())?
         };
         let end_line = start_line + old_refs.len();
-        let start_byte = line_starts[start_line];
-        let end_byte = line_starts[end_line];
+        let start_byte = line_starts
+            .get(start_line)
+            .copied()
+            .ok_or_else(|| "start_line out of bounds".to_string())?;
+        let end_byte = line_starts
+            .get(end_line)
+            .copied()
+            .ok_or_else(|| "end_line out of bounds".to_string())?;
         let new_text = build_replacement_text(content, start_byte, end_byte, &chunk.new_lines);
 
         replacements.push(Replacement {
@@ -655,6 +670,9 @@ where
 }
 
 /// Check one candidate sequence using a single normalization strategy.
+/// SAFETY: the caller `find_sequence_with` validates that `candidate + old_lines.len()`
+/// does not exceed `content_lines.len()`, so `candidate + offset` is always in bounds.
+#[allow(clippy::indexing_slicing)]
 fn sequence_matches<F>(
     old_lines: &[&str],
     content_lines: &[&str],
