@@ -5,81 +5,12 @@ use std::path::PathBuf;
 
 use agent_client_protocol::schema::{
     ContentBlock, SessionId, SessionNotification, SessionUpdate, StopReason, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, UsageUpdate,
+    ToolCallContent, ToolCallId, ToolCallUpdate, UsageUpdate,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::approval::PendingApproval;
-
-/// Renderable transcript cell stored in display order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TranscriptCell {
-    /// Assistant answer text.
-    Assistant(String),
-    /// Assistant reasoning text.
-    Reasoning(String),
-    /// User prompt text.
-    User(String),
-    /// System or runtime message text.
-    System(String),
-    /// ACP tool invocation and its live output state.
-    ToolCall(ToolCallView),
-}
-
-impl TranscriptCell {
-    /// Returns the cell text regardless of the transcript role.
-    pub fn text(&self) -> &str {
-        match self {
-            TranscriptCell::Assistant(text)
-            | TranscriptCell::Reasoning(text)
-            | TranscriptCell::User(text)
-            | TranscriptCell::System(text) => text,
-            TranscriptCell::ToolCall(tool) => tool.output(),
-        }
-    }
-}
-
-/// Renderable view of an ACP tool call.
-#[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
-pub struct ToolCallView {
-    /// Unique ACP call id for the tool invocation.
-    call_id: String,
-    /// Tool title shown to the user.
-    name: String,
-    /// JSON argument text accumulated from ACP raw input.
-    arguments: String,
-    /// Tool output text accumulated from ACP update content.
-    output: String,
-    /// Latest ACP execution status for the tool.
-    status: ToolCallStatus,
-}
-
-impl ToolCallView {
-    /// Returns the ACP call id.
-    pub fn call_id(&self) -> &str {
-        &self.call_id
-    }
-
-    /// Returns the display tool name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Returns the accumulated argument text.
-    pub fn arguments(&self) -> &str {
-        &self.arguments
-    }
-
-    /// Returns the accumulated output text.
-    pub fn output(&self) -> &str {
-        &self.output
-    }
-
-    /// Returns the latest tool execution status.
-    pub fn status(&self) -> ToolCallStatus {
-        self.status
-    }
-}
+use crate::ui::cell::{TextRole, ToolCallCell, TranscriptCell};
 
 /// Token usage totals for the current turn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -203,25 +134,18 @@ impl AppState {
         match notification.update {
             SessionUpdate::UserMessageChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    self.transcript.push(TranscriptCell::User(text));
+                    self.transcript
+                        .push(TranscriptCell::text_cell(TextRole::User, text));
                 }
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    Self::append_to_last_or_push(
-                        &mut self.transcript,
-                        text,
-                        TranscriptRole::Assistant,
-                    );
+                    Self::append_to_last_or_push(&mut self.transcript, text, TextRole::Assistant);
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    Self::append_to_last_or_push(
-                        &mut self.transcript,
-                        text,
-                        TranscriptRole::Reasoning,
-                    );
+                    Self::append_to_last_or_push(&mut self.transcript, text, TextRole::Reasoning);
                 }
             }
             SessionUpdate::ToolCall(tool_call) => self.apply_tool_call(tool_call),
@@ -234,7 +158,8 @@ impl AppState {
 
     /// Appends a user prompt and marks the runtime as waiting for a turn result.
     pub fn append_user_message(&mut self, text: impl Into<String>) {
-        self.transcript.push(TranscriptCell::User(text.into()));
+        self.transcript
+            .push(TranscriptCell::text_cell(TextRole::User, text));
         self.running_prompt = true;
         self.last_error = None;
         self.last_stop_reason = None;
@@ -257,7 +182,8 @@ impl AppState {
     pub fn set_error(&mut self, message: impl Into<String>) {
         let message = message.into();
         self.last_error = Some(message.clone());
-        self.transcript.push(TranscriptCell::System(message));
+        self.transcript
+            .push(TranscriptCell::text_cell(TextRole::System, message));
         self.running_prompt = false;
         self.pending_approval = None;
     }
@@ -351,12 +277,12 @@ impl AppState {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let entry = self.pending_tool_call_view(call_id.clone());
-        entry.name = title;
-        entry.arguments = raw_input;
-        entry.status = status;
+        let entry = self.pending_tool_call_cell(call_id.clone());
+        entry.set_name(title);
+        entry.set_arguments(raw_input);
+        entry.set_status(status);
         if !output.is_empty() {
-            entry.output.push_str(&output);
+            entry.push_output(&output);
         }
     }
 
@@ -364,15 +290,15 @@ impl AppState {
     fn apply_tool_call_update(&mut self, update: ToolCallUpdate) {
         let call_id = tool_call_id_string(&update.tool_call_id);
         {
-            let entry = self.pending_tool_call_view(call_id.clone());
+            let entry = self.pending_tool_call_cell(call_id.clone());
             if let Some(title) = update.fields.title {
-                entry.name = title;
+                entry.set_name(title);
             }
             if let Some(raw_input) = update.fields.raw_input {
-                entry.arguments = json_to_display(&raw_input);
+                entry.set_arguments(json_to_display(&raw_input));
             }
             if let Some(raw_output) = update.fields.raw_output {
-                entry.output.push_str(&json_to_display(&raw_output));
+                entry.push_output(&json_to_display(&raw_output));
             }
             if let Some(content) = update.fields.content {
                 let text = content
@@ -380,10 +306,10 @@ impl AppState {
                     .filter_map(tool_content_text)
                     .collect::<Vec<_>>()
                     .join("\n");
-                entry.output.push_str(&text);
+                entry.push_output(&text);
             }
             if let Some(status) = update.fields.status {
-                entry.status = status;
+                entry.set_status(status);
             }
         }
     }
@@ -394,13 +320,13 @@ impl AppState {
     }
 
     /// Returns an existing tool view or creates a pending placeholder for updates.
-    fn pending_tool_call_view(&mut self, call_id: String) -> &mut ToolCallView {
+    fn pending_tool_call_cell(&mut self, call_id: String) -> &mut ToolCallCell {
         let index = if let Some(index) = self.tool_call_indices.get(&call_id) {
             *index
         } else {
             let index = self.transcript.len();
             self.transcript
-                .push(TranscriptCell::ToolCall(empty_tool_call_view(
+                .push(TranscriptCell::tool_call(ToolCallCell::pending(
                     call_id.clone(),
                 )));
             self.tool_call_indices.insert(call_id.clone(), index);
@@ -417,21 +343,15 @@ impl AppState {
     }
 
     /// Appends text to the previous compatible cell or pushes a new cell.
-    fn append_to_last_or_push(
-        transcript: &mut Vec<TranscriptCell>,
-        text: String,
-        role: TranscriptRole,
-    ) {
+    fn append_to_last_or_push(transcript: &mut Vec<TranscriptCell>, text: String, role: TextRole) {
         // Coalescing adjacent chunks keeps rendering stable while preserving role boundaries.
-        match (transcript.last_mut(), role) {
-            (Some(TranscriptCell::Assistant(existing)), TranscriptRole::Assistant) => {
+        match transcript.last_mut() {
+            Some(TranscriptCell::Text(existing)) if existing.role() == role => {
                 existing.push_str(&text);
             }
-            (Some(TranscriptCell::Reasoning(existing)), TranscriptRole::Reasoning) => {
-                existing.push_str(&text);
+            _ => {
+                transcript.push(TranscriptCell::text_cell(role, text));
             }
-            (_, TranscriptRole::Assistant) => transcript.push(TranscriptCell::Assistant(text)),
-            (_, TranscriptRole::Reasoning) => transcript.push(TranscriptCell::Reasoning(text)),
         }
     }
 
@@ -462,26 +382,6 @@ impl AppState {
         truncated.push_str("...");
         truncated
     }
-}
-
-/// Builds the placeholder tool call used when updates arrive before snapshots.
-fn empty_tool_call_view(call_id: String) -> ToolCallView {
-    ToolCallView::builder()
-        .call_id(call_id)
-        .name(String::new())
-        .arguments(String::new())
-        .output(String::new())
-        .status(ToolCallStatus::Pending)
-        .build()
-}
-
-/// Internal transcript role selector used while coalescing streamed chunks.
-#[derive(Debug, Clone, Copy)]
-enum TranscriptRole {
-    /// Coalesce as assistant text.
-    Assistant,
-    /// Coalesce as reasoning text.
-    Reasoning,
 }
 
 /// Extracts visible text from an ACP content block.
@@ -521,7 +421,7 @@ mod tests {
     use super::*;
     use agent_client_protocol::schema::{
         Content, ContentBlock, ContentChunk, RequestPermissionRequest, TextContent, ToolCall,
-        ToolCallId, ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
+        ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -541,7 +441,7 @@ mod tests {
     }
 
     /// Returns the tool call cell at the given transcript index.
-    fn transcript_tool(state: &AppState, index: usize) -> &ToolCallView {
+    fn transcript_tool(state: &AppState, index: usize) -> &ToolCallCell {
         match &state.transcript()[index] {
             TranscriptCell::ToolCall(tool) => tool,
             other => panic!("expected tool cell, got {other:?}"),
@@ -585,10 +485,7 @@ mod tests {
             SessionUpdate::AgentThoughtChunk(ContentChunk::new(text("ing"))),
         ));
 
-        assert_eq!(
-            state.transcript()[0],
-            TranscriptCell::Reasoning("thinking".to_string())
-        );
+        assert_eq!(state.transcript()[0].text(), "thinking");
     }
 
     /// Verifies ACP tool-call snapshots and updates become renderable tool state.

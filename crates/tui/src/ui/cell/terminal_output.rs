@@ -1,7 +1,7 @@
-//! Terminal output normalization for the local TUI.
+//! Terminal output normalization for tool-call cells.
 
 /// Converts captured terminal output into stable text lines for ratatui rendering.
-pub(super) fn terminal_display_lines(text: &str) -> Vec<String> {
+pub(crate) fn terminal_display_lines(text: &str) -> Vec<String> {
     let text = strip_ansi_control_sequences(text);
     let mut lines = Vec::new();
     let mut current = String::new();
