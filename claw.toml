@@ -1,6 +1,7 @@
 # Active model in "provider_id/model_id" format.
+active_model = "deepseek/deepseek-v4-flash"
 # active_model = "deepseek/deepseek-v4-pro"
-active_model = "chatgpt/gpt-5.5"
+# active_model = "chatgpt/gpt-5.5"
 
 # Approval strategy to use.
 approval = "yolo"
