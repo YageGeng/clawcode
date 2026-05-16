@@ -4,7 +4,7 @@ use std::io::{self, Stdout};
 
 use anyhow::Result;
 use crossterm::{
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -33,11 +33,19 @@ pub fn enter(use_alt_screen: bool) -> Result<(TuiTerminal, TerminalGuard)> {
         return Err(error.into());
     }
 
+    // Mouse capture is required for terminal wheel events used by transcript scrolling.
+    if let Err(error) = execute!(stdout, EnableMouseCapture) {
+        let _ = execute!(stdout, DisableBracketedPaste);
+        let _ = disable_raw_mode();
+        return Err(error.into());
+    }
+
     // Enter alternate screen only when requested and roll back immediately on failure.
     let alt_screen = if use_alt_screen {
         match execute!(stdout, EnterAlternateScreen) {
             Ok(()) => true,
             Err(error) => {
+                let _ = execute!(stdout, DisableMouseCapture);
                 let _ = execute!(stdout, DisableBracketedPaste);
                 let _ = disable_raw_mode();
                 return Err(error.into());
@@ -54,6 +62,7 @@ pub fn enter(use_alt_screen: bool) -> Result<(TuiTerminal, TerminalGuard)> {
             if alt_screen {
                 let _ = execute!(stdout, LeaveAlternateScreen);
             }
+            let _ = execute!(stdout, DisableMouseCapture);
             let _ = execute!(stdout, DisableBracketedPaste);
             let _ = disable_raw_mode();
             return Err(error.into());
@@ -79,6 +88,9 @@ impl TerminalGuard {
         if self.alt_screen
             && let Err(error) = execute!(stdout, LeaveAlternateScreen)
         {
+            errors.push(error.into());
+        }
+        if let Err(error) = execute!(stdout, DisableMouseCapture) {
             errors.push(error.into());
         }
         if let Err(error) = execute!(stdout, DisableBracketedPaste) {

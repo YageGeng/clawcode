@@ -8,7 +8,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent};
+use protocol::message::{
+    AssistantContent, Message, Reasoning, ReasoningContent, ToolResult, ToolResultContent,
+};
 use protocol::one_or_many::OneOrMany;
 use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId};
 use provider::completion::request::CompletionRequest;
@@ -175,7 +177,6 @@ pub(crate) async fn execute_turn(
 
         let mut assistant_content: Vec<AssistantContent> = Vec::new();
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
-        let mut reasoning_text = String::new();
 
         while let Some(event) = stream.next().await {
             let event = event
@@ -212,8 +213,8 @@ pub(crate) async fn execute_turn(
                     assistant_content.push(AssistantContent::Reasoning(reasoning));
                     let _ = tx_event.send(Event::thought_chunk(sid.clone(), text));
                 }
-                LlmStreamEvent::ReasoningDelta { reasoning, .. } => {
-                    reasoning_text.push_str(&reasoning);
+                LlmStreamEvent::ReasoningDelta { id, reasoning } => {
+                    append_reasoning_delta(&mut assistant_content, id, &reasoning);
                     let _ = tx_event.send(Event::thought_chunk(sid.clone(), reasoning));
                 }
                 LlmStreamEvent::ToolCallDelta {
@@ -239,17 +240,6 @@ pub(crate) async fn execute_turn(
                 }
                 _ => {}
             }
-        }
-
-        // Accumulate reasoning deltas into a Reasoning content item.
-        // Skip if a complete Reasoning block was already added during stream consumption.
-        let has_reasoning = assistant_content
-            .iter()
-            .any(|c| matches!(c, AssistantContent::Reasoning(_)));
-        if !reasoning_text.is_empty() && !has_reasoning {
-            assistant_content.push(AssistantContent::Reasoning(
-                protocol::message::Reasoning::new(&reasoning_text),
-            ));
         }
 
         // Save assistant message from this iteration
@@ -283,6 +273,24 @@ pub(crate) async fn execute_turn(
             ctx.persist_message(tool_message).await;
         }
     }
+}
+
+/// Append a reasoning delta at its stream position, merging contiguous reasoning chunks.
+fn append_reasoning_delta(
+    assistant_content: &mut Vec<AssistantContent>,
+    id: Option<String>,
+    reasoning: &str,
+) {
+    if let Some(AssistantContent::Reasoning(existing)) = assistant_content.last_mut()
+        && let Some(ReasoningContent::Text { text, .. }) = existing.content.last_mut()
+    {
+        text.push_str(reasoning);
+        return;
+    }
+
+    assistant_content.push(AssistantContent::Reasoning(
+        Reasoning::new(reasoning).optional_id(id),
+    ));
 }
 
 /// Captures a tool execution result and the provider correlation id.
@@ -415,4 +423,45 @@ async fn request_tool_approval(
             "approval channel closed for tool call {call_id}"
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_delta_is_stored_before_later_text() {
+        let mut assistant_content = Vec::new();
+
+        append_reasoning_delta(
+            &mut assistant_content,
+            Some("reasoning-1".to_string()),
+            "think first",
+        );
+        assistant_content.push(AssistantContent::text("answer second"));
+
+        assert!(matches!(
+            assistant_content.first(),
+            Some(AssistantContent::Reasoning(_))
+        ));
+        assert!(matches!(
+            assistant_content.get(1),
+            Some(AssistantContent::Text(_))
+        ));
+    }
+
+    #[test]
+    fn contiguous_reasoning_deltas_are_merged_in_place() {
+        let mut assistant_content = Vec::new();
+
+        append_reasoning_delta(&mut assistant_content, None, "think ");
+        append_reasoning_delta(&mut assistant_content, None, "more");
+
+        assert_eq!(assistant_content.len(), 1);
+        let Some(AssistantContent::Reasoning(reasoning)) = assistant_content.first() else {
+            panic!("expected merged reasoning content");
+        };
+
+        assert_eq!(reasoning.display_text(), "think more");
+    }
 }

@@ -22,6 +22,8 @@ pub enum TranscriptCell {
     User(String),
     /// System or runtime message text.
     System(String),
+    /// ACP tool invocation and its live output state.
+    ToolCall(ToolCallView),
 }
 
 impl TranscriptCell {
@@ -32,6 +34,7 @@ impl TranscriptCell {
             | TranscriptCell::Reasoning(text)
             | TranscriptCell::User(text)
             | TranscriptCell::System(text) => text,
+            TranscriptCell::ToolCall(tool) => tool.output(),
         }
     }
 }
@@ -136,9 +139,9 @@ pub struct AppState {
     /// Ordered transcript cells ready for rendering.
     #[builder(default)]
     transcript: Vec<TranscriptCell>,
-    /// Tool calls keyed by ACP call id.
+    /// Transcript index for each tool call id.
     #[builder(default)]
-    tool_calls: HashMap<String, ToolCallView>,
+    tool_call_indices: HashMap<String, usize>,
     /// Latest token usage update.
     #[builder(default)]
     usage: UsageView,
@@ -184,11 +187,6 @@ impl AppState {
     /// Returns the renderable transcript cells.
     pub fn transcript(&self) -> &[TranscriptCell] {
         &self.transcript
-    }
-
-    /// Returns the renderable tool-call map keyed by call id.
-    pub fn tool_calls(&self) -> &HashMap<String, ToolCallView> {
-        &self.tool_calls
     }
 
     /// Returns the latest token usage view.
@@ -339,6 +337,8 @@ impl AppState {
     /// Applies a full ACP tool-call snapshot.
     fn apply_tool_call(&mut self, tool_call: ToolCall) {
         let call_id = tool_call_id_string(&tool_call.tool_call_id);
+        let title = tool_call.title;
+        let status = tool_call.status;
         let raw_input = tool_call
             .raw_input
             .as_ref()
@@ -351,50 +351,40 @@ impl AppState {
             .collect::<Vec<_>>()
             .join("\n");
 
-        if let Some(existing) = self.tool_calls.get_mut(&call_id) {
-            existing.name = tool_call.title;
-            existing.arguments = raw_input;
-            existing.status = tool_call.status;
-            if !output.is_empty() {
-                existing.output.push_str(&output);
-            }
-        } else {
-            self.tool_calls.insert(
-                call_id.clone(),
-                ToolCallView::builder()
-                    .call_id(call_id)
-                    .name(tool_call.title)
-                    .arguments(raw_input)
-                    .output(output)
-                    .status(tool_call.status)
-                    .build(),
-            );
+        let entry = self.pending_tool_call_view(call_id.clone());
+        entry.name = title;
+        entry.arguments = raw_input;
+        entry.status = status;
+        if !output.is_empty() {
+            entry.output.push_str(&output);
         }
     }
 
     /// Applies an ACP tool-call field update to an existing or placeholder view.
     fn apply_tool_call_update(&mut self, update: ToolCallUpdate) {
         let call_id = tool_call_id_string(&update.tool_call_id);
-        let entry = self.pending_tool_call_view(call_id);
-        if let Some(title) = update.fields.title {
-            entry.name = title;
-        }
-        if let Some(raw_input) = update.fields.raw_input {
-            entry.arguments = json_to_display(&raw_input);
-        }
-        if let Some(raw_output) = update.fields.raw_output {
-            entry.output.push_str(&json_to_display(&raw_output));
-        }
-        if let Some(content) = update.fields.content {
-            let text = content
-                .iter()
-                .filter_map(tool_content_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-            entry.output.push_str(&text);
-        }
-        if let Some(status) = update.fields.status {
-            entry.status = status;
+        {
+            let entry = self.pending_tool_call_view(call_id.clone());
+            if let Some(title) = update.fields.title {
+                entry.name = title;
+            }
+            if let Some(raw_input) = update.fields.raw_input {
+                entry.arguments = json_to_display(&raw_input);
+            }
+            if let Some(raw_output) = update.fields.raw_output {
+                entry.output.push_str(&json_to_display(&raw_output));
+            }
+            if let Some(content) = update.fields.content {
+                let text = content
+                    .iter()
+                    .filter_map(tool_content_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                entry.output.push_str(&text);
+            }
+            if let Some(status) = update.fields.status {
+                entry.status = status;
+            }
         }
     }
 
@@ -405,15 +395,25 @@ impl AppState {
 
     /// Returns an existing tool view or creates a pending placeholder for updates.
     fn pending_tool_call_view(&mut self, call_id: String) -> &mut ToolCallView {
-        self.tool_calls.entry(call_id.clone()).or_insert_with(|| {
-            ToolCallView::builder()
-                .call_id(call_id)
-                .name(String::new())
-                .arguments(String::new())
-                .output(String::new())
-                .status(ToolCallStatus::Pending)
-                .build()
-        })
+        let index = if let Some(index) = self.tool_call_indices.get(&call_id) {
+            *index
+        } else {
+            let index = self.transcript.len();
+            self.transcript
+                .push(TranscriptCell::ToolCall(empty_tool_call_view(
+                    call_id.clone(),
+                )));
+            self.tool_call_indices.insert(call_id.clone(), index);
+            index
+        };
+
+        let Some(cell) = self.transcript.get_mut(index) else {
+            unreachable!("tool call index must point inside transcript");
+        };
+        match cell {
+            TranscriptCell::ToolCall(tool) => tool,
+            _ => unreachable!("tool call index must point at a tool call transcript cell"),
+        }
     }
 
     /// Appends text to the previous compatible cell or pushes a new cell.
@@ -462,6 +462,17 @@ impl AppState {
         truncated.push_str("...");
         truncated
     }
+}
+
+/// Builds the placeholder tool call used when updates arrive before snapshots.
+fn empty_tool_call_view(call_id: String) -> ToolCallView {
+    ToolCallView::builder()
+        .call_id(call_id)
+        .name(String::new())
+        .arguments(String::new())
+        .output(String::new())
+        .status(ToolCallStatus::Pending)
+        .build()
 }
 
 /// Internal transcript role selector used while coalescing streamed chunks.
@@ -527,6 +538,14 @@ mod tests {
     /// Builds a session notification for ACP state tests.
     fn notification(session_id: SessionId, update: SessionUpdate) -> SessionNotification {
         SessionNotification::new(session_id, update)
+    }
+
+    /// Returns the tool call cell at the given transcript index.
+    fn transcript_tool(state: &AppState, index: usize) -> &ToolCallView {
+        match &state.transcript()[index] {
+            TranscriptCell::ToolCall(tool) => tool,
+            other => panic!("expected tool cell, got {other:?}"),
+        }
     }
 
     /// Verifies ACP assistant message chunks are coalesced into one transcript cell.
@@ -596,11 +615,76 @@ mod tests {
             )),
         ));
 
-        let tool = state.tool_calls().get("call-1").expect("tool");
+        let tool = transcript_tool(&state, 0);
         assert_eq!(tool.name(), "shell");
         assert_eq!(tool.arguments(), "{\"cmd\":\"pwd\"}");
         assert_eq!(tool.output(), "/tmp");
         assert_eq!(tool.status(), ToolCallStatus::Completed);
+    }
+
+    /// Verifies tool calls keep their original transcript position when updated.
+    #[test]
+    fn state_tool_call_update_mutates_existing_transcript_cell() {
+        let session_id = sid("s1");
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        state.apply_session_update(notification(
+            session_id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(text("before"))),
+        ));
+        state.apply_session_update(notification(
+            session_id.clone(),
+            SessionUpdate::ToolCall(
+                ToolCall::new(ToolCallId::new("call-1"), "shell")
+                    .status(ToolCallStatus::InProgress)
+                    .raw_input(serde_json::json!({"command": "pwd"})),
+            ),
+        ));
+        state.apply_session_update(notification(
+            session_id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(text("after"))),
+        ));
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("call-1"),
+                ToolCallUpdateFields::new()
+                    .content(vec![ToolCallContent::Content(Content::new(text("done")))])
+                    .status(ToolCallStatus::Completed),
+            )),
+        ));
+
+        assert_eq!(state.transcript().len(), 3);
+        assert_eq!(state.transcript()[0].text(), "before");
+        let tool = transcript_tool(&state, 1);
+        assert_eq!(tool.output(), "done");
+        assert_eq!(tool.status(), ToolCallStatus::Completed);
+        assert_eq!(state.transcript()[2].text(), "after");
+    }
+
+    /// Verifies updates arriving before snapshots create a pending transcript tool cell.
+    #[test]
+    fn state_tool_call_update_first_creates_pending_transcript_cell() {
+        let session_id = sid("s1");
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("call-1"),
+                ToolCallUpdateFields::new()
+                    .title("shell")
+                    .content(vec![ToolCallContent::Content(Content::new(text(
+                        "partial",
+                    )))]),
+            )),
+        ));
+
+        let tool = transcript_tool(&state, 0);
+        assert_eq!(tool.call_id(), "call-1");
+        assert_eq!(tool.name(), "shell");
+        assert_eq!(tool.output(), "partial");
+        assert_eq!(tool.status(), ToolCallStatus::Pending);
     }
 
     /// Verifies ACP updates from another session do not mutate renderable state.

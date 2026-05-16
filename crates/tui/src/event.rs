@@ -1,6 +1,6 @@
 //! Terminal and application event types.
 
-use crossterm::event::{Event as CrosstermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseEventKind};
 
 /// A normalized event type used by the local TUI layer.
 #[derive(Debug, PartialEq, Eq)]
@@ -11,6 +11,10 @@ pub enum TuiEvent {
     Paste(String),
     /// Terminal resize or terminal focus update event.
     Resize,
+    /// Mouse wheel scroll toward older transcript content.
+    ScrollUp,
+    /// Mouse wheel scroll toward newer transcript content.
+    ScrollDown,
     /// Timer tick event.
     Tick,
 }
@@ -23,6 +27,11 @@ pub fn map_crossterm_event(event: CrosstermEvent) -> Option<TuiEvent> {
             Some(TuiEvent::Key(key_event))
         }
         CrosstermEvent::Paste(text) => Some(TuiEvent::Paste(text.replace('\r', "\n"))),
+        CrosstermEvent::Mouse(mouse_event) => match mouse_event.kind {
+            MouseEventKind::ScrollUp => Some(TuiEvent::ScrollUp),
+            MouseEventKind::ScrollDown => Some(TuiEvent::ScrollDown),
+            _ => None,
+        },
         CrosstermEvent::Resize(_, _) => Some(TuiEvent::Resize),
         CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => Some(TuiEvent::Resize),
         _ => None,
@@ -74,6 +83,26 @@ mod tests {
         });
 
         assert_eq!(map_crossterm_event(event), None);
+    }
+
+    /// Verifies mouse wheel events map to transcript scroll commands.
+    #[test]
+    fn mouse_wheel_events_map_to_scroll_commands() {
+        let scroll_up = CrosstermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+        let scroll_down = CrosstermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(map_crossterm_event(scroll_up), Some(TuiEvent::ScrollUp));
+        assert_eq!(map_crossterm_event(scroll_down), Some(TuiEvent::ScrollDown));
     }
 
     /// Verifies resize events are mapped to [`TuiEvent::Resize`].

@@ -23,6 +23,8 @@ use crate::ui::view::ViewState;
 
 type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 
+const MOUSE_SCROLL_LINES: u16 = 3;
+
 /// Runs a full interactive loop for one ACP session.
 pub async fn run(
     cwd: PathBuf,
@@ -176,6 +178,14 @@ async fn run_loop(
                                     ui.composer.insert_str(&text);
                                     false
                                 }
+                                TuiEvent::ScrollUp => {
+                                    ui.view.scroll_page_up(MOUSE_SCROLL_LINES);
+                                    false
+                                }
+                                TuiEvent::ScrollDown => {
+                                    ui.view.scroll_page_down(MOUSE_SCROLL_LINES);
+                                    false
+                                }
                                 TuiEvent::Resize | TuiEvent::Tick => false,
                             };
                         }
@@ -260,10 +270,6 @@ fn handle_key_event(
         }
         KeyCode::End => {
             ui.view.follow_bottom();
-            Ok(false)
-        }
-        KeyCode::Char('t') if key_event.modifiers == KeyModifiers::CONTROL => {
-            ui.view.toggle_tool_calls();
             Ok(false)
         }
         KeyCode::Char('c') if key_event.modifiers == KeyModifiers::CONTROL => {

@@ -10,7 +10,7 @@ use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
 use futures::StreamExt;
 
-use protocol::message::{AssistantContent, Message, ToolResultContent, UserContent};
+use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
 use protocol::{AgentKernel, Event, SessionId};
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
@@ -81,77 +81,73 @@ impl ClawcodeAgent {
         SessionModelState::new(first_model_id, acp_models)
     }
 
-    /// Convert a persisted message into terminal-friendly transcript text.
-    fn history_message_text(message: &Message) -> Option<String> {
+    /// Convert one persisted message into ACP replay updates while preserving content order.
+    fn history_replay_updates(message: &Message) -> Vec<SessionUpdate> {
         match message {
-            Message::System { .. } => None,
-            Message::User { content } => {
-                let parts = content
-                    .iter()
-                    .filter_map(Self::user_content_text)
-                    .collect::<Vec<_>>();
-                if parts.is_empty() {
-                    None
-                } else {
-                    Some(format!("\n> {}\n", parts.join("\n")))
-                }
-            }
-            Message::Assistant { content, .. } => {
-                let mut text = String::new();
-                for content in content.iter() {
-                    match content {
-                        AssistantContent::Text(part) => text.push_str(&part.text),
-                        _ => {
-                            if let Some(part) = Self::assistant_content_text(content) {
-                                if !text.is_empty() && !text.ends_with('\n') {
-                                    text.push('\n');
-                                }
-                                text.push_str(&part);
-                                text.push('\n');
-                            }
-                        }
+            Message::System { .. } => Vec::new(),
+            Message::User { content } => content
+                .iter()
+                .filter_map(Self::user_content_update)
+                .collect(),
+            Message::Assistant { content, .. } => Self::assistant_replay_updates(content.iter()),
+        }
+    }
+
+    /// Convert assistant content into ordered replay updates with contiguous text merged.
+    fn assistant_replay_updates<'a>(
+        content: impl IntoIterator<Item = &'a AssistantContent>,
+    ) -> Vec<SessionUpdate> {
+        let mut updates = Vec::new();
+        let mut pending_text = String::new();
+
+        for content in content {
+            match content {
+                AssistantContent::Text(text) => pending_text.push_str(&text.text),
+                _ => {
+                    Self::flush_pending_agent_text(&mut updates, &mut pending_text);
+                    if let Some(update) = Self::assistant_content_update(content) {
+                        updates.push(update);
                     }
                 }
-                if text.trim().is_empty() {
-                    None
-                } else {
-                    Some(format!("{}\n", text.trim_end()))
-                }
             }
+        }
+
+        Self::flush_pending_agent_text(&mut updates, &mut pending_text);
+        updates
+    }
+
+    /// Push a pending assistant text update before replaying a non-text content item.
+    fn flush_pending_agent_text(updates: &mut Vec<SessionUpdate>, pending_text: &mut String) {
+        if pending_text.is_empty() {
+            return;
+        }
+
+        updates.push(Self::agent_message_update(std::mem::take(pending_text)));
+    }
+
+    /// Convert one persisted user content item into an ACP replay update.
+    fn user_content_update(content: &UserContent) -> Option<SessionUpdate> {
+        match content {
+            UserContent::Text(text) => {
+                Some(Self::agent_message_update(format!("\n> {}\n", text.text)))
+            }
+            UserContent::ToolResult(result) => Some(Self::tool_result_update(result)),
+            UserContent::Image(_) => Some(Self::agent_message_update("\n> [image]\n")),
+            UserContent::Document(_) => Some(Self::agent_message_update("\n> [document]\n")),
         }
     }
 
-    /// Convert persisted user content into transcript text.
-    fn user_content_text(content: &UserContent) -> Option<String> {
+    /// Convert one persisted assistant content item into an ACP replay update.
+    fn assistant_content_update(content: &AssistantContent) -> Option<SessionUpdate> {
         match content {
-            UserContent::Text(text) => Some(text.text.clone()),
-            UserContent::ToolResult(result) => {
-                let parts = result
-                    .content
-                    .iter()
-                    .filter_map(|content| match content {
-                        ToolResultContent::Text(text) => Some(text.text.clone()),
-                        ToolResultContent::Image(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                if parts.is_empty() {
-                    None
-                } else {
-                    Some(format!("[tool result {}] {}", result.id, parts.join("\n")))
-                }
-            }
-            UserContent::Image(_) => Some("[image]".to_string()),
-            UserContent::Document(_) => Some("[document]".to_string()),
-        }
-    }
-
-    /// Convert persisted assistant content into transcript text.
-    fn assistant_content_text(content: &AssistantContent) -> Option<String> {
-        match content {
-            AssistantContent::Text(text) => Some(text.text.clone()),
-            AssistantContent::ToolCall(tool_call) => Some(format!(
-                "  [tool call] {} {}",
-                tool_call.function.name, tool_call.function.arguments
+            AssistantContent::Text(text) => Some(Self::agent_message_update(text.text.clone())),
+            AssistantContent::ToolCall(tool_call) => Some(SessionUpdate::ToolCall(
+                ToolCall::new(
+                    ToolCallId::new(tool_call.id.clone()),
+                    tool_call.function.name.clone(),
+                )
+                .status(AcpToolCallStatus::Completed)
+                .raw_input(tool_call.function.arguments.clone()),
             )),
             AssistantContent::Reasoning(reasoning) => {
                 let parts = reasoning
@@ -169,11 +165,48 @@ impl ClawcodeAgent {
                 if parts.is_empty() {
                     None
                 } else {
-                    Some(format!("[thought] {}", parts.join("\n")))
+                    Some(SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+                        ContentBlock::Text(TextContent::new(parts.join("\n"))),
+                    )))
                 }
             }
-            AssistantContent::Image(_) => Some("[assistant image]".to_string()),
+            AssistantContent::Image(_) => Some(Self::agent_message_update("[assistant image]")),
         }
+    }
+
+    /// Build an ACP assistant message chunk for replay text.
+    fn agent_message_update(text: impl Into<String>) -> SessionUpdate {
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text.into(),
+        ))))
+    }
+
+    /// Convert a persisted tool result into the ACP update shape used by live tool output.
+    fn tool_result_update(result: &ToolResult) -> SessionUpdate {
+        let mut fields = ToolCallUpdateFields::default();
+        fields.status = Some(AcpToolCallStatus::Completed);
+
+        let parts = result
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ToolResultContent::Text(text) => Some(text.text.clone()),
+                ToolResultContent::Image(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        if !parts.is_empty() {
+            // Keep the complete persisted output in the protocol event; the TUI
+            // applies the preview limit at render time just like it does live.
+            fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                ContentBlock::Text(TextContent::new(parts.join("\n"))),
+            ))]);
+        }
+
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new(result.id.clone()),
+            fields,
+        ))
     }
 
     /// Replay restored history to the ACP client as message chunks.
@@ -195,12 +228,8 @@ impl ClawcodeAgent {
         ))?;
 
         for message in history {
-            if let Some(text) = Self::history_message_text(message) {
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-                cx.send_notification(SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentMessageChunk(chunk),
-                ))?;
+            for update in Self::history_replay_updates(message) {
+                cx.send_notification(SessionNotification::new(session_id.clone(), update))?;
             }
         }
 
@@ -702,5 +731,211 @@ impl ClawcodeAgent {
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
         Ok(CloseSessionResponse::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::{OneOrMany, Text, ToolFunction};
+
+    /// Build a persisted assistant tool call message for replay tests.
+    fn assistant_tool_call_message() -> Message {
+        protocol::message::ToolCall::new(
+            "call-1".to_string(),
+            ToolFunction::new(
+                "shell".to_string(),
+                serde_json::json!({"cmd": "printf 'one\\ntwo\\n'"}),
+            ),
+        )
+        .into()
+    }
+
+    #[test]
+    fn replay_history_converts_tool_calls_to_structured_updates() {
+        let message = assistant_tool_call_message();
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 1);
+
+        let SessionUpdate::ToolCall(tool_call) = &updates[0] else {
+            panic!("expected a structured tool call update");
+        };
+
+        assert_eq!(tool_call.tool_call_id.to_string(), "call-1");
+        assert_eq!(tool_call.title, "shell");
+        assert_eq!(tool_call.status, AcpToolCallStatus::Completed);
+        assert_eq!(
+            tool_call.raw_input,
+            Some(serde_json::json!({"cmd": "printf 'one\\ntwo\\n'"}))
+        );
+    }
+
+    #[test]
+    fn replay_history_converts_tool_results_to_structured_updates() {
+        let message = Message::tool_result("call-1", "one\ntwo\nthree\nfour\nfive\nsix");
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 1);
+
+        let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
+            panic!("expected a structured tool result update");
+        };
+
+        assert_eq!(update.tool_call_id.to_string(), "call-1");
+        assert_eq!(update.fields.status, Some(AcpToolCallStatus::Completed));
+
+        let content = update
+            .fields
+            .content
+            .as_ref()
+            .and_then(|content| content.first())
+            .expect("tool output should be replayed as content");
+        let ToolCallContent::Content(content) = content else {
+            panic!("expected content-backed tool output");
+        };
+        let ContentBlock::Text(text) = &content.content else {
+            panic!("expected text tool output");
+        };
+
+        assert_eq!(text.text, "one\ntwo\nthree\nfour\nfive\nsix");
+    }
+
+    #[test]
+    fn replay_history_marks_image_only_tool_results_completed() {
+        let message = Message::from(ToolResult {
+            id: "call-image".to_string(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::Image(protocol::message::Image {
+                data: protocol::message::DocumentSourceKind::unknown(),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            })),
+        });
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 1);
+
+        let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
+            panic!("expected a structured tool result update");
+        };
+
+        assert_eq!(update.tool_call_id.to_string(), "call-image");
+        assert_eq!(update.fields.status, Some(AcpToolCallStatus::Completed));
+        assert!(update.fields.content.is_none());
+    }
+
+    #[test]
+    fn replay_history_keeps_regular_text_as_transcript_text() {
+        let message = Message::User {
+            content: OneOrMany::one(UserContent::Text(Text {
+                text: "hello".to_string(),
+            })),
+        };
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 1);
+
+        let SessionUpdate::AgentMessageChunk(chunk) = &updates[0] else {
+            panic!("expected regular user text to replay as transcript text");
+        };
+        let ContentBlock::Text(text) = &chunk.content else {
+            panic!("expected text user content");
+        };
+
+        assert_eq!(text.text, "\n> hello\n");
+    }
+
+    #[test]
+    fn replay_history_keeps_reasoning_out_of_assistant_text() {
+        let message = Message::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::reasoning("hidden reasoning")),
+        };
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+
+        assert!(
+            updates
+                .iter()
+                .all(|update| !matches!(update, SessionUpdate::AgentMessageChunk(_)))
+        );
+    }
+
+    #[test]
+    fn replay_history_converts_reasoning_to_thought_chunks() {
+        let message = Message::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::reasoning("hidden reasoning")),
+        };
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 1);
+
+        let SessionUpdate::AgentThoughtChunk(chunk) = &updates[0] else {
+            panic!("expected a structured thought chunk");
+        };
+        let ContentBlock::Text(text) = &chunk.content else {
+            panic!("expected text thought content");
+        };
+
+        assert_eq!(text.text, "hidden reasoning");
+    }
+
+    #[test]
+    fn replay_history_preserves_assistant_content_order() {
+        let message = Message::Assistant {
+            id: None,
+            content: OneOrMany::many(vec![
+                AssistantContent::reasoning("thinking first"),
+                AssistantContent::text("answer second"),
+            ])
+            .expect("non-empty assistant content"),
+        };
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 2);
+
+        let SessionUpdate::AgentThoughtChunk(thought) = &updates[0] else {
+            panic!("expected reasoning to be replayed before answer text");
+        };
+        let ContentBlock::Text(thought_text) = &thought.content else {
+            panic!("expected text thought content");
+        };
+        assert_eq!(thought_text.text, "thinking first");
+
+        let SessionUpdate::AgentMessageChunk(answer) = &updates[1] else {
+            panic!("expected answer text after reasoning");
+        };
+        let ContentBlock::Text(answer_text) = &answer.content else {
+            panic!("expected text answer content");
+        };
+        assert_eq!(answer_text.text, "answer second");
+    }
+
+    #[test]
+    fn replay_history_combines_contiguous_assistant_text_chunks() {
+        let message = Message::Assistant {
+            id: None,
+            content: OneOrMany::many(vec![
+                AssistantContent::reasoning("thinking first"),
+                AssistantContent::text("answer "),
+                AssistantContent::text("second"),
+            ])
+            .expect("non-empty assistant content"),
+        };
+
+        let updates = ClawcodeAgent::history_replay_updates(&message);
+        assert_eq!(updates.len(), 2);
+
+        let SessionUpdate::AgentMessageChunk(answer) = &updates[1] else {
+            panic!("expected contiguous answer text to replay as one chunk");
+        };
+        let ContentBlock::Text(answer_text) = &answer.content else {
+            panic!("expected text answer content");
+        };
+
+        assert_eq!(answer_text.text, "answer second");
     }
 }
