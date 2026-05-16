@@ -11,8 +11,9 @@
 .env.*
 !.env.example
 
-# Local Codex workspace state
+# Local agent workspace state
 .agents/
+.claude/
 .codex/
 
 # OS and temporary files

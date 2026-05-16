@@ -42,6 +42,7 @@ clawcode 包含两个二进制文件：
 | `skills` | 技能发现（`.agents/skills/` 与 `$HOME/.agents/skills/`）、目录渲染、`$skill-name` 提及匹配 |
 | `mcp` | MCP 客户端 — 服务端连接管理、工具发现、通过 stdio 或 streamable HTTP 调用 |
 | `store` | 会话持久化 — 基于文件的存储，含清单、录制与回放 |
+| `tui` | 交互式终端 UI — 在进程内启动本地 ACP 代理，并渲染流式会话更新 |
 
 ## 快速开始
 
@@ -81,21 +82,21 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ```
 
-运行：
+运行 TUI：
 
 ```sh
-# 交互式终端客户端
-cargo run --bin claw
+# 交互式终端 UI
+cargo run -p tui
 
 # 构建并启动 ACP 代理
 cargo run --bin acp
 ```
 
-`claw` CLI 还支持列出已持久化的会话及恢复会话：
+TUI 还支持列出已持久化的会话并恢复其中一个会话：
 
 ```sh
-cargo run --bin claw -- --list-sessions
-cargo run --bin claw -- --resume <SESSION_ID>
+cargo run -p tui -- --list-sessions
+cargo run -p tui -- --resume <SESSION_ID>
 ```
 
 ## 技能（Skills）
@@ -106,6 +107,16 @@ cargo run --bin claw -- --resume <SESSION_ID>
 对应技能的正文会被注入到 system prompt 中。
 
 同名技能以项目级优先。
+
+## 本地工作区状态
+
+本地代理状态目录会被 Git 忽略：
+
+- `.agents/`
+- `.claude/`
+- `.codex/`
+
+这些目录可能包含本地技能、工具缓存、会话记录或代理运行时文件。需要长期保留的项目文档应放在 `docs/`。
 
 ## 许可证
 

@@ -15,6 +15,7 @@ clawcode ships two binaries:
 ```
 ┌──────────┐  ACP (stdio)  ┌───────┐
 │  ACP     │◄────────────►│  acp  │
+│  Client  │               └───┬───┘
 └──────────┘                   │
                     ┌──────────▼──────────┐
                     │       kernel        │
@@ -45,6 +46,7 @@ clawcode ships two binaries:
 | `skills` | Skill discovery from `.agents/skills/` and `$HOME/.agents/skills/`, catalog rendering, `$skill-name` mention matching |
 | `mcp` | MCP client — server connection management, tool discovery, calls over stdio or streamable HTTP |
 | `store` | Session persistence — file-based store with manifest, recording, and replay |
+| `tui` | Interactive terminal UI — starts the local ACP agent in-process and renders streamed session updates |
 
 ## Quick start
 
@@ -84,21 +86,21 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ```
 
-Run with:
+Run the TUI with:
 
 ```sh
-# Interactive terminal client
-cargo run --bin claw
+# Interactive terminal UI
+cargo run -p tui
 
 # Or build and launch the ACP agent 
 cargo run --bin acp
 ```
 
-The `claw` CLI also supports listing persisted sessions and resuming them:
+The TUI also supports listing persisted sessions and resuming one:
 
 ```sh
-cargo run --bin claw -- --list-sessions
-cargo run --bin claw -- --resume <SESSION_ID>
+cargo run -p tui -- --list-sessions
+cargo run -p tui -- --resume <SESSION_ID>
 ```
 
 ## Skills
@@ -109,6 +111,18 @@ with a `name` and `description`, and a markdown body that is injected into the
 system prompt when the user mentions `$skill-name`.
 
 Project skills take priority over user skills with the same name.
+
+## Local workspace state
+
+Local agent state directories are intentionally ignored by Git:
+
+- `.agents/`
+- `.claude/`
+- `.codex/`
+
+These directories may contain local skills, tool caches, transcripts, or
+agent-specific runtime files. Keep durable project documentation in `docs/`
+instead.
 
 ## License
 
