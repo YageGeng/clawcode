@@ -4,6 +4,8 @@ use agent_client_protocol::schema::{
     ContentBlock, PermissionOptionId, RequestPermissionRequest, ToolCallContent,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 
 /// User decision selected from the approval overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +111,23 @@ pub fn decision_for_key(key: KeyEvent) -> Option<ApprovalDecision> {
         (KeyCode::Esc, _) => Some(ApprovalDecision::RejectOnce),
         _ => None,
     }
+}
+
+/// Builds overlay content for pending user approval prompts.
+pub(crate) fn approval_lines(title: &str, body: &str) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(body.to_string()),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[a] allow once   [r] reject",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ]
 }
 
 #[cfg(test)]

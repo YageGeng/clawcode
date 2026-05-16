@@ -193,7 +193,9 @@ impl Kernel {
     /// Build available models from LLM configuration.
     fn build_models(&self) -> Vec<ModelInfo> {
         let cfg = self.config.current();
-        cfg.providers
+        let active_model = cfg.active_model.clone();
+        let mut models = cfg
+            .providers
             .iter()
             .flat_map(|p| {
                 p.models.iter().map(|m| {
@@ -206,7 +208,16 @@ impl Kernel {
                         .build()
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        if let Some(active_index) = models.iter().position(|model| model.id == active_model) {
+            // ACP marks the first model as current, so keep config.active_model first
+            // while preserving the configured order of all other models.
+            let active = models.remove(active_index);
+            models.insert(0, active);
+        }
+
+        models
     }
 
     /// Recursively restore subagents from persisted agent edges.
@@ -563,5 +574,57 @@ impl AgentKernel for Kernel {
         let _ = tx.send(decision);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::{AppConfig, ConfigHandle};
+
+    /// Builds a kernel with config-driven providers for metadata-only tests.
+    fn kernel_with_config(app_config: AppConfig) -> Kernel {
+        let config = ConfigHandle::from_config(app_config);
+        let llm_factory = Arc::new(LlmFactory::new(ConfigHandle::from_config(
+            AppConfig::default(),
+        )));
+        Kernel::new(llm_factory, config, Arc::new(ToolRegistry::new()))
+    }
+
+    /// Verifies model metadata puts config.active_model first for ACP current model selection.
+    #[test]
+    fn build_models_orders_active_model_first() {
+        let app_config: AppConfig = serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "providers": [
+                {
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "gpt-5.4" }]
+                },
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [
+                        { "id": "deepseek-v4-flash" },
+                        { "id": "deepseek-chat" }
+                    ]
+                }
+            ],
+        }))
+        .expect("valid app config");
+        let kernel = kernel_with_config(app_config);
+
+        let models = kernel.build_models();
+
+        assert_eq!(models[0].id, "deepseek/deepseek-chat");
+        assert_eq!(models[1].id, "openai/gpt-5.4");
+        assert_eq!(models[2].id, "deepseek/deepseek-v4-flash");
     }
 }
