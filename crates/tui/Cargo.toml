@@ -1,0 +1,40 @@
+[package]
+name = "tui"
+edition.workspace = true
+version.workspace = true
+description = "Local terminal UI for clawcode"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "claw-tui"
+path = "src/main.rs"
+
+[dependencies]
+acp = { path = "../acp" }
+kernel = { path = "../kernel" }
+config = { path = "../config" }
+provider = { path = "../provider" }
+tools = { path = "../tools" }
+
+agent-client-protocol = { workspace = true, features = ["unstable"] }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+crossterm = { workspace = true, features = ["bracketed-paste", "event-stream"] }
+futures = { workspace = true }
+ratatui = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = [
+  "rt-multi-thread",
+  "macros",
+  "io-std",
+  "signal",
+  "time",
+  "sync"
+] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+typed-builder = { workspace = true }
+unicode-width = { workspace = true }
