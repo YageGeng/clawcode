@@ -115,6 +115,19 @@ impl ApiKeyConfig {
     }
 }
 
+/// Provider auth configuration for specialized auth workflows.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum ProviderAuthConfig {
+    /// Use Codex auth.json (tokens field) for subscription authentication.
+    Codex {
+        /// Optional explicit auth file path, defaults to CODEX_HOME/auth.json
+        /// or ~/.codex/auth.json.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_file: Option<String>,
+    },
+}
+
 /// User-visible model metadata attached to an [`LlmProvider`].
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LlmModel {
@@ -145,7 +158,11 @@ pub struct LlmProvider {
     /// Base URL used for provider requests (no trailing slash).
     pub base_url: String,
     /// API key source. This can be a plaintext string or `{ env = "NAME" }`.
-    pub api_key: ApiKeyConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<ApiKeyConfig>,
+    /// Provider-level auth strategy for non-API-key flows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProviderAuthConfig>,
     /// Models available through this provider.
     #[serde(default)]
     pub models: Vec<LlmModel>,
@@ -180,7 +197,7 @@ reasoning_effort = "high"
         assert_eq!(provider.provider_type, ProviderType::OpenaiCompletions);
         assert_eq!(
             provider.api_key,
-            ApiKeyConfig::Plaintext("sk-abc".to_string())
+            Some(ApiKeyConfig::Plaintext("sk-abc".to_string()))
         );
         assert_eq!(provider.models.len(), 1);
         assert_eq!(provider.models[0].id, "deepseek-v4-flash");
@@ -242,9 +259,59 @@ env = "OPENAI_API_KEY"
         .unwrap();
         assert_eq!(
             provider.api_key,
-            ApiKeyConfig::Env {
+            Some(ApiKeyConfig::Env {
                 env: "OPENAI_API_KEY".to_string(),
-            }
+            })
+        );
+    }
+
+    /// auth = { type = "codex" } parses without an api_key.
+    #[test]
+    fn provider_supports_codex_auth_without_api_key() {
+        let provider: LlmProvider = toml::from_str(
+            r#"
+id = "chatgpt"
+display_name = "ChatGPT"
+provider_type = "responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth = { type = "codex" }
+
+[[models]]
+id = "gpt-5.4"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(provider.id, ProviderId::Chatgpt);
+        assert!(provider.api_key.is_none());
+        assert_eq!(
+            provider.auth,
+            Some(ProviderAuthConfig::Codex { auth_file: None })
+        );
+    }
+
+    /// auth = { type = "codex", auth_file = "/tmp/custom.json" } is parsed.
+    #[test]
+    fn provider_parses_codex_auth_file_override() {
+        let provider: LlmProvider = toml::from_str(
+            r#"
+id = "chatgpt"
+display_name = "ChatGPT"
+provider_type = "responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth = { type = "codex", auth_file = "/tmp/custom-auth.json" }
+
+[[models]]
+id = "gpt-5.4"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            provider.auth,
+            Some(ProviderAuthConfig::Codex {
+                auth_file: Some("/tmp/custom-auth.json".to_string()),
+            })
         );
     }
 }

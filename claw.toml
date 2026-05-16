@@ -1,5 +1,6 @@
 # Active model in "provider_id/model_id" format.
-active_model = "deepseek/deepseek-v4-pro"
+# active_model = "deepseek/deepseek-v4-pro"
+active_model = "chatgpt/gpt-5.5"
 
 # Approval strategy to use.
 approval = "yolo"
@@ -14,10 +15,47 @@ base_url = "https://api.openai.com/v1"
 env = "OPENAI_API_KEY"
 
 [[providers.models]]
+id = "gpt-5.5"
+display_name = "GPT-5.5"
+context_tokens = 270000
+max_output_tokens = 128000
+
+[providers.models.extra_param]
+reasoning = { effort = "high" }
+
+[[providers.models]]
 id = "gpt-5.4"
 display_name = "GPT-5.4"
 context_tokens = 270000
 max_output_tokens = 128000
+
+[providers.models.extra_param]
+reasoning = { effort = "high" }
+
+[[providers]]
+id = "chatgpt"
+display_name = "ChatGPT"
+provider_type = "responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth = { type = "codex" }
+
+[[providers.models]]
+id = "gpt-5.5"
+display_name = "GPT-5.5"
+context_tokens = 270000
+max_output_tokens = 128000
+
+[providers.models.extra_param]
+reasoning = { effort = "high" }
+
+[[providers.models]]
+id = "gpt-5.4"
+display_name = "GPT-5.4"
+context_tokens = 270000
+max_output_tokens = 128000
+
+[providers.models.extra_param]
+reasoning = { effort = "high" }
 
 [[providers]]
 id = "deepseek"
@@ -43,6 +81,10 @@ id = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 context_tokens = 1000000
 max_output_tokens = 384000
+
+[providers.models.extra_param]
+thinking = { type = "enabled" }
+reasoning_effort = "high"
 
 [[mcp_servers]]
 enabled = false

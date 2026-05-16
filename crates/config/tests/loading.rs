@@ -33,7 +33,7 @@ id = "deepseek-v4-flash"
         assert_eq!(cfg.providers.len(), 1);
         assert_eq!(
             cfg.providers[0].api_key,
-            ApiKeyConfig::Plaintext("sk-from-file".to_string())
+            Some(ApiKeyConfig::Plaintext("sk-from-file".to_string()))
         );
         assert_eq!(cfg.providers[0].models[0].id, "deepseek-v4-flash");
         Ok(())
@@ -72,7 +72,7 @@ api_key = "sk-custom"
         let cfg = handle.current();
         assert_eq!(
             cfg.providers[0].api_key,
-            ApiKeyConfig::Plaintext("sk-custom".to_string())
+            Some(ApiKeyConfig::Plaintext("sk-custom".to_string()))
         );
         Ok(())
     });

@@ -121,7 +121,7 @@ impl PlatformAuthenticator {
         };
 
         match std::fs::read(path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Ok(bytes) => read_auth_record(&bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AuthRecord::default()),
             Err(err) => Err(err.into()),
         }
@@ -133,7 +133,26 @@ impl PlatformAuthenticator {
         };
 
         ensure_parent_dir(path)?;
-        std::fs::write(path, serde_json::to_vec_pretty(record)?)?;
+
+        let mut root = match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::Value::Object(serde_json::Map::new())
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let tokens = serde_json::to_value(record)?;
+        match root.as_object_mut() {
+            Some(object) => {
+                object.insert("tokens".to_string(), tokens);
+            }
+            None => {
+                root = serde_json::json!({ "tokens": tokens });
+            }
+        }
+
+        std::fs::write(path, serde_json::to_vec_pretty(&root)?)?;
         Ok(())
     }
 
@@ -335,6 +354,29 @@ fn decode_jwt_claims(token: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// Parse a codex auth.json payload, preferring the legacy `tokens` nesting.
+fn read_auth_record(bytes: &[u8]) -> Result<AuthRecord, AuthError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    if let Some(tokens) = value.get("tokens") {
+        if !tokens.is_null() {
+            if let Ok(record) = serde_json::from_value::<AuthRecord>(tokens.clone())
+                && auth_record_has_token_material(&record)
+            {
+                return Ok(record);
+            }
+        } else {
+            return Ok(AuthRecord::default());
+        }
+    }
+
+    serde_json::from_value::<AuthRecord>(value).map_err(AuthError::Json)
+}
+
+/// Returns true when a cached record can authenticate or refresh without relogin.
+fn auth_record_has_token_material(record: &AuthRecord) -> bool {
+    record.access_token.is_some() || record.refresh_token.is_some()
+}
+
 fn should_reauthenticate_after_refresh(
     status: reqwest::StatusCode,
     error_code: Option<&str>,
@@ -418,10 +460,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse, build_auth_record,
-        format_refresh_error, should_reauthenticate_after_refresh,
+        AuthRecord, DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse, build_auth_record,
+        format_refresh_error, read_auth_record, should_reauthenticate_after_refresh,
     };
     use reqwest::StatusCode;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn device_code_response_accepts_numeric_interval() {
@@ -503,5 +546,75 @@ mod tests {
             record.refresh_token.as_deref(),
             Some("cached-refresh-token")
         );
+    }
+
+    #[test]
+    fn read_auth_record_prefers_nested_tokens_field() {
+        let payload = serde_json::json!({
+            "OPENAI_API_KEY": "legacy-key",
+            "tokens": {
+                "access_token": "nested-access",
+                "account_id": "nested-account"
+            },
+            "last_refresh": "2026-01-01T00:00:00Z"
+        });
+        let record = read_auth_record(&serde_json::to_vec(&payload).unwrap()).unwrap();
+
+        assert_eq!(record.account_id.as_deref(), Some("nested-account"));
+        assert_eq!(record.access_token.as_deref(), Some("nested-access"));
+    }
+
+    #[test]
+    fn read_auth_record_falls_back_to_top_level_when_tokens_are_empty() {
+        let payload = serde_json::json!({
+            "access_token": "legacy-access",
+            "account_id": "legacy-account",
+            "tokens": {},
+        });
+        let record = read_auth_record(&serde_json::to_vec(&payload).unwrap()).unwrap();
+
+        assert_eq!(record.account_id.as_deref(), Some("legacy-account"));
+        assert_eq!(record.access_token.as_deref(), Some("legacy-access"));
+    }
+
+    #[test]
+    fn write_auth_record_preserves_unrelated_root_fields() {
+        let dir = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = dir.join(format!("clawcode-chatgpt-auth-{now}.json"));
+
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "OPENAI_API_KEY": "legacy-key",
+                "extra": {
+                    "plan": "pro"
+                },
+                "tokens": {
+                    "access_token": "old-token"
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let auth = super::PlatformAuthenticator::new(Some(path.clone()), Default::default());
+        let record = AuthRecord {
+            access_token: Some("new-token".into()),
+            refresh_token: Some("refresh-token".into()),
+            id_token: None,
+            expires_at: Some(1710000000),
+            account_id: Some("new-account".into()),
+        };
+        auth.write_auth_record(&record).unwrap();
+
+        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(raw["OPENAI_API_KEY"], "legacy-key");
+        assert_eq!(raw["extra"]["plan"], "pro");
+        assert_eq!(raw["tokens"]["access_token"], "new-token");
+        assert_eq!(raw["tokens"]["refresh_token"], "refresh-token");
     }
 }
