@@ -3,9 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use protocol::FileChange;
 use tokio::fs;
 
-use crate::Tool;
+use crate::{Tool, ToolDisplayOutput, ToolExecutionResult};
 
 const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files.
 
@@ -67,6 +68,17 @@ impl Tool for EditFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
+        self.execute_structured(arguments, ctx)
+            .await
+            .map(|result| result.model_output)
+    }
+
+    /// Execute an edit while returning final file state for UI diff rendering.
+    async fn execute_structured(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<ToolExecutionResult, String> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Args {
@@ -87,13 +99,43 @@ impl Tool for EditFile {
         }
 
         if args.old_string.is_empty() {
+            let old_text = if fs::try_exists(&resolved)
+                .await
+                .map_err(|e| format!("failed to inspect {}: {e}", resolved.display()))?
+            {
+                Some(
+                    fs::read_to_string(&resolved)
+                        .await
+                        .map_err(|e| format!("failed to read {}: {e}", resolved.display()))?,
+                )
+            } else {
+                None
+            };
             let content = normalize_for_existing_line_endings(&resolved, &args.new_string).await?;
             write_full_file(&resolved, &content).await?;
-            return Ok(format!(
+            let model_output = format!(
                 "edited {}: wrote {} bytes",
                 resolved.display(),
                 content.len()
-            ));
+            );
+            // `old_text = None` means this edit created a new file; otherwise
+            // ACP can render the before/after state of the full-file write.
+            let change = if let Some(old_text) = old_text {
+                FileChange::builder()
+                    .path(resolved)
+                    .old_text(old_text)
+                    .new_text(content)
+                    .build()
+            } else {
+                FileChange::builder()
+                    .path(resolved)
+                    .new_text(content)
+                    .build()
+            };
+            return Ok(ToolExecutionResult {
+                model_output,
+                display: ToolDisplayOutput::FileChanges(vec![change]),
+            });
         }
 
         let resolved = fs::canonicalize(&resolved)
@@ -130,10 +172,20 @@ impl Tool for EditFile {
         fs::write(&resolved, &result)
             .await
             .map_err(|e| format!("failed to write {}: {e}", resolved.display()))?;
-        Ok(format!(
+        let model_output = format!(
             "edited {}: replaced {match_count} occurrence(s)",
             resolved.display()
-        ))
+        );
+        Ok(ToolExecutionResult {
+            model_output,
+            display: ToolDisplayOutput::FileChanges(vec![
+                FileChange::builder()
+                    .path(resolved)
+                    .old_text(original)
+                    .new_text(result)
+                    .build(),
+            ]),
+        })
     }
 }
 
@@ -739,6 +791,35 @@ mod tests {
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "created"
         );
+    }
+
+    /// Verifies that edit returns final file state for ACP diff rendering.
+    #[tokio::test]
+    async fn edit_file_structured_result_includes_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("structured.txt");
+        std::fs::write(&path, "before\ntarget\nafter").unwrap();
+        let tool = EditFile::new();
+
+        let result = tool
+            .execute_structured(
+                serde_json::json!({"filePath": "structured.txt", "oldString": "target", "newString": "REPLACED"}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.model_output.contains("edited"));
+        let ToolDisplayOutput::FileChanges(changes) = result.display else {
+            panic!("expected file changes display output");
+        };
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, path.canonicalize().unwrap());
+        assert_eq!(
+            changes[0].old_text,
+            Some("before\ntarget\nafter".to_string())
+        );
+        assert_eq!(changes[0].new_text, "before\nREPLACED\nafter");
     }
 
     /// Verifies that edit rejects ambiguous matches without replaceAll.

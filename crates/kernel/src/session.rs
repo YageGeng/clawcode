@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use config::AppConfig;
 use futures::Stream;
-use protocol::{AgentPath, Event, KernelError, Op, ReviewDecision, SessionId, StopReason};
+use protocol::{AgentPath, Event, KernelError, Op, ReviewDecision, SessionId, StopReason, TurnId};
 use provider::factory::ArcLlm;
 use skills::SkillRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -220,7 +220,7 @@ async fn run_loop(mut rt: Session) {
             // The content is injected as the turn input, and the turn loop
             // handles tool calls, approvals, and cancellation the same way.
             Some(Op::InterAgentMessage { content, .. }) => {
-                let turn_id = uuid::Uuid::new_v4().to_string();
+                let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
                 let ctx = TurnContext::builder()
                     .session_id(rt.session_id.clone())
                     .turn_id(turn_id.clone())
@@ -284,7 +284,7 @@ async fn run_loop(mut rt: Session) {
                 }
             }
             Some(Op::Prompt { text, system, .. }) => {
-                let turn_id = uuid::Uuid::new_v4().to_string();
+                let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
                 let ctx = TurnContext::builder()
                     .session_id(rt.session_id.clone())
                     .turn_id(turn_id.clone())
@@ -379,14 +379,14 @@ fn active_provider_id(app_config: &AppConfig) -> String {
 /// Persist a successful turn completion marker, logging but not failing the live turn.
 async fn persist_turn_complete(
     recorder: &Option<Arc<dyn SessionRecorder>>,
-    turn_id: &str,
+    turn_id: &TurnId,
     stop_reason: StopReason,
 ) {
     let Some(recorder) = recorder else {
         return;
     };
     let record = TurnCompleteRecord::builder()
-        .turn_id(turn_id.to_string())
+        .turn_id(String::from(turn_id))
         .stop_reason(stop_reason)
         .build();
     if let Err(error) = recorder
@@ -400,14 +400,14 @@ async fn persist_turn_complete(
 /// Persist an interrupted turn marker, logging but not failing shutdown/error handling.
 async fn persist_turn_aborted(
     recorder: &Option<Arc<dyn SessionRecorder>>,
-    turn_id: &str,
+    turn_id: &TurnId,
     reason: String,
 ) {
     let Some(recorder) = recorder else {
         return;
     };
     let record = TurnAbortedRecord::builder()
-        .turn_id(turn_id.to_string())
+        .turn_id(String::from(turn_id))
         .reason(reason)
         .build();
     if let Err(error) = recorder

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentPath, AgentStatus};
+use crate::item::{TurnId, TurnItem};
 use crate::permission::PermissionRequest;
 use crate::plan::PlanEntry;
 use crate::session::SessionId;
@@ -83,6 +84,22 @@ pub enum Event {
         output_delta: Option<String>,
         /// Updated status, if changed.
         status: Option<ToolCallStatus>,
+    },
+    /// A structured turn item started.
+    ItemStarted {
+        session_id: SessionId,
+        /// Turn that owns the item.
+        turn_id: TurnId,
+        /// Structured item payload for display.
+        item: TurnItem,
+    },
+    /// A structured turn item completed.
+    ItemCompleted {
+        session_id: SessionId,
+        /// Turn that owns the item.
+        turn_id: TurnId,
+        /// Structured item payload for display.
+        item: TurnItem,
     },
     /// The agent's execution plan was created or updated.
     PlanUpdate {
@@ -211,6 +228,34 @@ impl Event {
         }
     }
 
+    /// Create an `ItemStarted` event for a structured turn item.
+    #[inline(always)]
+    pub fn item_started(
+        session_id: impl Into<SessionId>,
+        turn_id: impl Into<TurnId>,
+        item: TurnItem,
+    ) -> Self {
+        Event::ItemStarted {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            item,
+        }
+    }
+
+    /// Create an `ItemCompleted` event for a structured turn item.
+    #[inline(always)]
+    pub fn item_completed(
+        session_id: impl Into<SessionId>,
+        turn_id: impl Into<TurnId>,
+        item: TurnItem,
+    ) -> Self {
+        Event::ItemCompleted {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            item,
+        }
+    }
+
     /// Create a `UsageUpdate` event with token consumption info.
     #[inline(always)]
     pub fn usage_update(
@@ -314,4 +359,44 @@ pub enum StopReason {
     Cancelled,
     /// Turn terminated due to an error.
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::{FileChangeItem, FileChangeStatus};
+
+    /// Verifies that item lifecycle events preserve the owning turn id.
+    #[test]
+    fn item_lifecycle_events_roundtrip_turn_id() {
+        let session_id = SessionId("session-1".to_string());
+        let turn_id = TurnId("turn-1".to_string());
+        let item = TurnItem::FileChange(
+            FileChangeItem::builder()
+                .id("call-1".to_string())
+                .title("Apply patch".to_string())
+                .changes(Vec::new())
+                .status(FileChangeStatus::InProgress)
+                .build(),
+        );
+
+        let started = Event::item_started(session_id.clone(), turn_id.clone(), item.clone());
+        let completed = Event::item_completed(session_id, turn_id.clone(), item);
+
+        let started_json = serde_json::to_string(&started).expect("serialize started event");
+        let completed_json = serde_json::to_string(&completed).expect("serialize completed event");
+        let decoded_started: Event =
+            serde_json::from_str(&started_json).expect("deserialize started event");
+        let decoded_completed: Event =
+            serde_json::from_str(&completed_json).expect("deserialize completed event");
+
+        assert!(matches!(
+            decoded_started,
+            Event::ItemStarted { turn_id: decoded, .. } if decoded == turn_id
+        ));
+        assert!(matches!(
+            decoded_completed,
+            Event::ItemCompleted { turn_id: decoded, .. } if decoded == turn_id
+        ));
+    }
 }

@@ -2,11 +2,13 @@
 
 pub mod builtin;
 pub mod mcp;
+pub mod output;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use output::{ToolDisplayOutput, ToolExecutionResult};
 pub use protocol::ToolContext;
 
 /// A tool that can be invoked by the LLM during a turn.
@@ -34,6 +36,17 @@ pub trait Tool: Send + Sync {
         arguments: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<String, String>;
+
+    /// Execute the tool and return optional display-only structured output.
+    async fn execute_structured(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolExecutionResult, String> {
+        self.execute(arguments, ctx)
+            .await
+            .map(ToolExecutionResult::text)
+    }
 }
 
 /// Registry of available tools, keyed by tool name.
@@ -95,6 +108,19 @@ impl ToolRegistry {
     ) -> Result<String, String> {
         match self.get(name) {
             Some(tool) => tool.execute(arguments, ctx).await,
+            None => Err(format!("unknown tool: {name}")),
+        }
+    }
+
+    /// Execute a tool call and retain structured display payloads when available.
+    pub async fn execute_structured(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolExecutionResult, String> {
+        match self.get(name) {
+            Some(tool) => tool.execute_structured(arguments, ctx).await,
             None => Err(format!("unknown tool: {name}")),
         }
     }

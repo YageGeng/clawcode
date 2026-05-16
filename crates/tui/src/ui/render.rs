@@ -272,6 +272,81 @@ mod tests {
         assert!(!screen[assistant_index.saturating_add(1)].contains('└'));
     }
 
+    /// Verifies long transcript lines wrap vertically instead of being truncated.
+    #[test]
+    fn transcript_wraps_long_assistant_lines() {
+        let backend = TestBackend::new(24, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+        let session_id = sid("s1");
+        push_assistant(
+            &mut state,
+            &session_id,
+            "alpha beta gamma delta epsilon zeta",
+        );
+
+        terminal
+            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        assert!(screen.iter().any(|line| line.contains("alpha beta")));
+        assert!(screen.iter().any(|line| line.contains("epsilon zeta")));
+    }
+
+    /// Verifies streaming updates remain visible after the transcript has wrapped and overflowed.
+    #[test]
+    fn transcript_streaming_keeps_latest_wrapped_line_live() {
+        let backend = TestBackend::new(26, 9);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+        let session_id = sid("s1");
+        push_assistant(
+            &mut state,
+            &session_id,
+            "alpha beta gamma delta epsilon zeta eta theta iota",
+        );
+        push_assistant(&mut state, &session_id, " kappa");
+
+        terminal
+            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        assert!(screen.iter().any(|line| line.contains("kappa")));
+    }
+
+    /// Verifies long words still stream through wrapping instead of disappearing until newline.
+    #[test]
+    fn transcript_wraps_long_unbroken_streaming_text() {
+        let backend = TestBackend::new(18, 9);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+        let session_id = sid("s1");
+        push_assistant(&mut state, &session_id, "abcdefghijklmnop");
+        push_assistant(&mut state, &session_id, "qrstuvwxyz");
+
+        terminal
+            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        assert!(screen.iter().any(|line| line.contains("abcdefgh")));
+        assert!(screen.iter().any(|line| line.contains("stuvwxyz")));
+    }
+
     /// Verifies terminal resize keeps core chrome visible instead of collapsing the input box.
     #[test]
     fn render_after_resize_keeps_input_and_status_visible() {

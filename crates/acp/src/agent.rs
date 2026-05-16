@@ -11,7 +11,7 @@ use agent_client_protocol as acp;
 use futures::StreamExt;
 
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
-use protocol::{AgentKernel, Event, SessionId};
+use protocol::{AgentKernel, Event, FileChangeStatus, SessionId, TurnItem};
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
@@ -602,6 +602,18 @@ impl ClawcodeAgent {
                     let update = SessionUpdate::ToolCallUpdate(update_val);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }
+                Event::ItemStarted { item, .. } => {
+                    if let Some(update) = item_started_update(item) {
+                        let _ =
+                            cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    }
+                }
+                Event::ItemCompleted { item, .. } => {
+                    if let Some(update) = item_completed_update(item) {
+                        let _ =
+                            cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    }
+                }
                 Event::PlanUpdate { entries, .. } => {
                     let plan_entries: Vec<PlanEntry> = entries
                         .into_iter()
@@ -734,10 +746,68 @@ impl ClawcodeAgent {
     }
 }
 
+/// Convert a structured item-start event into an ACP session update.
+fn item_started_update(item: TurnItem) -> Option<SessionUpdate> {
+    match item {
+        TurnItem::FileChange(item) => {
+            let fields = ToolCallUpdateFields::new()
+                .kind(ToolKind::Edit)
+                .status(file_change_status_to_acp(item.status))
+                .title(item.title);
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new(item.id),
+                fields,
+            )))
+        }
+        TurnItem::McpToolCall(_) => None,
+    }
+}
+
+/// Convert a structured item-completed event into an ACP session update.
+fn item_completed_update(item: TurnItem) -> Option<SessionUpdate> {
+    match item {
+        TurnItem::FileChange(item) => {
+            let mut fields = ToolCallUpdateFields::new()
+                .kind(ToolKind::Edit)
+                .status(file_change_status_to_acp(item.status))
+                .title(item.title);
+            if let Some(model_output) = item.model_output {
+                fields.raw_output = Some(serde_json::json!(model_output));
+            }
+            if !item.changes.is_empty() {
+                fields.content = Some(
+                    item.changes
+                        .into_iter()
+                        .map(|change| {
+                            ToolCallContent::Diff(
+                                Diff::new(change.path, change.new_text).old_text(change.old_text),
+                            )
+                        })
+                        .collect(),
+                );
+            }
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new(item.id),
+                fields,
+            )))
+        }
+        TurnItem::McpToolCall(_) => None,
+    }
+}
+
+/// Convert file-change lifecycle status into ACP tool-call status.
+fn file_change_status_to_acp(status: FileChangeStatus) -> AcpToolCallStatus {
+    match status {
+        FileChangeStatus::InProgress => AcpToolCallStatus::InProgress,
+        FileChangeStatus::Completed => AcpToolCallStatus::Completed,
+        FileChangeStatus::Failed | FileChangeStatus::Declined => AcpToolCallStatus::Failed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{OneOrMany, Text, ToolFunction};
+    use protocol::{FileChange, FileChangeItem, OneOrMany, Text, ToolFunction};
 
     /// Build a persisted assistant tool call message for replay tests.
     fn assistant_tool_call_message() -> Message {
@@ -937,5 +1007,87 @@ mod tests {
         };
 
         assert_eq!(answer_text.text, "answer second");
+    }
+
+    /// Verifies that file-change start events update the ACP tool cell as an edit.
+    #[test]
+    fn file_change_started_maps_to_acp_edit_update() {
+        let item = TurnItem::FileChange(
+            FileChangeItem::builder()
+                .id("call-apply".to_string())
+                .title("Apply patch".to_string())
+                .changes(Vec::new())
+                .status(FileChangeStatus::InProgress)
+                .build(),
+        );
+
+        let update = item_started_update(item).expect("file change should map to ACP");
+        let SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("expected a tool call update");
+        };
+
+        assert_eq!(update.tool_call_id.to_string(), "call-apply");
+        assert_eq!(update.fields.kind, Some(ToolKind::Edit));
+        assert_eq!(update.fields.status, Some(AcpToolCallStatus::InProgress));
+        assert_eq!(update.fields.title, Some("Apply patch".to_string()));
+        assert!(update.fields.content.is_none());
+    }
+
+    /// Verifies that file-change completion events map final states to ACP diffs.
+    #[test]
+    fn file_change_completed_maps_final_file_states_to_acp_diffs() {
+        let item = TurnItem::FileChange(
+            FileChangeItem::builder()
+                .id("call-apply".to_string())
+                .title("Apply patch".to_string())
+                .changes(vec![
+                    FileChange::builder()
+                        .path(std::path::PathBuf::from("src/new.rs"))
+                        .new_text("fn new() {}\n".to_string())
+                        .build(),
+                    FileChange::builder()
+                        .path(std::path::PathBuf::from("src/existing.rs"))
+                        .old_text("fn old() {}\n".to_string())
+                        .new_text("fn new() {}\n".to_string())
+                        .build(),
+                ])
+                .status(FileChangeStatus::Completed)
+                .model_output("A src/new.rs\nM src/existing.rs".to_string())
+                .build(),
+        );
+
+        let update = item_completed_update(item).expect("file change should map to ACP");
+        let SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("expected a tool call update");
+        };
+
+        assert_eq!(update.tool_call_id.to_string(), "call-apply");
+        assert_eq!(update.fields.kind, Some(ToolKind::Edit));
+        assert_eq!(update.fields.status, Some(AcpToolCallStatus::Completed));
+        assert_eq!(update.fields.title, Some("Apply patch".to_string()));
+        assert_eq!(
+            update.fields.raw_output,
+            Some(serde_json::json!("A src/new.rs\nM src/existing.rs"))
+        );
+
+        let content = update
+            .fields
+            .content
+            .expect("diff content should be present");
+        assert_eq!(content.len(), 2);
+
+        let ToolCallContent::Diff(added) = &content[0] else {
+            panic!("expected added file to be represented as a diff");
+        };
+        assert_eq!(added.path, std::path::PathBuf::from("src/new.rs"));
+        assert_eq!(added.old_text, None);
+        assert_eq!(added.new_text, "fn new() {}\n");
+
+        let ToolCallContent::Diff(updated) = &content[1] else {
+            panic!("expected updated file to be represented as a diff");
+        };
+        assert_eq!(updated.path, std::path::PathBuf::from("src/existing.rs"));
+        assert_eq!(updated.old_text, Some("fn old() {}\n".to_string()));
+        assert_eq!(updated.new_text, "fn new() {}\n");
     }
 }

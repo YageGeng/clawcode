@@ -8,6 +8,7 @@ pub mod approval;
 pub mod context;
 pub(crate) mod prompt;
 pub mod session;
+pub(crate) mod tool_events;
 pub(crate) mod turn;
 
 use std::collections::HashMap;

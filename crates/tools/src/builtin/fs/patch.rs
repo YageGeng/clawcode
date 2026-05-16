@@ -3,10 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use protocol::FileChange;
 use tokio::fs;
 use typed_builder::TypedBuilder;
 
-use crate::Tool;
+use crate::{Tool, ToolDisplayOutput, ToolExecutionResult};
 
 const APPLY_PATCH_DESCRIPTION: &str = r#"Use the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
 
@@ -130,6 +131,17 @@ impl Tool for ApplyPatch {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
+        self.execute_structured(arguments, ctx)
+            .await
+            .map(|result| result.model_output)
+    }
+
+    /// Execute a patch while returning final file states for UI diff rendering.
+    async fn execute_structured(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<ToolExecutionResult, String> {
         let patch_text = arguments
             .get("patchText")
             .and_then(|v| v.as_str())
@@ -145,12 +157,16 @@ impl Tool for ApplyPatch {
             .map(PreparedHunk::summary_line)
             .collect::<Vec<_>>()
             .join("\n");
+        let changes = file_changes_from_prepared_hunks(&prepared);
 
         for hunk in prepared {
             hunk.write().await?;
         }
 
-        Ok(summary)
+        Ok(ToolExecutionResult {
+            model_output: summary,
+            display: ToolDisplayOutput::FileChanges(changes),
+        })
     }
 }
 
@@ -162,10 +178,12 @@ enum PreparedHunk {
     },
     Delete {
         path: PathBuf,
+        contents: String,
     },
     Update {
         path: PathBuf,
         move_path: Option<PathBuf>,
+        old_contents: String,
         contents: String,
     },
 }
@@ -175,7 +193,7 @@ impl PreparedHunk {
     fn summary_line(&self) -> String {
         match self {
             Self::Add { path, .. } => format!("A {}", path.display()),
-            Self::Delete { path } => format!("D {}", path.display()),
+            Self::Delete { path, .. } => format!("D {}", path.display()),
             Self::Update { path, .. } => format!("M {}", path.display()),
         }
     }
@@ -189,12 +207,13 @@ impl PreparedHunk {
                     .await
                     .map_err(|e| format!("failed to add {}: {e}", path.display()))
             }
-            Self::Delete { path } => fs::remove_file(&path)
+            Self::Delete { path, .. } => fs::remove_file(&path)
                 .await
                 .map_err(|e| format!("failed to delete {}: {e}", path.display())),
             Self::Update {
                 path,
                 move_path,
+                old_contents: _,
                 contents,
             } => {
                 if let Some(move_path) = move_path {
@@ -464,10 +483,13 @@ async fn prepare_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<PreparedHunk>, 
             }
             Hunk::Delete { path } => {
                 let path = resolve_path(cwd, path);
-                fs::read(&path)
+                let contents = fs::read(&path)
                     .await
                     .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-                prepared.push(PreparedHunk::Delete { path });
+                prepared.push(PreparedHunk::Delete {
+                    path,
+                    contents: String::from_utf8_lossy(&contents).into_owned(),
+                });
             }
             Hunk::Update {
                 path,
@@ -482,12 +504,54 @@ async fn prepare_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<PreparedHunk>, 
                 prepared.push(PreparedHunk::Update {
                     path,
                     move_path: move_path.as_ref().map(|target| resolve_path(cwd, target)),
+                    old_contents: content,
                     contents: new_contents,
                 });
             }
         }
     }
     Ok(prepared)
+}
+
+/// Build final file-change display payloads from validated hunks.
+fn file_changes_from_prepared_hunks(prepared: &[PreparedHunk]) -> Vec<FileChange> {
+    let mut changes = Vec::<FileChange>::new();
+    for hunk in prepared {
+        let (path, old_text, new_text) = match hunk {
+            PreparedHunk::Add { path, contents } => (path.clone(), None, contents.clone()),
+            PreparedHunk::Delete { path, contents } => {
+                (path.clone(), Some(contents.clone()), String::new())
+            }
+            PreparedHunk::Update {
+                path,
+                move_path,
+                old_contents,
+                contents,
+            } => (
+                move_path.clone().unwrap_or_else(|| path.clone()),
+                Some(old_contents.clone()),
+                contents.clone(),
+            ),
+        };
+
+        // Multiple hunks can target the same final path; keep the first old
+        // state and replace only the final new state so the UI shows net change.
+        if let Some(existing) = changes.iter_mut().find(|change| change.path == path) {
+            existing.new_text = new_text;
+        } else {
+            let change = if let Some(old_text) = old_text {
+                FileChange::builder()
+                    .path(path)
+                    .old_text(old_text)
+                    .new_text(new_text)
+                    .build()
+            } else {
+                FileChange::builder().path(path).new_text(new_text).build()
+            };
+            changes.push(change);
+        }
+    }
+    changes
 }
 
 /// Resolve a patch path relative to the execution working directory.
@@ -729,7 +793,7 @@ fn build_replacement_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolContext;
+    use crate::{ToolContext, ToolDisplayOutput};
 
     /// Verifies that parser keeps all supported operation kinds in order.
     #[test]
@@ -1025,6 +1089,38 @@ mod tests {
             std::fs::read_to_string(dir.path().join("moved/renamed.txt")).unwrap(),
             "move me"
         );
+    }
+
+    /// Verifies that structured execution returns final file states for UI diffs.
+    #[tokio::test]
+    async fn apply_patch_structured_result_includes_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("modify.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("delete.txt"), "remove me\n").unwrap();
+
+        let patch = "*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: modify.txt\n@@\n-two\n+TWO\n*** Delete File: delete.txt\n*** End Patch";
+        let result = ApplyPatch::new()
+            .execute_structured(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        let ToolDisplayOutput::FileChanges(changes) = result.display else {
+            panic!("expected file changes");
+        };
+
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0].path, dir.path().join("added.txt"));
+        assert_eq!(changes[0].old_text, None);
+        assert_eq!(changes[0].new_text, "created\n");
+        assert_eq!(changes[1].path, dir.path().join("modify.txt"));
+        assert_eq!(changes[1].old_text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(changes[1].new_text, "one\nTWO\n");
+        assert_eq!(changes[2].path, dir.path().join("delete.txt"));
+        assert_eq!(changes[2].old_text.as_deref(), Some("remove me\n"));
+        assert_eq!(changes[2].new_text, "");
     }
 
     /// Verifies that update hunks fail when their exact context is absent.

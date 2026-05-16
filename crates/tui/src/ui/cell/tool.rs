@@ -1,5 +1,7 @@
 //! Tool-call transcript cells for the local TUI.
 
+use std::path::PathBuf;
+
 use agent_client_protocol::schema::ToolCallStatus;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -7,6 +9,11 @@ use ratatui::text::{Line, Span};
 use super::terminal_output::terminal_display_lines;
 
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 5;
+const TOOL_DIFF_PREVIEW_LINES: usize = 24;
+/// Background used for added file lines in structured diff output.
+const DIFF_ADDED_BG: Color = Color::Rgb(18, 66, 42);
+/// Background used for removed file lines in structured diff output.
+const DIFF_REMOVED_BG: Color = Color::Rgb(76, 34, 38);
 
 /// Renderable view of an ACP tool call.
 #[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
@@ -19,8 +26,22 @@ pub struct ToolCallCell {
     arguments: String,
     /// Tool output text accumulated from ACP update content.
     output: String,
+    /// Structured file diffs accumulated from ACP diff content.
+    #[builder(default)]
+    diffs: Vec<ToolCallDiff>,
     /// Latest ACP execution status for the tool.
     status: ToolCallStatus,
+}
+
+/// Final file state rendered as unified diff-style output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallDiff {
+    /// Path displayed in the diff header.
+    path: PathBuf,
+    /// File content before the tool ran; `None` means the file was created.
+    old_text: Option<String>,
+    /// File content after the tool ran.
+    new_text: String,
 }
 
 impl ToolCallCell {
@@ -31,6 +52,7 @@ impl ToolCallCell {
             .name(String::new())
             .arguments(String::new())
             .output(String::new())
+            .diffs(Vec::new())
             .status(ToolCallStatus::Pending)
             .build()
     }
@@ -75,6 +97,15 @@ impl ToolCallCell {
         self.output.push_str(output);
     }
 
+    /// Appends a structured file diff received from ACP updates.
+    pub fn push_diff(&mut self, path: PathBuf, old_text: Option<String>, new_text: String) {
+        self.diffs.push(ToolCallDiff {
+            path,
+            old_text,
+            new_text,
+        });
+    }
+
     /// Replaces the latest ACP execution status.
     pub fn set_status(&mut self, status: ToolCallStatus) {
         self.status = status;
@@ -91,7 +122,13 @@ impl ToolCallCell {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ]));
-        append_tool_output_preview_lines(&mut lines, self.status, &self.output);
+        append_tool_output_preview_lines(
+            &mut lines,
+            self.status,
+            &self.output,
+            self.diffs.is_empty(),
+        );
+        append_tool_diff_preview_lines(&mut lines, &self.diffs);
         lines
     }
 
@@ -107,6 +144,9 @@ impl ToolCallCell {
                 .into_iter()
                 .map(Line::from),
         );
+        for diff in &self.diffs {
+            lines.extend(diff.raw_lines().into_iter().map(Line::from));
+        }
         lines
     }
 
@@ -132,15 +172,42 @@ impl ToolCallCell {
     }
 }
 
+impl ToolCallDiff {
+    /// Builds plain unified diff-style lines for this file change.
+    fn raw_lines(&self) -> Vec<String> {
+        let path = self.path.display().to_string();
+        let old_line_count = self
+            .old_text
+            .as_deref()
+            .map(|text| split_diff_lines(text).len())
+            .unwrap_or(0);
+        let new_line_count = split_diff_lines(&self.new_text).len();
+        let mut lines = vec![
+            format!("--- {path}"),
+            format!("+++ {path}"),
+            hunk_header(old_line_count, new_line_count),
+        ];
+        lines.extend(unified_diff_body(
+            self.old_text.as_deref().unwrap_or(""),
+            &self.new_text,
+            self.old_text.is_none(),
+        ));
+        lines
+    }
+}
+
 /// Appends the first five display lines from normalized tool output.
 fn append_tool_output_preview_lines(
     lines: &mut Vec<Line<'static>>,
     status: ToolCallStatus,
     text: &str,
+    show_empty_placeholder: bool,
 ) {
     let display_lines = terminal_display_lines(text);
     if display_lines.is_empty() {
-        if matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
+        if show_empty_placeholder
+            && matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+        {
             lines.push(dim_line("  └ (no output)"));
         }
         return;
@@ -159,6 +226,41 @@ fn append_tool_output_preview_lines(
         let omitted = display_lines.len() - TOOL_OUTPUT_PREVIEW_LINES;
         lines.push(dim_line(format!("    ... +{omitted} lines")));
     }
+}
+
+/// Appends unified diff-style display lines for structured file diffs.
+fn append_tool_diff_preview_lines(lines: &mut Vec<Line<'static>>, diffs: &[ToolCallDiff]) {
+    let all_lines = diffs
+        .iter()
+        .flat_map(ToolCallDiff::raw_lines)
+        .collect::<Vec<_>>();
+    for (index, line) in all_lines.iter().take(TOOL_DIFF_PREVIEW_LINES).enumerate() {
+        let prefix = if index == 0 { "  └ " } else { "    " };
+        lines.push(diff_line(prefix, line.to_string(), line));
+    }
+    if all_lines.len() > TOOL_DIFF_PREVIEW_LINES {
+        lines.push(diff_line(
+            "    ",
+            format!(
+                "... +{} diff lines",
+                all_lines.len() - TOOL_DIFF_PREVIEW_LINES
+            ),
+            "",
+        ));
+    }
+}
+
+/// Builds a styled line for one unified diff row.
+fn diff_line(prefix: &'static str, display: String, raw: &str) -> Line<'static> {
+    let style = if raw.starts_with('+') && !raw.starts_with("+++") {
+        Style::default().fg(Color::Green).bg(DIFF_ADDED_BG)
+    } else if raw.starts_with('-') && !raw.starts_with("---") {
+        Style::default().fg(Color::Red).bg(DIFF_REMOVED_BG)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    // Keep the tree prefix unstyled so diff backgrounds never bleed into normal transcript chrome.
+    Line::from(vec![Span::raw(prefix), Span::styled(display, style)])
 }
 
 /// Builds a dimmed display line for secondary tool output.
@@ -311,6 +413,83 @@ fn compact_inline(text: &str) -> String {
     }
 }
 
+/// Builds a whole-file unified diff hunk header from old/new line counts.
+fn hunk_header(old_line_count: usize, new_line_count: usize) -> String {
+    let old_start = usize::from(old_line_count > 0);
+    let new_start = usize::from(new_line_count > 0);
+    format!("@@ -{old_start},{old_line_count} +{new_start},{new_line_count} @@")
+}
+
+/// Builds a simple line-based unified diff body from final old/new file states.
+fn unified_diff_body(old_text: &str, new_text: &str, is_new_file: bool) -> Vec<String> {
+    if is_new_file {
+        return split_diff_lines(new_text)
+            .into_iter()
+            .map(|line| format!("+{line}"))
+            .collect();
+    }
+    let old_lines = split_diff_lines(old_text);
+    let new_lines = split_diff_lines(new_text);
+    let table = lcs_table(&old_lines, &new_lines);
+    collect_diff_lines(&old_lines, &new_lines, &table)
+}
+
+/// Splits text into display lines while preserving a visible empty file state.
+fn split_diff_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split_inclusive('\n')
+        .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
+        .collect()
+}
+
+/// Computes the longest-common-subsequence table used by the line diff renderer.
+/// SAFETY: loop bounds are derived from the same slices and table dimensions.
+#[allow(clippy::indexing_slicing)]
+fn lcs_table(old_lines: &[String], new_lines: &[String]) -> Vec<Vec<usize>> {
+    let mut table = vec![vec![0; new_lines.len() + 1]; old_lines.len() + 1];
+    for i in (0..old_lines.len()).rev() {
+        for j in (0..new_lines.len()).rev() {
+            table[i][j] = if old_lines[i] == new_lines[j] {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
+        }
+    }
+    table
+}
+
+/// Collects context, removed, and added lines from an LCS table.
+/// SAFETY: every indexed access is guarded by the current old/new cursor bounds.
+#[allow(clippy::indexing_slicing)]
+fn collect_diff_lines(
+    old_lines: &[String],
+    new_lines: &[String],
+    table: &[Vec<usize>],
+) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < old_lines.len() || j < new_lines.len() {
+        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+            output.push(format!(" {}", old_lines[i]));
+            i += 1;
+            j += 1;
+        } else if i < old_lines.len()
+            && (j == new_lines.len() || table[i + 1][j] >= table[i][j + 1])
+        {
+            output.push(format!("-{}", old_lines[i]));
+            i += 1;
+        } else if j < new_lines.len() {
+            output.push(format!("+{}", new_lines[j]));
+            j += 1;
+        }
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +526,69 @@ mod tests {
         let lines = cell.display_lines(80);
 
         assert!(lines[1].to_string().contains("(no output)"));
+    }
+
+    /// Verifies ACP diffs render as unified diff-style lines.
+    #[test]
+    fn tool_call_cell_display_lines_renders_unified_diff() {
+        let mut cell = ToolCallCell::builder()
+            .call_id("call-1".to_string())
+            .name("apply_patch".to_string())
+            .arguments(String::new())
+            .output(String::new())
+            .status(ToolCallStatus::Completed)
+            .build();
+        cell.push_diff(
+            "src/main.rs".into(),
+            Some("fn old() {}\n".to_string()),
+            "fn new() {}\n".to_string(),
+        );
+
+        let lines = cell.display_lines(80);
+        let rendered = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("--- src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("+++ src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("@@ -1,1 +1,1 @@")));
+        assert!(rendered.iter().any(|line| line.contains("-fn old() {}")));
+        assert!(rendered.iter().any(|line| line.contains("+fn new() {}")));
+        let removed = rendered
+            .iter()
+            .position(|line| line.contains("-fn old() {}"))
+            .expect("removed line");
+        let added = rendered
+            .iter()
+            .position(|line| line.contains("+fn new() {}"))
+            .expect("added line");
+        assert!(removed < added);
+
+        let removed_spans = &lines[removed].spans;
+        let added_spans = &lines[added].spans;
+        let removed_prefix_style = removed_spans.first().expect("removed prefix").style;
+        let removed_diff_style = removed_spans.get(1).expect("removed diff").style;
+        let added_prefix_style = added_spans.first().expect("added prefix").style;
+        let added_diff_style = added_spans.get(1).expect("added diff").style;
+        let header_line = lines
+            .iter()
+            .find(|line| line.to_string().contains("--- src/main.rs"))
+            .expect("header line");
+        let header_prefix_style = header_line.spans.first().expect("header prefix").style;
+        let header_diff_style = header_line.spans.get(1).expect("header diff").style;
+        let header_text = lines
+            .iter()
+            .find(|line| line.to_string().contains("--- src/main.rs"))
+            .expect("header line")
+            .to_string();
+        assert!(removed_prefix_style.bg.is_none());
+        assert!(added_prefix_style.bg.is_none());
+        assert!(header_prefix_style.bg.is_none());
+        assert!(removed_diff_style.bg.is_some());
+        assert!(added_diff_style.bg.is_some());
+        assert!(header_diff_style.bg.is_none());
+        assert_ne!(removed_diff_style.bg, added_diff_style.bg);
+        assert_eq!(header_text, "  └ --- src/main.rs");
     }
 }

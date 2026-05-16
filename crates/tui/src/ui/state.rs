@@ -270,19 +270,14 @@ impl AppState {
             .as_ref()
             .map(json_to_display)
             .unwrap_or_default();
-        let output = tool_call
-            .content
-            .iter()
-            .filter_map(tool_content_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = tool_call.content;
 
         let entry = self.pending_tool_call_cell(call_id.clone());
         entry.set_name(title);
         entry.set_arguments(raw_input);
         entry.set_status(status);
-        if !output.is_empty() {
-            entry.push_output(&output);
+        for content in content {
+            apply_tool_call_content(entry, content);
         }
     }
 
@@ -301,12 +296,9 @@ impl AppState {
                 entry.push_output(&json_to_display(&raw_output));
             }
             if let Some(content) = update.fields.content {
-                let text = content
-                    .iter()
-                    .filter_map(tool_content_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                entry.push_output(&text);
+                for content in content {
+                    apply_tool_call_content(entry, content);
+                }
             }
             if let Some(status) = update.fields.status {
                 entry.set_status(status);
@@ -384,6 +376,24 @@ impl AppState {
     }
 }
 
+/// Applies one ACP tool-call content item to the renderable tool cell.
+fn apply_tool_call_content(entry: &mut ToolCallCell, content: ToolCallContent) {
+    match content {
+        ToolCallContent::Content(content) => {
+            if let Some(text) = content_block_text(&content.content) {
+                entry.push_output(&text);
+            }
+        }
+        ToolCallContent::Diff(diff) => {
+            entry.push_diff(diff.path, diff.old_text, diff.new_text);
+        }
+        ToolCallContent::Terminal(_) => {
+            entry.push_output("[terminal]");
+        }
+        _ => {}
+    }
+}
+
 /// Extracts visible text from an ACP content block.
 fn content_block_text(content: &ContentBlock) -> Option<String> {
     match content {
@@ -392,16 +402,6 @@ fn content_block_text(content: &ContentBlock) -> Option<String> {
         ContentBlock::Audio(_) => Some("[audio]".to_string()),
         ContentBlock::ResourceLink(resource) => Some(format!("[resource] {}", resource.uri)),
         ContentBlock::Resource(_) => Some("[resource]".to_string()),
-        _ => None,
-    }
-}
-
-/// Extracts visible text from ACP tool-call content.
-fn tool_content_text(content: &ToolCallContent) -> Option<String> {
-    match content {
-        ToolCallContent::Content(content) => content_block_text(&content.content),
-        ToolCallContent::Diff(_) => Some("[diff]".to_string()),
-        ToolCallContent::Terminal(_) => Some("[terminal]".to_string()),
         _ => None,
     }
 }
@@ -582,6 +582,41 @@ mod tests {
         assert_eq!(tool.name(), "shell");
         assert_eq!(tool.output(), "partial");
         assert_eq!(tool.status(), ToolCallStatus::Pending);
+    }
+
+    /// Verifies ACP diff content reaches the renderable tool cell as real diff lines.
+    #[test]
+    fn state_tool_call_update_preserves_diff_content() {
+        let session_id = sid("s1");
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("call-1"),
+                ToolCallUpdateFields::new()
+                    .title("apply_patch")
+                    .content(vec![ToolCallContent::Diff(
+                        agent_client_protocol::schema::Diff::new("src/main.rs", "fn new() {}\n")
+                            .old_text("fn old() {}\n"),
+                    )])
+                    .status(ToolCallStatus::Completed),
+            )),
+        ));
+
+        let tool = transcript_tool(&state, 0);
+        let rendered = tool
+            .display_lines(80)
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("--- src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("+++ src/main.rs")));
+        assert!(rendered.iter().any(|line| line.contains("@@ -1,1 +1,1 @@")));
+        assert!(rendered.iter().any(|line| line.contains("-fn old() {}")));
+        assert!(rendered.iter().any(|line| line.contains("+fn new() {}")));
+        assert!(!rendered.iter().any(|line| line.contains("[diff]")));
     }
 
     /// Verifies ACP updates from another session do not mutate renderable state.
