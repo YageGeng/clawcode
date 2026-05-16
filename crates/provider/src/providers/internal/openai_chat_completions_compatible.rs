@@ -315,6 +315,7 @@ where
                         yield Ok(RawStreamingChoice::ReasoningDelta {
                             id: None,
                             reasoning,
+                            replayable: true,
                         });
                     }
 

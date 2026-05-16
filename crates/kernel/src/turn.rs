@@ -177,6 +177,7 @@ pub(crate) async fn execute_turn(
 
         let mut assistant_content: Vec<AssistantContent> = Vec::new();
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
+        let mut streamed_reasoning_preview = String::new();
 
         while let Some(event) = stream.next().await {
             let event = event
@@ -210,11 +211,27 @@ pub(crate) async fn execute_turn(
                 }
                 LlmStreamEvent::Reasoning(reasoning) => {
                     let text = reasoning.display_text();
-                    assistant_content.push(AssistantContent::Reasoning(reasoning));
-                    let _ = tx_event.send(Event::thought_chunk(sid.clone(), text));
+                    let emit_text =
+                        should_emit_reasoning_block(&mut streamed_reasoning_preview, &text);
+                    append_reasoning_block(&mut assistant_content, reasoning);
+                    if emit_text {
+                        let _ = tx_event.send(Event::thought_chunk(sid.clone(), text));
+                    }
                 }
-                LlmStreamEvent::ReasoningDelta { id, reasoning } => {
-                    append_reasoning_delta(&mut assistant_content, id, &reasoning);
+                LlmStreamEvent::ReasoningDelta {
+                    id,
+                    reasoning,
+                    replayable,
+                } => {
+                    // Non-replayable reasoning deltas are UI previews, such as
+                    // OpenAI reasoning summaries. They are tracked only to avoid
+                    // redisplaying the canonical reasoning item when it later
+                    // arrives with `reasoning.encrypted_content` for stateless
+                    // `store=false` replay.
+                    if !replayable {
+                        streamed_reasoning_preview.push_str(&reasoning);
+                    }
+                    append_reasoning_delta(&mut assistant_content, id, &reasoning, replayable);
                     let _ = tx_event.send(Event::thought_chunk(sid.clone(), reasoning));
                 }
                 LlmStreamEvent::ToolCallDelta {
@@ -275,12 +292,21 @@ pub(crate) async fn execute_turn(
     }
 }
 
-/// Append a reasoning delta at its stream position, merging contiguous reasoning chunks.
+/// Append a replayable reasoning delta, merging contiguous reasoning chunks.
+///
+/// Display-only previews are intentionally skipped because providers such as
+/// OpenAI require the completed reasoning item, including encrypted content, to
+/// be replayed in later stateless `store=false` requests.
 fn append_reasoning_delta(
     assistant_content: &mut Vec<AssistantContent>,
     id: Option<String>,
     reasoning: &str,
+    replayable: bool,
 ) {
+    if !replayable {
+        return;
+    }
+
     if let Some(AssistantContent::Reasoning(existing)) = assistant_content.last_mut()
         && let Some(ReasoningContent::Text { text, .. }) = existing.content.last_mut()
     {
@@ -291,6 +317,33 @@ fn append_reasoning_delta(
     assistant_content.push(AssistantContent::Reasoning(
         Reasoning::new(reasoning).optional_id(id),
     ));
+}
+
+/// Append a complete reasoning block, merging adjacent canonical provider items.
+fn append_reasoning_block(assistant_content: &mut Vec<AssistantContent>, reasoning: Reasoning) {
+    if reasoning.id.is_some()
+        && let Some(AssistantContent::Reasoning(existing)) = assistant_content.last_mut()
+        && existing.id == reasoning.id
+    {
+        existing.content.extend(reasoning.content);
+        return;
+    }
+
+    assistant_content.push(AssistantContent::Reasoning(reasoning));
+}
+
+/// Decide whether a canonical reasoning block should be displayed to the UI.
+fn should_emit_reasoning_block(streamed_preview: &mut String, text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    if streamed_preview == text {
+        streamed_preview.clear();
+        return false;
+    }
+
+    true
 }
 
 /// Captures a tool execution result and the provider correlation id.
@@ -437,6 +490,7 @@ mod tests {
             &mut assistant_content,
             Some("reasoning-1".to_string()),
             "think first",
+            true,
         );
         assistant_content.push(AssistantContent::text("answer second"));
 
@@ -454,8 +508,8 @@ mod tests {
     fn contiguous_reasoning_deltas_are_merged_in_place() {
         let mut assistant_content = Vec::new();
 
-        append_reasoning_delta(&mut assistant_content, None, "think ");
-        append_reasoning_delta(&mut assistant_content, None, "more");
+        append_reasoning_delta(&mut assistant_content, None, "think ", true);
+        append_reasoning_delta(&mut assistant_content, None, "more", true);
 
         assert_eq!(assistant_content.len(), 1);
         let Some(AssistantContent::Reasoning(reasoning)) = assistant_content.first() else {
@@ -463,5 +517,51 @@ mod tests {
         };
 
         assert_eq!(reasoning.display_text(), "think more");
+    }
+
+    #[test]
+    fn non_replayable_reasoning_delta_is_not_stored() {
+        let mut assistant_content = Vec::new();
+
+        append_reasoning_delta(&mut assistant_content, None, "display only", false);
+
+        assert!(assistant_content.is_empty());
+    }
+
+    #[test]
+    fn canonical_reasoning_blocks_with_same_id_are_merged() {
+        let mut assistant_content = Vec::new();
+
+        append_reasoning_block(
+            &mut assistant_content,
+            Reasoning {
+                id: Some("rs_1".to_string()),
+                content: vec![ReasoningContent::Summary("thinking".to_string())],
+            },
+        );
+        append_reasoning_block(
+            &mut assistant_content,
+            Reasoning {
+                id: Some("rs_1".to_string()),
+                content: vec![ReasoningContent::Encrypted("enc_1".to_string())],
+            },
+        );
+
+        let Some(AssistantContent::Reasoning(reasoning)) = assistant_content.first() else {
+            panic!("expected reasoning content");
+        };
+
+        assert_eq!(assistant_content.len(), 1);
+        assert_eq!(reasoning.content.len(), 2);
+    }
+
+    #[test]
+    fn canonical_reasoning_text_is_not_redisplayed_after_preview_delta() {
+        let mut streamed_preview = String::from("thinking");
+
+        let emit_text = should_emit_reasoning_block(&mut streamed_preview, "thinking");
+
+        assert!(!emit_text);
+        assert!(streamed_preview.is_empty());
     }
 }

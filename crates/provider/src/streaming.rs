@@ -83,6 +83,12 @@ where
         id: Option<String>,
         /// Partial reasoning text.
         reasoning: String,
+        /// Whether this delta is canonical provider reasoning that can be retained
+        /// for future requests. OpenAI summary deltas are display-only previews;
+        /// only completed reasoning items with `reasoning.encrypted_content` are
+        /// valid for stateless multi-turn replay when `store=false`.
+        /// See: https://developers.openai.com/api/reference/resources/responses/methods/create
+        replayable: bool,
     },
     /// The final provider response object.
     FinalResponse(R),
@@ -262,7 +268,7 @@ where
         self.text_item_index = Some(self.assistant_items.len() - 1);
     }
 
-    /// Accumulate reasoning deltas into the aggregated assistant output.
+    /// Accumulate replayable reasoning deltas into the aggregated assistant output.
     fn append_reasoning_chunk(&mut self, id: &Option<String>, text: &str) {
         if let Some(index) = self.reasoning_item_index
             && let Some(AssistantContent::Reasoning(existing)) = self.assistant_items.get_mut(index)
@@ -284,6 +290,23 @@ where
                 }],
             }));
         self.reasoning_item_index = Some(self.assistant_items.len() - 1);
+    }
+
+    /// Accumulate complete reasoning blocks, merging same-id provider blocks.
+    fn append_reasoning_block(&mut self, id: Option<String>, content: ReasoningContent) {
+        if id.is_some()
+            && let Some(AssistantContent::Reasoning(existing)) = self.assistant_items.last_mut()
+            && existing.id == id
+        {
+            existing.content.push(content);
+            return;
+        }
+
+        self.assistant_items
+            .push(AssistantContent::Reasoning(Reasoning {
+                id,
+                content: vec![content],
+            }));
     }
 }
 
@@ -354,22 +377,27 @@ where
                 }))),
                 RawStreamingChoice::Reasoning { id, content } => {
                     let reasoning = Reasoning {
-                        id,
-                        content: vec![content],
+                        id: id.clone(),
+                        content: vec![content.clone()],
                     };
                     stream.text_item_index = None;
                     stream.reasoning_item_index = None;
-                    stream
-                        .assistant_items
-                        .push(AssistantContent::Reasoning(reasoning.clone()));
+                    stream.append_reasoning_block(id, content);
                     Poll::Ready(Some(Ok(StreamedAssistantContent::Reasoning(reasoning))))
                 }
-                RawStreamingChoice::ReasoningDelta { id, reasoning } => {
+                RawStreamingChoice::ReasoningDelta {
+                    id,
+                    reasoning,
+                    replayable,
+                } => {
                     stream.text_item_index = None;
-                    stream.append_reasoning_chunk(&id, &reasoning);
+                    if replayable {
+                        stream.append_reasoning_chunk(&id, &reasoning);
+                    }
                     Poll::Ready(Some(Ok(StreamedAssistantContent::ReasoningDelta {
                         id,
                         reasoning,
+                        replayable,
                     })))
                 }
                 RawStreamingChoice::ToolCall(raw_tool_call) => {
@@ -436,6 +464,12 @@ pub enum StreamedAssistantContent<R> {
         id: Option<String>,
         /// Partial reasoning text.
         reasoning: String,
+        /// Whether this delta is canonical provider reasoning that can be retained
+        /// for future requests. OpenAI summary deltas are display-only previews;
+        /// only completed reasoning items with `reasoning.encrypted_content` are
+        /// valid for stateless multi-turn replay when `store=false`.
+        /// See: https://developers.openai.com/api/reference/resources/responses/methods/create
+        replayable: bool,
     },
     /// Final provider response object.
     Final(R),

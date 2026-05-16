@@ -21,7 +21,7 @@ context_tokens = 270000
 max_output_tokens = 128000
 
 [providers.models.extra_param]
-reasoning = { effort = "high" }
+reasoning = { effort = "high", summary = "auto" }
 
 [[providers.models]]
 id = "gpt-5.4"
@@ -30,7 +30,7 @@ context_tokens = 270000
 max_output_tokens = 128000
 
 [providers.models.extra_param]
-reasoning = { effort = "high" }
+reasoning = { effort = "high", summary = "auto" }
 
 [[providers]]
 id = "chatgpt"
@@ -46,7 +46,7 @@ context_tokens = 270000
 max_output_tokens = 128000
 
 [providers.models.extra_param]
-reasoning = { effort = "high" }
+reasoning = { effort = "high", summary = "auto" }
 
 [[providers.models]]
 id = "gpt-5.4"
@@ -55,7 +55,7 @@ context_tokens = 270000
 max_output_tokens = 128000
 
 [providers.models.extra_param]
-reasoning = { effort = "high" }
+reasoning = { effort = "high", summary = "auto" }
 
 [[providers]]
 id = "deepseek"

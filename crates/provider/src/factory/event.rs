@@ -50,6 +50,12 @@ pub enum LlmStreamEvent {
         id: Option<String>,
         /// Partial reasoning text.
         reasoning: String,
+        /// Whether this delta is canonical provider reasoning that can be retained
+        /// for future requests. OpenAI summary deltas are display-only previews;
+        /// only completed reasoning items with `reasoning.encrypted_content` are
+        /// valid for stateless multi-turn replay when `store=false`.
+        /// See: https://developers.openai.com/api/reference/resources/responses/methods/create
+        replayable: bool,
     },
     /// Provider-specific raw response with optional token usage.
     Final {
@@ -96,9 +102,15 @@ where
                 content,
             }),
             StreamedAssistantContent::Reasoning(r) => Ok(LlmStreamEvent::Reasoning(r)),
-            StreamedAssistantContent::ReasoningDelta { id, reasoning } => {
-                Ok(LlmStreamEvent::ReasoningDelta { id, reasoning })
-            }
+            StreamedAssistantContent::ReasoningDelta {
+                id,
+                reasoning,
+                replayable,
+            } => Ok(LlmStreamEvent::ReasoningDelta {
+                id,
+                reasoning,
+                replayable,
+            }),
             StreamedAssistantContent::Final(r) => Ok(LlmStreamEvent::Final {
                 raw: serde_json::to_value(&r).map_err(CompletionError::JsonError)?,
                 usage: r.token_usage(),

@@ -419,6 +419,7 @@ fn handle_event(
                 Some(Ok(RawStreamingChoice::ReasoningDelta {
                     id: None,
                     reasoning: thinking.clone(),
+                    replayable: true,
                 }))
             }
             ContentDelta::SignatureDelta { signature } => {

@@ -302,9 +302,15 @@ impl RawChoiceAccumulator {
                 immediate.push(streaming::RawStreamingChoice::Message(delta.delta));
             }
             ItemChunkKind::ReasoningSummaryTextDelta(delta) => {
+                // OpenAI documents `reasoning.encrypted_content` as the stateful
+                // payload for stateless multi-turn replay when `store=false`.
+                // Summary text deltas are only user-visible previews, so keep
+                // them out of replayable assistant history.
+                // See: https://developers.openai.com/api/reference/resources/responses/methods/create
                 immediate.push(streaming::RawStreamingChoice::ReasoningDelta {
                     id: None,
                     reasoning: delta.delta,
+                    replayable: false,
                 });
             }
             ItemChunkKind::RefusalDelta(delta) => {
@@ -458,9 +464,15 @@ pub(crate) fn raw_choices_from_sse_body(
             }
             Some("response.reasoning_summary_text.delta") => {
                 if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                    // OpenAI documents `reasoning.encrypted_content` as the stateful
+                    // payload for stateless multi-turn replay when `store=false`.
+                    // Summary text deltas are only user-visible previews, so keep
+                    // them out of replayable assistant history.
+                    // See: https://developers.openai.com/api/reference/resources/responses/methods/create
                     raw_choices.push(streaming::RawStreamingChoice::ReasoningDelta {
                         id: None,
                         reasoning: delta.to_owned(),
+                        replayable: false,
                     });
                 }
             }
@@ -909,5 +921,44 @@ where
         let event_source = GenericEventSource::new(client, req);
 
         Ok(stream_from_event_source(event_source, span, "OpenAI"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{AssistantContent, ReasoningContent};
+
+    #[tokio::test]
+    async fn streamed_summary_delta_does_not_create_replayable_reasoning_history() {
+        let body = r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking","summary_index":0,"sequence_number":1}
+data: {"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc_1"}}
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":3},"output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc_1"}],"tools":[]}}
+data: [DONE]"#;
+
+        let raw_response =
+            parse_sse_completion_body(body, "OpenAI").expect("expected completed response");
+        let response = completion_response_from_sse_body(body, raw_response, "OpenAI")
+            .await
+            .expect("expected fallback completion");
+
+        let reasonings = response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(reasonings.len(), 1);
+        assert_eq!(reasonings[0].id.as_deref(), Some("rs_1"));
+        assert!(matches!(
+            reasonings[0].content.as_slice(),
+            [
+                ReasoningContent::Summary(summary),
+                ReasoningContent::Encrypted(encrypted)
+            ] if summary == "thinking" && encrypted == "enc_1"
+        ));
     }
 }
