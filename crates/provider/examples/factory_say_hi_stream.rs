@@ -10,7 +10,7 @@ use provider::completion::CompletionRequest;
 use provider::factory::{LlmFactory, LlmStreamEvent};
 use provider::message::Message;
 
-/// Loads `claw.toml`, builds the factory cache, selects one provider/model,
+/// Loads the default app config, builds the factory cache, selects one provider/model,
 /// and streams a short "say hi" response.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

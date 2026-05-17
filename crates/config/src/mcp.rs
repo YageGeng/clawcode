@@ -1,4 +1,4 @@
-//! MCP server configuration from claw.toml.
+//! MCP server configuration loaded from the application config TOML.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

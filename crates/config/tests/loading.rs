@@ -10,6 +10,19 @@
 use config::{ApiKeyConfig, load_from};
 use std::path::PathBuf;
 
+/// Build a minimal provider config with a distinguishable API key.
+fn provider_config(api_key: &str) -> String {
+    format!(
+        r#"
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "{api_key}"
+"#
+    )
+}
+
 /// `load_from` reads a TOML file and populates AppConfig.providers.
 #[test]
 fn load_from_reads_toml_file() {
@@ -73,6 +86,83 @@ api_key = "sk-custom"
         assert_eq!(
             cfg.providers[0].api_key,
             Some(ApiKeyConfig::Plaintext("sk-custom".to_string()))
+        );
+        Ok(())
+    });
+}
+
+/// `CLAW_CONFIG` remains the highest-priority explicit config path.
+#[test]
+fn load_prefers_claw_config_over_default_paths() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        let config_home = jail.directory().join(".config");
+        let user_config_dir = config_home.join("clawcode");
+        std::fs::create_dir_all(&user_config_dir).unwrap();
+        std::fs::write(
+            user_config_dir.join("config.toml"),
+            provider_config("sk-from-xdg"),
+        )
+        .unwrap();
+        jail.create_file("custom.toml", &provider_config("sk-from-explicit"))?;
+        let explicit = jail.directory().join("custom.toml");
+        jail.set_env("CLAW_CONFIG", explicit.to_str().unwrap());
+        jail.set_env("XDG_CONFIG_HOME", config_home.to_str().unwrap());
+
+        let handle = config::load().unwrap();
+        let cfg = handle.current();
+
+        assert_eq!(
+            cfg.providers[0].api_key,
+            Some(ApiKeyConfig::Plaintext("sk-from-explicit".to_string()))
+        );
+        Ok(())
+    });
+}
+
+/// `load` prefers the XDG user config path before cwd fallbacks.
+#[test]
+fn load_prefers_xdg_clawcode_config() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        let config_home = jail.directory().join(".config");
+        let user_config_dir = config_home.join("clawcode");
+        std::fs::create_dir_all(&user_config_dir).unwrap();
+        std::fs::write(
+            user_config_dir.join("config.toml"),
+            provider_config("sk-from-xdg"),
+        )
+        .unwrap();
+        jail.create_file("claw.conf", &provider_config("sk-from-cwd"))?;
+        jail.set_env("XDG_CONFIG_HOME", config_home.to_str().unwrap());
+
+        let handle = config::load().unwrap();
+        let cfg = handle.current();
+
+        assert_eq!(
+            cfg.providers[0].api_key,
+            Some(ApiKeyConfig::Plaintext("sk-from-xdg".to_string()))
+        );
+        Ok(())
+    });
+}
+
+/// `load` falls back to ./claw.conf when no user config exists.
+#[test]
+fn load_falls_back_to_cwd_claw_conf() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        let config_home = jail.directory().join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        jail.set_env("XDG_CONFIG_HOME", config_home.to_str().unwrap());
+        jail.create_file("claw.conf", &provider_config("sk-from-fallback"))?;
+
+        let handle = config::load().unwrap();
+        let cfg = handle.current();
+
+        assert_eq!(
+            cfg.providers[0].api_key,
+            Some(ApiKeyConfig::Plaintext("sk-from-fallback".to_string()))
         );
         Ok(())
     });

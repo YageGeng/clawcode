@@ -94,29 +94,32 @@ where
 /// Resolve default configuration search paths in priority order:
 ///
 /// 1. `$CLAW_CONFIG` if set and the path exists.
-/// 2. `./claw.toml` in the current working directory if it exists.
-/// 3. `$XDG_CONFIG_HOME/claw/config.toml` (or `~/.config/claw/config.toml`) if it exists.
+/// 2. `$XDG_CONFIG_HOME/clawcode/config.toml` (or `~/.config/clawcode/config.toml`) if it exists.
+/// 3. `./claw.conf` in the current working directory if the user config does not exist.
 ///
-/// Non-existent paths are silently skipped; only configured-but-missing files
-/// raise errors via [`load_from`]. The returned vec may be empty, in which case
-/// [`load`] yields an `AppConfig::default()` handle.
+/// Missing default candidates are silently skipped. Missing paths passed
+/// directly to [`load_from`] still raise an error. The returned vec may be
+/// empty, in which case [`load`] yields an `AppConfig::default()` handle.
 fn default_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("CLAW_CONFIG") {
         let path = PathBuf::from(p);
         if path.exists() {
             out.push(path);
+            // An explicit config path should not be merged with implicit defaults.
+            return out;
         }
-    }
-    let cwd = PathBuf::from("./claw.toml");
-    if cwd.exists() {
-        out.push(cwd);
     }
     if let Some(base) = dirs::config_dir() {
-        let xdg = base.join("claw").join("config.toml");
+        let xdg = base.join("clawcode").join("config.toml");
         if xdg.exists() {
             out.push(xdg);
+            return out;
         }
+    }
+    let cwd = PathBuf::from("./claw.conf");
+    if cwd.exists() {
+        out.push(cwd);
     }
     out
 }
