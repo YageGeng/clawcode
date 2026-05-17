@@ -36,7 +36,7 @@ clawcode 包含两个二进制文件：
 | `protocol` | 内部事件/操作类型，用于 agent-core 与前端通信 |
 | `acp` | ACP 桥接层 — 将内部协议转换为 Agent Client Protocol，通过 stdio 传输 |
 | `kernel` | 代理核心 — 会话生命周期、轮次循环、LLM 编排、工具调度 |
-| `config` | 类型化配置，从 `claw.toml` 加载，基于 Figment，通过 `ArcSwap` 共享 |
+| `config` | 类型化配置，从 `~/.config/clawcode/config.toml` 或 `./claw.conf` 加载，基于 Figment，通过 `ArcSwap` 共享 |
 | `provider` | LLM 提供商抽象 — 工厂、补全、流式客户端 |
 | `tools` | 内置工具：shell 执行、文件 I/O（读/写/编辑/补丁）、技能调用、子代理派发、MCP 工具透传 |
 | `skills` | 技能发现（`.agents/skills/` 与 `$HOME/.agents/skills/`）、目录渲染、`$skill-name` 提及匹配 |
@@ -53,7 +53,7 @@ clawcode 包含两个二进制文件：
 
 ### 配置
 
-在项目根目录创建 `claw.toml`（或复制项目自带示例）：
+创建 `~/.config/clawcode/config.toml`。如果需要仓库内临时配置，可以创建 fallback 文件 `./claw.conf`：
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"

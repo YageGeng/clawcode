@@ -40,7 +40,7 @@ clawcode ships two binaries:
 | `protocol` | Internal event/op types for agent-core ↔ frontend communication |
 | `acp` | ACP bridge — translates internal protocol to Agent Client Protocol over stdio |
 | `kernel` | Agent core — session lifecycle, turn loop, LLM orchestration, tool dispatch |
-| `config` | Typed configuration loaded from `claw.toml` via Figment, shared behind `ArcSwap` |
+| `config` | Typed configuration loaded from `~/.config/clawcode/config.toml` or `./claw.conf` via Figment, shared behind `ArcSwap` |
 | `provider` | LLM provider abstraction — factory, completion, streaming clients |
 | `tools` | Built-in tools: shell execution, file I/O (read / write / edit / patch), skill invocation, sub-agent spawning, MCP tool passthrough |
 | `skills` | Skill discovery from `.agents/skills/` and `$HOME/.agents/skills/`, catalog rendering, `$skill-name` mention matching |
@@ -57,7 +57,7 @@ clawcode ships two binaries:
 
 ### Configuration
 
-Create a `claw.toml` in the project root (or copy the bundled example):
+Create `~/.config/clawcode/config.toml`. For repo-local experiments, create `./claw.conf` as the fallback config:
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
