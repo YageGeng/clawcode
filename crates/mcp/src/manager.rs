@@ -15,7 +15,8 @@ use crate::{McpStartupStatus, McpToolInfo, normalize_tool_name};
 /// is protected by `Arc<Mutex<>>` so the manager can be shared across tasks.
 #[derive(typed_builder::TypedBuilder)]
 pub struct McpConnectionManager {
-    configs: Vec<McpServerConfig>,
+    #[builder(setter(transform = |configs: Vec<McpServerConfig>| Mutex::new(configs)))]
+    configs: Mutex<Vec<McpServerConfig>>,
     auth_dir: PathBuf,
     #[builder(default)]
     clients: Mutex<HashMap<String, ManagedClient>>,
@@ -38,23 +39,6 @@ impl McpConnectionManager {
     pub async fn start_all(&self) {
         self.start_all_with(|cfg, dir| {
             Box::pin(async move { ManagedClient::connect(&cfg, &dir).await })
-        })
-        .await;
-    }
-
-    /// Start all enabled servers with an injectable connector for in-memory tests.
-    #[cfg(test)]
-    pub(crate) async fn start_all_with_connector<T, F, E, A>(&self, stdio_connector: F)
-    where
-        T: rmcp::transport::IntoTransport<rmcp::RoleClient, E, A>,
-        E: std::error::Error + Send + Sync + 'static,
-        F: Fn(tokio::process::Command) -> Result<T, McpError> + Send + Sync + Clone + 'static,
-    {
-        self.start_all_with(move |cfg, dir| {
-            let connector = stdio_connector.clone();
-            Box::pin(
-                async move { ManagedClient::connect_with_connector(&cfg, &dir, connector).await },
-            )
         })
         .await;
     }
@@ -82,17 +66,23 @@ impl McpConnectionManager {
             }
         }
 
+        // Clone the configs before awaiting so dynamic registration can proceed independently.
+        let configs = self
+            .configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
         // Collect connection handles without holding any lock across awaits.
         let mut handles = Vec::new();
-        for config in &self.configs {
+        for config in configs {
             if !config.enabled {
                 continue;
             }
-            let cfg = config.clone();
             let dir = self.auth_dir.clone();
             let connect = connect.clone();
             handles.push(tokio::spawn(async move {
-                (cfg.name.clone(), connect(cfg, dir).await)
+                (config.name.clone(), connect(config, dir).await)
             }));
         }
 
@@ -134,6 +124,78 @@ impl McpConnectionManager {
                         },
                     );
                 }
+            }
+        }
+    }
+
+    /// Register and start an externally supplied MCP server at runtime.
+    pub async fn register_external_mcp_server(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<(), McpError> {
+        self.register_external_mcp_server_with(config, |cfg, dir| {
+            Box::pin(async move { ManagedClient::connect(&cfg, &dir).await })
+        })
+        .await
+    }
+
+    /// Register an external server using the supplied connection strategy.
+    async fn register_external_mcp_server_with<F>(
+        &self,
+        mut config: McpServerConfig,
+        connect: F,
+    ) -> Result<(), McpError>
+    where
+        F: Fn(
+                McpServerConfig,
+                PathBuf,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<ManagedClient, McpError>> + Send>,
+            > + Send
+            + Sync
+            + Clone
+            + 'static,
+    {
+        config.external = true;
+
+        if !config.enabled {
+            self.configs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(config);
+            return Ok(());
+        }
+
+        let name = config.name.clone();
+        let result = connect(config.clone(), self.auth_dir.clone()).await;
+
+        match result {
+            Ok(client) => {
+                self.configs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(config);
+                self.startup_status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(name.clone(), McpStartupStatus::Ready);
+                self.clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(name, client);
+                Ok(())
+            }
+            Err(error) => {
+                self.startup_status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        name,
+                        McpStartupStatus::Failed {
+                            reason: error.to_string(),
+                        },
+                    );
+                Err(error)
             }
         }
     }
@@ -365,6 +427,46 @@ mod tests {
             .build()
     }
 
+    /// Start all enabled MCP servers with an in-memory test connector.
+    async fn start_all_with_connector<T, F, E, A>(
+        manager: &McpConnectionManager,
+        stdio_connector: F,
+    ) where
+        T: rmcp::transport::IntoTransport<rmcp::RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+        F: Fn(tokio::process::Command) -> Result<T, McpError> + Send + Sync + Clone + 'static,
+    {
+        manager
+            .start_all_with(move |cfg, dir| {
+                let connector = stdio_connector.clone();
+                Box::pin(async move {
+                    ManagedClient::connect_with_connector(&cfg, &dir, connector).await
+                })
+            })
+            .await;
+    }
+
+    /// Register an external MCP server with an in-memory test connector.
+    async fn register_external_mcp_server_with_connector<T, F, E, A>(
+        manager: &McpConnectionManager,
+        config: McpServerConfig,
+        stdio_connector: F,
+    ) -> Result<(), McpError>
+    where
+        T: rmcp::transport::IntoTransport<rmcp::RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+        F: Fn(tokio::process::Command) -> Result<T, McpError> + Send + Sync + Clone + 'static,
+    {
+        manager
+            .register_external_mcp_server_with(config, move |cfg, dir| {
+                let connector = stdio_connector.clone();
+                Box::pin(async move {
+                    ManagedClient::connect_with_connector(&cfg, &dir, connector).await
+                })
+            })
+            .await
+    }
+
     #[tokio::test]
     async fn manager_lists_prefixed_tools_after_start() {
         let manager = McpConnectionManager::new(
@@ -372,9 +474,7 @@ mod tests {
             tempfile::tempdir().unwrap().path().to_path_buf(),
         );
 
-        manager
-            .start_all_with_connector(|_cmd| Ok(spawn_server(EchoServer)))
-            .await;
+        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(EchoServer))).await;
 
         let tools = manager.list_all_tools();
         assert_eq!(tools.len(), 1);
@@ -388,9 +488,7 @@ mod tests {
             tempfile::tempdir().unwrap().path().to_path_buf(),
         );
 
-        manager
-            .start_all_with_connector(|_cmd| Ok(spawn_server(ErrorServer)))
-            .await;
+        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(ErrorServer))).await;
 
         let result = manager.call_tool("errors", "fail", json!({})).await;
         assert_eq!(result.expect_err("tool-level error should be Err"), "boom");
@@ -404,22 +502,45 @@ mod tests {
         );
         let error_message = Arc::new(Mutex::new(String::from("spawn denied")));
 
-        manager
-            .start_all_with_connector({
-                let error_message = Arc::clone(&error_message);
-                move |_cmd| -> Result<tokio::io::DuplexStream, McpError> {
-                    Err(McpError::Startup {
-                        server: "missing".to_string(),
-                        reason: error_message.lock().unwrap().clone(),
-                    })
-                }
-            })
-            .await;
+        start_all_with_connector(&manager, {
+            let error_message = Arc::clone(&error_message);
+            move |_cmd| -> Result<tokio::io::DuplexStream, McpError> {
+                Err(McpError::Startup {
+                    server: "missing".to_string(),
+                    reason: error_message.lock().unwrap().clone(),
+                })
+            }
+        })
+        .await;
 
         let status = manager.startup_status();
         assert!(matches!(
             status.get("missing"),
             Some(McpStartupStatus::Failed { reason }) if reason.contains("spawn denied")
         ));
+    }
+
+    #[tokio::test]
+    async fn manager_register_external_mcp_server_adds_new_tools() {
+        let manager = McpConnectionManager::new(
+            Vec::new(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        );
+
+        register_external_mcp_server_with_connector(&manager, stdio_config("dynamic"), |_cmd| {
+            Ok(spawn_server(EchoServer))
+        })
+        .await
+        .expect("external server should register");
+
+        let tools = manager.list_all_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].callable_name, "mcp__dynamic__echo");
+
+        let configs = manager
+            .configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(configs[0].external);
     }
 }

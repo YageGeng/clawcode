@@ -12,6 +12,9 @@ pub struct McpServerConfig {
     /// Whether this server should be started.
     #[builder(default = true)]
     pub enabled: bool,
+    /// Whether this server was registered dynamically by an external caller.
+    #[builder(default)]
+    pub external: bool,
     /// Handshake timeout in seconds (default 30).
     #[builder(default = 30)]
     pub startup_timeout_secs: u64,
@@ -64,4 +67,29 @@ pub struct McpOAuthParams {
     /// Token endpoint override.
     #[builder(default, setter(strip_option))]
     pub token_url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal stdio transport for runtime MCP config tests.
+    fn stdio_transport() -> McpTransportConfig {
+        McpTransportConfig::Stdio {
+            command: "server".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+        }
+    }
+
+    /// Runtime MCP server configs default to non-external servers.
+    #[test]
+    fn mcp_server_config_external_defaults_false() {
+        let config = McpServerConfig::builder()
+            .name("server".to_string())
+            .transport(stdio_transport())
+            .build();
+
+        assert!(!config.external);
+    }
 }

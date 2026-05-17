@@ -13,6 +13,11 @@ pub struct McpServerConfig {
     #[builder(default = default_true())]
     pub enabled: bool,
 
+    /// Whether this server is registered by an external caller at runtime.
+    #[serde(default)]
+    #[builder(default)]
+    pub external: bool,
+
     #[serde(default = "default_startup_timeout")]
     #[builder(default = default_startup_timeout())]
     pub startup_timeout_sec: u64,
@@ -166,6 +171,7 @@ impl TryFrom<McpServerConfig> for protocol::mcp::McpServerConfig {
         let McpServerConfig {
             name,
             enabled,
+            external,
             startup_timeout_sec,
             tool_timeout_sec,
             command,
@@ -197,6 +203,7 @@ impl TryFrom<McpServerConfig> for protocol::mcp::McpServerConfig {
             Some(oauth) => Ok(Self::builder()
                 .name(name)
                 .enabled(enabled)
+                .external(external)
                 .startup_timeout_secs(startup_timeout_sec)
                 .tool_timeout_secs(tool_timeout_sec)
                 .transport(transport)
@@ -205,6 +212,7 @@ impl TryFrom<McpServerConfig> for protocol::mcp::McpServerConfig {
             None => Ok(Self::builder()
                 .name(name)
                 .enabled(enabled)
+                .external(external)
                 .startup_timeout_secs(startup_timeout_sec)
                 .tool_timeout_secs(tool_timeout_sec)
                 .transport(transport)
@@ -224,5 +232,39 @@ impl From<McpOAuthConfig> for protocol::mcp::McpOAuthParams {
             authorization_url: o.authorization_url,
             token_url: o.token_url,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TOML MCP server configs default to non-external servers.
+    #[test]
+    fn mcp_server_config_external_defaults_false() {
+        let config: McpServerConfig = toml::from_str(
+            r#"
+name = "server"
+command = "echo"
+"#,
+        )
+        .expect("config should deserialize");
+
+        assert!(!config.external);
+    }
+
+    /// Runtime MCP server configs preserve the external marker from TOML.
+    #[test]
+    fn mcp_server_config_preserves_external_during_runtime_conversion() {
+        let config = McpServerConfig::builder()
+            .name("server".to_string())
+            .command("echo".to_string())
+            .external(true)
+            .build();
+
+        let runtime: protocol::mcp::McpServerConfig =
+            config.try_into().expect("config should convert");
+
+        assert!(runtime.external);
     }
 }
