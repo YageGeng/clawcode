@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::AgentPath;
+use crate::{AgentPath, SessionId};
 
 /// Tool-approval behaviour for a session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,8 +19,10 @@ pub enum ApprovalMode {
 }
 
 /// Per-turn context passed to every tool execution.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, typed_builder::TypedBuilder)]
 pub struct ToolContext {
+    /// Session identifier for routing session-scoped tool backends.
+    pub session_id: SessionId,
     /// Working directory for this turn.
     pub cwd: PathBuf,
     /// Path of the agent executing this turn.
@@ -34,11 +36,12 @@ impl ToolContext {
     /// and the default approval mode.
     #[must_use]
     pub fn for_test(cwd: impl Into<PathBuf>) -> Self {
-        Self {
-            cwd: cwd.into(),
-            agent_path: AgentPath::root(),
-            approval_mode: ApprovalMode::default(),
-        }
+        Self::builder()
+            .session_id(SessionId("test-session".to_string()))
+            .cwd(cwd.into())
+            .agent_path(AgentPath::root())
+            .approval_mode(ApprovalMode::default())
+            .build()
     }
 }
 

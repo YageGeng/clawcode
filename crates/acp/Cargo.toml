@@ -7,14 +7,6 @@ description = "ACP bridge for clawcode - translates between internal protocol an
 [lints]
 workspace = true
 
-[[bin]]
-name = "acp"
-path = "src/main.rs"
-
-[[bin]]
-name = "claw"
-path = "src/bin/client.rs"
-
 [dependencies]
 protocol = { path = "../protocol" }
 kernel = { path = "../kernel" }
@@ -36,3 +28,5 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 typed-builder = { workspace = true }
 clap = { workspace = true }
+chrono = { workspace = true, features = ["clock", "std"] }
+dirs = { workspace = true }

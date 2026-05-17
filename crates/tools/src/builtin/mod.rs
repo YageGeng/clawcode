@@ -7,14 +7,19 @@ pub mod skill;
 
 use std::sync::Arc;
 
-use crate::ToolRegistry;
+use crate::{FsBackend, LocalFsBackend, ToolRegistry};
 
 impl ToolRegistry {
     /// Register basic built-in tools (shell, file I/O). Takes `&self` so
     /// callers can register through `Arc<ToolRegistry>` after passing it to Kernel.
     pub fn register_builtins(&self) {
+        self.register_builtins_with_fs_backend(Arc::new(LocalFsBackend::new()));
+    }
+
+    /// Register basic built-in tools using the provided filesystem backend.
+    pub fn register_builtins_with_fs_backend(&self, fs_backend: Arc<dyn FsBackend>) {
         self.register(Arc::new(shell::ShellCommand::new()));
-        self.register_fs_tools(false);
+        self.register_fs_tools_with_backend(false, fs_backend);
     }
 
     /// Register the skill tool, backed by the given registry.

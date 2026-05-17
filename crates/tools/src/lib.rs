@@ -1,6 +1,7 @@
 //! Agent tool registry and built-in tools.
 
 pub mod builtin;
+pub mod fs_backend;
 pub mod mcp;
 pub mod output;
 
@@ -8,6 +9,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use fs_backend::{
+    FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest, FsWriteResponse,
+    LocalFsBackend,
+};
 pub use output::{ToolDisplayOutput, ToolExecutionResult};
 pub use protocol::ToolContext;
 

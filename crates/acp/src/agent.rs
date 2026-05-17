@@ -15,6 +15,8 @@ use protocol::mcp::{McpServerConfig, McpTransportConfig};
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
 use protocol::{AgentKernel, Event, SessionId, SessionLaunchOptions};
 
+use crate::fs_backend::AcpClientFsRouter;
+
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
     /// Reference to the kernel for session operations.
@@ -22,16 +24,33 @@ pub struct ClawcodeAgent {
     /// Capabilities reported by the connected ACP client.
     #[allow(dead_code)]
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
+    /// Routes ACP filesystem backend calls to client sessions.
+    fs_router: Arc<AcpClientFsRouter>,
 }
 
 impl ClawcodeAgent {
     /// Create a new ACP agent with the given kernel.
     #[must_use]
     pub fn new(kernel: Arc<dyn AgentKernel>) -> Self {
+        Self::with_fs_router(kernel, Arc::new(AcpClientFsRouter::default()))
+    }
+
+    /// Create a new ACP agent with a shared filesystem router.
+    #[must_use]
+    pub fn with_fs_router(kernel: Arc<dyn AgentKernel>, fs_router: Arc<AcpClientFsRouter>) -> Self {
         Self {
             kernel,
             client_capabilities: Arc::default(),
+            fs_router,
         }
+    }
+
+    /// Return the latest client capabilities snapshot.
+    fn client_capabilities_snapshot(&self) -> ClientCapabilities {
+        self.client_capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Convert an internal SessionId to an ACP SessionId.
@@ -322,8 +341,10 @@ impl ClawcodeAgent {
                     let agent = agent.clone();
                     async move |request: NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                         let agent = agent.clone();
+                        let cx2 = cx.clone();
                         cx.spawn(async move {
-                            responder.respond_with_result(agent.handle_new_session(request).await)
+                            responder
+                                .respond_with_result(agent.handle_new_session(request, cx2).await)
                         })?;
                         Ok(())
                     }
@@ -443,12 +464,16 @@ impl ClawcodeAgent {
 
     async fn handle_initialize(
         &self,
-        _request: InitializeRequest,
+        request: InitializeRequest,
     ) -> Result<InitializeResponse, Error> {
         let protocol_version = acp::schema::ProtocolVersion::V1;
+        *self
+            .client_capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = request.client_capabilities;
 
         let mut caps = AgentCapabilities::new()
-            .prompt_capabilities(PromptCapabilities::new().embedded_context(true).image(true))
+            .prompt_capabilities(PromptCapabilities::new().embedded_context(true))
             .mcp_capabilities(McpCapabilities::new().http(true))
             .load_session(true)
             .auth(AgentAuthCapabilities::new().logout(LogoutCapabilities::new()));
@@ -474,6 +499,7 @@ impl ClawcodeAgent {
     async fn handle_new_session(
         &self,
         request: NewSessionRequest,
+        cx: ConnectionTo<Client>,
     ) -> Result<NewSessionResponse, Error> {
         let NewSessionRequest {
             cwd, mcp_servers, ..
@@ -492,6 +518,11 @@ impl ClawcodeAgent {
         let acp_session_id = Self::to_acp_session_id(&created.session_id);
         let mode_state = Self::to_acp_mode_state(created.modes);
         let model_state = Self::to_acp_model_state(created.models);
+        self.fs_router.register_session(
+            created.session_id,
+            cx,
+            self.client_capabilities_snapshot(),
+        );
 
         Ok(NewSessionResponse::new(acp_session_id)
             .modes(mode_state)
@@ -524,6 +555,11 @@ impl ClawcodeAgent {
 
         let mode_state = Self::to_acp_mode_state(created.modes);
         let model_state = Self::to_acp_model_state(created.models);
+        self.fs_router.register_session(
+            created.session_id,
+            cx,
+            self.client_capabilities_snapshot(),
+        );
 
         Ok(LoadSessionResponse::new()
             .modes(mode_state)
@@ -788,6 +824,7 @@ impl ClawcodeAgent {
             .close_session(&session_id)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
+        self.fs_router.unregister_session(&session_id);
         Ok(CloseSessionResponse::new())
     }
 }
@@ -970,6 +1007,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initialize_records_client_fs_capabilities_and_omits_image() {
+        let kernel = Arc::new(RecordingKernel::default());
+        let agent = ClawcodeAgent::new(kernel);
+        let request = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+            ClientCapabilities::new().fs(FileSystemCapabilities::new()
+                .read_text_file(true)
+                .write_text_file(true)),
+        );
+
+        let response = agent
+            .handle_initialize(request)
+            .await
+            .expect("initialize should succeed");
+        let stored = agent
+            .client_capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        assert!(stored.fs.read_text_file);
+        assert!(stored.fs.write_text_file);
+        assert!(!response.agent_capabilities.prompt_capabilities.image);
+    }
+
+    #[tokio::test]
     async fn new_session_forwards_acp_mcp_servers_to_kernel_options() {
         let kernel = Arc::new(RecordingKernel::default());
         let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
@@ -977,9 +1039,10 @@ mod tests {
             NewSessionRequest::new(PathBuf::from("/tmp")).mcp_servers(vec![McpServer::Stdio(
                 McpServerStdio::new("filesystem", "/usr/bin/mcp"),
             )]);
+        let client = test_connection_to_client().await;
 
         agent
-            .handle_new_session(request)
+            .handle_new_session(request, client)
             .await
             .expect("new session should succeed");
 
