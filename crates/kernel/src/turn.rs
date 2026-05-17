@@ -153,11 +153,12 @@ pub(crate) async fn execute_turn(
     let tool_defs = ctx.tools.definitions();
     let sid = &ctx.session_id;
 
-    let tool_ctx = ToolContext {
-        cwd: ctx.cwd.clone(),
-        agent_path: ctx.agent_path.clone(),
-        approval_mode: ctx.approval.mode(),
-    };
+    let tool_ctx = ToolContext::builder()
+        .session_id(ctx.session_id.clone())
+        .cwd(ctx.cwd.clone())
+        .agent_path(ctx.agent_path.clone())
+        .approval_mode(ctx.approval.mode())
+        .build();
 
     loop {
         let history = context.history();

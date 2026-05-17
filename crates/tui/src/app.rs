@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 use tokio::{select, task::JoinHandle};
 
-use crate::acp_client::{self, AcpClient, AppEvent};
+use crate::acp::client::{self as acp_client, AcpClient, AppEvent};
 use crate::event::{TuiEvent, map_crossterm_event};
 use crate::terminal::enter;
 use crate::ui::approval::decision_for_key;

@@ -1,20 +1,29 @@
 //! Built-in tool for reading files.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::fs;
 
-use crate::Tool;
+use crate::{FsBackend, FsReadRequest, LocalFsBackend, Tool};
 
 /// Reads a file's content, optionally limited by offset and line count.
-pub struct ReadFile;
+pub struct ReadFile {
+    /// Backend selected when this tool was registered.
+    backend: Arc<dyn FsBackend>,
+}
 
 impl ReadFile {
     /// Create a new read-file tool instance.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::with_backend(Arc::new(LocalFsBackend::new()))
+    }
+
+    /// Create a read-file tool using the provided filesystem backend.
+    #[must_use]
+    pub fn with_backend(backend: Arc<dyn FsBackend>) -> Self {
+        Self { backend }
     }
 }
 
@@ -62,21 +71,6 @@ impl Tool for ReadFile {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or("missing 'path' argument")?;
-        let resolved = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            ctx.cwd.join(path)
-        };
-        // Canonicalize to detect symlink escapes even on absolute paths.
-        let resolved = fs::canonicalize(&resolved)
-            .await
-            .map_err(|e| format!("failed to resolve {}: {e}", resolved.display()))?;
-
-        let content = fs::read_to_string(&resolved)
-            .await
-            .map_err(|e| format!("failed to read {}: {e}", resolved.display()))?;
-
-        let lines: Vec<&str> = content.lines().collect();
         let offset = arguments
             .get("offset")
             .and_then(|v| v.as_u64())
@@ -86,23 +80,67 @@ impl Tool for ReadFile {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
 
-        let start = offset.min(lines.len());
-        let end = limit
-            .map(|line_count| (start + line_count).min(lines.len()))
-            .unwrap_or(lines.len());
+        let request = match limit {
+            Some(limit) => FsReadRequest::builder()
+                .session_id(ctx.session_id.clone())
+                .cwd(ctx.cwd.clone())
+                .path(PathBuf::from(path))
+                .offset(offset)
+                .limit(limit)
+                .build(),
+            None => FsReadRequest::builder()
+                .session_id(ctx.session_id.clone())
+                .cwd(ctx.cwd.clone())
+                .path(PathBuf::from(path))
+                .offset(offset)
+                .build(),
+        };
 
-        // SAFETY: both `start` and `end` are clamped to `lines.len()` above.
-        #[allow(clippy::indexing_slicing)]
-        Ok(lines[start..end].join("\n"))
+        self.backend
+            .read_text_file(request)
+            .await
+            .map(|response| response.content)
+            .map_err(|error| error.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolContext;
+    use crate::{FsBackend, FsBackendError, FsReadRequest, FsReadResponse, ToolContext};
+    use async_trait::async_trait;
     use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
+
+    struct RecordingReadBackend {
+        request: Mutex<Option<FsReadRequest>>,
+    }
+
+    #[async_trait]
+    impl FsBackend for RecordingReadBackend {
+        /// Return canned content while recording the read request.
+        async fn read_text_file(
+            &self,
+            request: FsReadRequest,
+        ) -> Result<FsReadResponse, FsBackendError> {
+            *self
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+            Ok(FsReadResponse {
+                content: "from backend".to_string(),
+            })
+        }
+
+        /// This fake backend is only used by read-file tests.
+        async fn write_text_file(
+            &self,
+            _request: crate::FsWriteRequest,
+        ) -> Result<crate::FsWriteResponse, FsBackendError> {
+            Err(FsBackendError::Io("unexpected write".to_string()))
+        }
+    }
 
     /// Verifies that the read tool returns file contents.
     #[tokio::test]
@@ -127,6 +165,34 @@ mod tests {
             .unwrap();
 
         assert!(result.contains("line2"));
+    }
+
+    /// Verifies that read-file delegates file access to the injected backend.
+    #[tokio::test]
+    async fn read_file_uses_injected_backend() {
+        let backend = Arc::new(RecordingReadBackend {
+            request: Mutex::new(None),
+        });
+        let tool = ReadFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "sample.txt", "offset": 2, "limit": 3}),
+                &ToolContext::for_test("/workspace"),
+            )
+            .await
+            .expect("read should use fake backend");
+
+        assert_eq!(result, "from backend");
+        let request = backend
+            .request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("read request should be recorded");
+        assert_eq!(request.path, PathBuf::from("sample.txt"));
+        assert_eq!(request.offset, 2);
+        assert_eq!(request.limit, Some(3));
     }
 
     /// Verifies that offset and limit slice line output.

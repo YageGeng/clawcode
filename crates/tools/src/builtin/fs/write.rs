@@ -1,20 +1,28 @@
 //! Built-in tool for writing files.
 
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::fs;
 
-use crate::Tool;
+use crate::{FsBackend, FsWriteRequest, LocalFsBackend, Tool};
 
 /// Creates or overwrites a file with the given content.
-pub struct WriteFile;
+pub struct WriteFile {
+    /// Backend selected when this tool was registered.
+    backend: Arc<dyn FsBackend>,
+}
 
 impl WriteFile {
     /// Create a new write-file tool instance.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::with_backend(Arc::new(LocalFsBackend::new()))
+    }
+
+    /// Create a write-file tool using the provided filesystem backend.
+    #[must_use]
+    pub fn with_backend(backend: Arc<dyn FsBackend>) -> Self {
+        Self { backend }
     }
 }
 
@@ -64,26 +72,23 @@ impl Tool for WriteFile {
             .ok_or("missing 'content' argument")?;
 
         // Approval is handled by the caller before execute reaches disk mutation.
-        let resolved = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            ctx.cwd.join(path)
-        };
-
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("failed to create parent dir: {e}"))?;
-        }
-
-        fs::write(&resolved, content)
+        let response = self
+            .backend
+            .write_text_file(
+                FsWriteRequest::builder()
+                    .session_id(ctx.session_id.clone())
+                    .cwd(ctx.cwd.clone())
+                    .path(std::path::PathBuf::from(path))
+                    .content(content.to_string())
+                    .build(),
+            )
             .await
-            .map_err(|e| format!("failed to write {}: {e}", resolved.display()))?;
+            .map_err(|error| error.to_string())?;
 
         Ok(format!(
             "wrote {} bytes to {}",
-            content.len(),
-            resolved.display()
+            response.bytes_written,
+            response.display_path.display()
         ))
     }
 }
@@ -93,6 +98,40 @@ mod tests {
     use super::*;
     use crate::ToolContext;
     use crate::builtin::fs::read::ReadFile;
+    use crate::{FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteResponse};
+    use async_trait::async_trait;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingWriteBackend {
+        request: Mutex<Option<crate::FsWriteRequest>>,
+    }
+
+    #[async_trait]
+    impl FsBackend for RecordingWriteBackend {
+        /// This fake backend is only used by write-file tests.
+        async fn read_text_file(
+            &self,
+            _request: FsReadRequest,
+        ) -> Result<FsReadResponse, FsBackendError> {
+            Err(FsBackendError::Io("unexpected read".to_string()))
+        }
+
+        /// Return canned write metadata while recording the write request.
+        async fn write_text_file(
+            &self,
+            request: crate::FsWriteRequest,
+        ) -> Result<FsWriteResponse, FsBackendError> {
+            *self
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+            Ok(FsWriteResponse {
+                bytes_written: 12,
+                display_path: std::path::PathBuf::from("/workspace/out.txt"),
+            })
+        }
+    }
 
     /// Verifies that written content can be read back.
     #[tokio::test]
@@ -118,6 +157,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "hello world");
+    }
+
+    /// Verifies that write-file delegates file access to the injected backend.
+    #[tokio::test]
+    async fn write_file_uses_injected_backend() {
+        let backend = Arc::new(RecordingWriteBackend {
+            request: Mutex::new(None),
+        });
+        let tool = WriteFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "out.txt", "content": "hello world!"}),
+                &ToolContext::for_test("/workspace"),
+            )
+            .await
+            .expect("write should use fake backend");
+
+        assert_eq!(result, "wrote 12 bytes to /workspace/out.txt");
+        let request = backend
+            .request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("write request should be recorded");
+        assert_eq!(request.path, std::path::PathBuf::from("out.txt"));
+        assert_eq!(request.content, "hello world!");
     }
 
     /// Verifies that relative writes stay rooted under cwd.

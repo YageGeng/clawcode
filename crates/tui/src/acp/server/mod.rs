@@ -8,7 +8,9 @@ use provider::factory::LlmFactory;
 use tokio::io::DuplexStream;
 use tokio::task::JoinHandle;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tools::ToolRegistry;
+use tools::{FsBackend, ToolRegistry};
+
+pub mod fs;
 
 /// ACP byte transport backed by in-memory duplex streams.
 pub type InProcessTransport = ByteStreams<Compat<DuplexStream>, Compat<DuplexStream>>;
@@ -30,8 +32,11 @@ impl InProcessAcpServer {
 /// Starts the clawcode ACP agent in-process and returns the client-side transport.
 pub fn start() -> anyhow::Result<(InProcessTransport, InProcessAcpServer)> {
     let config = config::load()?;
+    let fs_router = Arc::new(acp::fs_backend::AcpClientFsRouter::default());
+    let fs_backend: Arc<dyn FsBackend> =
+        Arc::new(acp::fs_backend::AcpFsBackend::new(Arc::clone(&fs_router)));
     let tools = Arc::new(ToolRegistry::new());
-    tools.register_builtins();
+    tools.register_builtins_with_fs_backend(fs_backend);
 
     let kernel = Kernel::new(
         Arc::new(LlmFactory::new(config.clone())),
@@ -40,7 +45,10 @@ pub fn start() -> anyhow::Result<(InProcessTransport, InProcessAcpServer)> {
     );
     kernel.register_agent_tools();
 
-    let agent = Arc::new(acp::agent::ClawcodeAgent::new(Arc::new(kernel)));
+    let agent = Arc::new(acp::agent::ClawcodeAgent::with_fs_router(
+        Arc::new(kernel),
+        fs_router,
+    ));
 
     // Two one-way duplex streams keep the TUI connected to the exact ACP agent
     // built in this process, avoiding stale external binaries during development.

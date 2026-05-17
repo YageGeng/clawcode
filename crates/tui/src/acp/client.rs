@@ -11,7 +11,7 @@ use agent_client_protocol::{Agent, Client, ConnectionTo, Responder};
 use anyhow::{Context, anyhow};
 use tokio::sync::mpsc;
 
-use crate::acp_server;
+use crate::acp::server;
 use crate::ui::approval::{ApprovalDecision, PendingApproval};
 
 /// App-level events emitted by ACP callbacks or background request tasks.
@@ -28,6 +28,15 @@ pub enum AppEvent {
     AcpError(String),
 }
 
+/// Builds the TUI initialize request with the client capabilities it implements.
+fn initialize_request() -> InitializeRequest {
+    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+        ClientCapabilities::new().fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true)),
+    )
+}
+
 /// TUI-side ACP client plus pending permission responders.
 #[derive(Clone)]
 pub struct AcpClient {
@@ -41,7 +50,7 @@ impl AcpClient {
     /// Sends ACP initialize and returns the agent metadata.
     pub async fn initialize(&self) -> anyhow::Result<InitializeResponse> {
         self.conn
-            .send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .send_request(initialize_request())
             .block_task()
             .await
             .context("initialize ACP agent")
@@ -183,7 +192,7 @@ where
     F: FnOnce(AcpClient) -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    let (client_io, server) = acp_server::start()?;
+    let (client_io, server) = server::start()?;
     let permissions = PendingPermissions::default();
     let next_request_id = Arc::new(AtomicU64::new(1));
 
@@ -192,52 +201,85 @@ where
     let permission_map = permissions.clone();
     let permission_counter = Arc::clone(&next_request_id);
 
-    let result = Client
-        .builder()
-        .on_receive_notification(
-            move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
-                let tx = notification_tx.clone();
-                async move {
-                    if tx
-                        .send(AppEvent::SessionNotification(Box::new(notification)))
-                        .is_err()
-                    {
-                        return Err(agent_client_protocol::Error::internal_error()
-                            .data("TUI event receiver closed"));
+    let result =
+        Client
+            .builder()
+            .on_receive_notification(
+                move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
+                    let tx = notification_tx.clone();
+                    async move {
+                        if tx
+                            .send(AppEvent::SessionNotification(Box::new(notification)))
+                            .is_err()
+                        {
+                            return Err(agent_client_protocol::Error::internal_error()
+                                .data("TUI event receiver closed"));
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_notification!(),
-        )
-        .on_receive_request(
-            move |request: RequestPermissionRequest,
-                  responder: Responder<RequestPermissionResponse>,
-                  _cx| {
-                let tx = permission_tx.clone();
-                let pending = permission_map.clone();
-                let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    pending.insert(request_id, responder);
-                    let approval = PendingApproval::from_request(request_id, &request);
-                    if tx.send(AppEvent::PermissionRequested(approval)).is_err() {
-                        let _ = pending
-                            .respond_selected(request_id, ApprovalDecision::RejectOnce.option_id());
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                move |request: RequestPermissionRequest,
+                      responder: Responder<RequestPermissionResponse>,
+                      _cx| {
+                    let tx = permission_tx.clone();
+                    let pending = permission_map.clone();
+                    let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
+                    async move {
+                        pending.insert(request_id, responder);
+                        let approval = PendingApproval::from_request(request_id, &request);
+                        if tx.send(AppEvent::PermissionRequested(approval)).is_err() {
+                            let _ = pending.respond_selected(
+                                request_id,
+                                ApprovalDecision::RejectOnce.option_id(),
+                            );
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .connect_with(client_io, async move |conn: ConnectionTo<Agent>| {
-            let client = AcpClient { conn, permissions };
-            run(client)
-                .await
-                .map_err(agent_client_protocol::util::internal_error)
-        })
-        .await
-        .map_err(|error| anyhow!("ACP client failed: {error}"));
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                move |request: ReadTextFileRequest,
+                      responder: Responder<ReadTextFileResponse>,
+                      _cx| async move {
+                    responder.respond_with_result(server::fs::handle_read_text_file(request).await)
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                move |request: WriteTextFileRequest,
+                      responder: Responder<WriteTextFileResponse>,
+                      _cx| async move {
+                    responder.respond_with_result(server::fs::handle_write_text_file(request).await)
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(client_io, async move |conn: ConnectionTo<Agent>| {
+                let client = AcpClient { conn, permissions };
+                run(client)
+                    .await
+                    .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .map_err(|error| anyhow!("ACP client failed: {error}"));
 
     server.shutdown().await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tui_initialize_request_declares_fs_without_terminal() {
+        let request = initialize_request();
+
+        assert!(request.client_capabilities.fs.read_text_file);
+        assert!(request.client_capabilities.fs.write_text_file);
+        assert!(!request.client_capabilities.terminal);
+    }
 }
