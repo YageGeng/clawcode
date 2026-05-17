@@ -9,6 +9,7 @@ use futures::Stream;
 use crate::agent::AgentPath;
 use crate::config::{ModelInfo, SessionMode};
 use crate::event::Event;
+use crate::mcp::McpServerConfig;
 use crate::permission::ReviewDecision;
 use crate::session::{SessionCreated, SessionId, SessionListPage};
 
@@ -18,6 +19,13 @@ use crate::session::{SessionCreated, SessionId, SessionListPage};
 /// to receive real-time updates during a turn.
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>;
 
+/// Frontend-provided options used when creating or loading a session.
+#[derive(Debug, Clone, Default)]
+pub struct SessionLaunchOptions {
+    /// MCP servers injected by the frontend for this session only.
+    pub external_mcp_servers: Vec<McpServerConfig>,
+}
+
 /// Central agent kernel trait.
 ///
 /// Implemented by the kernel crate, consumed by ACP and other
@@ -26,10 +34,19 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + S
 #[async_trait]
 pub trait AgentKernel: Send + Sync {
     /// Create a new session and return its ID plus available config.
-    async fn new_session(&self, cwd: PathBuf) -> Result<SessionCreated, KernelError>;
+    async fn new_session(
+        &self,
+        cwd: PathBuf,
+        options: SessionLaunchOptions,
+    ) -> Result<SessionCreated, KernelError>;
 
     /// Load a previously persisted session.
-    async fn load_session(&self, session_id: &SessionId) -> Result<SessionCreated, KernelError>;
+    async fn load_session(
+        &self,
+        session_id: &SessionId,
+        cwd: PathBuf,
+        options: SessionLaunchOptions,
+    ) -> Result<SessionCreated, KernelError>;
 
     /// List persisted sessions with optional cwd filter and cursor-based pagination.
     async fn list_sessions(

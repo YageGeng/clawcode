@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use config::ConfigHandle;
 use protocol::{
     AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, ReviewDecision, SessionCreated,
-    SessionId, SessionInfo, SessionListPage, SessionMode,
+    SessionId, SessionInfo, SessionLaunchOptions, SessionListPage, SessionMode,
 };
 use provider::factory::LlmFactory;
 
@@ -221,6 +221,28 @@ impl Kernel {
         models
     }
 
+    /// Register frontend-injected MCP servers for a live thread and refresh exposed tools.
+    async fn register_external_mcp_servers_for_thread(
+        &self,
+        thread: &Thread,
+        external_mcp_servers: Vec<mcp::McpServerConfig>,
+    ) -> Result<(), KernelError> {
+        // MCP startup can involve process spawn, HTTP auth, and handshakes.
+        // Run injected servers in the background so session creation stays responsive.
+        external_mcp_servers.into_iter().for_each(|config| {
+            let manager = Arc::clone(&thread.mcp_manager);
+            let tools = Arc::clone(&thread.tools);
+            tokio::spawn(async move {
+                match manager.register_external_mcp_server(config).await {
+                    Ok(()) => tools.register_mcp_tools(Arc::clone(&manager)),
+                    Err(error) => tracing::warn!(%error, "external MCP server registration failed"),
+                }
+            });
+        });
+
+        Ok(())
+    }
+
     /// Recursively restore subagents from persisted agent edges.
     async fn restore_subagent_tree(
         &self,
@@ -297,7 +319,11 @@ impl Kernel {
 
 #[async_trait]
 impl AgentKernel for Kernel {
-    async fn new_session(&self, cwd: PathBuf) -> Result<SessionCreated, KernelError> {
+    async fn new_session(
+        &self,
+        cwd: PathBuf,
+        options: SessionLaunchOptions,
+    ) -> Result<SessionCreated, KernelError> {
         let session_id = SessionId(uuid::Uuid::new_v4().to_string());
         let (provider_id, model_id) = self.active_provider_model().ok_or_else(|| {
             KernelError::Internal(anyhow::anyhow!("active model must be provider/model"))
@@ -337,6 +363,9 @@ impl AgentKernel for Kernel {
             app_cfg,
         )?;
 
+        self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
+            .await?;
+
         // Register root only after session creation succeeds, avoiding stale registry entries.
         agent_ctrl.registry.register_root_thread(session_id.clone());
 
@@ -362,8 +391,15 @@ impl AgentKernel for Kernel {
             .build())
     }
 
-    async fn load_session(&self, session_id: &SessionId) -> Result<SessionCreated, KernelError> {
-        if self.sessions.lock().await.contains_key(session_id) {
+    async fn load_session(
+        &self,
+        session_id: &SessionId,
+        _cwd: PathBuf,
+        options: SessionLaunchOptions,
+    ) -> Result<SessionCreated, KernelError> {
+        if let Some(handle) = self.sessions.lock().await.get(session_id).cloned() {
+            self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
+                .await?;
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
                 .modes(self.build_modes())
@@ -388,6 +424,8 @@ impl AgentKernel for Kernel {
             Some(Arc::clone(&recorder)),
             Arc::clone(&app_cfg),
         )?;
+        self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
+            .await?;
         let agent_ctrl = Arc::clone(&self.agent_control);
         agent_ctrl.registry.register_root_thread(session_id.clone());
         agent_ctrl
@@ -582,14 +620,52 @@ impl AgentKernel for Kernel {
 mod tests {
     use super::*;
     use config::{AppConfig, ConfigHandle};
+    use protocol::mcp::{McpServerConfig, McpTransportConfig};
 
     /// Builds a kernel with config-driven providers for metadata-only tests.
     fn kernel_with_config(app_config: AppConfig) -> Kernel {
         let config = ConfigHandle::from_config(app_config);
-        let llm_factory = Arc::new(LlmFactory::new(ConfigHandle::from_config(
-            AppConfig::default(),
-        )));
+        let llm_factory = Arc::new(LlmFactory::new(config.clone()));
         Kernel::new(llm_factory, config, Arc::new(ToolRegistry::new()))
+    }
+
+    /// Builds an app config with one OpenAI-compatible provider for session tests.
+    fn app_config_with_provider() -> AppConfig {
+        serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "deepseek-chat" }]
+                }
+            ],
+        }))
+        .expect("valid app config")
+    }
+
+    /// Builds a runtime MCP config whose command cannot start.
+    fn missing_external_mcp_server(name: &str) -> McpServerConfig {
+        McpServerConfig::builder()
+            .name(name.to_string())
+            .external(true)
+            .transport(McpTransportConfig::Stdio {
+                command: "/definitely/missing/clawcode-mcp-test-server".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            })
+            .build()
+    }
+
+    /// Builds launch options with one missing external MCP server.
+    fn missing_external_mcp_options(name: &str) -> SessionLaunchOptions {
+        SessionLaunchOptions {
+            external_mcp_servers: vec![missing_external_mcp_server(name)],
+        }
     }
 
     /// Verifies model metadata puts config.active_model first for ACP current model selection.
@@ -627,5 +703,58 @@ mod tests {
         assert_eq!(models[0].id, "deepseek/deepseek-chat");
         assert_eq!(models[1].id, "openai/gpt-5.4");
         assert_eq!(models[2].id, "deepseek/deepseek-v4-flash");
+    }
+
+    /// Verifies new-session launch options register external MCP servers asynchronously.
+    #[tokio::test]
+    async fn new_session_returns_before_external_mcp_server_startup_finishes() {
+        let app_config = app_config_with_provider();
+        let kernel = kernel_with_config(app_config);
+        let cwd = tempfile::tempdir().expect("temp cwd");
+
+        let created = kernel
+            .new_session(
+                cwd.path().to_path_buf(),
+                missing_external_mcp_options("missing"),
+            )
+            .await
+            .expect("session creation should not wait for external MCP startup");
+
+        assert!(
+            kernel
+                .sessions
+                .lock()
+                .await
+                .contains_key(&created.session_id)
+        );
+    }
+
+    /// Verifies active load-session options register external MCP servers asynchronously.
+    #[tokio::test]
+    async fn active_load_session_returns_before_external_mcp_server_startup_finishes() {
+        let app_config = app_config_with_provider();
+        let kernel = kernel_with_config(app_config);
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        let created = kernel
+            .new_session(cwd.path().to_path_buf(), SessionLaunchOptions::default())
+            .await
+            .expect("session should start without external MCP");
+
+        kernel
+            .load_session(
+                &created.session_id,
+                cwd.path().to_path_buf(),
+                missing_external_mcp_options("missing-active"),
+            )
+            .await
+            .expect("load session should not wait for external MCP startup");
+
+        assert!(
+            kernel
+                .sessions
+                .lock()
+                .await
+                .contains_key(&created.session_id)
+        );
     }
 }

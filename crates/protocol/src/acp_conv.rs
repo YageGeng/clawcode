@@ -136,6 +136,7 @@ impl TryFrom<schema::McpServerStdio> for McpServerConfig {
                 command,
                 args: server.args,
                 env,
+                cwd: None,
             })
             .build())
     }
@@ -357,12 +358,19 @@ mod tests {
         assert_eq!(config.name, "filesystem");
         assert!(config.enabled);
         assert!(config.external);
-        let McpTransportConfig::Stdio { command, args, env } = config.transport else {
+        let McpTransportConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } = config.transport
+        else {
             panic!("expected stdio transport");
         };
         assert_eq!(command, "/usr/bin/mcp");
         assert_eq!(args, vec!["--root", "."]);
         assert_eq!(env.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(cwd, None);
     }
 
     /// Verifies that ACP HTTP MCP config maps to runtime streamable HTTP config.

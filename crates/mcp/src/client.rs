@@ -42,8 +42,13 @@ impl ManagedClient {
         use tokio::time::timeout;
 
         match &config.transport {
-            McpTransportConfig::Stdio { command, args, env } => {
-                let cmd = crate::transport::build_stdio_command(command, args, env);
+            McpTransportConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                let cmd = crate::transport::build_stdio_command(command, args, env, cwd);
                 let t = rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| {
                     McpError::Startup {
                         server: config.name.clone(),
@@ -140,8 +145,13 @@ impl ManagedClient {
         use tokio::time::timeout;
 
         match &config.transport {
-            McpTransportConfig::Stdio { command, args, env } => {
-                let cmd = crate::transport::build_stdio_command(command, args, env);
+            McpTransportConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                let cmd = crate::transport::build_stdio_command(command, args, env, cwd);
                 let t = stdio_connector(cmd)?;
                 let running = timeout(
                     Duration::from_secs(config.startup_timeout_secs),

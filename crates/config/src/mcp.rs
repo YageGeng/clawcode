@@ -189,6 +189,7 @@ impl TryFrom<McpServerConfig> for protocol::mcp::McpServerConfig {
                 command: cmd,
                 args: args.unwrap_or_default(),
                 env: env.unwrap_or_default(),
+                cwd: None,
             },
             (None, Some(u)) => protocol::mcp::McpTransportConfig::StreamableHttp {
                 url: u,

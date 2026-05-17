@@ -56,27 +56,26 @@ impl McpConnectionManager {
             + Clone
             + 'static,
     {
-        {
-            let clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !clients.is_empty() {
-                return;
-            }
-        }
-
         // Clone the configs before awaiting so dynamic registration can proceed independently.
         let configs = self
             .configs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let connected_servers = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
 
         // Collect connection handles without holding any lock across awaits.
         let mut handles = Vec::new();
         for config in configs {
-            if !config.enabled {
+            // Dynamic registration can connect one server before background startup runs.
+            // Skip only already-connected servers so static configs still get started.
+            if !config.enabled || connected_servers.contains(&config.name) {
                 continue;
             }
             let dir = self.auth_dir.clone();
@@ -423,6 +422,7 @@ mod tests {
                 command: name.to_string(),
                 args: Vec::new(),
                 env: HashMap::new(),
+                cwd: None,
             })
             .build()
     }
@@ -542,5 +542,28 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(configs[0].external);
+    }
+
+    #[tokio::test]
+    async fn manager_start_all_still_starts_static_servers_after_external_registration() {
+        let manager = McpConnectionManager::new(
+            vec![stdio_config("static")],
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        );
+
+        register_external_mcp_server_with_connector(&manager, stdio_config("dynamic"), |_cmd| {
+            Ok(spawn_server(EchoServer))
+        })
+        .await
+        .expect("external server should register");
+        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(EchoServer))).await;
+
+        let tools = manager.list_all_tools();
+        let names = tools
+            .iter()
+            .map(|tool| tool.callable_name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"mcp__dynamic__echo"));
+        assert!(names.contains(&"mcp__static__echo"));
     }
 }

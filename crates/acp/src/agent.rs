@@ -11,8 +11,9 @@ use agent_client_protocol as acp;
 use futures::StreamExt;
 
 use protocol::acp_conv::TurnItemAcpExt;
+use protocol::mcp::{McpServerConfig, McpTransportConfig};
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
-use protocol::{AgentKernel, Event, SessionId};
+use protocol::{AgentKernel, Event, SessionId, SessionLaunchOptions};
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
@@ -80,6 +81,45 @@ impl ClawcodeAgent {
             .unwrap_or_else(|| acp::schema::ModelId::new("".to_string()));
 
         SessionModelState::new(first_model_id, acp_models)
+    }
+
+    /// Resolve an ACP request cwd against the current process directory when needed.
+    fn resolve_request_cwd(cwd: std::path::PathBuf) -> Result<std::path::PathBuf, Error> {
+        if cwd.is_absolute() {
+            return Ok(cwd);
+        }
+
+        std::env::current_dir()
+            .map_err(|e| Error::internal_error().data(e.to_string()))
+            .map(|current_dir| current_dir.join(cwd))
+    }
+
+    /// Convert ACP MCP server declarations into kernel session launch options.
+    fn launch_options_from_mcp_servers(
+        mcp_servers: Vec<McpServer>,
+        cwd: &std::path::Path,
+    ) -> Result<SessionLaunchOptions, Error> {
+        let external_mcp_servers = mcp_servers
+            .into_iter()
+            .map(McpServerConfig::try_from)
+            .map(|config| config.map(|config| Self::with_session_cwd(config, cwd)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+
+        Ok(SessionLaunchOptions {
+            external_mcp_servers,
+        })
+    }
+
+    /// Attach the session cwd to stdio MCP configs supplied through ACP.
+    fn with_session_cwd(mut config: McpServerConfig, cwd: &std::path::Path) -> McpServerConfig {
+        if let McpTransportConfig::Stdio {
+            cwd: transport_cwd, ..
+        } = &mut config.transport
+        {
+            *transport_cwd = Some(cwd.to_path_buf());
+        }
+        config
     }
 
     /// Convert one persisted message into ACP replay updates while preserving content order.
@@ -435,20 +475,17 @@ impl ClawcodeAgent {
         &self,
         request: NewSessionRequest,
     ) -> Result<NewSessionResponse, Error> {
-        let NewSessionRequest { cwd, .. } = request;
+        let NewSessionRequest {
+            cwd, mcp_servers, ..
+        } = request;
         // ACP clients may send a relative cwd; resolve it in the agent process
         // before passing it to tool execution.
-        let cwd = if cwd.is_absolute() {
-            cwd
-        } else {
-            std::env::current_dir()
-                .map_err(|e| Error::internal_error().data(e.to_string()))?
-                .join(cwd)
-        };
+        let cwd = Self::resolve_request_cwd(cwd)?;
+        let options = Self::launch_options_from_mcp_servers(mcp_servers, &cwd)?;
 
         let created = self
             .kernel
-            .new_session(cwd)
+            .new_session(cwd, options)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
 
@@ -467,10 +504,18 @@ impl ClawcodeAgent {
         request: LoadSessionRequest,
         cx: ConnectionTo<Client>,
     ) -> Result<LoadSessionResponse, Error> {
-        let session_id = SessionId(request.session_id.0.to_string());
+        let LoadSessionRequest {
+            session_id,
+            cwd,
+            mcp_servers,
+            ..
+        } = request;
+        let session_id = SessionId(session_id.0.to_string());
+        let cwd = Self::resolve_request_cwd(cwd)?;
+        let options = Self::launch_options_from_mcp_servers(mcp_servers, &cwd)?;
         let created = self
             .kernel
-            .load_session(&session_id)
+            .load_session(&session_id, cwd, options)
             .await
             .map_err(|error| Error::internal_error().data(error.to_string()))?;
 
@@ -750,7 +795,167 @@ impl ClawcodeAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{OneOrMany, Text, ToolFunction};
+    use async_trait::async_trait;
+    use futures::stream;
+    use protocol::mcp::McpTransportConfig;
+    use protocol::{
+        AgentPath, EventStream, KernelError, ModelInfo, OneOrMany, ReviewDecision, SessionCreated,
+        SessionInfo, SessionLaunchOptions, SessionListPage, SessionMode, Text, ToolFunction,
+    };
+    use std::path::{Path, PathBuf};
+
+    #[derive(Default)]
+    struct RecordingKernel {
+        new_session_options: std::sync::Mutex<Option<SessionLaunchOptions>>,
+        load_session_options: std::sync::Mutex<Option<SessionLaunchOptions>>,
+    }
+
+    #[async_trait]
+    impl AgentKernel for RecordingKernel {
+        /// Record new-session launch options for ACP handler tests.
+        async fn new_session(
+            &self,
+            _cwd: PathBuf,
+            options: SessionLaunchOptions,
+        ) -> Result<SessionCreated, KernelError> {
+            *self
+                .new_session_options
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(options);
+            Ok(session_created())
+        }
+
+        /// Record load-session launch options for ACP handler tests.
+        async fn load_session(
+            &self,
+            _session_id: &SessionId,
+            _cwd: PathBuf,
+            options: SessionLaunchOptions,
+        ) -> Result<SessionCreated, KernelError> {
+            *self
+                .load_session_options
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(options);
+            Ok(session_created())
+        }
+
+        /// Return an empty session list; list behavior is outside these tests.
+        async fn list_sessions(
+            &self,
+            _cwd: Option<&Path>,
+            _cursor: Option<&str>,
+        ) -> Result<SessionListPage, KernelError> {
+            Ok(SessionListPage {
+                sessions: Vec::<SessionInfo>::new(),
+                next_cursor: None,
+            })
+        }
+
+        /// Return an empty event stream; prompting is outside these tests.
+        async fn prompt(
+            &self,
+            _session_id: &SessionId,
+            _text: String,
+        ) -> Result<EventStream, KernelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        /// Accept cancellation in the fake kernel.
+        async fn cancel(&self, _session_id: &SessionId) -> Result<(), KernelError> {
+            Ok(())
+        }
+
+        /// Accept mode changes in the fake kernel.
+        async fn set_mode(&self, _session_id: &SessionId, _mode: &str) -> Result<(), KernelError> {
+            Ok(())
+        }
+
+        /// Accept model changes in the fake kernel.
+        async fn set_model(
+            &self,
+            _session_id: &SessionId,
+            _provider_id: &str,
+            _model_id: &str,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+
+        /// Accept session close in the fake kernel.
+        async fn close_session(&self, _session_id: &SessionId) -> Result<(), KernelError> {
+            Ok(())
+        }
+
+        /// Accept sub-agent spawns in the fake kernel.
+        async fn spawn_agent(
+            &self,
+            _parent_session: &SessionId,
+            _agent_path: AgentPath,
+            _role: &str,
+            _prompt: &str,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+
+        /// Accept approval decisions in the fake kernel.
+        async fn resolve_approval(
+            &self,
+            _session_id: &SessionId,
+            _call_id: &str,
+            _decision: ReviewDecision,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+
+        /// Return no modes; ACP conversion has fallbacks for empty state.
+        fn available_modes(&self) -> Vec<SessionMode> {
+            Vec::new()
+        }
+
+        /// Return no models; ACP conversion has fallbacks for empty state.
+        fn available_models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+    }
+
+    /// Build a minimal session-created response for ACP handler tests.
+    fn session_created() -> SessionCreated {
+        SessionCreated::builder()
+            .session_id(protocol::SessionId("session-1".to_string()))
+            .modes(Vec::new())
+            .models(Vec::new())
+            .build()
+    }
+
+    /// Extract exactly one external MCP config from recorded launch options.
+    fn recorded_mcp_config(
+        options: &std::sync::Mutex<Option<SessionLaunchOptions>>,
+    ) -> protocol::mcp::McpServerConfig {
+        options
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .expect("launch options should be recorded")
+            .external_mcp_servers
+            .first()
+            .expect("external MCP config should be forwarded")
+            .clone()
+    }
+
+    /// Create an ACP connection handle for load-session replay tests.
+    async fn test_connection_to_client() -> ConnectionTo<Client> {
+        let (agent_channel, _client_channel) = acp::Channel::duplex();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = Agent
+                .builder()
+                .connect_with(agent_channel, async move |cx: ConnectionTo<Client>| {
+                    let _ = tx.send(cx);
+                    std::future::pending::<Result<(), Error>>().await
+                })
+                .await;
+        });
+        rx.await.expect("test ACP connection should start")
+    }
 
     /// Build a persisted assistant tool call message for replay tests.
     fn assistant_tool_call_message() -> Message {
@@ -762,6 +967,55 @@ mod tests {
             ),
         )
         .into()
+    }
+
+    #[tokio::test]
+    async fn new_session_forwards_acp_mcp_servers_to_kernel_options() {
+        let kernel = Arc::new(RecordingKernel::default());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request =
+            NewSessionRequest::new(PathBuf::from("/tmp")).mcp_servers(vec![McpServer::Stdio(
+                McpServerStdio::new("filesystem", "/usr/bin/mcp"),
+            )]);
+
+        agent
+            .handle_new_session(request)
+            .await
+            .expect("new session should succeed");
+
+        let config = recorded_mcp_config(&kernel.new_session_options);
+        assert_eq!(config.name, "filesystem");
+        assert!(config.external);
+        let McpTransportConfig::Stdio { cwd, .. } = config.transport else {
+            panic!("expected stdio transport");
+        };
+        assert_eq!(cwd, Some(PathBuf::from("/tmp")));
+    }
+
+    #[tokio::test]
+    async fn load_session_forwards_acp_mcp_servers_to_kernel_options() {
+        let kernel = Arc::new(RecordingKernel::default());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request =
+            LoadSessionRequest::new(AcpSessionId::new("session-1"), PathBuf::from("/tmp"))
+                .mcp_servers(vec![McpServer::Http(McpServerHttp::new(
+                    "remote",
+                    "https://example.com/mcp",
+                ))]);
+        let client = test_connection_to_client().await;
+
+        agent
+            .handle_load_session(request, client)
+            .await
+            .expect("load session should succeed");
+
+        let config = recorded_mcp_config(&kernel.load_session_options);
+        assert_eq!(config.name, "remote");
+        assert!(config.external);
+        assert!(matches!(
+            config.transport,
+            McpTransportConfig::StreamableHttp { .. }
+        ));
     }
 
     #[test]

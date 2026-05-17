@@ -7,9 +7,14 @@ pub(crate) fn build_stdio_command(
     command: &str,
     args: &[String],
     env: &std::collections::HashMap<String, String>,
+    cwd: &Option<std::path::PathBuf>,
 ) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(args);
+    if let Some(cwd) = cwd {
+        // ACP-injected stdio servers should inherit the session working directory.
+        cmd.current_dir(cwd);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -42,4 +47,20 @@ pub(crate) fn build_http_headers(
     }
 
     Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_stdio_command_sets_current_dir_when_provided() {
+        let cwd = Some(std::path::PathBuf::from("/tmp"));
+        let command = build_stdio_command("server", &[], &std::collections::HashMap::new(), &cwd);
+
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(std::path::Path::new("/tmp"))
+        );
+    }
 }

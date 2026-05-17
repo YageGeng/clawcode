@@ -45,6 +45,10 @@ pub struct Thread {
     /// Mailbox for receiving inter-agent messages.
     #[allow(dead_code)]
     pub(crate) mailbox: Mailbox,
+    /// Tool registry available to this live session.
+    pub(crate) tools: Arc<ToolRegistry>,
+    /// MCP connection manager for this live session.
+    pub(crate) mcp_manager: Arc<mcp::McpConnectionManager>,
     /// Optional file-backed recorder for canonical session history.
     #[builder(default, setter(strip_option))]
     pub(crate) recorder: Option<Arc<dyn SessionRecorder>>,
@@ -183,7 +187,7 @@ pub(crate) fn spawn_thread(
         .cancel_rx(cancel_rx)
         .context(context)
         .llm(llm)
-        .tools(tools)
+        .tools(Arc::clone(&tools))
         .pending_approvals(Arc::clone(&pending_approvals))
         .agent_path(agent_path)
         .approval(approval)
@@ -191,8 +195,9 @@ pub(crate) fn spawn_thread(
         .agent_control(agent_control.as_ref().map(Arc::clone))
         .app_config(app_config)
         .skill_registry(skill_registry)
-        .mcp_manager(mcp_manager)
+        .mcp_manager(Arc::clone(&mcp_manager))
         .build();
+
     runtime.recorder = recorder.clone();
 
     tokio::spawn(run_loop(runtime));
@@ -206,6 +211,8 @@ pub(crate) fn spawn_thread(
         .cancel_tx(cancel_tx)
         .agent_control(agent_control)
         .mailbox(mailbox)
+        .tools(tools)
+        .mcp_manager(mcp_manager)
         .build();
     thread.recorder = recorder;
     thread

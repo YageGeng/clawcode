@@ -1,6 +1,7 @@
 //! MCP configuration types shared across crates.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Runtime-ready MCP server configuration.
 #[derive(Debug, Clone, typed_builder::TypedBuilder)]
@@ -33,6 +34,7 @@ pub enum McpTransportConfig {
         command: String,
         args: Vec<String>,
         env: HashMap<String, String>,
+        cwd: Option<PathBuf>,
     },
     StreamableHttp {
         url: String,
@@ -79,6 +81,7 @@ mod tests {
             command: "server".to_string(),
             args: Vec::new(),
             env: HashMap::new(),
+            cwd: None,
         }
     }
 
