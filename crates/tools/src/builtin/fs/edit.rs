@@ -1,12 +1,13 @@
 //! Built-in tool for exact string edits.
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use async_trait::async_trait;
 use protocol::FileChange;
 use tokio::fs;
 
-use crate::{Tool, ToolDisplayOutput, ToolExecutionResult};
+use crate::Tool;
 
 const EDIT_DESCRIPTION: &str = r#"Performs exact string replacements in files.
 
@@ -59,6 +60,12 @@ impl Tool for EditFile {
         })
     }
 
+    fn capability(&self) -> protocol::ToolCapability {
+        protocol::ToolCapability {
+            supports_streaming: true,
+        }
+    }
+
     fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         true
     }
@@ -68,17 +75,53 @@ impl Tool for EditFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        self.execute_structured(arguments, ctx)
-            .await
-            .map(|result| result.model_output)
+        self.do_edit(arguments, ctx).await.map(|(text, _)| text)
     }
 
-    /// Execute an edit while returning final file state for UI diff rendering.
-    async fn execute_structured(
+    async fn execute_streaming(
         &self,
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
-    ) -> Result<ToolExecutionResult, String> {
+    ) -> Result<
+        (
+            String,
+            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
+        ),
+        String,
+    > {
+        let (model_output, changes) = self.do_edit(arguments, ctx).await?;
+
+        let begin = protocol::ToolStreamItem::Begin(protocol::TurnItem::FileChange(
+            protocol::FileChangeItem::builder()
+                .id(String::new())
+                .title("Edit".into())
+                .changes(vec![])
+                .status(protocol::FileChangeStatus::InProgress)
+                .build(),
+        ));
+        let end = protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(
+            protocol::FileChangeItem::builder()
+                .id(String::new())
+                .title("Edit".into())
+                .changes(changes)
+                .status(protocol::FileChangeStatus::Completed)
+                .model_output(model_output.clone())
+                .build(),
+        ));
+
+        let stream: Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>> =
+            Box::pin(futures::stream::iter([begin, end]));
+        Ok((model_output, stream))
+    }
+}
+
+impl EditFile {
+    /// Execute an edit and return the model-facing summary together with file changes.
+    async fn do_edit(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<(String, Vec<FileChange>), String> {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Args {
@@ -132,10 +175,7 @@ impl Tool for EditFile {
                     .new_text(content)
                     .build()
             };
-            return Ok(ToolExecutionResult {
-                model_output,
-                display: ToolDisplayOutput::FileChanges(vec![change]),
-            });
+            return Ok((model_output, vec![change]));
         }
 
         let resolved = fs::canonicalize(&resolved)
@@ -176,16 +216,14 @@ impl Tool for EditFile {
             "edited {}: replaced {match_count} occurrence(s)",
             resolved.display()
         );
-        Ok(ToolExecutionResult {
-            model_output,
-            display: ToolDisplayOutput::FileChanges(vec![
-                FileChange::builder()
-                    .path(resolved)
-                    .old_text(original)
-                    .new_text(result)
-                    .build(),
-            ]),
-        })
+        let changes = vec![
+            FileChange::builder()
+                .path(resolved)
+                .old_text(original)
+                .new_text(result)
+                .build(),
+        ];
+        Ok((model_output, changes))
     }
 }
 
@@ -793,26 +831,32 @@ mod tests {
         );
     }
 
-    /// Verifies that edit returns final file state for ACP diff rendering.
+    /// Verifies that edit returns final file state via execute_streaming.
     #[tokio::test]
-    async fn edit_file_structured_result_includes_file_change() {
+    async fn edit_file_streaming_result_includes_file_change() {
+        use futures::stream::StreamExt;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("structured.txt");
         std::fs::write(&path, "before\ntarget\nafter").unwrap();
         let tool = EditFile::new();
 
-        let result = tool
-            .execute_structured(
+        let (model_output, mut stream) = tool
+            .execute_streaming(
                 serde_json::json!({"filePath": "structured.txt", "oldString": "target", "newString": "REPLACED"}),
                 &ToolContext::for_test(dir.path()),
             )
             .await
             .unwrap();
 
-        assert!(result.model_output.contains("edited"));
-        let ToolDisplayOutput::FileChanges(changes) = result.display else {
-            panic!("expected file changes display output");
-        };
+        assert!(model_output.contains("edited"));
+
+        let mut changes = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) = item {
+                changes = item.changes;
+            }
+        }
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, path.canonicalize().unwrap());
         assert_eq!(

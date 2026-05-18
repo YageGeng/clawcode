@@ -8,7 +8,6 @@ pub mod approval;
 pub mod context;
 pub(crate) mod prompt;
 pub mod session;
-pub(crate) mod tool_events;
 pub(crate) mod turn;
 
 use std::collections::HashMap;
@@ -152,9 +151,13 @@ impl Kernel {
         recorder: Option<Arc<dyn SessionRecorder>>,
         app_cfg: Arc<config::AppConfig>,
     ) -> Result<Thread, KernelError> {
-        let llm = self
-            .default_llm()
-            .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("no LLM configured")))?;
+        let llm = self.default_llm().ok_or_else(|| {
+            let active = &self.config.current().active_model;
+            KernelError::Internal(anyhow::anyhow!(
+                "no provider found for active_model '{active}'; \
+                 add a [[providers]] section to your config file"
+            ))
+        })?;
         let approval = Arc::new(ApprovalPolicy::new(app_cfg.approval));
         Ok(spawn_thread(
             session_id,
@@ -326,7 +329,10 @@ impl AgentKernel for Kernel {
     ) -> Result<SessionCreated, KernelError> {
         let session_id = SessionId(uuid::Uuid::new_v4().to_string());
         let (provider_id, model_id) = self.active_provider_model().ok_or_else(|| {
-            KernelError::Internal(anyhow::anyhow!("active model must be provider/model"))
+            KernelError::Internal(anyhow::anyhow!(
+                "active_model is not set or not in 'provider/model' format; \
+                 check your config file or CLAW_PROVIDERS_* env vars"
+            ))
         })?;
 
         // Use the kernel-wide AgentControl shared across all sessions.

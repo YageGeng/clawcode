@@ -52,6 +52,8 @@ pub enum TurnItem {
     FileChange(FileChangeItem),
     /// An MCP tool invocation with MCP-specific identity and result fields.
     McpToolCall(McpToolCallItem),
+    /// A shell/exec command invocation with streaming lifecycle.
+    ExecCommand(ExecCommandItem),
 }
 
 /// File-change lifecycle status.
@@ -130,6 +132,45 @@ pub struct McpToolCallItem {
     /// Duration in milliseconds when the call has completed.
     #[builder(default, setter(strip_option))]
     pub duration_ms: Option<u64>,
+}
+
+/// shell/exec command lifecycle item emitted via ItemStarted/ItemCompleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+pub struct ExecCommandItem {
+    /// Tool call id shared with existing tool-call events.
+    pub id: String,
+    /// Command-line argument array, first element is the program.
+    pub command: Vec<String>,
+    /// Working directory for the command.
+    pub cwd: PathBuf,
+    /// Current lifecycle status.
+    pub status: ExecCommandStatus,
+    /// Full stdout, populated in terminal states.
+    #[builder(default, setter(strip_option))]
+    pub stdout: Option<String>,
+    /// Full stderr, populated in terminal states.
+    #[builder(default, setter(strip_option))]
+    pub stderr: Option<String>,
+    /// Exit code, populated in terminal states.
+    #[builder(default, setter(strip_option))]
+    pub exit_code: Option<i32>,
+    /// Wall-clock duration in milliseconds, populated in terminal states.
+    #[builder(default, setter(strip_option))]
+    pub duration_ms: Option<u64>,
+}
+
+/// ExecCommand lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecCommandStatus {
+    /// Command has started execution.
+    InProgress,
+    /// Command completed successfully (exit_code == 0).
+    Completed,
+    /// Command failed (non-zero exit code or abnormal termination).
+    Failed,
+    /// Command was declined by the user.
+    Declined,
 }
 
 #[cfg(test)]

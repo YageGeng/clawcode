@@ -26,6 +26,10 @@ pub enum ConfigError {
     /// MCP config failed validation after TOML/env extraction.
     #[error("mcp config error: {0}")]
     Mcp(#[from] crate::mcp::McpConfigError),
+    /// No configuration found at any default search path and no providers
+    /// were set via `CLAW_*` environment variables.
+    #[error("{0}")]
+    NotFound(String),
 }
 
 /// Convenience: turn a bare `figment::Error` into our boxed variant via `?`.
@@ -95,7 +99,7 @@ where
 ///
 /// 1. `$CLAW_CONFIG` if set and the path exists.
 /// 2. `$XDG_CONFIG_HOME/clawcode/config.toml` (or `~/.config/clawcode/config.toml`) if it exists.
-/// 3. `./claw.conf` in the current working directory if the user config does not exist.
+/// 3. `./claw.toml` in the current working directory if the user config does not exist.
 ///
 /// Missing default candidates are silently skipped. Missing paths passed
 /// directly to [`load_from`] still raise an error. The returned vec may be
@@ -117,7 +121,7 @@ fn default_paths() -> Vec<PathBuf> {
             return out;
         }
     }
-    let cwd = PathBuf::from("./claw.conf");
+    let cwd = PathBuf::from("./claw.toml");
     if cwd.exists() {
         out.push(cwd);
     }
@@ -125,8 +129,39 @@ fn default_paths() -> Vec<PathBuf> {
 }
 
 /// Load configuration from the default search paths plus the `CLAW_` env layer.
+///
+/// When no config file is found at any default path and no providers are set via
+/// environment variables, returns [`ConfigError::NotFound`] with a message
+/// listing the searched locations.
 pub fn load() -> Result<ConfigHandle, ConfigError> {
-    load_from(default_paths())
+    let paths = default_paths();
+    let no_files_found = paths.is_empty();
+    let handle = load_from(paths)?;
+    if no_files_found {
+        let cfg = handle.current();
+        if cfg.providers.is_empty() {
+            return Err(ConfigError::NotFound(
+                "no config file found.\n\
+                 \n\
+                 Searched:\n  - $CLAW_CONFIG (not set)\n  - \
+                 $XDG_CONFIG_HOME/clawcode/config.toml (not found)\n  - \
+                 ./claw.toml (not found)\n\
+                 \n\
+                 Create a config file at one of these paths with at least one\n\
+                 [[providers]] section and active_model set. Example:\n\
+                 \n  active_model = \"deepseek/deepseek-v4-flash\"\n\
+                 \n  [[providers]]\n  id = \"deepseek\"\n  \
+                 provider_type = \"openai-completions\"\n  \
+                 base_url = \"https://api.deepseek.com\"\n  \
+                 api_key = \"your-api-key\"\n\
+                 \n  [[providers.models]]\n  id = \"deepseek-v4-flash\"\n\
+                 \n\
+                 Or set providers via CLAW_PROVIDERS_* environment variables."
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(handle)
 }
 
 #[cfg(test)]

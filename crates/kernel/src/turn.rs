@@ -12,7 +12,10 @@ use protocol::message::{
     AssistantContent, Message, Reasoning, ReasoningContent, ToolResult, ToolResultContent,
 };
 use protocol::one_or_many::OneOrMany;
-use protocol::{AgentPath, Event, KernelError, ReviewDecision, SessionId, TurnId};
+use protocol::{
+    AgentPath, Event, ExecCommandStatus, FileChangeStatus, KernelError, McpToolCallStatus,
+    ReviewDecision, SessionId, ToolStreamItem, TurnId, TurnItem,
+};
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
 use provider::message::ToolCall;
@@ -24,9 +27,8 @@ use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
-use crate::tool_events::{ToolEmitter, ToolEventCtx};
 use store::{MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord, TurnKindRecord};
-use tools::{ToolContext, ToolDisplayOutput, ToolRegistry};
+use tools::{ToolContext, ToolRegistry};
 
 /// Immutable snapshot of all context needed to execute a single turn.
 #[derive(Clone, typed_builder::TypedBuilder)]
@@ -358,10 +360,11 @@ struct ToolOutput {
     output: String,
 }
 
-/// Dispatch a tool call, handling events, approval, and execution.
+/// Dispatch a tool call, driving the unified `execute_streaming` path.
 ///
-/// Emits `Pending` → `InProgress` → `Completed`/`Failed` status events,
-/// respecting the session's approval policy.
+/// Streaming tools (`supports_streaming == true`) produce `Begin`/`End`
+/// lifecycle items; non-streaming tools get a synthetic `ToolCall(InProgress)`
+/// before execution and a `Text` item wrapping their `execute()` result.
 ///
 /// Returns `(output_text, succeeded)` on completion, or
 /// `Err(KernelError::Cancelled)` on abort.
@@ -382,7 +385,6 @@ async fn dispatch_tool(
         .is_some_and(|tool| tool.needs_approval(arguments, tool_ctx));
 
     if needs_approval && ctx.approval.mode() != ApprovalMode::Yolo {
-        // Emit Pending event before any approval check.
         let _ = tx_event.send(Event::tool_call(
             ctx.session_id.clone(),
             ctx.agent_path.clone(),
@@ -408,70 +410,80 @@ async fn dispatch_tool(
         }
     }
 
-    // Emit InProgress and execute.
-    let _ = tx_event.send(Event::tool_call(
-        ctx.session_id.clone(),
-        ctx.agent_path.clone(),
-        call_id,
-        tool_name,
-        arguments.clone(),
-        ToolCallStatus::InProgress,
-    ));
+    let tool = ctx
+        .tools
+        .get(tool_name)
+        .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("unknown tool: {tool_name}")))?;
 
-    let emitter = file_change_emitter(tool_name);
-    let event_ctx = ToolEventCtx {
-        session_id: &ctx.session_id,
-        turn_id: &ctx.turn_id,
-        call_id,
-        tx_event,
-    };
-    if let Some(emitter) = &emitter {
-        emitter.begin(&event_ctx);
+    if !tool.capability().supports_streaming {
+        let _ = tx_event.send(Event::tool_call(
+            ctx.session_id.clone(),
+            ctx.agent_path.clone(),
+            call_id,
+            tool_name,
+            arguments.clone(),
+            ToolCallStatus::InProgress,
+        ));
     }
 
-    let output = ctx
-        .tools
-        .execute_structured(tool_name, arguments.clone(), tool_ctx)
-        .await;
+    let (text, mut stream) = tool
+        .execute_streaming(arguments.clone(), tool_ctx)
+        .await
+        .map_err(|err| KernelError::Internal(anyhow::anyhow!(err)))?;
 
-    let (text, succeeded, display) = match output {
-        Ok(result) => (result.model_output, true, result.display),
-        Err(err) => (err, false, ToolDisplayOutput::None),
-    };
-
-    let _ = tx_event.send(Event::tool_call_update(
-        ctx.session_id.clone(),
-        call_id,
-        Some(text.clone()),
-        Some(if succeeded {
-            ToolCallStatus::Completed
-        } else {
-            ToolCallStatus::Failed
-        }),
-    ));
-
-    if let Some(emitter) = &emitter {
-        match (succeeded, display) {
-            (true, ToolDisplayOutput::FileChanges(changes)) => {
-                emitter.complete_file_change(&event_ctx, changes, text.clone());
+    let mut succeeded = true;
+    while let Some(item) = stream.next().await {
+        match item {
+            ToolStreamItem::Begin(turn_item) => {
+                let _ = tx_event.send(Event::item_started(
+                    ctx.session_id.clone(),
+                    ctx.turn_id.clone(),
+                    turn_item,
+                ));
             }
-            (false, _) => {
-                emitter.fail_file_change(&event_ctx, text.clone());
+            ToolStreamItem::End(turn_item) => {
+                succeeded = match &turn_item {
+                    TurnItem::ExecCommand(item) => {
+                        matches!(item.status, ExecCommandStatus::Completed)
+                    }
+                    TurnItem::FileChange(item) => {
+                        matches!(item.status, FileChangeStatus::Completed)
+                    }
+                    TurnItem::McpToolCall(item) => {
+                        matches!(item.status, McpToolCallStatus::Completed)
+                    }
+                };
+                let _ = tx_event.send(Event::item_completed(
+                    ctx.session_id.clone(),
+                    ctx.turn_id.clone(),
+                    turn_item,
+                ));
             }
-            (true, ToolDisplayOutput::None) => {}
+            ToolStreamItem::Delta { stream, chunk } => {
+                let _ = tx_event.send(Event::ExecCommandOutputDelta {
+                    session_id: ctx.session_id.clone(),
+                    call_id: call_id.to_string(),
+                    stream,
+                    chunk,
+                });
+            }
+            ToolStreamItem::Text { content, is_error } => {
+                succeeded = !is_error;
+                let _ = tx_event.send(Event::tool_call_update(
+                    ctx.session_id.clone(),
+                    call_id,
+                    Some(content),
+                    Some(if is_error {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    }),
+                ));
+            }
         }
     }
 
     Ok((text, succeeded))
-}
-
-/// Return a structured display emitter for supported file-changing tools.
-fn file_change_emitter(tool_name: &str) -> Option<ToolEmitter> {
-    match tool_name {
-        "apply_patch" => Some(ToolEmitter::file_change("apply_patch")),
-        "edit" => Some(ToolEmitter::file_change("edit")),
-        _ => None,
-    }
 }
 
 /// Request approval for a tool call and return the frontend decision.
@@ -597,13 +609,5 @@ mod tests {
 
         assert!(!emit_text);
         assert!(streamed_preview.is_empty());
-    }
-
-    /// Verifies that only file-editing tools get structured file-change emitters.
-    #[test]
-    fn file_change_emitter_is_enabled_for_file_editing_tools() {
-        assert!(file_change_emitter("apply_patch").is_some());
-        assert!(file_change_emitter("edit").is_some());
-        assert!(file_change_emitter("shell").is_none());
     }
 }

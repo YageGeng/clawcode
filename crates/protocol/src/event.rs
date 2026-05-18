@@ -157,6 +157,14 @@ pub enum Event {
         /// Reason the turn stopped.
         stop_reason: StopReason,
     },
+    /// Incremental output delta from a running exec command (stdout/stderr chunk).
+    ExecCommandOutputDelta {
+        session_id: SessionId,
+        call_id: String,
+        stream: ExecOutputStream,
+        /// Raw bytes from the stream, serialized as a JSON array of numbers.
+        chunk: Vec<u8>,
+    },
 }
 
 impl Event {
@@ -359,6 +367,32 @@ pub enum StopReason {
     Cancelled,
     /// Turn terminated due to an error.
     Error,
+}
+
+/// Distinguishes incremental output source for ExecCommandOutputDelta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// A single item yielded by a streaming tool's `execute_streaming` stream.
+/// The dispatch layer converts each variant into the corresponding [`Event`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolStreamItem {
+    /// Lifecycle start → dispatch emits [`Event::ItemStarted`].
+    Begin(crate::item::TurnItem),
+    /// Lifecycle end → dispatch emits [`Event::ItemCompleted`].
+    End(crate::item::TurnItem),
+    /// Incremental output chunk → dispatch emits [`Event::ExecCommandOutputDelta`].
+    Delta {
+        stream: ExecOutputStream,
+        chunk: Vec<u8>,
+    },
+    /// Final model-facing text → dispatch emits [`Event::ToolCallUpdate`].
+    /// `is_error` indicates whether the tool execution failed.
+    Text { content: String, is_error: bool },
 }
 
 #[cfg(test)]

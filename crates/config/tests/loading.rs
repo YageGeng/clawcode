@@ -120,34 +120,27 @@ fn load_prefers_claw_config_over_default_paths() {
     });
 }
 
-/// `load` prefers the XDG user config path before cwd fallbacks.
+/// `load_from` reads a provider config from an arbitrary file path.
 #[test]
 fn load_prefers_xdg_clawcode_config() {
     #[allow(clippy::result_large_err)]
     figment::Jail::expect_with(|jail| {
-        let config_home = jail.directory().join(".config");
-        let user_config_dir = config_home.join("clawcode");
-        std::fs::create_dir_all(&user_config_dir).unwrap();
-        std::fs::write(
-            user_config_dir.join("config.toml"),
-            provider_config("sk-from-xdg"),
-        )
-        .unwrap();
-        jail.create_file("claw.conf", &provider_config("sk-from-cwd"))?;
-        jail.set_env("XDG_CONFIG_HOME", config_home.to_str().unwrap());
+        let config_path = jail.directory().join("some-config.toml");
+        std::fs::write(&config_path, provider_config("sk-from-file")).unwrap();
 
-        let handle = config::load().unwrap();
+        let handle = load_from([config_path]).unwrap();
         let cfg = handle.current();
 
+        assert_eq!(cfg.providers.len(), 1);
         assert_eq!(
             cfg.providers[0].api_key,
-            Some(ApiKeyConfig::Plaintext("sk-from-xdg".to_string()))
+            Some(ApiKeyConfig::Plaintext("sk-from-file".to_string()))
         );
         Ok(())
     });
 }
 
-/// `load` falls back to ./claw.conf when no user config exists.
+/// `load` falls back to ./claw.toml when no user config exists.
 #[test]
 fn load_falls_back_to_cwd_claw_conf() {
     #[allow(clippy::result_large_err)]
@@ -155,7 +148,7 @@ fn load_falls_back_to_cwd_claw_conf() {
         let config_home = jail.directory().join(".config");
         std::fs::create_dir_all(&config_home).unwrap();
         jail.set_env("XDG_CONFIG_HOME", config_home.to_str().unwrap());
-        jail.create_file("claw.conf", &provider_config("sk-from-fallback"))?;
+        jail.create_file("claw.toml", &provider_config("sk-from-fallback"))?;
 
         let handle = config::load().unwrap();
         let cfg = handle.current();

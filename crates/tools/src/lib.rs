@@ -3,17 +3,17 @@
 pub mod builtin;
 pub mod fs_backend;
 pub mod mcp;
-pub mod output;
 
 use async_trait::async_trait;
+use futures::stream::Stream;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub use fs_backend::{
     FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest, FsWriteResponse,
     LocalFsBackend,
 };
-pub use output::{ToolDisplayOutput, ToolExecutionResult};
 pub use protocol::ToolContext;
 
 /// A tool that can be invoked by the LLM during a turn.
@@ -28,6 +28,12 @@ pub trait Tool: Send + Sync {
     /// JSON Schema describing the tool's arguments.
     fn parameters(&self) -> serde_json::Value;
 
+    /// Tool capability descriptor, for dispatch path selection.
+    /// Default: not streaming-capable.
+    fn capability(&self) -> protocol::ToolCapability {
+        protocol::ToolCapability::default()
+    }
+
     /// Whether this specific invocation requires user approval.
     /// Default: `true` (safe-by-default).
     fn needs_approval(&self, _arguments: &serde_json::Value, _ctx: &ToolContext) -> bool {
@@ -35,22 +41,46 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool with the given JSON arguments and turn context.
-    /// Returns the output string on success, or an error message on failure.
+    /// Returns the model-facing output string on success, or an error message on failure.
     async fn execute(
         &self,
         arguments: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<String, String>;
 
-    /// Execute the tool and return optional display-only structured output.
-    async fn execute_structured(
+    /// Execute the tool and return a stream of lifecycle/display items.
+    ///
+    /// The default implementation calls [`execute`] and wraps the result text in
+    /// a single [`ToolStreamItem::Text`] event. Streaming-capable tools should
+    /// override this to emit [`ToolStreamItem::Begin`]/[`ToolStreamItem::End`]
+    /// lifecycle events and [`ToolStreamItem::Delta`] incremental updates.
+    async fn execute_streaming(
         &self,
         arguments: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<ToolExecutionResult, String> {
-        self.execute(arguments, ctx)
-            .await
-            .map(ToolExecutionResult::text)
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        ),
+        String,
+    > {
+        match self.execute(arguments, ctx).await {
+            Ok(text) => {
+                let item = protocol::ToolStreamItem::Text {
+                    content: text.clone(),
+                    is_error: false,
+                };
+                Ok((text, Box::pin(futures::stream::once(async move { item }))))
+            }
+            Err(err) => {
+                let item = protocol::ToolStreamItem::Text {
+                    content: err.clone(),
+                    is_error: true,
+                };
+                Ok((err, Box::pin(futures::stream::once(async move { item }))))
+            }
+        }
     }
 }
 
@@ -117,15 +147,21 @@ impl ToolRegistry {
         }
     }
 
-    /// Execute a tool call and retain structured display payloads when available.
-    pub async fn execute_structured(
+    /// Execute a streaming tool call by name.
+    pub async fn execute_streaming(
         &self,
         name: &str,
         arguments: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<ToolExecutionResult, String> {
+    ) -> Result<
+        (
+            String,
+            Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        ),
+        String,
+    > {
         match self.get(name) {
-            Some(tool) => tool.execute_structured(arguments, ctx).await,
+            Some(tool) => tool.execute_streaming(arguments, ctx).await,
             None => Err(format!("unknown tool: {name}")),
         }
     }

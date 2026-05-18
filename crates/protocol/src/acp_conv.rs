@@ -214,6 +214,7 @@ impl TurnItemAcpExt for TurnItem {
                 ))
             }
             TurnItem::McpToolCall(_) => None,
+            TurnItem::ExecCommand(_) => None,
         }
     }
 
@@ -242,6 +243,7 @@ impl TurnItemAcpExt for TurnItem {
                 ))
             }
             TurnItem::McpToolCall(_) => None,
+            TurnItem::ExecCommand(_) => None,
         }
     }
 }

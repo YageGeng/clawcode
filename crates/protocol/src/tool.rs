@@ -15,6 +15,13 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Tool capability descriptor for dispatch path selection.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolCapability {
+    /// Whether the tool supports streaming execution via [`execute_streaming`].
+    pub supports_streaming: bool,
+}
+
 /// Execution status of a tool call within the agent kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

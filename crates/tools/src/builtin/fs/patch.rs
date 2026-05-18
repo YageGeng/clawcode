@@ -7,7 +7,7 @@ use protocol::FileChange;
 use tokio::fs;
 use typed_builder::TypedBuilder;
 
-use crate::{Tool, ToolDisplayOutput, ToolExecutionResult};
+use crate::Tool;
 
 const APPLY_PATCH_DESCRIPTION: &str = r#"Use the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
 
@@ -122,6 +122,12 @@ impl Tool for ApplyPatch {
         })
     }
 
+    fn capability(&self) -> protocol::ToolCapability {
+        protocol::ToolCapability {
+            supports_streaming: true,
+        }
+    }
+
     fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
         true
     }
@@ -131,17 +137,54 @@ impl Tool for ApplyPatch {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        self.execute_structured(arguments, ctx)
-            .await
-            .map(|result| result.model_output)
+        self.do_apply(arguments, ctx).await.map(|(text, _)| text)
     }
 
-    /// Execute a patch while returning final file states for UI diff rendering.
-    async fn execute_structured(
+    async fn execute_streaming(
         &self,
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
-    ) -> Result<ToolExecutionResult, String> {
+    ) -> Result<
+        (
+            String,
+            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
+        ),
+        String,
+    > {
+        let (model_output, changes) = self.do_apply(arguments, ctx).await?;
+
+        let begin = protocol::ToolStreamItem::Begin(protocol::TurnItem::FileChange(
+            protocol::FileChangeItem::builder()
+                .id(String::new())
+                .title("Apply patch".into())
+                .changes(vec![])
+                .status(protocol::FileChangeStatus::InProgress)
+                .build(),
+        ));
+        let end = protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(
+            protocol::FileChangeItem::builder()
+                .id(String::new())
+                .title("Apply patch".into())
+                .changes(changes)
+                .status(protocol::FileChangeStatus::Completed)
+                .model_output(model_output.clone())
+                .build(),
+        ));
+
+        let stream: std::pin::Pin<
+            Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>,
+        > = Box::pin(futures::stream::iter([begin, end]));
+        Ok((model_output, stream))
+    }
+}
+
+impl ApplyPatch {
+    /// Execute a patch and return the summary together with file changes.
+    async fn do_apply(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<(String, Vec<FileChange>), String> {
         let patch_text = arguments
             .get("patchText")
             .and_then(|v| v.as_str())
@@ -163,10 +206,7 @@ impl Tool for ApplyPatch {
             hunk.write().await?;
         }
 
-        Ok(ToolExecutionResult {
-            model_output: summary,
-            display: ToolDisplayOutput::FileChanges(changes),
-        })
+        Ok((summary, changes))
     }
 }
 
@@ -793,7 +833,7 @@ fn build_replacement_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ToolContext, ToolDisplayOutput};
+    use crate::ToolContext;
 
     /// Verifies that parser keeps all supported operation kinds in order.
     #[test]
@@ -1091,26 +1131,32 @@ mod tests {
         );
     }
 
-    /// Verifies that structured execution returns final file states for UI diffs.
+    /// Verifies that streaming execution returns final file states for UI diffs.
     #[tokio::test]
-    async fn apply_patch_structured_result_includes_file_changes() {
+    async fn apply_patch_streaming_result_includes_file_changes() {
+        use futures::stream::StreamExt;
+
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("modify.txt"), "one\ntwo\n").unwrap();
         std::fs::write(dir.path().join("delete.txt"), "remove me\n").unwrap();
 
         let patch = "*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: modify.txt\n@@\n-two\n+TWO\n*** Delete File: delete.txt\n*** End Patch";
-        let result = ApplyPatch::new()
-            .execute_structured(
+        let (model_output, mut stream) = ApplyPatch::new()
+            .execute_streaming(
                 serde_json::json!({"patchText": patch}),
                 &ToolContext::for_test(dir.path()),
             )
             .await
             .unwrap();
 
-        let ToolDisplayOutput::FileChanges(changes) = result.display else {
-            panic!("expected file changes");
-        };
+        assert!(!model_output.is_empty());
 
+        let mut changes = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) = item {
+                changes = item.changes;
+            }
+        }
         assert_eq!(changes.len(), 3);
         assert_eq!(changes[0].path, dir.path().join("added.txt"));
         assert_eq!(changes[0].old_text, None);
