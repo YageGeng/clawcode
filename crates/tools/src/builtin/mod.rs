@@ -7,30 +7,41 @@ pub mod skill;
 
 use std::sync::Arc;
 
-use crate::{FsBackend, LocalFsBackend, ToolRegistry};
+use crate::{FsBackend, LocalFsBackend, LocalTerminalBackend, TerminalBackend, ToolRegistry};
 
 impl ToolRegistry {
-    /// Register basic built-in tools (shell, file I/O). Takes `&self` so
-    /// callers can register through `Arc<ToolRegistry>` after passing it to Kernel.
+    /// Register basic built-in tools (shell, file I/O) with default local backends.
     pub fn register_builtins(&self) {
-        self.register_builtins_with_fs_backend(Arc::new(LocalFsBackend::new()));
+        self.register_builtins_with_backends(
+            Arc::new(LocalFsBackend::new()),
+            Arc::new(LocalTerminalBackend::new()),
+        );
     }
 
-    /// Register basic built-in tools using the provided filesystem backend.
-    pub fn register_builtins_with_fs_backend(&self, fs_backend: Arc<dyn FsBackend>) {
-        self.register(Arc::new(shell::ShellCommand::new()));
+    /// Register basic built-in tools using the provided backends.
+    pub fn register_builtins_with_backends(
+        &self,
+        fs_backend: Arc<dyn FsBackend>,
+        terminal_backend: Arc<dyn TerminalBackend>,
+    ) {
+        self.register(Arc::new(shell::ShellCommand::with_backend(
+            terminal_backend,
+        )));
         self.register_fs_tools_with_backend(false, fs_backend);
     }
 
+    /// Register basic built-in tools using the provided filesystem backend
+    /// and a default local terminal backend.
+    pub fn register_builtins_with_fs_backend(&self, fs_backend: Arc<dyn FsBackend>) {
+        self.register_builtins_with_backends(fs_backend, Arc::new(LocalTerminalBackend::new()));
+    }
+
     /// Register the skill tool, backed by the given registry.
-    /// Separate from `register_builtins` because the registry is created
-    /// per-session in the kernel and passed in here.
     pub fn register_skill_tools(&self, registry: Arc<skills::SkillRegistry>) {
         self.register(Arc::new(skill::SkillTool::new(registry)));
     }
 
-    /// Register agent management tools. Separate from `register_builtins` so
-    /// callers control the composition order.
+    /// Register agent management tools.
     pub fn register_agent_tools(&self, agent_ctrl: Arc<dyn agents::AgentControlRef>) {
         self.register(Arc::new(agents::SpawnAgent::new(Arc::clone(&agent_ctrl))));
         self.register(Arc::new(agents::SendMessage::new(Arc::clone(&agent_ctrl))));

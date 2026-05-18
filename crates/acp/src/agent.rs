@@ -15,7 +15,8 @@ use protocol::mcp::{McpServerConfig, McpTransportConfig};
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
 use protocol::{AgentKernel, Event, SessionId, SessionLaunchOptions};
 
-use crate::fs_backend::AcpClientFsRouter;
+use crate::backend::fs::AcpClientFsRouter;
+use crate::backend::terminal::AcpClientTerminalRouter;
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
@@ -26,22 +27,43 @@ pub struct ClawcodeAgent {
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
     /// Routes ACP filesystem backend calls to client sessions.
     fs_router: Arc<AcpClientFsRouter>,
+    /// Routes ACP terminal backend calls to client sessions.
+    terminal_router: Arc<AcpClientTerminalRouter>,
 }
 
 impl ClawcodeAgent {
-    /// Create a new ACP agent with the given kernel.
+    /// Create a new ACP agent with the given kernel (default routers).
     #[must_use]
     pub fn new(kernel: Arc<dyn AgentKernel>) -> Self {
-        Self::with_fs_router(kernel, Arc::new(AcpClientFsRouter::default()))
+        Self::with_routers(
+            kernel,
+            Arc::new(AcpClientFsRouter::default()),
+            Arc::new(AcpClientTerminalRouter::default()),
+        )
     }
 
     /// Create a new ACP agent with a shared filesystem router.
     #[must_use]
     pub fn with_fs_router(kernel: Arc<dyn AgentKernel>, fs_router: Arc<AcpClientFsRouter>) -> Self {
+        Self::with_routers(
+            kernel,
+            fs_router,
+            Arc::new(AcpClientTerminalRouter::default()),
+        )
+    }
+
+    /// Create a new ACP agent with shared filesystem and terminal routers.
+    #[must_use]
+    pub fn with_routers(
+        kernel: Arc<dyn AgentKernel>,
+        fs_router: Arc<AcpClientFsRouter>,
+        terminal_router: Arc<AcpClientTerminalRouter>,
+    ) -> Self {
         Self {
             kernel,
             client_capabilities: Arc::default(),
             fs_router,
+            terminal_router,
         }
     }
 
@@ -519,6 +541,11 @@ impl ClawcodeAgent {
         let mode_state = Self::to_acp_mode_state(created.modes);
         let model_state = Self::to_acp_model_state(created.models);
         self.fs_router.register_session(
+            created.session_id.clone(),
+            cx.clone(),
+            self.client_capabilities_snapshot(),
+        );
+        self.terminal_router.register_session(
             created.session_id,
             cx,
             self.client_capabilities_snapshot(),
@@ -556,6 +583,11 @@ impl ClawcodeAgent {
         let mode_state = Self::to_acp_mode_state(created.modes);
         let model_state = Self::to_acp_model_state(created.models);
         self.fs_router.register_session(
+            created.session_id.clone(),
+            cx.clone(),
+            self.client_capabilities_snapshot(),
+        );
+        self.terminal_router.register_session(
             created.session_id,
             cx,
             self.client_capabilities_snapshot(),
@@ -825,6 +857,7 @@ impl ClawcodeAgent {
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
         self.fs_router.unregister_session(&session_id);
+        self.terminal_router.unregister_session(&session_id);
         Ok(CloseSessionResponse::new())
     }
 }

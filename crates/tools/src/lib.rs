@@ -1,7 +1,7 @@
 //! Agent tool registry and built-in tools.
 
+pub mod backend;
 pub mod builtin;
-pub mod fs_backend;
 pub mod mcp;
 
 use async_trait::async_trait;
@@ -10,9 +10,13 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub use fs_backend::{
+pub use backend::fs::{
     FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest, FsWriteResponse,
     LocalFsBackend,
+};
+pub use backend::terminal::{
+    LocalTerminalBackend, RunningTerminal, TerminalBackend, TerminalBackendError,
+    TerminalCreateParams, TerminalEnvVariable, TerminalExitResult, TerminalOutputSnapshot,
 };
 pub use protocol::ToolContext;
 

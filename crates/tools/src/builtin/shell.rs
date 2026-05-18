@@ -1,32 +1,40 @@
 //! Shell command execution tool.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::Stream;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::Tool;
+use crate::{
+    LocalTerminalBackend, RunningTerminal, TerminalBackend, TerminalCreateParams,
+    TerminalEnvVariable, TerminalOutputSnapshot, Tool, ToolContext,
+};
 
 const OUTPUT_MAX_LEN: usize = 4096;
-const SHELL_TIMEOUT_SECS: u64 = 30;
+const POLL_INTERVAL_MS: u64 = 100;
 
-/// Executes arbitrary shell commands.
-pub struct ShellCommand;
+/// Executes arbitrary shell commands via a [`TerminalBackend`].
+pub struct ShellCommand {
+    backend: Arc<dyn TerminalBackend>,
+}
 
 impl ShellCommand {
-    /// Create a new shell tool instance.
+    /// Create a shell tool with the default local backend.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::with_backend(Arc::new(LocalTerminalBackend::new()))
+    }
+
+    /// Create a shell tool with a custom terminal backend.
+    #[must_use]
+    pub fn with_backend(backend: Arc<dyn TerminalBackend>) -> Self {
+        Self { backend }
     }
 }
 
@@ -57,6 +65,11 @@ impl Tool for ShellCommand {
                 "cwd": {
                     "type": "string",
                     "description": "Optional working directory for the command"
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Optional environment variables as key-value pairs",
+                    "additionalProperties": { "type": "string" }
                 }
             },
             "required": ["command"]
@@ -78,50 +91,47 @@ impl Tool for ShellCommand {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let command = arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'command' argument")?
-            .to_string();
+        let (command_str, work_dir, env_vars) = parse_args(arguments, ctx)?;
+        let params = TerminalCreateParams::builder()
+            .session_id(ctx.session_id.clone())
+            .command("/bin/sh".to_string())
+            .args(vec!["-c".to_string(), command_str.clone()])
+            .env(env_vars)
+            .cwd(work_dir.clone())
+            .build();
 
-        let work_dir = arguments
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.cwd.clone());
+        let handle = self
+            .backend
+            .create(params)
+            .await
+            .map_err(|e| format!("terminal create failed: {e}"))?;
 
-        let result = timeout(
-            Duration::from_secs(SHELL_TIMEOUT_SECS),
-            Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&command)
-                .current_dir(&work_dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output(),
-        )
-        .await;
+        let exit_result = handle
+            .wait_for_exit()
+            .await
+            .map_err(|e| format!("terminal wait failed: {e}"))?;
 
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let mut formatted = format!(
-                    "exit code: {}\nstdout:\n{}\nstderr:\n{}",
-                    output.status.code().unwrap_or(-1),
-                    truncate(&stdout),
-                    truncate(&stderr),
-                );
-                if formatted.len() > OUTPUT_MAX_LEN {
-                    formatted.truncate(OUTPUT_MAX_LEN);
-                    formatted.push_str("\n... (output truncated)");
-                }
-                Ok(formatted)
-            }
-            Ok(Err(e)) => Err(format!("command execution failed: {e}")),
-            Err(_) => Err(format!("command timed out after {SHELL_TIMEOUT_SECS}s")),
+        // Get final output snapshot.
+        let snapshot = handle
+            .output()
+            .await
+            .map_err(|e| format!("terminal output failed: {e}"))?;
+
+        drop(handle);
+
+        let model_text = format!(
+            "exit code: {}\nstdout:\n{}\nstderr:\n{}",
+            exit_result.exit_code,
+            truncate(&snapshot.stdout),
+            truncate(&snapshot.stderr),
+        );
+
+        let mut result = model_text;
+        if result.len() > OUTPUT_MAX_LEN {
+            result.truncate(OUTPUT_MAX_LEN);
+            result.push_str("\n... (output truncated)");
         }
+        Ok(result)
     }
 
     async fn execute_streaming(
@@ -135,18 +145,22 @@ impl Tool for ShellCommand {
         ),
         String,
     > {
-        let command_str = arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'command' argument")?
-            .to_string();
-        let work_dir = arguments
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.cwd.clone());
-
+        let (command_str, work_dir, env_vars) = parse_args(arguments, ctx)?;
         let command = vec!["/bin/sh".to_string(), "-c".to_string(), command_str.clone()];
+
+        let params = TerminalCreateParams::builder()
+            .session_id(ctx.session_id.clone())
+            .command("/bin/sh".to_string())
+            .args(vec!["-c".to_string(), command_str.clone()])
+            .env(env_vars)
+            .cwd(work_dir.clone())
+            .build();
+
+        let handle = self
+            .backend
+            .create(params)
+            .await
+            .map_err(|e| format!("terminal create failed: {e}"))?;
 
         let (delta_tx, delta_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = oneshot::channel();
@@ -160,11 +174,12 @@ impl Tool for ShellCommand {
                 .build(),
         ));
 
-        let command_for_task = command_str.clone();
+        let handle: Arc<dyn RunningTerminal> = handle.into();
+        let handle_for_task = Arc::clone(&handle);
         let work_dir_for_task = work_dir.clone();
         tokio::spawn(async move {
             let start = Instant::now();
-            let result = run_with_streaming(&command_for_task, &work_dir_for_task, delta_tx).await;
+            let result = poll_terminal(&*handle_for_task, &delta_tx).await;
             let duration_ms = start.elapsed().as_millis() as u64;
             let _ = result_tx.send((result, duration_ms));
         });
@@ -177,14 +192,14 @@ impl Tool for ShellCommand {
             .map_err(|_e| "internal error: shell task dropped".to_string())?;
 
         let (model_text, end_item) = match exec_result {
-            Ok(result) => build_shell_result(&command, &work_dir, result, duration_ms),
+            Ok(snapshot) => build_shell_result(&command, &work_dir_for_task, snapshot, duration_ms),
             Err(e) => {
                 let err_msg = format!("command execution failed: {e}");
                 let end = protocol::ToolStreamItem::End(protocol::TurnItem::ExecCommand(
                     protocol::ExecCommandItem::builder()
                         .id(String::new())
                         .command(command.clone())
-                        .cwd(work_dir.clone())
+                        .cwd(work_dir_for_task)
                         .status(protocol::ExecCommandStatus::Failed)
                         .stderr(err_msg.clone())
                         .exit_code(-1)
@@ -195,103 +210,117 @@ impl Tool for ShellCommand {
             }
         };
 
+        // Release terminal after polling completes.
+        drop(handle);
+
         let stream = stream.chain(futures::stream::once(async { end_item }));
         Ok((model_text, Box::pin(stream)))
     }
 }
 
-/// Result of a completed shell command execution.
-struct ExecResult {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    exit_code: i32,
-}
-
-/// Spawn a child process and stream stdout/stderr chunks via `delta_tx`.
-async fn run_with_streaming(
-    command: &str,
-    cwd: &Path,
-    delta_tx: mpsc::UnboundedSender<protocol::ToolStreamItem>,
-) -> std::io::Result<ExecResult> {
-    let mut child = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let stdout = child.stdout.take().expect("stdout pipe configured");
-    let stderr = child.stderr.take().expect("stderr pipe configured");
-
-    let stdout_tx = delta_tx.clone();
-    let stdout_handle = tokio::spawn(read_and_emit(
-        stdout,
-        protocol::ExecOutputStream::Stdout,
-        stdout_tx,
-    ));
-    let stderr_handle = tokio::spawn(read_and_emit(
-        stderr,
-        protocol::ExecOutputStream::Stderr,
-        delta_tx,
-    ));
-
-    let status = child.wait().await?;
-    let stdout = stdout_handle.await??;
-    let stderr = stderr_handle.await??;
-
-    Ok(ExecResult {
-        stdout,
-        stderr,
-        exit_code: status.code().unwrap_or(-1),
-    })
-}
-
-/// Read from an async pipe and emit byte chunks as `Delta` stream items.
-async fn read_and_emit<R: tokio::io::AsyncRead + Unpin>(
-    mut reader: R,
-    stream_type: protocol::ExecOutputStream,
-    tx: mpsc::UnboundedSender<protocol::ToolStreamItem>,
-) -> std::io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 8192];
+/// Poll terminal output at intervals and emit delta items for new content.
+async fn poll_terminal(
+    handle: &dyn RunningTerminal,
+    delta_tx: &mpsc::UnboundedSender<protocol::ToolStreamItem>,
+) -> Result<TerminalOutputSnapshot, String> {
+    let mut prev_stdout_len = 0usize;
+    let mut prev_stderr_len = 0usize;
     loop {
-        let n = reader.read(&mut tmp).await?;
-        if n == 0 {
-            break;
+        let snapshot = handle
+            .output()
+            .await
+            .map_err(|e| format!("terminal output failed: {e}"))?;
+
+        // Emit new stdout content.
+        let stdout_bytes = snapshot.stdout.as_bytes();
+        if stdout_bytes.len() > prev_stdout_len {
+            // Output is monotonic: prev_stdout_len ≤ stdout_bytes.len() always holds.
+            #[allow(clippy::indexing_slicing)]
+            let chunk = stdout_bytes[prev_stdout_len..].to_vec();
+            let _ = delta_tx.send(protocol::ToolStreamItem::Delta {
+                stream: protocol::ExecOutputStream::Stdout,
+                chunk,
+            });
+            prev_stdout_len = stdout_bytes.len();
         }
-        let chunk = &tmp.get(..n).expect("read byte count within buffer bounds");
-        let _ = tx.send(protocol::ToolStreamItem::Delta {
-            stream: stream_type,
-            chunk: chunk.to_vec(),
-        });
-        buf.extend_from_slice(chunk);
+
+        // Emit new stderr content.
+        let stderr_bytes = snapshot.stderr.as_bytes();
+        if stderr_bytes.len() > prev_stderr_len {
+            // Output is monotonic: prev_stderr_len ≤ stderr_bytes.len() always holds.
+            #[allow(clippy::indexing_slicing)]
+            let chunk = stderr_bytes[prev_stderr_len..].to_vec();
+            let _ = delta_tx.send(protocol::ToolStreamItem::Delta {
+                stream: protocol::ExecOutputStream::Stderr,
+                chunk,
+            });
+            prev_stderr_len = stderr_bytes.len();
+        }
+
+        if snapshot.exit_status.is_some() {
+            return Ok(snapshot);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
-    Ok(buf)
+}
+
+/// Parse tool arguments into command string, working directory, and env vars.
+fn parse_args(
+    arguments: serde_json::Value,
+    ctx: &ToolContext,
+) -> Result<(String, PathBuf, Vec<TerminalEnvVariable>), String> {
+    let command = arguments
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or("missing 'command' argument")?
+        .to_string();
+    let work_dir = arguments
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.cwd.clone());
+    let env_vars = arguments
+        .get("env")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| {
+                    TerminalEnvVariable::builder()
+                        .name(k.clone())
+                        .value(v.as_str().unwrap_or_default().to_string())
+                        .build()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((command, work_dir, env_vars))
 }
 
 /// Build the model-facing text and `End` lifecycle item for a completed shell command.
 fn build_shell_result(
     command: &[String],
-    cwd: &Path,
-    result: ExecResult,
+    cwd: &std::path::Path,
+    snapshot: TerminalOutputSnapshot,
     duration_ms: u64,
 ) -> (String, protocol::ToolStreamItem) {
-    let stdout_str = String::from_utf8_lossy(&result.stdout).to_string();
-    let stderr_str = String::from_utf8_lossy(&result.stderr).to_string();
-
-    let status = if result.exit_code == 0 {
+    let status = if snapshot
+        .exit_status
+        .as_ref()
+        .is_none_or(|es| es.exit_code == 0)
+    {
         protocol::ExecCommandStatus::Completed
     } else {
         protocol::ExecCommandStatus::Failed
     };
 
+    let exit_code = snapshot.exit_status.as_ref().map_or(-1, |es| es.exit_code);
+
     let model_text = format!(
         "exit code: {}\nstdout:\n{}\nstderr:\n{}",
-        result.exit_code,
-        truncate(&stdout_str),
-        truncate(&stderr_str),
+        exit_code,
+        truncate(&snapshot.stdout),
+        truncate(&snapshot.stderr),
     );
 
     let end_item = protocol::ToolStreamItem::End(protocol::TurnItem::ExecCommand(
@@ -300,9 +329,9 @@ fn build_shell_result(
             .command(command.to_vec())
             .cwd(cwd.to_path_buf())
             .status(status)
-            .stdout(stdout_str)
-            .stderr(stderr_str)
-            .exit_code(result.exit_code)
+            .stdout(snapshot.stdout)
+            .stderr(snapshot.stderr)
+            .exit_code(exit_code)
             .duration_ms(duration_ms)
             .build(),
     ));
@@ -312,8 +341,8 @@ fn build_shell_result(
 
 /// Truncate command output to the per-stream display budget.
 ///
-/// Uses [`str::floor_char_boundary`] to avoid panicking when the byte limit
-/// falls in the middle of a multi-byte UTF-8 character.
+/// Calls [`str::floor_char_boundary`] before slicing, guaranteeing the index
+/// lands on a valid UTF-8 character boundary.
 #[allow(clippy::string_slice)]
 fn truncate(s: &str) -> &str {
     if s.len() > OUTPUT_MAX_LEN / 2 {
@@ -327,7 +356,7 @@ fn truncate(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolContext;
+    use std::path::Path;
 
     #[tokio::test]
     async fn shell_echo_hello() {
@@ -367,7 +396,6 @@ mod tests {
 
     #[test]
     fn truncate_utf8_boundary_does_not_panic() {
-        // 2047 ASCII bytes + CJK chars: byte 2048 lands mid-char.
         let s = format!("{}{}", "a".repeat(2047), "你好世界");
         let result = truncate(&s);
         assert!(
