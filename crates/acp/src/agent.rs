@@ -1,9 +1,12 @@
 //! ACP Agent bridging the clawcode kernel to the ACP protocol.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use acp::schema::{
-    ModelInfo as AcpModelInfo, SessionId as AcpSessionId, SessionMode as AcpSessionMode,
+    ModelInfo as AcpModelInfo, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId as AcpSessionId, SessionMode as AcpSessionMode,
     StopReason as AcpStopReason, ToolCallStatus as AcpToolCallStatus, *,
 };
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
@@ -29,6 +32,8 @@ pub struct ClawcodeAgent {
     fs_router: Arc<AcpClientFsRouter>,
     /// Routes ACP terminal backend calls to client sessions.
     terminal_router: Arc<AcpClientTerminalRouter>,
+    /// Session-scoped configuration options tracked for supported `set_session_config_option` calls.
+    session_configs: Arc<Mutex<HashMap<protocol::SessionId, Vec<SessionConfigOption>>>>,
 }
 
 impl ClawcodeAgent {
@@ -64,6 +69,7 @@ impl ClawcodeAgent {
             client_capabilities: Arc::default(),
             fs_router,
             terminal_router,
+            session_configs: Arc::default(),
         }
     }
 
@@ -73,6 +79,179 @@ impl ClawcodeAgent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Build and store the default session configuration options for a session.
+    fn set_session_config_defaults(
+        &self,
+        session_id: protocol::SessionId,
+        modes: &[protocol::config::SessionMode],
+        models: &[protocol::ModelInfo],
+    ) -> Vec<SessionConfigOption> {
+        let config_options = Self::build_session_config_options(modes, models);
+
+        self.session_configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id, config_options.clone());
+
+        config_options
+    }
+
+    /// Build the default set of config options from available session modes and models.
+    fn build_session_config_options(
+        modes: &[protocol::config::SessionMode],
+        models: &[protocol::ModelInfo],
+    ) -> Vec<SessionConfigOption> {
+        let mut options = Vec::new();
+
+        if let Some(default_mode) = modes.first() {
+            let select_options = modes
+                .iter()
+                .map(|mode| {
+                    SessionConfigSelectOption::new(mode.id.clone(), mode.name.clone())
+                        .description(mode.description.clone())
+                })
+                .collect::<Vec<_>>();
+
+            let default_value = SessionConfigValueId::new(default_mode.id.clone());
+            options.push(
+                SessionConfigOption::select(
+                    SessionConfigId::new("mode"),
+                    "Mode",
+                    default_value,
+                    select_options,
+                )
+                .category(SessionConfigOptionCategory::Mode),
+            );
+        }
+
+        if let Some(default_model) = models.first() {
+            let select_options = models
+                .iter()
+                .map(|model| {
+                    SessionConfigSelectOption::new(model.id.clone(), model.display_name.clone())
+                        .description(model.description.clone())
+                })
+                .collect::<Vec<_>>();
+
+            options.push(
+                SessionConfigOption::select(
+                    SessionConfigId::new("model"),
+                    "Model",
+                    SessionConfigValueId::new(default_model.id.clone()),
+                    select_options,
+                )
+                .category(SessionConfigOptionCategory::Model),
+            );
+        }
+
+        options
+    }
+
+    /// Return a clone of the current session config option snapshot.
+    fn session_config_snapshot(
+        &self,
+        session_id: &protocol::SessionId,
+    ) -> Option<Vec<SessionConfigOption>> {
+        self.session_configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Update the current value for a single session configuration option in-memory.
+    fn set_session_config_current_value(
+        &self,
+        session_id: &protocol::SessionId,
+        config_id: &str,
+        value: &str,
+    ) -> bool {
+        let mut sessions = self
+            .session_configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let options = match sessions.get_mut(session_id) {
+            Some(configs) => configs,
+            None => return false,
+        };
+
+        for option in options.iter_mut() {
+            if option.id.0.as_ref() != config_id {
+                continue;
+            }
+
+            if let SessionConfigKind::Select(select) = &mut option.kind {
+                let requested = SessionConfigValueId::new(value);
+                if !self.session_config_select_contains_value(&select.options, &requested) {
+                    return false;
+                }
+
+                select.current_value = requested;
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a session config option exists and exposes a specific selectable value.
+    fn has_session_config_value(
+        &self,
+        session_id: &protocol::SessionId,
+        config_id: &str,
+        value: &str,
+    ) -> bool {
+        let sessions = self
+            .session_configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let Some(options) = sessions.get(session_id) else {
+            return false;
+        };
+
+        let requested = SessionConfigValueId::new(value);
+        options.iter().any(|option| {
+            option.id.0.as_ref() == config_id
+                && match &option.kind {
+                    SessionConfigKind::Select(select) => {
+                        self.session_config_select_contains_value(&select.options, &requested)
+                    }
+                    _ => false,
+                }
+        })
+    }
+
+    fn session_config_select_contains_value(
+        &self,
+        options: &SessionConfigSelectOptions,
+        value: &SessionConfigValueId,
+    ) -> bool {
+        match options {
+            SessionConfigSelectOptions::Ungrouped(values) => {
+                values.iter().any(|candidate| candidate.value == *value)
+            }
+            SessionConfigSelectOptions::Grouped(groups) => {
+                groups.iter().any(|group: &SessionConfigSelectGroup| {
+                    group
+                        .options
+                        .iter()
+                        .any(|candidate| candidate.value == *value)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Clear all cached configuration snapshots for a closed session.
+    fn clear_session_configs(&self, session_id: &protocol::SessionId) {
+        self.session_configs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 
     /// Convert an internal SessionId to an ACP SessionId.
@@ -346,21 +525,6 @@ impl ClawcodeAgent {
             .on_receive_request(
                 {
                     let agent = agent.clone();
-                    async move |request: AuthenticateRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(agent.handle_authenticate(request).await)
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
                     async move |request: NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                         let agent = agent.clone();
                         let cx2 = cx.clone();
@@ -466,6 +630,23 @@ impl ClawcodeAgent {
             .on_receive_request(
                 {
                     let agent = agent.clone();
+                    async move |request: SetSessionConfigOptionRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = agent.clone();
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_set_session_config_option(request).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = agent.clone();
                     async move |request: CloseSessionRequest,
                                 responder,
                                 cx: ConnectionTo<Client>| {
@@ -495,10 +676,13 @@ impl ClawcodeAgent {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = request.client_capabilities;
 
         let mut caps = AgentCapabilities::new()
-            .prompt_capabilities(PromptCapabilities::new().embedded_context(true))
+            .prompt_capabilities(
+                PromptCapabilities::new()
+                    .embedded_context(true)
+                    .image(false),
+            )
             .mcp_capabilities(McpCapabilities::new().http(true))
-            .load_session(true)
-            .auth(AgentAuthCapabilities::new().logout(LogoutCapabilities::new()));
+            .load_session(true);
 
         caps.session_capabilities = SessionCapabilities::new()
             .close(SessionCloseCapabilities::new())
@@ -509,13 +693,6 @@ impl ClawcodeAgent {
             .agent_info(
                 Implementation::new("claw-acp", env!("CARGO_PKG_VERSION")).title("Clawcode"),
             ))
-    }
-
-    async fn handle_authenticate(
-        &self,
-        _request: AuthenticateRequest,
-    ) -> Result<AuthenticateResponse, Error> {
-        Ok(AuthenticateResponse::new())
     }
 
     async fn handle_new_session(
@@ -538,8 +715,13 @@ impl ClawcodeAgent {
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
 
         let acp_session_id = Self::to_acp_session_id(&created.session_id);
-        let mode_state = Self::to_acp_mode_state(created.modes);
-        let model_state = Self::to_acp_model_state(created.models);
+        let mode_state = Self::to_acp_mode_state(created.modes.clone());
+        let model_state = Self::to_acp_model_state(created.models.clone());
+        let config_options = self.set_session_config_defaults(
+            created.session_id.clone(),
+            &created.modes,
+            &created.models,
+        );
         self.fs_router.register_session(
             created.session_id.clone(),
             cx.clone(),
@@ -553,7 +735,8 @@ impl ClawcodeAgent {
 
         Ok(NewSessionResponse::new(acp_session_id)
             .modes(mode_state)
-            .models(model_state))
+            .models(model_state)
+            .config_options(config_options))
     }
 
     /// Load a persisted session through the kernel and return initial ACP state.
@@ -578,10 +761,15 @@ impl ClawcodeAgent {
             .map_err(|error| Error::internal_error().data(error.to_string()))?;
 
         let acp_session_id = Self::to_acp_session_id(&created.session_id);
+        let config_options = self.set_session_config_defaults(
+            created.session_id.clone(),
+            &created.modes,
+            &created.models,
+        );
         Self::replay_history(&acp_session_id, &created.history, &cx).await?;
 
-        let mode_state = Self::to_acp_mode_state(created.modes);
-        let model_state = Self::to_acp_model_state(created.models);
+        let mode_state = Self::to_acp_mode_state(created.modes.clone());
+        let model_state = Self::to_acp_model_state(created.models.clone());
         self.fs_router.register_session(
             created.session_id.clone(),
             cx.clone(),
@@ -595,7 +783,8 @@ impl ClawcodeAgent {
 
         Ok(LoadSessionResponse::new()
             .modes(mode_state)
-            .models(model_state))
+            .models(model_state)
+            .config_options(config_options))
     }
 
     /// List persisted sessions through the kernel and convert them into ACP session summaries.
@@ -629,16 +818,17 @@ impl ClawcodeAgent {
     ) -> Result<PromptResponse, Error> {
         let session_id = SessionId(request.session_id.0.to_string());
 
-        // Extract text from prompt blocks
+        // Keep supported prompt blocks from ACP and forward them as plain kernel text.
         let text = request
             .prompt
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
+            .into_iter()
+            .filter_map(Self::prompt_block_to_text)
             .collect::<Vec<_>>()
             .join("\n");
+
+        if text.is_empty() {
+            return Err(Error::invalid_params().data("prompt must include a text block"));
+        }
 
         let acp_sid = AcpSessionId::new(request.session_id.0.to_string());
 
@@ -661,25 +851,6 @@ impl ClawcodeAgent {
                 Event::AgentThoughtChunk { text, .. } => {
                     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
                     let update = SessionUpdate::AgentThoughtChunk(chunk);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
-                }
-                Event::ToolCallDelta {
-                    call_id, content, ..
-                } => {
-                    // Stream incremental tool call building to the client.
-                    let mut fields = ToolCallUpdateFields::default();
-                    match content {
-                        protocol::event::ToolCallDeltaContent::Name(n) => {
-                            fields.title = Some(n);
-                        }
-                        protocol::event::ToolCallDeltaContent::Delta(d) => {
-                            fields.content = Some(vec![ToolCallContent::Content(Content::new(
-                                ContentBlock::Text(TextContent::new(d)),
-                            ))]);
-                        }
-                    }
-                    let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
-                    let update = SessionUpdate::ToolCallUpdate(update_val);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }
                 Event::ToolCall {
@@ -715,6 +886,32 @@ impl ClawcodeAgent {
                     let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
                     let update = SessionUpdate::ToolCallUpdate(update_val);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::ExecCommandOutputDelta {
+                    call_id,
+                    stream,
+                    chunk,
+                    ..
+                } => {
+                    // Translate shell output stream chunks into ACP ToolCallUpdate
+                    // events so the terminal-like progress remains visible in Zed.
+                    let stream_name = match stream {
+                        protocol::event::ExecOutputStream::Stdout => "stdout",
+                        protocol::event::ExecOutputStream::Stderr => "stderr",
+                    };
+                    let decoded = String::from_utf8_lossy(&chunk);
+                    if !decoded.is_empty() {
+                        let line = format!("[{stream_name}] {decoded}");
+                        let mut fields = ToolCallUpdateFields::default();
+                        fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                            ContentBlock::Text(TextContent::new(line)),
+                        ))]);
+                        fields.status = Some(AcpToolCallStatus::InProgress);
+                        let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
+                        let update = SessionUpdate::ToolCallUpdate(update_val);
+                        let _ =
+                            cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    }
                 }
                 Event::ItemStarted { item, .. } => {
                     if let Some(update) = item.start() {
@@ -806,6 +1003,50 @@ impl ClawcodeAgent {
         Ok(PromptResponse::new(AcpStopReason::EndTurn))
     }
 
+    /// Convert supported ACP prompt blocks into the kernel text format.
+    fn prompt_block_to_text(block: ContentBlock) -> Option<String> {
+        match block {
+            ContentBlock::Text(t) => Some(t.text),
+            ContentBlock::ResourceLink(link) => {
+                Some(Self::format_uri_as_link(Some(link.name), link.uri))
+            }
+            ContentBlock::Resource(EmbeddedResource {
+                resource:
+                    EmbeddedResourceResource::TextResourceContents(TextResourceContents {
+                        text,
+                        uri,
+                        ..
+                    }),
+                ..
+            }) => Some(format!(
+                "{}\n<context ref=\"{uri}\">\n{text}\n</context>",
+                Self::format_uri_as_link(None, uri.clone())
+            )),
+            // Audio and image blocks are intentionally unsupported in this iteration.
+            // Skip them so callers can still send mixed prompts with plain text/link.
+            ContentBlock::Audio(_) | ContentBlock::Image(_) => None,
+            // Skip unsupported embedded content formats to keep the behavior stable.
+            ContentBlock::Resource(..) | _ => None,
+        }
+    }
+
+    /// Render a resource link as the mention-style syntax expected by the kernel.
+    fn format_uri_as_link(name: Option<String>, uri: String) -> String {
+        if let Some(name) = name
+            && !name.is_empty()
+        {
+            format!("[@{name}]({uri})")
+        } else if let Some(path) = uri.strip_prefix("file://") {
+            let name = path.split('/').next_back().unwrap_or(path);
+            format!("[@{name}]({uri})")
+        } else if uri.starts_with("zed://") {
+            let name = uri.split('/').next_back().unwrap_or(&uri);
+            format!("[@{name}]({uri})")
+        } else {
+            uri
+        }
+    }
+
     async fn handle_cancel(&self, notification: CancelNotification) -> Result<(), Error> {
         let session_id = SessionId(notification.session_id.0.to_string());
         self.kernel
@@ -823,6 +1064,8 @@ impl ClawcodeAgent {
             .set_mode(&session_id, &request.mode_id.0)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
+
+        let _ = self.set_session_config_current_value(&session_id, "mode", &request.mode_id.0);
         Ok(SetSessionModeResponse::default())
     }
 
@@ -844,7 +1087,74 @@ impl ClawcodeAgent {
             .set_model(&session_id, provider_id, model_id)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
+
+        let _ = self.set_session_config_current_value(&session_id, "model", &request.model_id.0);
         Ok(SetSessionModelResponse::default())
+    }
+
+    async fn handle_set_session_config_option(
+        &self,
+        request: SetSessionConfigOptionRequest,
+    ) -> Result<SetSessionConfigOptionResponse, Error> {
+        let session_id = SessionId(request.session_id.0.to_string());
+        let config_id = request.config_id.0.as_ref();
+        let requested = match request.value {
+            SessionConfigOptionValue::ValueId { value } => value.to_string(),
+            SessionConfigOptionValue::Boolean { .. } => {
+                return Err(Error::invalid_params()
+                    .data("session config option value type is not supported"));
+            }
+            _ => {
+                return Err(Error::invalid_params()
+                    .data("session config option value type is not supported"));
+            }
+        };
+
+        if self.session_config_snapshot(&session_id).is_none() {
+            return Err(Error::resource_not_found(Some(format!(
+                "session not found: {}",
+                request.session_id.0.as_ref()
+            ))));
+        }
+
+        if !self.has_session_config_value(&session_id, config_id, requested.as_str()) {
+            return Err(
+                Error::invalid_params().data("session config option or value is not supported")
+            );
+        }
+
+        match config_id {
+            "mode" => {
+                self.kernel
+                    .set_mode(&session_id, &requested)
+                    .await
+                    .map_err(|e| Error::internal_error().data(e.to_string()))?;
+            }
+            "model" => {
+                let mut parts = requested.splitn(2, '/');
+                let provider_id = parts.next().unwrap_or("");
+                let model_id = parts.next().unwrap_or(requested.as_str());
+
+                self.kernel
+                    .set_model(&session_id, provider_id, model_id)
+                    .await
+                    .map_err(|e| Error::internal_error().data(e.to_string()))?;
+            }
+            _ => {
+                return Err(Error::invalid_params().data("unsupported session config option"));
+            }
+        }
+
+        let _ = self.set_session_config_current_value(&session_id, config_id, requested.as_str());
+
+        let updated = self.session_config_snapshot(&session_id).ok_or_else(|| {
+            Error::resource_not_found(Some(format!(
+                "session not found: {}",
+                request.session_id.0.as_ref()
+            )))
+        })?;
+
+        Ok(SetSessionConfigOptionResponse::new(updated))
     }
 
     async fn handle_close_session(
@@ -856,6 +1166,7 @@ impl ClawcodeAgent {
             .close_session(&session_id)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
+        self.clear_session_configs(&session_id);
         self.fs_router.unregister_session(&session_id);
         self.terminal_router.unregister_session(&session_id);
         Ok(CloseSessionResponse::new())
@@ -878,6 +1189,10 @@ mod tests {
     struct RecordingKernel {
         new_session_options: std::sync::Mutex<Option<SessionLaunchOptions>>,
         load_session_options: std::sync::Mutex<Option<SessionLaunchOptions>>,
+        set_mode_calls: std::sync::Mutex<Vec<String>>,
+        set_model_calls: std::sync::Mutex<Vec<(String, String)>>,
+        available_modes: Vec<SessionMode>,
+        available_models: Vec<ModelInfo>,
     }
 
     #[async_trait]
@@ -892,7 +1207,10 @@ mod tests {
                 .new_session_options
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(options);
-            Ok(session_created())
+            Ok(session_created(
+                self.available_modes.clone(),
+                self.available_models.clone(),
+            ))
         }
 
         /// Record load-session launch options for ACP handler tests.
@@ -906,7 +1224,10 @@ mod tests {
                 .load_session_options
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(options);
-            Ok(session_created())
+            Ok(session_created(
+                self.available_modes.clone(),
+                self.available_models.clone(),
+            ))
         }
 
         /// Return an empty session list; list behavior is outside these tests.
@@ -937,6 +1258,10 @@ mod tests {
 
         /// Accept mode changes in the fake kernel.
         async fn set_mode(&self, _session_id: &SessionId, _mode: &str) -> Result<(), KernelError> {
+            self.set_mode_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(_mode.to_string());
             Ok(())
         }
 
@@ -947,6 +1272,10 @@ mod tests {
             _provider_id: &str,
             _model_id: &str,
         ) -> Result<(), KernelError> {
+            self.set_model_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((_provider_id.to_string(), _model_id.to_string()));
             Ok(())
         }
 
@@ -978,21 +1307,49 @@ mod tests {
 
         /// Return no modes; ACP conversion has fallbacks for empty state.
         fn available_modes(&self) -> Vec<SessionMode> {
-            Vec::new()
+            self.available_modes.clone()
         }
 
         /// Return no models; ACP conversion has fallbacks for empty state.
         fn available_models(&self) -> Vec<ModelInfo> {
-            Vec::new()
+            self.available_models.clone()
         }
     }
 
-    /// Build a minimal session-created response for ACP handler tests.
-    fn session_created() -> SessionCreated {
+    fn kernel_with_configs(
+        modes: Vec<SessionMode>,
+        models: Vec<ModelInfo>,
+    ) -> Arc<RecordingKernel> {
+        Arc::new(RecordingKernel {
+            available_modes: modes,
+            available_models: models,
+            ..Default::default()
+        })
+    }
+
+    fn default_config_modes() -> Vec<SessionMode> {
+        vec![SessionMode {
+            id: "auto".to_string(),
+            name: "Auto".to_string(),
+            description: Some("Default mode".to_string()),
+        }]
+    }
+
+    fn default_config_models() -> Vec<ModelInfo> {
+        vec![
+            ModelInfo::builder()
+                .id("deepseek/deepseek-chat".to_string())
+                .display_name("DeepSeek Chat".to_string())
+                .build(),
+        ]
+    }
+
+    /// Build a session-created response for ACP handler tests.
+    fn session_created(modes: Vec<SessionMode>, models: Vec<ModelInfo>) -> SessionCreated {
         SessionCreated::builder()
             .session_id(protocol::SessionId("session-1".to_string()))
-            .modes(Vec::new())
-            .models(Vec::new())
+            .modes(modes)
+            .models(models)
             .build()
     }
 
@@ -1062,6 +1419,177 @@ mod tests {
         assert!(stored.fs.read_text_file);
         assert!(stored.fs.write_text_file);
         assert!(!response.agent_capabilities.prompt_capabilities.image);
+    }
+
+    #[tokio::test]
+    async fn new_session_registers_initial_config_options() {
+        let kernel = kernel_with_configs(default_config_modes(), default_config_models());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = NewSessionRequest::new(PathBuf::from("/tmp"));
+        let client = test_connection_to_client().await;
+
+        let response = agent
+            .handle_new_session(request, client)
+            .await
+            .expect("new session should include config options");
+
+        let config_options = response
+            .config_options
+            .expect("new session should return session config options");
+        assert_eq!(config_options.len(), 2);
+
+        let mode = config_options
+            .iter()
+            .find(|option| option.id.0.as_ref() == "mode")
+            .expect("mode config should exist");
+        let SessionConfigKind::Select(mode_select) = &mode.kind else {
+            panic!("expected mode to use select config kind");
+        };
+        assert_eq!(mode_select.current_value.0.as_ref(), "auto");
+
+        let model = config_options
+            .iter()
+            .find(|option| option.id.0.as_ref() == "model")
+            .expect("model config should exist");
+        let SessionConfigKind::Select(model_select) = &model.kind else {
+            panic!("expected model to use select config kind");
+        };
+        assert_eq!(
+            model_select.current_value.0.as_ref(),
+            "deepseek/deepseek-chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_config_option_updates_mode_and_kernel() {
+        let kernel = kernel_with_configs(default_config_modes(), default_config_models());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = NewSessionRequest::new(PathBuf::from("/tmp"));
+        let client = test_connection_to_client().await;
+        let response = agent
+            .handle_new_session(request, client)
+            .await
+            .expect("new session should succeed");
+
+        let set = SetSessionConfigOptionRequest::new(response.session_id.clone(), "mode", "auto");
+        let updated = agent
+            .handle_set_session_config_option(set)
+            .await
+            .expect("set_session_config_option should succeed");
+
+        let mode = updated
+            .config_options
+            .into_iter()
+            .find(|option| option.id.0.as_ref() == "mode")
+            .expect("mode should still be present");
+
+        let SessionConfigKind::Select(mode_select) = mode.kind else {
+            panic!("expected mode to use select config kind");
+        };
+        assert_eq!(mode_select.current_value.0.as_ref(), "auto");
+
+        assert_eq!(
+            kernel
+                .set_mode_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            ["auto"].as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_config_option_rejects_unsupported_config_id() {
+        let kernel = kernel_with_configs(default_config_modes(), default_config_models());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = NewSessionRequest::new(PathBuf::from("/tmp"));
+        let client = test_connection_to_client().await;
+        let response = agent
+            .handle_new_session(request, client)
+            .await
+            .expect("new session should succeed");
+
+        let set =
+            SetSessionConfigOptionRequest::new(response.session_id.clone(), "unsupported", "x");
+
+        agent
+            .handle_set_session_config_option(set)
+            .await
+            .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn set_session_config_option_rejects_unsupported_value() {
+        let kernel = kernel_with_configs(default_config_modes(), default_config_models());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = NewSessionRequest::new(PathBuf::from("/tmp"));
+        let client = test_connection_to_client().await;
+        let response = agent
+            .handle_new_session(request, client)
+            .await
+            .expect("new session should succeed");
+
+        let set =
+            SetSessionConfigOptionRequest::new(response.session_id.clone(), "mode", "unknown");
+
+        agent
+            .handle_set_session_config_option(set)
+            .await
+            .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_accepts_text_with_other_blocks() {
+        let kernel = Arc::new(RecordingKernel::default());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new("session-1"),
+            vec![
+                ContentBlock::Text(TextContent::new("hello".to_string())),
+                ContentBlock::Image(ImageContent::new("image-data", "image/png")),
+            ],
+        );
+
+        let client = test_connection_to_client().await;
+        let result = agent.handle_prompt(request, client).await;
+
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_accepts_resource_link() {
+        let kernel = Arc::new(RecordingKernel::default());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new("session-1"),
+            vec![ContentBlock::ResourceLink(ResourceLink::new(
+                "README".to_string(),
+                "file:///tmp/README.md".to_string(),
+            ))],
+        );
+
+        let client = test_connection_to_client().await;
+        let result = agent.handle_prompt(request, client).await;
+
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_rejects_non_text_only_content() {
+        let kernel = Arc::new(RecordingKernel::default());
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new("session-1"),
+            vec![ContentBlock::Image(ImageContent::new(
+                "image-data",
+                "image/png",
+            ))],
+        );
+
+        let client = test_connection_to_client().await;
+        let result = agent.handle_prompt(request, client).await;
+
+        result.unwrap_err();
     }
 
     #[tokio::test]

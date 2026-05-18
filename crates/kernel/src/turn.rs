@@ -200,10 +200,12 @@ pub(crate) async fn execute_turn(
                     if tool_call.id.is_empty() {
                         tool_call.id = internal_call_id.clone();
                     }
+                    // Always use the canonical tool-call id for frontend correlation.
+                    // Keep `internal_call_id` only as a parser-local fallback.
+                    let event_call_id = tool_call.id.clone();
 
                     let (text, _succeeded) =
-                        dispatch_tool(ctx, tx_event, &internal_call_id, &tool_call, &tool_ctx)
-                            .await?;
+                        dispatch_tool(ctx, tx_event, &event_call_id, &tool_call, &tool_ctx).await?;
 
                     assistant_content.push(AssistantContent::ToolCall(tool_call.clone()));
 
@@ -240,15 +242,17 @@ pub(crate) async fn execute_turn(
                 }
                 LlmStreamEvent::ToolCallDelta {
                     internal_call_id,
+                    id,
                     content,
                     ..
                 } => {
                     // Forward incremental tool call arguments to the frontend.
-                    let _ = tx_event.send(Event::tool_call_delta(
-                        sid.clone(),
-                        internal_call_id,
-                        content,
-                    ));
+                    let call_id = if id.is_empty() {
+                        internal_call_id.as_str()
+                    } else {
+                        id.as_str()
+                    };
+                    let _ = tx_event.send(Event::tool_call_delta(sid.clone(), call_id, content));
                 }
                 LlmStreamEvent::Final {
                     usage: Some(usage), ..
@@ -385,6 +389,8 @@ async fn dispatch_tool(
         .is_some_and(|tool| tool.needs_approval(arguments, tool_ctx));
 
     if needs_approval && ctx.approval.mode() != ApprovalMode::Yolo {
+        // Approval-required tools need an explicit pending event first so the
+        // frontend can show the confirm action before execution starts.
         let _ = tx_event.send(Event::tool_call(
             ctx.session_id.clone(),
             ctx.agent_path.clone(),
@@ -393,7 +399,6 @@ async fn dispatch_tool(
             arguments.clone(),
             ToolCallStatus::Pending,
         ));
-
         match request_tool_approval(ctx, tx_event, call_id, tool_name, arguments.clone()).await? {
             ReviewDecision::Abort => return Err(KernelError::Cancelled),
             ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {}
@@ -408,14 +413,18 @@ async fn dispatch_tool(
                 return Ok((msg, false));
             }
         }
-    }
-
-    let tool = ctx
-        .tools
-        .get(tool_name)
-        .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("unknown tool: {tool_name}")))?;
-
-    if !tool.capability().supports_streaming {
+        // Once approved, convert the call to InProgress so UI keeps a stable
+        // tool-call anchor while the execution stream is running.
+        let _ = tx_event.send(Event::tool_call_update(
+            ctx.session_id.clone(),
+            call_id,
+            None,
+            Some(ToolCallStatus::InProgress),
+        ));
+    } else {
+        // Tools that do not require approval can begin immediately; emit an
+        // InProgress ToolCall so clients that subscribe to call status can
+        // render a live tool row.
         let _ = tx_event.send(Event::tool_call(
             ctx.session_id.clone(),
             ctx.agent_path.clone(),
@@ -425,6 +434,11 @@ async fn dispatch_tool(
             ToolCallStatus::InProgress,
         ));
     }
+
+    let tool = ctx
+        .tools
+        .get(tool_name)
+        .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("unknown tool: {tool_name}")))?;
 
     let (text, mut stream) = tool
         .execute_streaming(arguments.clone(), tool_ctx)
@@ -453,6 +467,19 @@ async fn dispatch_tool(
                         matches!(item.status, McpToolCallStatus::Completed)
                     }
                 };
+                // Emit a final status update before item completion so ACP clients
+                // can show a deterministic transition to completed/failed.
+                let status = if succeeded {
+                    ToolCallStatus::Completed
+                } else {
+                    ToolCallStatus::Failed
+                };
+                let _ = tx_event.send(Event::tool_call_update(
+                    ctx.session_id.clone(),
+                    call_id,
+                    None,
+                    Some(status),
+                ));
                 let _ = tx_event.send(Event::item_completed(
                     ctx.session_id.clone(),
                     ctx.turn_id.clone(),
