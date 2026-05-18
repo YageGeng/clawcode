@@ -1,6 +1,6 @@
 //! Ratatui rendering for the local TUI.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use crate::ui::state::AppState;
+use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
 use crate::ui::{approval, layout, status, transcript};
 
@@ -19,7 +20,7 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, compose
 
     transcript::render_transcript(frame, rows.transcript, state, view);
     status::render_top_status(frame, rows.top_status, state);
-    render_composer(frame, rows.composer, composer_text);
+    render_composer(frame, rows.composer, composer_text, state.theme());
     status::render_bottom_status(frame, rows.bottom_status, state);
 
     if let Some(approval) = state.pending_approval() {
@@ -34,8 +35,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, compose
 }
 
 /// Renders the input composer row.
-fn render_composer(frame: &mut Frame<'_>, area: Rect, text: &str) {
-    let composer_style = Style::default().bg(Color::Rgb(235, 238, 244));
+fn render_composer(frame: &mut Frame<'_>, area: Rect, text: &str, theme: &Theme) {
+    // No explicit background; lets the terminal background show through.
+    let composer_style = Style::default().bg(theme.composer_bg());
     let vertical_padding = area
         .height
         .saturating_sub(text.lines().count().max(1) as u16)

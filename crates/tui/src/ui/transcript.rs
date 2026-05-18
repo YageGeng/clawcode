@@ -25,7 +25,7 @@ pub(super) fn render_transcript(
     let mut lines = Vec::new();
     for cell in state.transcript() {
         lines.extend(wrap_display_lines(
-            cell.display_lines(area.width),
+            cell.display_lines_with_theme(area.width, state.theme()),
             area.width,
         ));
         lines.push(Line::from(""));

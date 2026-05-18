@@ -7,5 +7,6 @@ pub mod layout;
 pub mod render;
 pub mod state;
 pub mod status;
+pub mod theme;
 pub mod transcript;
 pub mod view;

@@ -6,6 +6,9 @@ active_model = "deepseek/deepseek-v4-flash"
 # Approval strategy to use.
 approval = "yolo"
 
+[tui]
+theme = "light"
+
 [[providers]]
 id = "openai"
 display_name = "OpenAI"

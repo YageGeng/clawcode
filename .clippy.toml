@@ -26,3 +26,14 @@ allow-unwrap-in-tests = true
 allow-panic-in-tests = true
 # Allow indexing/slicing in tests
 allow-indexing-slicing-in-tests = true
+
+# Ratatui colour discipline: semantic ANSI-only, no RGB/Indexed/hardcoded white/black/yellow.
+# Mirrors the codex-rs clippy.toml style guide: prefer ANSI colours that adapt
+# to the terminal theme, routed through broad semantic tokens.
+disallowed-methods = [
+    { path = "ratatui::style::Color::Rgb", reason = "Use semantic ANSI colors via the theme module (crates/tui/src/ui/theme)." },
+    { path = "ratatui::style::Color::Indexed", reason = "Use semantic ANSI colors via the theme module (crates/tui/src/ui/theme)." },
+    { path = "ratatui::style::Stylize::white", reason = "Avoid hardcoding white; prefer default fg or dim/bold." },
+    { path = "ratatui::style::Stylize::black", reason = "Avoid hardcoding black; prefer default fg or dim/bold." },
+    { path = "ratatui::style::Stylize::yellow", reason = "Avoid yellow; prefer other ANSI colours defined in the theme." },
+]

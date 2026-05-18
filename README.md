@@ -63,6 +63,9 @@ Create `~/.config/clawcode/config.toml`. For repo-local experiments, create `./c
 active_model = "deepseek/deepseek-v4-pro"
 approval = "yolo"  # or "on_request"
 
+[tui]
+theme = "dark"  # or "light"
+
 [[providers]]
 id = "deepseek"
 display_name = "DeepSeek"

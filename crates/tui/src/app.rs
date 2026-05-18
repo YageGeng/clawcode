@@ -19,6 +19,7 @@ use crate::ui::approval::decision_for_key;
 use crate::ui::composer::{Composer, ComposerAction};
 use crate::ui::render::render;
 use crate::ui::state::AppState;
+use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
 
 type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
@@ -32,11 +33,12 @@ pub async fn run(
     resume: Option<SessionId>,
     use_alt_screen: bool,
 ) -> anyhow::Result<()> {
+    let theme = Theme::from_config(config::load()?.current().tui.theme);
     let (app_tx, app_rx) = mpsc::unbounded_channel::<AppEvent>();
     acp_client::with_in_process_client(app_tx.clone(), move |client| async move {
         client.initialize().await?;
         let (session_id, model_label) = open_session(&client, cwd.clone(), resume).await?;
-        let mut state = AppState::new(session_id, cwd, model_label);
+        let mut state = AppState::new_with_theme(session_id, cwd, model_label, theme);
         let mut view = ViewState::default();
         let mut composer = Composer::default();
 

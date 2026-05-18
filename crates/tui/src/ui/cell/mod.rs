@@ -2,6 +2,8 @@
 
 use ratatui::text::Line;
 
+use super::theme::Theme;
+
 mod terminal_output;
 mod text;
 mod tool;
@@ -31,9 +33,14 @@ impl TranscriptCell {
 
     /// Returns styled logical lines for this transcript cell.
     pub fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.display_lines_with_theme(width, &Theme::dark())
+    }
+
+    /// Returns styled logical lines using the configured render theme.
+    pub fn display_lines_with_theme(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
         match self {
-            TranscriptCell::Text(cell) => cell.display_lines(width),
-            TranscriptCell::ToolCall(cell) => cell.display_lines(width),
+            TranscriptCell::Text(cell) => cell.display_lines_with_theme(width, theme),
+            TranscriptCell::ToolCall(cell) => cell.display_lines_with_theme(width, theme),
         }
     }
 

@@ -1,6 +1,6 @@
 //! Status row rendering helpers for the local TUI.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, layout::Rect};
@@ -8,8 +8,17 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::state::AppState;
 
-const MODEL_STYLE: Style = Style::new().fg(Color::Rgb(245, 158, 11));
-const CWD_STYLE: Style = Style::new().fg(Color::Green);
+use super::theme::Theme;
+
+/// Returns the model style for the configured render theme.
+fn model_style_with_theme(theme: &Theme) -> Style {
+    Style::new().fg(theme.model_label())
+}
+
+/// Returns the cwd style for the configured render theme.
+fn cwd_style_with_theme(theme: &Theme) -> Style {
+    Style::new().fg(theme.cwd())
+}
 
 /// Renders the top status row.
 pub(super) fn render_top_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -38,7 +47,7 @@ fn bottom_status_line(state: &AppState, width: usize) -> Line<'static> {
     let suffix_width = UnicodeWidthStr::width(separator) + token_width;
     if width > suffix_width {
         let prefix_width = width - suffix_width;
-        let mut spans = styled_prefix_spans(model, &cwd, prefix_width);
+        let mut spans = styled_prefix_spans(model, &cwd, prefix_width, state.theme());
         spans.push(Span::raw(separator));
         spans.push(Span::raw(token_status));
         return Line::from(spans);
@@ -51,16 +60,21 @@ fn bottom_status_line(state: &AppState, width: usize) -> Line<'static> {
 }
 
 /// Builds colored model/cwd prefix spans after applying display-width truncation.
-fn styled_prefix_spans(model: &str, cwd: &str, max_width: usize) -> Vec<Span<'static>> {
+fn styled_prefix_spans(
+    model: &str,
+    cwd: &str,
+    max_width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
     let prefix = truncate_to_display_width(&format!("{model} | {cwd}"), max_width);
     if let Some((model_part, cwd_part)) = prefix.split_once(" | ") {
         vec![
-            Span::styled(model_part.to_string(), MODEL_STYLE),
+            Span::styled(model_part.to_string(), model_style_with_theme(theme)),
             Span::raw(" | "),
-            Span::styled(cwd_part.to_string(), CWD_STYLE),
+            Span::styled(cwd_part.to_string(), cwd_style_with_theme(theme)),
         ]
     } else {
-        vec![Span::styled(prefix, MODEL_STYLE)]
+        vec![Span::styled(prefix, model_style_with_theme(theme))]
     }
 }
 
@@ -117,8 +131,11 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer.cell((0, 0)).expect("model cell").fg,
-            Color::Rgb(245, 158, 11)
+            Theme::dark().model_label()
         );
-        assert_eq!(buffer.cell((15, 0)).expect("cwd cell").fg, Color::Green);
+        assert_eq!(
+            buffer.cell((15, 0)).expect("cwd cell").fg,
+            Theme::dark().cwd()
+        );
     }
 }

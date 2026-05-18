@@ -8,6 +8,7 @@ use crate::agent::MultiAgentConfig;
 use crate::llm::LlmProvider;
 use crate::mcp::McpServerConfig;
 use crate::skills::SkillsConfig;
+use crate::tui::TuiConfig;
 
 /// File-backed session persistence settings.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -53,6 +54,9 @@ pub struct AppConfig {
     /// File-backed session persistence configuration.
     #[serde(default)]
     pub session_persistence: SessionPersistenceConfig,
+    /// Local terminal UI configuration.
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 /// Return the default session persistence enablement.
@@ -74,6 +78,7 @@ impl Default for AppConfig {
             skills: SkillsConfig::default(),
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
+            tui: TuiConfig::default(),
         }
     }
 }
@@ -98,5 +103,19 @@ mod tests {
     fn app_config_default_is_empty() {
         let cfg = AppConfig::default();
         assert!(cfg.providers.is_empty());
+    }
+
+    /// AppConfig reads the TUI theme from the nested tui section.
+    #[test]
+    fn app_config_reads_tui_theme() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[tui]
+theme = "light"
+"#,
+        )
+        .expect("parse app config");
+
+        assert_eq!(cfg.tui.theme, crate::tui::TuiTheme::Light);
     }
 }

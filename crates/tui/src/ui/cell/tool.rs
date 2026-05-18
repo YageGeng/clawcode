@@ -3,17 +3,14 @@
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::ToolCallStatus;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::super::theme::Theme;
 use super::terminal_output::terminal_display_lines;
 
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 5;
 const TOOL_DIFF_PREVIEW_LINES: usize = 24;
-/// Background used for added file lines in structured diff output.
-const DIFF_ADDED_BG: Color = Color::Rgb(18, 66, 42);
-/// Background used for removed file lines in structured diff output.
-const DIFF_REMOVED_BG: Color = Color::Rgb(76, 34, 38);
 
 /// Renderable view of an ACP tool call.
 #[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
@@ -113,9 +110,14 @@ impl ToolCallCell {
 
     /// Returns styled logical lines for this tool-call cell.
     pub fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        self.display_lines_with_theme(_width, &Theme::dark())
+    }
+
+    /// Returns styled logical lines using the configured render theme.
+    pub fn display_lines_with_theme(&self, _width: u16, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         lines.push(Line::from(vec![
-            status_bullet(self.status),
+            status_bullet(self.status, theme),
             " ".into(),
             Span::styled(
                 format!("{} {}", status_verb(self.status), self.summary()),
@@ -128,7 +130,7 @@ impl ToolCallCell {
             &self.output,
             self.diffs.is_empty(),
         );
-        append_tool_diff_preview_lines(&mut lines, &self.diffs);
+        append_tool_diff_preview_lines(&mut lines, &self.diffs, theme);
         lines
     }
 
@@ -229,14 +231,18 @@ fn append_tool_output_preview_lines(
 }
 
 /// Appends unified diff-style display lines for structured file diffs.
-fn append_tool_diff_preview_lines(lines: &mut Vec<Line<'static>>, diffs: &[ToolCallDiff]) {
+fn append_tool_diff_preview_lines(
+    lines: &mut Vec<Line<'static>>,
+    diffs: &[ToolCallDiff],
+    theme: &Theme,
+) {
     let all_lines = diffs
         .iter()
         .flat_map(ToolCallDiff::raw_lines)
         .collect::<Vec<_>>();
     for (index, line) in all_lines.iter().take(TOOL_DIFF_PREVIEW_LINES).enumerate() {
         let prefix = if index == 0 { "  └ " } else { "    " };
-        lines.push(diff_line(prefix, line.to_string(), line));
+        lines.push(diff_line(prefix, line.to_string(), line, theme));
     }
     if all_lines.len() > TOOL_DIFF_PREVIEW_LINES {
         lines.push(diff_line(
@@ -246,18 +252,21 @@ fn append_tool_diff_preview_lines(lines: &mut Vec<Line<'static>>, diffs: &[ToolC
                 all_lines.len() - TOOL_DIFF_PREVIEW_LINES
             ),
             "",
+            theme,
         ));
     }
 }
 
 /// Builds a styled line for one unified diff row.
-fn diff_line(prefix: &'static str, display: String, raw: &str) -> Line<'static> {
+fn diff_line(prefix: &'static str, display: String, raw: &str, theme: &Theme) -> Line<'static> {
     let style = if raw.starts_with('+') && !raw.starts_with("+++") {
-        Style::default().fg(Color::Green).bg(DIFF_ADDED_BG)
+        Style::default().fg(theme.diff_added())
     } else if raw.starts_with('-') && !raw.starts_with("---") {
-        Style::default().fg(Color::Red).bg(DIFF_REMOVED_BG)
+        Style::default().fg(theme.diff_removed())
     } else {
-        Style::default().add_modifier(Modifier::DIM)
+        Style::default()
+            .fg(theme.diff_context())
+            .add_modifier(Modifier::DIM)
     };
     // Keep the tree prefix unstyled so diff backgrounds never bleed into normal transcript chrome.
     Line::from(vec![Span::raw(prefix), Span::styled(display, style)])
@@ -283,12 +292,14 @@ fn status_verb(status: ToolCallStatus) -> &'static str {
 }
 
 /// Returns the bullet style shown in the tool-call header.
-fn status_bullet(status: ToolCallStatus) -> Span<'static> {
+fn status_bullet(status: ToolCallStatus, theme: &Theme) -> Span<'static> {
     let style = match status {
         ToolCallStatus::Completed => Style::default()
-            .fg(Color::Green)
+            .fg(theme.success)
             .add_modifier(Modifier::BOLD),
-        ToolCallStatus::Failed => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ToolCallStatus::Failed => Style::default()
+            .fg(theme.danger)
+            .add_modifier(Modifier::BOLD),
         _ => Style::default().add_modifier(Modifier::DIM),
     };
     Span::styled("•", style)
@@ -585,10 +596,11 @@ mod tests {
         assert!(removed_prefix_style.bg.is_none());
         assert!(added_prefix_style.bg.is_none());
         assert!(header_prefix_style.bg.is_none());
-        assert!(removed_diff_style.bg.is_some());
-        assert!(added_diff_style.bg.is_some());
+        // Diff lines use foreground-only styling; no backgrounds.
+        assert_eq!(removed_diff_style.fg, Some(Theme::dark().diff_removed()));
+        assert_eq!(added_diff_style.fg, Some(Theme::dark().diff_added()));
         assert!(header_diff_style.bg.is_none());
-        assert_ne!(removed_diff_style.bg, added_diff_style.bg);
+        assert_ne!(removed_diff_style.fg, added_diff_style.fg);
         assert_eq!(header_text, "  └ --- src/main.rs");
     }
 }

@@ -6,6 +6,7 @@ pub mod llm;
 pub mod loader;
 pub mod mcp;
 pub mod skills;
+pub mod tui;
 
 pub use agent::MultiAgentConfig;
 pub use config::{AppConfig, SessionPersistenceConfig};
@@ -13,3 +14,4 @@ pub use llm::{ApiKeyConfig, LlmModel, LlmProvider, ProviderAuthConfig, ProviderI
 pub use loader::{ConfigError, ConfigHandle, load, load_from};
 pub use protocol::ApprovalMode;
 pub use skills::SkillsConfig;
+pub use tui::{TuiConfig, TuiTheme};

@@ -11,6 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::approval::PendingApproval;
 use crate::ui::cell::{TextRole, ToolCallCell, TranscriptCell};
+use crate::ui::theme::Theme;
 
 /// Token usage totals for the current turn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -67,6 +68,9 @@ pub struct AppState {
     cwd: PathBuf,
     /// Human-readable provider/model label.
     model_label: String,
+    /// Color theme used by TUI renderers.
+    #[builder(default)]
+    theme: Theme,
     /// Ordered transcript cells ready for rendering.
     #[builder(default)]
     transcript: Vec<TranscriptCell>,
@@ -100,6 +104,21 @@ impl AppState {
             .build()
     }
 
+    /// Creates renderable state with an explicit TUI theme.
+    pub fn new_with_theme(
+        session_id: SessionId,
+        cwd: PathBuf,
+        model_label: String,
+        theme: Theme,
+    ) -> Self {
+        AppState::builder()
+            .session_id(session_id)
+            .cwd(cwd)
+            .model_label(model_label)
+            .theme(theme)
+            .build()
+    }
+
     /// Returns the ACP session id represented by this state.
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
@@ -113,6 +132,11 @@ impl AppState {
     /// Returns the provider/model label used in status lines.
     pub fn model_label(&self) -> &str {
         &self.model_label
+    }
+
+    /// Returns the configured TUI render theme.
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     /// Returns the renderable transcript cells.
