@@ -1,7 +1,7 @@
 //! Built-in file-system tools and registration.
 
+pub mod apply_patch;
 pub mod edit;
-pub mod patch;
 pub mod read;
 pub mod write;
 
@@ -25,7 +25,7 @@ impl ToolRegistry {
         if is_anthropic {
             self.register(Arc::new(edit::EditFile::new()));
         } else {
-            self.register(Arc::new(patch::ApplyPatch::new()));
+            self.register(Arc::new(apply_patch::ApplyPatch::new()));
         }
     }
 }

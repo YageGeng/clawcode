@@ -1,5 +1,7 @@
 //! Structured multi-file patch tool for agent edits.
 
+mod stream_parser;
+
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -126,6 +128,10 @@ impl Tool for ApplyPatch {
         protocol::ToolCapability {
             supports_streaming: true,
         }
+    }
+
+    fn arguments_consumer(&self) -> Option<Box<dyn crate::ToolArgumentsConsumer>> {
+        Some(Box::new(stream_parser::ApplyPatchArgumentsConsumer::new()))
     }
 
     fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
@@ -1197,5 +1203,13 @@ mod tests {
             }),
             &ToolContext::for_test(Path::new(".")),
         ));
+    }
+
+    /// Verifies that apply_patch opts into argument streaming previews.
+    #[test]
+    fn apply_patch_exposes_arguments_consumer() {
+        let tool = ApplyPatch::new();
+
+        assert!(tool.arguments_consumer().is_some());
     }
 }

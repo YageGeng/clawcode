@@ -132,6 +132,8 @@ impl Client<reqwest::Client> {
         &self,
         model: impl Into<String>,
     ) -> super::responses_api::websocket::ResponsesWebSocketSessionBuilder {
+        use crate::client::completion::CompletionClient;
+
         super::responses_api::websocket::ResponsesWebSocketSessionBuilder::new(
             self.completion_model(model),
         )

@@ -320,6 +320,14 @@ impl AppState {
                 entry.push_output(&json_to_display(&raw_output));
             }
             if let Some(content) = update.fields.content {
+                if content
+                    .iter()
+                    .any(|content| matches!(content, ToolCallContent::Diff(_)))
+                {
+                    // ACP content updates replace the content collection; clear
+                    // existing diffs so streaming apply_patch previews do not stack.
+                    entry.clear_diffs();
+                }
                 for content in content {
                     apply_tool_call_content(entry, content);
                 }
@@ -641,6 +649,46 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("-fn old() {}")));
         assert!(rendered.iter().any(|line| line.contains("+fn new() {}")));
         assert!(!rendered.iter().any(|line| line.contains("[diff]")));
+    }
+
+    /// Verifies ACP diff updates replace previous diff content instead of accumulating previews.
+    #[test]
+    fn state_tool_call_diff_updates_replace_previous_diff_content() {
+        let session_id = sid("s1");
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        state.apply_session_update(notification(
+            session_id.clone(),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("call-1"),
+                ToolCallUpdateFields::new()
+                    .title("apply_patch")
+                    .content(vec![ToolCallContent::Diff(
+                        agent_client_protocol::schema::Diff::new("src/main.rs", "fn v1() {}\n")
+                            .old_text("fn old() {}\n"),
+                    )]),
+            )),
+        ));
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("call-1"),
+                ToolCallUpdateFields::new().content(vec![ToolCallContent::Diff(
+                    agent_client_protocol::schema::Diff::new("src/main.rs", "fn v2() {}\n")
+                        .old_text("fn old() {}\n"),
+                )]),
+            )),
+        ));
+
+        let tool = transcript_tool(&state, 0);
+        let rendered = tool
+            .raw_lines()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+
+        assert!(!rendered.iter().any(|line| line.contains("+fn v1() {}")));
+        assert!(rendered.iter().any(|line| line.contains("+fn v2() {}")));
     }
 
     /// Verifies ACP updates from another session do not mutate renderable state.

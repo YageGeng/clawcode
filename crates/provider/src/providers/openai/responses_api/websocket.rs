@@ -732,13 +732,17 @@ fn websocket_url(base_url: &str) -> Result<String, CompletionError> {
     let mut url = Url::parse(base_url)?;
     match url.scheme() {
         "https" => {
-            url.set_scheme("wss").map_err(|_| {
-                CompletionError::ProviderError("Failed to convert https URL to wss".to_string())
+            url.set_scheme("wss").map_err(|error| {
+                CompletionError::ProviderError(format!(
+                    "Failed to convert https URL to wss: {error:?}"
+                ))
             })?;
         }
         "http" => {
-            url.set_scheme("ws").map_err(|_| {
-                CompletionError::ProviderError("Failed to convert http URL to ws".to_string())
+            url.set_scheme("ws").map_err(|error| {
+                CompletionError::ProviderError(format!(
+                    "Failed to convert http URL to ws: {error:?}"
+                ))
             })?;
         }
         scheme => {
@@ -1711,7 +1715,7 @@ mod tests {
     #[test]
     fn websocket_url_rejects_unsupported_scheme() {
         let result = websocket_url("ftp://example.com/v1");
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     #[test]

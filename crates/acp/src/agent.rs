@@ -470,6 +470,45 @@ impl ClawcodeAgent {
         ))
     }
 
+    /// Convert an apply_patch argument preview into an ACP edit tool update.
+    fn patch_apply_updated_to_acp(
+        call_id: String,
+        changes: Vec<protocol::PatchPreviewChange>,
+    ) -> SessionUpdate {
+        let content = changes
+            .into_iter()
+            .map(Self::patch_preview_change_to_content)
+            .collect::<Vec<_>>();
+        let fields = ToolCallUpdateFields::new()
+            .kind(ToolKind::Edit)
+            .status(AcpToolCallStatus::InProgress)
+            .title("Apply patch")
+            .content(content);
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(ToolCallId::new(call_id), fields))
+    }
+
+    /// Convert one patch preview change into ACP tool-call content.
+    fn patch_preview_change_to_content(change: protocol::PatchPreviewChange) -> ToolCallContent {
+        match change {
+            protocol::PatchPreviewChange::Add { path, content } => {
+                ToolCallContent::Diff(Diff::new(path, content))
+            }
+            protocol::PatchPreviewChange::Delete { path } => {
+                ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(
+                    format!("Delete file: {}", path.display()),
+                ))))
+            }
+            protocol::PatchPreviewChange::Update {
+                path,
+                move_path,
+                old_text,
+                new_text,
+            } => ToolCallContent::Diff(
+                Diff::new(move_path.unwrap_or(path), new_text).old_text(old_text),
+            ),
+        }
+    }
+
     /// Replay restored history to the ACP client as message chunks.
     async fn replay_history(
         session_id: &AcpSessionId,
@@ -885,6 +924,12 @@ impl ClawcodeAgent {
                     }
                     let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
                     let update = SessionUpdate::ToolCallUpdate(update_val);
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::PatchApplyUpdated {
+                    call_id, changes, ..
+                } => {
+                    let update = Self::patch_apply_updated_to_acp(call_id, changes);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }
                 Event::ExecCommandOutputDelta {
@@ -1690,6 +1735,70 @@ mod tests {
         };
 
         assert_eq!(text.text, "one\ntwo\nthree\nfour\nfive\nsix");
+    }
+
+    #[test]
+    fn patch_apply_updated_converts_to_acp_diff_update() {
+        let update = ClawcodeAgent::patch_apply_updated_to_acp(
+            "call-1".to_string(),
+            vec![protocol::PatchPreviewChange::Update {
+                path: PathBuf::from("src/lib.rs"),
+                move_path: None,
+                old_text: "fn old() {}\n".to_string(),
+                new_text: "fn new() {}\n".to_string(),
+            }],
+        );
+
+        let SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("expected patch preview to become tool call update");
+        };
+
+        assert_eq!(update.tool_call_id.to_string(), "call-1");
+        assert_eq!(update.fields.status, Some(AcpToolCallStatus::InProgress));
+        assert_eq!(update.fields.kind, Some(ToolKind::Edit));
+
+        let content = update
+            .fields
+            .content
+            .as_ref()
+            .and_then(|content| content.first())
+            .expect("patch preview should include diff content");
+        let ToolCallContent::Diff(diff) = content else {
+            panic!("expected diff content");
+        };
+
+        assert_eq!(diff.path, PathBuf::from("src/lib.rs"));
+        assert_eq!(diff.old_text.as_deref(), Some("fn old() {}\n"));
+        assert_eq!(diff.new_text, "fn new() {}\n");
+    }
+
+    #[test]
+    fn patch_apply_updated_converts_delete_preview_to_text_update() {
+        let update = ClawcodeAgent::patch_apply_updated_to_acp(
+            "call-1".to_string(),
+            vec![protocol::PatchPreviewChange::Delete {
+                path: PathBuf::from("obsolete.txt"),
+            }],
+        );
+
+        let SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("expected patch preview to become tool call update");
+        };
+
+        let content = update
+            .fields
+            .content
+            .as_ref()
+            .and_then(|content| content.first())
+            .expect("delete preview should include visible content");
+        let ToolCallContent::Content(content) = content else {
+            panic!("expected text content for delete preview");
+        };
+        let ContentBlock::Text(text) = &content.content else {
+            panic!("expected delete preview text");
+        };
+
+        assert_eq!(text.text, "Delete file: obsolete.txt");
     }
 
     #[test]

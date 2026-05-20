@@ -82,6 +82,36 @@ pub struct FileChange {
     pub new_text: String,
 }
 
+/// Partial file-change preview parsed from streamed apply_patch arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PatchPreviewChange {
+    /// Preview for a file that is being added by the patch.
+    Add {
+        /// Path displayed to the frontend.
+        path: PathBuf,
+        /// Partial or complete new file content parsed from the patch stream.
+        content: String,
+    },
+    /// Preview for a file that is being deleted by the patch.
+    Delete {
+        /// Path displayed to the frontend.
+        path: PathBuf,
+    },
+    /// Preview for a file update using local old/new hunk text.
+    Update {
+        /// Source path from the patch.
+        path: PathBuf,
+        /// Optional destination path when the update also moves the file.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        move_path: Option<PathBuf>,
+        /// Local hunk text before the previewed update.
+        old_text: String,
+        /// Local hunk text after the previewed update.
+        new_text: String,
+    },
+}
+
 /// Turn item describing the lifecycle and result of a file-changing tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub struct FileChangeItem {
@@ -221,6 +251,23 @@ mod tests {
         let decoded: TurnItem = serde_json::from_str(&encoded).expect("deserialize item");
 
         assert_eq!(decoded, item);
+    }
+
+    /// Verifies that patch preview changes preserve partial update old/new text.
+    #[test]
+    fn patch_preview_change_roundtrips_update_state() {
+        let change = PatchPreviewChange::Update {
+            path: PathBuf::from("src/lib.rs"),
+            move_path: Some(PathBuf::from("src/main.rs")),
+            old_text: "fn old() {}\n".to_string(),
+            new_text: "fn new() {}\n".to_string(),
+        };
+
+        let encoded = serde_json::to_string(&change).expect("serialize patch preview change");
+        let decoded: PatchPreviewChange =
+            serde_json::from_str(&encoded).expect("deserialize patch preview change");
+
+        assert_eq!(decoded, change);
     }
 
     /// Verifies that MCP tool-call items preserve optional result metadata.
