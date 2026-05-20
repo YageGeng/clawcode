@@ -20,6 +20,19 @@ pub use backend::terminal::{
 };
 pub use protocol::ToolContext;
 
+/// Consumes provider-emitted tool argument deltas before tool execution starts.
+pub trait ToolArgumentsConsumer: Send {
+    /// Consume one streamed argument delta and return display items for the frontend.
+    fn consume_delta(
+        &mut self,
+        call_id: &str,
+        delta: &str,
+    ) -> Vec<protocol::ToolArgumentsStreamItem>;
+
+    /// Flush pending display state after argument streaming completes.
+    fn finish(&mut self, call_id: &str) -> Result<Vec<protocol::ToolArgumentsStreamItem>, String>;
+}
+
 /// A tool that can be invoked by the LLM during a turn.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -36,6 +49,11 @@ pub trait Tool: Send + Sync {
     /// Default: not streaming-capable.
     fn capability(&self) -> protocol::ToolCapability {
         protocol::ToolCapability::default()
+    }
+
+    /// Create a consumer for streamed tool arguments, when this tool supports previews.
+    fn arguments_consumer(&self) -> Option<Box<dyn ToolArgumentsConsumer>> {
+        None
     }
 
     /// Whether this specific invocation requires user approval.
@@ -174,5 +192,43 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoArgumentsConsumerTool;
+
+    #[async_trait]
+    impl Tool for NoArgumentsConsumerTool {
+        fn name(&self) -> &str {
+            "no_arguments_consumer"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<String, String> {
+            Ok("ok".to_string())
+        }
+    }
+
+    /// Verifies that tools do not consume streamed arguments unless they opt in.
+    #[test]
+    fn tool_arguments_consumer_defaults_to_none() {
+        let tool = NoArgumentsConsumerTool;
+
+        assert!(tool.arguments_consumer().is_none());
     }
 }

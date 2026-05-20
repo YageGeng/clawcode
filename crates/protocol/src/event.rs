@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentPath, AgentStatus};
-use crate::item::{TurnId, TurnItem};
+use crate::item::{PatchPreviewChange, TurnId, TurnItem};
 use crate::permission::PermissionRequest;
 use crate::plan::PlanEntry;
 use crate::session::SessionId;
@@ -165,6 +165,14 @@ pub enum Event {
         /// Raw bytes from the stream, serialized as a JSON array of numbers.
         chunk: Vec<u8>,
     },
+    /// Preview update parsed from streamed apply_patch arguments.
+    PatchApplyUpdated {
+        session_id: SessionId,
+        /// The apply_patch tool call being previewed.
+        call_id: String,
+        /// Partial patch changes parsed from the argument stream.
+        changes: Vec<PatchPreviewChange>,
+    },
 }
 
 impl Event {
@@ -233,6 +241,20 @@ impl Event {
             call_id: call_id.into(),
             output_delta,
             status,
+        }
+    }
+
+    /// Create a `PatchApplyUpdated` event for apply_patch argument previews.
+    #[inline(always)]
+    pub fn patch_apply_updated(
+        session_id: impl Into<SessionId>,
+        call_id: impl Into<String>,
+        changes: Vec<PatchPreviewChange>,
+    ) -> Self {
+        Event::PatchApplyUpdated {
+            session_id: session_id.into(),
+            call_id: call_id.into(),
+            changes,
         }
     }
 
@@ -395,10 +417,20 @@ pub enum ToolStreamItem {
     Text { content: String, is_error: bool },
 }
 
+/// A single item yielded by a tool arguments consumer while arguments stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolArgumentsStreamItem {
+    /// Preview changes parsed from streamed apply_patch arguments.
+    PatchPreview {
+        call_id: String,
+        changes: Vec<PatchPreviewChange>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item::{FileChangeItem, FileChangeStatus};
+    use crate::item::{FileChangeItem, FileChangeStatus, PatchPreviewChange};
 
     /// Verifies that item lifecycle events preserve the owning turn id.
     #[test]
@@ -431,6 +463,28 @@ mod tests {
         assert!(matches!(
             decoded_completed,
             Event::ItemCompleted { turn_id: decoded, .. } if decoded == turn_id
+        ));
+    }
+
+    /// Verifies that patch preview updates keep call id and preview changes on the wire.
+    #[test]
+    fn patch_apply_updated_event_roundtrips_preview_changes() {
+        let event = Event::patch_apply_updated(
+            SessionId("session-1".to_string()),
+            "call-1",
+            vec![PatchPreviewChange::Add {
+                path: PathBuf::from("added.txt"),
+                content: "hello\n".to_string(),
+            }],
+        );
+
+        let encoded = serde_json::to_string(&event).expect("serialize patch preview event");
+        let decoded: Event = serde_json::from_str(&encoded).expect("deserialize patch event");
+
+        assert!(matches!(
+            decoded,
+            Event::PatchApplyUpdated { call_id, changes, .. }
+                if call_id == "call-1" && changes.len() == 1
         ));
     }
 }

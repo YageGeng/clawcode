@@ -28,7 +28,7 @@ use crate::context::ContextManager;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
 use store::{MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord, TurnKindRecord};
-use tools::{ToolContext, ToolRegistry};
+use tools::{ToolArgumentsConsumer, ToolContext, ToolRegistry};
 
 /// Immutable snapshot of all context needed to execute a single turn.
 #[derive(Clone, typed_builder::TypedBuilder)]
@@ -182,6 +182,7 @@ pub(crate) async fn execute_turn(
         let mut assistant_content: Vec<AssistantContent> = Vec::new();
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
         let mut streamed_reasoning_preview = String::new();
+        let mut argument_consumers = ArgumentsConsumers::default();
 
         while let Some(event) = stream.next().await {
             let event = event
@@ -203,6 +204,10 @@ pub(crate) async fn execute_turn(
                     // Always use the canonical tool-call id for frontend correlation.
                     // Keep `internal_call_id` only as a parser-local fallback.
                     let event_call_id = tool_call.id.clone();
+
+                    for preview_event in argument_consumers.finish(sid, event_call_id.as_str()) {
+                        let _ = tx_event.send(preview_event);
+                    }
 
                     let (text, _succeeded) =
                         dispatch_tool(ctx, tx_event, &event_call_id, &tool_call, &tool_ctx).await?;
@@ -252,6 +257,18 @@ pub(crate) async fn execute_turn(
                     } else {
                         id.as_str()
                     };
+                    match &content {
+                        protocol::ToolCallDeltaContent::Name(name) => {
+                            argument_consumers.maybe_create(call_id, name, &ctx.tools);
+                        }
+                        protocol::ToolCallDeltaContent::Delta(delta) => {
+                            for preview_event in
+                                argument_consumers.consume_delta(sid, call_id, delta)
+                            {
+                                let _ = tx_event.send(preview_event);
+                            }
+                        }
+                    }
                     let _ = tx_event.send(Event::tool_call_delta(sid.clone(), call_id, content));
                 }
                 LlmStreamEvent::Final {
@@ -364,6 +381,68 @@ struct ToolOutput {
     output: String,
 }
 
+#[derive(Default)]
+struct ArgumentsConsumers {
+    consumers: HashMap<String, Box<dyn ToolArgumentsConsumer>>,
+}
+
+impl ArgumentsConsumers {
+    /// Create a consumer for a tool call once the provider streams its tool name.
+    fn maybe_create(&mut self, call_id: &str, tool_name: &str, tools: &ToolRegistry) {
+        if self.consumers.contains_key(call_id) {
+            return;
+        }
+        let Some(tool) = tools.get(tool_name) else {
+            return;
+        };
+        let Some(consumer) = tool.arguments_consumer() else {
+            return;
+        };
+        self.consumers.insert(call_id.to_string(), consumer);
+    }
+
+    /// Route one streamed arguments delta to the matching consumer.
+    fn consume_delta(&mut self, session_id: &SessionId, call_id: &str, delta: &str) -> Vec<Event> {
+        let Some(consumer) = self.consumers.get_mut(call_id) else {
+            return Vec::new();
+        };
+        consumer
+            .consume_delta(call_id, delta)
+            .into_iter()
+            .map(|item| arguments_stream_item_to_event(session_id, item))
+            .collect()
+    }
+
+    /// Flush the matching consumer immediately before the final tool call executes.
+    fn finish(&mut self, session_id: &SessionId, call_id: &str) -> Vec<Event> {
+        let Some(mut consumer) = self.consumers.remove(call_id) else {
+            return Vec::new();
+        };
+        match consumer.finish(call_id) {
+            Ok(items) => items
+                .into_iter()
+                .map(|item| arguments_stream_item_to_event(session_id, item))
+                .collect(),
+            Err(error) => {
+                tracing::debug!(%call_id, %error, "tool arguments consumer failed to finish");
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Convert an argument-stream item into a frontend event.
+fn arguments_stream_item_to_event(
+    session_id: &SessionId,
+    item: protocol::ToolArgumentsStreamItem,
+) -> Event {
+    match item {
+        protocol::ToolArgumentsStreamItem::PatchPreview { call_id, changes } => {
+            Event::patch_apply_updated(session_id.clone(), call_id, changes)
+        }
+    }
+}
+
 /// Dispatch a tool call, driving the unified `execute_streaming` path.
 ///
 /// Streaming tools (`supports_streaming == true`) produce `Begin`/`End`
@@ -440,10 +519,20 @@ async fn dispatch_tool(
         .get(tool_name)
         .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("unknown tool: {tool_name}")))?;
 
-    let (text, mut stream) = tool
-        .execute_streaming(arguments.clone(), tool_ctx)
-        .await
-        .map_err(|err| KernelError::Internal(anyhow::anyhow!(err)))?;
+    let (text, mut stream) = match tool.execute_streaming(arguments.clone(), tool_ctx).await {
+        Ok(result) => result,
+        Err(err) => {
+            // Tool-level failures are model-visible results, not kernel failures.
+            // This lets the model repair bad tool inputs such as non-matching patches.
+            let _ = tx_event.send(Event::tool_call_update(
+                ctx.session_id.clone(),
+                call_id,
+                Some(err.clone()),
+                Some(ToolCallStatus::Failed),
+            ));
+            return Ok((err, false));
+        }
+    };
 
     let mut succeeded = true;
     while let Some(item) = stream.next().await {
@@ -554,6 +643,105 @@ async fn request_tool_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use provider::completion::CompletionError;
+    use provider::wasm_compat::WasmBoxedFuture;
+    use tools::Tool;
+
+    #[derive(Debug)]
+    struct TestLlm;
+
+    impl provider::factory::Llm for TestLlm {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<'_, Result<provider::factory::LlmCompletion, CompletionError>>
+        {
+            Box::pin(async {
+                Err(CompletionError::ProviderError(
+                    "test llm completion is unused".to_string(),
+                ))
+            })
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<'_, Result<provider::factory::DynLlmStream, CompletionError>> {
+            Box::pin(async {
+                Err(CompletionError::ProviderError(
+                    "test llm stream is unused".to_string(),
+                ))
+            })
+        }
+    }
+
+    struct FailingTool;
+
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn name(&self) -> &str {
+            "failing_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test failing tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn needs_approval(&self, _: &serde_json::Value, _: &ToolContext) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<String, String> {
+            Err("tool failed normally".to_string())
+        }
+
+        async fn execute_streaming(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<
+            (
+                String,
+                std::pin::Pin<
+                    Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>,
+                >,
+            ),
+            String,
+        > {
+            Err("tool failed normally".to_string())
+        }
+    }
+
+    fn test_turn_context(tools: Arc<ToolRegistry>) -> TurnContext {
+        TurnContext::builder()
+            .session_id(SessionId("session-1".to_string()))
+            .turn_id(TurnId("turn-1".to_string()))
+            .turn_kind(TurnKindRecord::Prompt)
+            .llm(Arc::new(TestLlm))
+            .tools(tools)
+            .cwd(PathBuf::from("/tmp"))
+            .provider_id("test".to_string())
+            .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
+            .skill_registry(Arc::new(SkillRegistry::default()))
+            .build()
+    }
 
     #[test]
     fn reasoning_delta_is_stored_before_later_text() {
@@ -636,5 +824,94 @@ mod tests {
 
         assert!(!emit_text);
         assert!(streamed_preview.is_empty());
+    }
+
+    #[test]
+    fn arguments_consumers_emit_patch_preview_events() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(tools::builtin::fs::apply_patch::ApplyPatch::new()));
+        let mut consumers = ArgumentsConsumers::default();
+
+        consumers.maybe_create("call-1", "apply_patch", &tools);
+        let events = consumers.consume_delta(
+            &SessionId("session-1".to_string()),
+            "call-1",
+            "{\"patchText\":\"*** Begin Patch\\n*** Add File: added.txt\\n+hello\\n",
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [Event::PatchApplyUpdated { call_id, changes, .. }]
+                if call_id == "call-1" && changes.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_returns_failed_result_when_tool_execution_errors() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(FailingTool));
+        let ctx = test_turn_context(Arc::clone(&tools));
+        let tool_ctx = ToolContext::builder()
+            .session_id(ctx.session_id.clone())
+            .cwd(ctx.cwd.clone())
+            .agent_path(ctx.agent_path.clone())
+            .approval_mode(ctx.approval.mode())
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tool_call = ToolCall::new(
+            "call-1".to_string(),
+            protocol::ToolFunction::new("failing_tool".to_string(), serde_json::json!({})),
+        );
+
+        let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+            .await
+            .expect("tool failure should not abort the turn");
+
+        assert_eq!(result, ("tool failed normally".to_string(), false));
+        assert!(matches!(rx.recv().await, Some(Event::ToolCall { .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::ToolCallUpdate {
+                output_delta: Some(output),
+                status: Some(protocol::ToolCallStatus::Failed),
+                ..
+            }) if output == "tool failed normally"
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_returns_failed_result_when_apply_patch_context_is_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("test_dup.txt"),
+            "unique line 1\nreal line\n",
+        )
+        .expect("write fixture");
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(tools::builtin::fs::apply_patch::ApplyPatch::new()));
+        let mut ctx = test_turn_context(Arc::clone(&tools));
+        ctx.cwd = dir.path().to_path_buf();
+        let tool_ctx = ToolContext::builder()
+            .session_id(ctx.session_id.clone())
+            .cwd(ctx.cwd.clone())
+            .agent_path(ctx.agent_path.clone())
+            .approval_mode(ctx.approval.mode())
+            .build();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let patch = "*** Begin Patch\n*** Update File: test_dup.txt\n@@\n-this line does NOT exist\n+this should NOT be applied\n*** End Patch";
+        let tool_call = ToolCall::new(
+            "call-1".to_string(),
+            protocol::ToolFunction::new(
+                "apply_patch".to_string(),
+                serde_json::json!({ "patchText": patch }),
+            ),
+        );
+
+        let (output, succeeded) = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+            .await
+            .expect("apply_patch failure should not abort the turn");
+
+        assert!(!succeeded);
+        assert!(output.contains("Could not find matching lines for update chunk"));
     }
 }

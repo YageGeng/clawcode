@@ -103,6 +103,11 @@ impl ToolCallCell {
         });
     }
 
+    /// Clears structured diffs before applying a replacement ACP content update.
+    pub fn clear_diffs(&mut self) {
+        self.diffs.clear();
+    }
+
     /// Replaces the latest ACP execution status.
     pub fn set_status(&mut self, status: ToolCallStatus) {
         self.status = status;
