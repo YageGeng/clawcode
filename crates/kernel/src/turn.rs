@@ -201,10 +201,12 @@ pub(crate) async fn execute_turn(
                     if tool_call.id.is_empty() {
                         tool_call.id = internal_call_id.clone();
                     }
+
                     // Always use the canonical tool-call id for frontend correlation.
                     // Keep `internal_call_id` only as a parser-local fallback.
                     let event_call_id = tool_call.id.clone();
 
+                    // mark streaming arguments consumer is finished
                     for preview_event in argument_consumers.finish(sid, event_call_id.as_str()) {
                         let _ = tx_event.send(preview_event);
                     }
@@ -257,10 +259,12 @@ pub(crate) async fn execute_turn(
                     } else {
                         id.as_str()
                     };
+
                     match &content {
                         protocol::ToolCallDeltaContent::Name(name) => {
                             argument_consumers.maybe_create(call_id, name, &ctx.tools);
                         }
+
                         protocol::ToolCallDeltaContent::Delta(delta) => {
                             for preview_event in
                                 argument_consumers.consume_delta(sid, call_id, delta)
@@ -269,6 +273,7 @@ pub(crate) async fn execute_turn(
                             }
                         }
                     }
+
                     let _ = tx_event.send(Event::tool_call_delta(sid.clone(), call_id, content));
                 }
                 LlmStreamEvent::Final {
@@ -381,6 +386,7 @@ struct ToolOutput {
     output: String,
 }
 
+/// Manages the lifecycle of tool arguments consumers, mapping call ids to their state.
 #[derive(Default)]
 struct ArgumentsConsumers {
     consumers: HashMap<String, Box<dyn ToolArgumentsConsumer>>,
@@ -404,12 +410,17 @@ impl ArgumentsConsumers {
     /// Route one streamed arguments delta to the matching consumer.
     fn consume_delta(&mut self, session_id: &SessionId, call_id: &str, delta: &str) -> Vec<Event> {
         let Some(consumer) = self.consumers.get_mut(call_id) else {
-            return Vec::new();
+            return Vec::with_capacity(0);
         };
+
         consumer
             .consume_delta(call_id, delta)
             .into_iter()
-            .map(|item| arguments_stream_item_to_event(session_id, item))
+            .map(|item| match item {
+                protocol::ToolArgumentsStreamItem::PatchPreview { call_id, changes } => {
+                    Event::patch_apply_updated(session_id.clone(), call_id, changes)
+                }
+            })
             .collect()
     }
 
@@ -421,24 +432,16 @@ impl ArgumentsConsumers {
         match consumer.finish(call_id) {
             Ok(items) => items
                 .into_iter()
-                .map(|item| arguments_stream_item_to_event(session_id, item))
+                .map(|item| match item {
+                    protocol::ToolArgumentsStreamItem::PatchPreview { call_id, changes } => {
+                        Event::patch_apply_updated(session_id.clone(), call_id, changes)
+                    }
+                })
                 .collect(),
             Err(error) => {
                 tracing::debug!(%call_id, %error, "tool arguments consumer failed to finish");
                 Vec::new()
             }
-        }
-    }
-}
-
-/// Convert an argument-stream item into a frontend event.
-fn arguments_stream_item_to_event(
-    session_id: &SessionId,
-    item: protocol::ToolArgumentsStreamItem,
-) -> Event {
-    match item {
-        protocol::ToolArgumentsStreamItem::PatchPreview { call_id, changes } => {
-            Event::patch_apply_updated(session_id.clone(), call_id, changes)
         }
     }
 }
