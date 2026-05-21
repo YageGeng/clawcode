@@ -13,12 +13,12 @@ use tokio::sync::{Mutex, watch};
 use crate::agent::mailbox::Mailbox;
 use crate::agent::registry::{AgentMetadata, AgentRegistry};
 use crate::agent::role::AgentRoleSet;
+use crate::approval::ApprovalPolicy;
 use crate::context::InMemoryContext;
+use crate::thread_manager::{SpawnThreadParams, ThreadManager};
 use config::MultiAgentConfig;
 use provider::factory::ArcLlm;
-use store::{
-    AgentEdgeRecord, AgentEdgeStatusRecord, CreateSessionParams, SessionRecorder, SessionStore,
-};
+use store::{AgentEdgeStatus, AgentGraphStore, CreateSessionParams, SessionRecorder, SessionStore};
 use tools::ToolRegistry;
 
 /// Fork mode for sub-agent history (reserved for future).
@@ -60,9 +60,14 @@ pub struct AgentControl {
     pub llm_factory: Arc<provider::factory::LlmFactory>,
     pub tools: Arc<ToolRegistry>,
     pub config_handle: config::ConfigHandle,
+    /// Live thread lifecycle manager used to spawn and route subagent operations.
+    pub(crate) thread_manager: Arc<ThreadManager>,
     /// Session persistence store for writing subagent AgentEdge records.
     #[builder(default)]
     pub session_store: Option<Arc<dyn SessionStore>>,
+    /// Durable graph store for parent-child agent topology.
+    #[builder(default)]
+    pub agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
     /// Recorder handles for live sessions, used to write AgentEdge records on spawn/close.
     #[builder(default)]
     recorders: Mutex<HashMap<SessionId, Arc<dyn SessionRecorder>>>,
@@ -72,12 +77,18 @@ impl AgentControl {
     /// Create a new AgentControl. Root registration is deferred — the
     /// caller must call `registry.register_root_thread(session_id)` when
     /// the first session is created.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "AgentControl wires shared kernel services"
+    )]
     pub(crate) fn new(
         llm_factory: Arc<provider::factory::LlmFactory>,
         config_handle: config::ConfigHandle,
         tools: Arc<ToolRegistry>,
         config: MultiAgentConfig,
+        thread_manager: Arc<ThreadManager>,
         session_store: Option<Arc<dyn SessionStore>>,
+        agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
     ) -> Arc<Self> {
         Arc::new(
             AgentControl::builder()
@@ -85,7 +96,9 @@ impl AgentControl {
                 .llm_factory(llm_factory)
                 .tools(tools)
                 .config_handle(config_handle)
+                .thread_manager(thread_manager)
                 .session_store(session_store)
+                .agent_graph_store(agent_graph_store)
                 .build(),
         )
     }
@@ -114,8 +127,8 @@ impl AgentControl {
     /// 2. Reserve a spawn slot (enforces thread cap)
     /// 3. Reserve path + nickname in registry
     /// 4. Resolve LLM for the role
-    /// 5. Spawn a new session thread via [`crate::session::spawn_thread`]
-    /// 6. Register the child's mailbox for message routing
+    /// 5. Create the child session recorder before runtime startup
+    /// 6. Spawn the child thread via [`ThreadManager`]
     /// 7. Commit the reservation (publishes agent to registry)
     /// 8. Send the initial prompt as an `InterAgentMessage` to trigger the first turn
     ///
@@ -165,20 +178,61 @@ impl AgentControl {
             .await
             .insert(session_id.clone(), status_tx);
 
-        // Step 5: create the child session thread
         let child_cwd = cwd.clone();
-        let handle = crate::session::spawn_thread(
-            session_id.clone(),
-            cwd,
-            llm,
-            Arc::clone(&self.tools),
-            context,
-            child_path.clone(),
-            Some(Arc::clone(self)),
-            Arc::new(crate::approval::ApprovalPolicy::default()),
-            Arc::new(config::AppConfig::default()),
-            None,
-        );
+        let app_config = self.config_handle.current();
+        let approval = Arc::new(ApprovalPolicy::new(app_config.approval));
+        let child_recorder = if let Some(store) = &self.session_store {
+            let (provider_id, model_id) = self
+                .config_handle
+                .current()
+                .active_model
+                .split_once('/')
+                .map(|(provider_id, model_id)| (provider_id.to_string(), model_id.to_string()))
+                .unwrap_or_default();
+            store
+                .create_session(
+                    CreateSessionParams::builder()
+                        .session_id(session_id.clone())
+                        .agent_path(child_path.clone())
+                        .cwd(child_cwd.clone())
+                        .provider_id(provider_id)
+                        .model_id(model_id)
+                        .base_system_prompt(String::new())
+                        .parent_session_id(parent_sid.clone().ok_or_else(|| {
+                            "cannot persist subagent without parent session id".to_string()
+                        })?)
+                        .agent_role(role_name.to_string())
+                        .agent_nickname(nickname.clone())
+                        .build(),
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .map(Arc::from)
+        } else {
+            None
+        };
+
+        // Step 5: create the child session thread after its recorder exists.
+        let builder = SpawnThreadParams::builder()
+            .session_id(session_id.clone())
+            .cwd(cwd)
+            .llm(llm)
+            .tools(Arc::clone(&self.tools))
+            .context(context)
+            .agent_path(child_path.clone())
+            .agent_control(Arc::clone(self))
+            .approval(approval)
+            .app_config(app_config);
+        let params = if let Some(recorder) = child_recorder.as_ref() {
+            builder.recorder(Arc::clone(recorder)).build()
+        } else {
+            builder.build()
+        };
+        let handle = self
+            .thread_manager
+            .spawn_thread(params)
+            .await
+            .map_err(|error| error.to_string())?;
 
         // Step 6: register mailbox so other agents can send messages here
         self.mailboxes
@@ -200,68 +254,52 @@ impl AgentControl {
             }
         };
 
+        if let Some(recorder) = child_recorder {
+            self.recorders
+                .lock()
+                .await
+                .insert(session_id.clone(), recorder);
+        }
+
+        if let (Some(graph_store), Some(parent_sid)) = (&self.agent_graph_store, &parent_sid) {
+            let edge_result = graph_store
+                .upsert_agent_edge(
+                    parent_sid.clone(),
+                    session_id.clone(),
+                    child_path.clone(),
+                    Some(role_name.to_string()),
+                    AgentEdgeStatus::Open,
+                )
+                .await;
+            if let Err(error) = edge_result {
+                let _ = self.thread_manager.close_thread(&session_id).await;
+                let child_recorder = self.unregister_recorder(&session_id).await;
+                if let Some(store) = &self.session_store {
+                    let _ = store
+                        .archive_session(&session_id, child_recorder.as_deref())
+                        .await;
+                }
+                return Err(error.to_string());
+            }
+        }
+
         reservation.commit(metadata.clone());
 
-        // Step 8: send initial prompt to kick off first turn
-        let _ = handle.tx_op.send(Op::InterAgentMessage {
-            from: parent_path.clone(),
-            to: child_path.clone(),
-            content: prompt.to_string(),
-        });
-
-        // Persist subagent: create child session file and write parent edge.
-        let parent_sid_owned = parent_sid.clone();
-        if let Some(ref store) = self.session_store
-            && let Some(parent_sid) = parent_sid_owned
-        {
-            let store = Arc::clone(store);
-            let sid = session_id.clone();
-            let sid2 = session_id.clone();
-            let cp = child_path.clone();
-            let cp2 = child_path.clone();
-            let cd = child_cwd;
-            let rn = role_name.to_string();
-            let nn = nickname.clone();
-            let parent_agent_ctrl = Arc::clone(self);
-            let psid = parent_sid;
-            tokio::spawn(async move {
-                let child_recorder = store
-                    .create_session(
-                        CreateSessionParams::builder()
-                            .session_id(sid)
-                            .agent_path(cp)
-                            .cwd(cd)
-                            .provider_id(String::new())
-                            .model_id(String::new())
-                            .base_system_prompt(String::new())
-                            .parent_session_id(psid.clone())
-                            .agent_role(rn)
-                            .agent_nickname(nn)
-                            .build(),
-                    )
-                    .await
-                    .ok()
-                    .flatten();
-                if let Some(rec) = child_recorder {
-                    let rec: Arc<dyn SessionRecorder> = Arc::from(rec);
-                    // Write parent edge
-                    let edge = AgentEdgeRecord::builder()
-                        .parent_session_id(psid.clone())
-                        .child_session_id(sid2.clone())
-                        .child_agent_path(cp2)
-                        .child_role(String::new())
-                        .status(AgentEdgeStatusRecord::Open)
-                        .build();
-                    let parent_rec = parent_agent_ctrl.recorders.lock().await.get(&psid).cloned();
-                    if let Some(parent_recorder) = parent_rec {
-                        let _ = parent_recorder
-                            .append(&[store::PersistedPayload::AgentEdge(edge)])
-                            .await;
-                    }
-                    parent_agent_ctrl.recorders.lock().await.insert(sid2, rec);
-                }
-            });
-        }
+        // Step 8: send initial prompt to kick off first turn.
+        self.thread_manager
+            .send_op(
+                &session_id,
+                Op::InterAgentMessage {
+                    message: InterAgentMessage::builder()
+                        .from(parent_path.clone())
+                        .to(child_path.clone())
+                        .content(prompt.to_string())
+                        .trigger_turn(true)
+                        .build(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
 
         Ok(LiveAgent {
             thread_id: session_id,
@@ -275,11 +313,10 @@ impl AgentControl {
         self.registry.resolve_target(target)
     }
 
-    /// Send a message to a target agent via its mailbox.
+    /// Send a message to a target agent via the thread manager.
     ///
-    /// Resolves the target agent's `SessionId` from the registry, then
-    /// looks up its [`Mailbox`] and delivers the message. If `trigger_turn`
-    /// is true, the target's `run_loop` will wake up and execute a turn.
+    /// Resolves the target agent's `SessionId` from the registry, then routes
+    /// a typed inter-agent operation to the target thread.
     pub(crate) async fn send_message(
         &self,
         from: AgentPath,
@@ -292,20 +329,65 @@ impl AgentControl {
             .agent_id_for_path(&to)
             .ok_or_else(|| format!("agent not found: {to}"))?;
 
-        let msg = InterAgentMessage::builder()
+        let message = InterAgentMessage::builder()
             .from(from)
             .to(to.clone())
             .content(content)
             .trigger_turn(trigger_turn)
             .build();
+        self.thread_manager
+            .send_op(&target_id, Op::InterAgentMessage { message })
+            .await
+            .map_err(|error| error.to_string())
+    }
 
-        let mailboxes = self.mailboxes.lock().await;
-        let mb = mailboxes
-            .get(&target_id)
-            .ok_or_else(|| format!("mailbox not found for agent: {to}"))?;
-        mb.send(msg);
-
-        Ok(())
+    /// Notify a parent agent that a child reached a terminal turn status.
+    pub(crate) async fn notify_child_terminal_turn(
+        &self,
+        child_session_id: &SessionId,
+        status: AgentStatus,
+    ) -> Result<(), String> {
+        if let Some(status_tx) = self.status_watchers.lock().await.get(child_session_id) {
+            let _ = status_tx.send(status.clone());
+        }
+        let Some(metadata) = self
+            .registry
+            .agent_metadata_for_thread(child_session_id.clone())
+        else {
+            return Ok(());
+        };
+        let Some(parent_session_id) = metadata.parent_session_id.clone() else {
+            return Ok(());
+        };
+        let child_path = metadata.agent_path.unwrap_or_else(AgentPath::root);
+        let child_name = metadata
+            .agent_nickname
+            .unwrap_or_else(|| child_path.to_string());
+        let parent_path = self
+            .registry
+            .agent_metadata_for_thread(parent_session_id.clone())
+            .and_then(|metadata| metadata.agent_path)
+            .unwrap_or_else(AgentPath::root);
+        let final_message = match &status {
+            AgentStatus::Completed { message } => message.as_deref().unwrap_or(""),
+            AgentStatus::Errored { reason } => reason.as_str(),
+            AgentStatus::Interrupted => "interrupted",
+            AgentStatus::Shutdown => "shutdown",
+            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound => "",
+        };
+        let content = format!(
+            "Subagent {child_name} ({child_session_id}) reached terminal status: {status:?}\n{final_message}"
+        );
+        let message = InterAgentMessage::builder()
+            .from(child_path)
+            .to(parent_path)
+            .content(content)
+            .trigger_turn(false)
+            .build();
+        self.thread_manager
+            .send_op(&parent_session_id, Op::InterAgentMessage { message })
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// List active sub-agents, optionally filtered by path prefix.
@@ -339,6 +421,9 @@ impl AgentControl {
 
     /// Write AgentEdge(Closed) to the parent session's recorder before closing a subagent.
     async fn write_closed_agent_edge(&self, thread_id: &SessionId) {
+        let Some(graph_store) = &self.agent_graph_store else {
+            return;
+        };
         let parent_sid = {
             let metadata = self.registry.agent_metadata_for_thread(thread_id.clone());
             metadata.and_then(|m| m.parent_session_id)
@@ -346,28 +431,8 @@ impl AgentControl {
         let Some(parent_sid) = parent_sid else {
             return;
         };
-        let parent_recorder = { self.recorders.lock().await.get(&parent_sid).cloned() };
-        let Some(parent_recorder) = parent_recorder else {
-            return;
-        };
-        let child_agent_path = self
-            .registry
-            .live_agents()
-            .into_iter()
-            .find(|m| m.agent_id.as_ref() == Some(thread_id))
-            .and_then(|m| m.agent_path);
-        let Some(child_agent_path) = child_agent_path else {
-            return;
-        };
-        let edge = AgentEdgeRecord::builder()
-            .parent_session_id(parent_sid)
-            .child_session_id(thread_id.clone())
-            .child_agent_path(child_agent_path)
-            .child_role(String::new())
-            .status(AgentEdgeStatusRecord::Closed)
-            .build();
-        let _ = parent_recorder
-            .append(&[store::PersistedPayload::AgentEdge(edge)])
+        let _ = graph_store
+            .set_agent_edge_status(&parent_sid, thread_id, AgentEdgeStatus::Closed)
             .await;
     }
 
@@ -435,6 +500,11 @@ impl AgentControl {
             sw.remove(&thread_id);
         }
 
+        let _ = self.thread_manager.close_thread(&thread_id).await;
+        for desc_id in &descendants {
+            let _ = self.thread_manager.close_thread(desc_id).await;
+        }
+
         Ok(())
     }
 
@@ -498,11 +568,562 @@ fn sanitize_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
     use super::*;
+    use crate::agent::mailbox::mailbox_pair;
+    use crate::session::Thread;
+    use async_trait::async_trait;
+    use config::{AppConfig, ConfigHandle};
+    use provider::factory::LlmFactory;
+    use store::{
+        AgentEdgeStatus, AgentGraphStore, CreateSessionParams, FileSessionStore, SessionRecorder,
+        SessionStore,
+    };
+    use tokio::sync::{mpsc, oneshot, watch};
 
     #[test]
     fn sanitize_replaces_special_chars() {
         assert_eq!(sanitize_name("code-reviewer"), "code_reviewer");
         assert_eq!(sanitize_name("Hello World!"), "hello_world_");
+    }
+
+    /// Build an app config with one OpenAI-compatible provider for spawn tests.
+    fn app_config_with_provider() -> AppConfig {
+        serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "deepseek-chat" }]
+                }
+            ]
+        }))
+        .expect("valid app config")
+    }
+
+    /// Build a minimal thread handle for AgentControl routing tests.
+    fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
+        let (tx_event, _rx_event) = mpsc::unbounded_channel();
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let (mailbox, _mailbox_rx) = mailbox_pair();
+        Thread::builder()
+            .session_id(session_id)
+            .cwd(PathBuf::from("/tmp/project"))
+            .tx_op(tx_op)
+            .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))
+            .pending_approvals(Arc::new(tokio::sync::Mutex::new(HashMap::<
+                String,
+                oneshot::Sender<protocol::ReviewDecision>,
+            >::new())))
+            .cancel_tx(cancel_tx)
+            .agent_control(None)
+            .mailbox(mailbox)
+            .tools(Arc::new(ToolRegistry::new()))
+            .mcp_manager(Arc::new(mcp::McpConnectionManager::new(
+                Vec::new(),
+                PathBuf::from("/tmp/clawcode-test-auth"),
+            )))
+            .build()
+    }
+
+    #[tokio::test]
+    async fn spawn_creates_child_session_and_open_graph_edge_before_returning() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let store = Arc::new(FileSessionStore::new(true, Some(&data_home)));
+        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            Arc::clone(&tools),
+            app_config.multi_agent.clone(),
+            thread_manager,
+            Some(session_store),
+            Some(Arc::clone(&store) as Arc<dyn AgentGraphStore>),
+        );
+        let parent_id = SessionId("parent".to_string());
+        let parent_recorder = store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(parent_id.clone())
+                    .agent_path(AgentPath::root())
+                    .cwd(temp.path().to_path_buf())
+                    .provider_id("deepseek".to_string())
+                    .model_id("deepseek-chat".to_string())
+                    .base_system_prompt(String::new())
+                    .build(),
+            )
+            .await
+            .expect("create parent session")
+            .expect("parent recorder");
+        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .register_recorder(parent_id.clone(), parent_recorder)
+            .await;
+
+        let child = control
+            .spawn(
+                &AgentPath::root(),
+                "child",
+                "default",
+                "do the work",
+                temp.path().to_path_buf(),
+            )
+            .await
+            .expect("spawn child");
+
+        let open_children = store
+            .list_agent_children(&parent_id, Some(AgentEdgeStatus::Open))
+            .expect("list open children");
+        assert_eq!(open_children.len(), 1);
+        assert_eq!(open_children[0].child_session_id, child.thread_id);
+        assert_eq!(open_children[0].child_role.as_deref(), Some("default"));
+        assert!(
+            store
+                .load_session(&child.thread_id)
+                .expect("load child")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_closes_child_session_when_graph_edge_write_fails() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let store = Arc::new(FileSessionStore::new(true, Some(&data_home)));
+        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            Arc::new(ToolRegistry::new()),
+            app_config.multi_agent.clone(),
+            thread_manager,
+            Some(session_store),
+            Some(Arc::new(FailingAgentGraphStore)),
+        );
+        let parent_id = SessionId("parent".to_string());
+        let parent_recorder = store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(parent_id.clone())
+                    .agent_path(AgentPath::root())
+                    .cwd(temp.path().to_path_buf())
+                    .provider_id("deepseek".to_string())
+                    .model_id("deepseek-chat".to_string())
+                    .base_system_prompt(String::new())
+                    .build(),
+            )
+            .await
+            .expect("create parent")
+            .expect("parent recorder");
+        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        control.registry.register_root_thread(parent_id);
+        control
+            .register_recorder(SessionId("parent".to_string()), parent_recorder)
+            .await;
+
+        let error = control
+            .spawn(
+                &AgentPath::root(),
+                "child",
+                "default",
+                "do work",
+                temp.path().to_path_buf(),
+            )
+            .await
+            .expect_err("graph write should fail");
+
+        assert!(error.contains("forced graph failure"));
+        let sessions = store.list_sessions(None).expect("list sessions");
+        assert_eq!(sessions.len(), 1);
+    }
+
+    struct FailingAgentGraphStore;
+
+    #[async_trait]
+    impl AgentGraphStore for FailingAgentGraphStore {
+        async fn upsert_agent_edge(
+            &self,
+            _parent_session_id: SessionId,
+            _child_session_id: SessionId,
+            _child_agent_path: AgentPath,
+            _child_role: Option<String>,
+            _status: AgentEdgeStatus,
+        ) -> std::io::Result<()> {
+            Err(std::io::Error::other("forced graph failure"))
+        }
+
+        async fn set_agent_edge_status(
+            &self,
+            _parent_session_id: &SessionId,
+            _child_session_id: &SessionId,
+            _status: AgentEdgeStatus,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn list_agent_children(
+            &self,
+            _parent_session_id: &SessionId,
+            _status: Option<AgentEdgeStatus>,
+        ) -> std::io::Result<Vec<store::AgentEdge>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_routes_through_thread_manager() {
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            tools,
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            None,
+            None,
+        );
+        let parent_id = SessionId("parent".to_string());
+        let child_id = SessionId("child".to_string());
+        let child_path = AgentPath::root().join("child");
+        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
+        thread_manager
+            .insert_thread(test_thread(child_id.clone(), tx_op))
+            .await;
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .registry
+            .restore_agent(
+                child_id.clone(),
+                child_path.clone(),
+                None,
+                Some("default".to_string()),
+                Some(parent_id),
+            )
+            .expect("restore child");
+
+        control
+            .send_message(
+                AgentPath::root(),
+                child_path.clone(),
+                "hello child".to_string(),
+                false,
+            )
+            .await
+            .expect("send message");
+        control
+            .send_message(AgentPath::root(), child_path, "follow up".to_string(), true)
+            .await
+            .expect("followup message");
+
+        let first = rx_op.recv().await.expect("first routed message");
+        let Op::InterAgentMessage { message } = first else {
+            panic!("expected inter-agent message");
+        };
+        assert!(!message.trigger_turn);
+        let second = rx_op.recv().await.expect("second routed message");
+        let Op::InterAgentMessage { message } = second else {
+            panic!("expected inter-agent message");
+        };
+        assert!(message.trigger_turn);
+    }
+
+    #[tokio::test]
+    async fn child_terminal_turn_notifies_parent_without_triggering_turn() {
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            tools,
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            None,
+            None,
+        );
+        let parent_id = SessionId("parent".to_string());
+        let child_id = SessionId("child".to_string());
+        let child_path = AgentPath::root().join("child");
+        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
+        thread_manager
+            .insert_thread(test_thread(parent_id.clone(), tx_op))
+            .await;
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .registry
+            .restore_agent(
+                child_id.clone(),
+                child_path,
+                Some("kid".to_string()),
+                Some("default".to_string()),
+                Some(parent_id.clone()),
+            )
+            .expect("restore child");
+        let (status_tx, mut status_rx) = watch::channel(AgentStatus::PendingInit);
+        control
+            .status_watchers
+            .lock()
+            .await
+            .insert(child_id.clone(), status_tx);
+
+        control
+            .notify_child_terminal_turn(
+                &child_id,
+                AgentStatus::Completed {
+                    message: Some("done".to_string()),
+                },
+            )
+            .await
+            .expect("notify parent");
+
+        status_rx.changed().await.expect("status changed");
+        assert_eq!(
+            status_rx.borrow().clone(),
+            AgentStatus::Completed {
+                message: Some("done".to_string())
+            }
+        );
+        let sent = rx_op.recv().await.expect("parent notification");
+        let Op::InterAgentMessage { message } = sent else {
+            panic!("expected inter-agent message");
+        };
+        assert!(!message.trigger_turn);
+        assert!(message.content.contains("kid"));
+        assert!(message.content.contains("done"));
+    }
+
+    // ── list_agents ──
+
+    /// Builds an AgentControl suitable for in-memory-only tests (no persistence).
+    fn agent_control_no_persistence() -> Arc<AgentControl> {
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let thread_manager = Arc::new(ThreadManager::new());
+        AgentControl::new(
+            llm_factory,
+            config_handle,
+            Arc::new(ToolRegistry::new()),
+            app_config.multi_agent.clone(),
+            thread_manager,
+            None,
+            None,
+        )
+    }
+
+    /// Seed a non-root agent into the registry via restore for listing tests.
+    fn seed_agent(
+        control: &Arc<AgentControl>,
+        id: &str,
+        name: &str,
+        nick: Option<&str>,
+        parent: Option<&str>,
+    ) {
+        let path = AgentPath::root().join(name);
+        control
+            .registry
+            .restore_agent(
+                SessionId(id.to_string()),
+                path,
+                nick.map(|n| n.to_string()),
+                Some("default".to_string()),
+                parent.map(|p| SessionId(p.to_string())),
+            )
+            .expect("seed agent");
+    }
+
+    #[tokio::test]
+    async fn list_agents_returns_non_root_agents() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+        seed_agent(&control, "a", "alice", Some("Alice"), Some("root"));
+        seed_agent(&control, "b", "bob", Some("Bob"), Some("root"));
+
+        let list = control.list_agents(None);
+        assert_eq!(list.len(), 2);
+        let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Bob"));
+    }
+
+    #[tokio::test]
+    async fn list_agents_filters_by_path_prefix() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+        seed_agent(&control, "alpha", "team/alpha", Some("Alpha"), Some("root"));
+        seed_agent(&control, "beta", "team/beta", Some("Beta"), Some("root"));
+        seed_agent(&control, "other", "other", Some("Other"), Some("root"));
+
+        let list = control.list_agents(Some(&AgentPath::root().join("team")));
+        assert_eq!(list.len(), 2);
+        let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
+        assert!(names.contains(&"Alpha"));
+        assert!(names.contains(&"Beta"));
+        assert!(!names.contains(&"Other"));
+    }
+
+    #[tokio::test]
+    async fn list_agents_empty_when_no_sub_agents() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("lonely_root".to_string()));
+        let list = control.list_agents(None);
+        assert!(list.is_empty());
+    }
+
+    // ── close_agent ──
+
+    /// Verifies that closing an agent with descendants cascades the close
+    /// to all children, grandchildren, etc.
+    #[tokio::test]
+    async fn close_agent_cascades_to_descendants() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+
+        // Build a three-level tree:
+        //   /root/team_a          (has tx_op)
+        //   /root/team_a/sub_1    (has tx_op)
+        //   /root/team_a/sub_1/deep (has tx_op)
+        //   /root/team_b          (unrelated, should NOT be closed)
+        let parent_id = SessionId("team_a".to_string());
+        let sub1_id = SessionId("sub_1".to_string());
+        let deep_id = SessionId("deep".to_string());
+        let team_b_id = SessionId("team_b".to_string());
+
+        let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
+        let (tx_sub1, _rx_sub1) = mpsc::unbounded_channel::<Op>();
+        let (tx_deep, _rx_deep) = mpsc::unbounded_channel::<Op>();
+        let (tx_team_b, _rx_team_b) = mpsc::unbounded_channel::<Op>();
+
+        control
+            .thread_manager
+            .insert_thread(test_thread(parent_id.clone(), tx_parent))
+            .await;
+        control
+            .thread_manager
+            .insert_thread(test_thread(sub1_id.clone(), tx_sub1))
+            .await;
+        control
+            .thread_manager
+            .insert_thread(test_thread(deep_id.clone(), tx_deep))
+            .await;
+        control
+            .thread_manager
+            .insert_thread(test_thread(team_b_id.clone(), tx_team_b))
+            .await;
+
+        seed_agent(&control, "team_a", "team_a", Some("TeamA"), Some("root"));
+        seed_agent(
+            &control,
+            "sub_1",
+            "team_a/sub_1",
+            Some("Sub1"),
+            Some("team_a"),
+        );
+        seed_agent(
+            &control,
+            "deep",
+            "team_a/sub_1/deep",
+            Some("Deep"),
+            Some("sub_1"),
+        );
+        seed_agent(&control, "team_b", "team_b", Some("TeamB"), Some("root"));
+
+        let team_a_path = AgentPath::root().join("team_a");
+        control.close_agent(&team_a_path).await.unwrap();
+
+        // team_a and all descendants should be gone
+        assert!(
+            control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("team_a"))
+                .is_none()
+        );
+        assert!(
+            control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("team_a/sub_1"))
+                .is_none()
+        );
+        assert!(
+            control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("team_a/sub_1/deep"))
+                .is_none()
+        );
+        // team_b must still be alive
+        assert!(
+            control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("team_b"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn close_nonexistent_agent_fails() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+
+        let result = control.close_agent(&AgentPath::root().join("ghost")).await;
+        assert!(result.is_err());
+    }
+
+    // ── spawn depth limit ──
+
+    #[tokio::test]
+    async fn spawn_exceeding_depth_limit_is_rejected() {
+        let control = agent_control_no_persistence();
+        // AgentPath::root() is not needed here — we pass a deep path directly.
+        // AgentControl builder sets max_spawn_depth from config.
+        // Default MultiAgentConfig::default() has max_spawn_depth = 8.
+        // 9 slashes = depth 9 > 8 limit.
+        let deep_parent = AgentPath("/root/a/b/c/d/e/f/g/h/i".to_string());
+
+        let error = control
+            .spawn(
+                &deep_parent,
+                "too_deep",
+                "default",
+                "do work",
+                PathBuf::from("/tmp"),
+            )
+            .await
+            .expect_err("should reject deep spawn");
+
+        assert!(error.contains("spawn depth"));
     }
 }

@@ -29,6 +29,7 @@ pub(crate) struct MailboxReceiver {
 impl Mailbox {
     /// Send a message, incrementing the sequence counter and waking
     /// any waiters.
+    #[allow(dead_code)]
     pub(crate) fn send(&self, msg: InterAgentMessage) {
         let seq = self.seq.fetch_add(1, Ordering::AcqRel) + 1;
         let _ = self.tx.send(msg);
@@ -132,6 +133,35 @@ mod tests {
         let (mb, rx) = mailbox_pair();
         assert!(!rx.has_pending_trigger_turn());
         mb.send(test_msg("go", true));
+        assert!(rx.has_pending_trigger_turn());
+    }
+
+    /// Verifies that a cloned mailbox shares the same channel and wake,
+    /// and messages sent through either the original or clone are all
+    /// received by the single receiver.
+    #[test]
+    fn clone_mailbox_shares_underlying_channel() {
+        let (mb, mut rx) = mailbox_pair();
+        let mb2 = mb.clone();
+
+        mb.send(test_msg("from_original", false));
+        mb2.send(test_msg("from_clone", false));
+
+        let msgs = rx.drain();
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs.iter().any(|m| m.content == "from_original"));
+        assert!(msgs.iter().any(|m| m.content == "from_clone"));
+    }
+
+    /// Verifies that sending a trigger_turn message through a clone
+    /// still wakes the original receiver.
+    #[test]
+    fn clone_wake_propagates_to_receiver() {
+        let (mb, rx) = mailbox_pair();
+        let mb2 = mb.clone();
+
+        assert!(!rx.has_pending_trigger_turn());
+        mb2.send(test_msg("wake", true));
         assert!(rx.has_pending_trigger_turn());
     }
 }

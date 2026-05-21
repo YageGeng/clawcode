@@ -3,11 +3,14 @@ use std::path::{Path, PathBuf};
 
 use protocol::{SessionId, SessionInfo};
 
+use super::agent_graph::{AgentEdgeStatus, AgentGraphStore, fold_agent_edges};
 use super::manifest::{
-    SessionManifestStatus, active_manifest_record, append_manifest_record, closed_manifest_record,
-    read_latest_manifest, resolve_manifest_path,
+    SessionManifestStatus, active_manifest_record, append_manifest_record,
+    archived_manifest_record, closed_manifest_record, read_latest_manifest, resolve_manifest_path,
 };
-use super::record::{CreateSessionParams, PersistedPayload, SessionMetaRecord, timestamp_now};
+use super::record::{
+    AgentEdgeRecord, CreateSessionParams, PersistedPayload, SessionMetaRecord, timestamp_now,
+};
 use super::recorder::{FileSessionRecorder, SessionRecorder};
 use super::replay::{ReplayedSession, replay_session_file};
 
@@ -44,6 +47,39 @@ impl FileSessionStore {
             .join(month)
             .join(day)
             .join(filename)
+    }
+
+    /// Resolve the persisted JSONL path for a live or closed session id.
+    fn session_path_for_id(&self, session_id: &SessionId) -> io::Result<Option<PathBuf>> {
+        let manifest = read_latest_manifest(&self.data_home)?;
+        Ok(manifest.get(session_id).and_then(|record| {
+            if record.status == SessionManifestStatus::Archived {
+                None
+            } else {
+                Some(resolve_manifest_path(&self.data_home, &record.path))
+            }
+        }))
+    }
+
+    /// Return the JSONL path for a session or a not-found IO error.
+    fn require_session_path(&self, session_id: &SessionId) -> io::Result<PathBuf> {
+        self.session_path_for_id(session_id)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("session not found in manifest: {session_id}"),
+            )
+        })
+    }
+
+    /// Append one agent edge record to the parent session JSONL file.
+    async fn append_agent_edge(
+        &self,
+        parent_session_id: &SessionId,
+        edge: AgentEdgeRecord,
+    ) -> io::Result<()> {
+        let path = self.require_session_path(parent_session_id)?;
+        let recorder = FileSessionRecorder::new(path);
+        recorder.append(&[PersistedPayload::AgentEdge(edge)]).await
     }
 }
 
@@ -127,6 +163,24 @@ impl super::traits::SessionStore for FileSessionStore {
         Ok(())
     }
 
+    async fn archive_session(
+        &self,
+        session_id: &SessionId,
+        recorder: Option<&dyn SessionRecorder>,
+    ) -> io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if let Some(recorder) = recorder {
+            recorder.flush().await?;
+        }
+        let manifest = read_latest_manifest(&self.data_home)?;
+        if let Some(record) = manifest.get(session_id) {
+            append_manifest_record(&self.data_home, &archived_manifest_record(record))?;
+        }
+        Ok(())
+    }
+
     fn list_sessions(&self, cwd: Option<&Path>) -> io::Result<Vec<SessionInfo>> {
         if !self.enabled {
             return Ok(Vec::new());
@@ -161,6 +215,81 @@ impl super::traits::SessionStore for FileSessionStore {
         }
         sessions.sort_by(|left, right| left.session_id.0.cmp(&right.session_id.0));
         Ok(sessions)
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentGraphStore for FileSessionStore {
+    async fn upsert_agent_edge(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        child_agent_path: protocol::AgentPath,
+        child_role: Option<String>,
+        status: AgentEdgeStatus,
+    ) -> io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let edge = AgentEdgeRecord::builder()
+            .parent_session_id(parent_session_id.clone())
+            .child_session_id(child_session_id)
+            .child_agent_path(child_agent_path)
+            .child_role(child_role.unwrap_or_default())
+            .status(status.into())
+            .build();
+        self.append_agent_edge(&parent_session_id, edge).await
+    }
+
+    async fn set_agent_edge_status(
+        &self,
+        parent_session_id: &SessionId,
+        child_session_id: &SessionId,
+        status: AgentEdgeStatus,
+    ) -> io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let current = self
+            .list_agent_children(parent_session_id, None)?
+            .into_iter()
+            .find(|edge| &edge.child_session_id == child_session_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("agent edge not found for child: {child_session_id}"),
+                )
+            })?;
+        let edge = AgentEdgeRecord::builder()
+            .parent_session_id(parent_session_id.clone())
+            .child_session_id(child_session_id.clone())
+            .child_agent_path(current.child_agent_path)
+            .child_role(current.child_role.unwrap_or_default())
+            .status(status.into())
+            .build();
+        self.append_agent_edge(parent_session_id, edge).await
+    }
+
+    fn list_agent_children(
+        &self,
+        parent_session_id: &SessionId,
+        status: Option<AgentEdgeStatus>,
+    ) -> io::Result<Vec<super::agent_graph::AgentEdge>> {
+        if !self.enabled {
+            return Ok(Vec::new());
+        }
+        let Some(path) = self.session_path_for_id(parent_session_id)? else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("session not found in manifest: {parent_session_id}"),
+            ));
+        };
+        let replayed = replay_session_file(&path)?;
+        Ok(fold_agent_edges(
+            parent_session_id.clone(),
+            replayed.agent_edges,
+            status,
+        ))
     }
 }
 
@@ -200,10 +329,23 @@ fn current_date_parts() -> (String, String, String) {
 #[cfg(test)]
 mod store_tests {
     use super::*;
+    use crate::agent_graph::{AgentEdgeStatus, AgentGraphStore};
     use crate::record::{CreateSessionParams, MessageRecord, PersistedPayload};
     use crate::traits::SessionStore;
     use protocol::AgentPath;
     use protocol::message::Message;
+
+    /// Build minimal root session creation parameters for store tests.
+    fn root_params(session_id: SessionId) -> CreateSessionParams {
+        CreateSessionParams::builder()
+            .session_id(session_id)
+            .agent_path(AgentPath::root())
+            .cwd(PathBuf::from("/tmp/project"))
+            .provider_id("provider".to_string())
+            .model_id("model".to_string())
+            .base_system_prompt(String::new())
+            .build()
+    }
 
     #[tokio::test]
     async fn create_load_and_list_session_roundtrips_messages() {
@@ -280,5 +422,106 @@ mod store_tests {
 
         let loaded = store.load_session(&session_id).expect("load result");
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_graph_store_lists_latest_open_children() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore {
+            data_home: temp.path().to_path_buf(),
+            enabled: true,
+        };
+        let parent = SessionId("parent".to_string());
+        let child = SessionId("child".to_string());
+        let path = AgentPath("/root/child".to_string());
+
+        store
+            .create_session(root_params(parent.clone()))
+            .await
+            .expect("create")
+            .expect("recorder");
+        store
+            .upsert_agent_edge(
+                parent.clone(),
+                child.clone(),
+                path,
+                Some("coder".to_string()),
+                AgentEdgeStatus::Open,
+            )
+            .await
+            .expect("open edge");
+
+        let open = store
+            .list_agent_children(&parent, Some(AgentEdgeStatus::Open))
+            .expect("list");
+
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].child_session_id, child);
+        assert_eq!(open[0].child_role.as_deref(), Some("coder"));
+    }
+
+    #[tokio::test]
+    async fn agent_graph_store_closed_child_is_not_returned_as_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore {
+            data_home: temp.path().to_path_buf(),
+            enabled: true,
+        };
+        let parent = SessionId("parent".to_string());
+        let child = SessionId("child".to_string());
+        let path = AgentPath("/root/child".to_string());
+
+        store
+            .create_session(root_params(parent.clone()))
+            .await
+            .expect("create")
+            .expect("recorder");
+        store
+            .upsert_agent_edge(
+                parent.clone(),
+                child.clone(),
+                path,
+                Some("coder".to_string()),
+                AgentEdgeStatus::Open,
+            )
+            .await
+            .expect("open edge");
+        store
+            .set_agent_edge_status(&parent, &child, AgentEdgeStatus::Closed)
+            .await
+            .expect("close edge");
+
+        let open = store
+            .list_agent_children(&parent, Some(AgentEdgeStatus::Open))
+            .expect("list open");
+
+        assert!(open.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_agent_graph_store_is_noop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore {
+            data_home: temp.path().to_path_buf(),
+            enabled: false,
+        };
+        let parent = SessionId("parent".to_string());
+        let child = SessionId("child".to_string());
+
+        store
+            .upsert_agent_edge(
+                parent.clone(),
+                child,
+                AgentPath("/root/child".to_string()),
+                None,
+                AgentEdgeStatus::Open,
+            )
+            .await
+            .expect("disabled write");
+
+        let children = store
+            .list_agent_children(&parent, None)
+            .expect("disabled list");
+        assert!(children.is_empty());
     }
 }

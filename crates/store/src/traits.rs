@@ -35,6 +35,13 @@ pub trait SessionStore: Send + Sync {
         recorder: Option<&dyn SessionRecorder>,
     ) -> io::Result<()>;
 
+    /// Mark a session archived in the manifest and flush its recorder.
+    async fn archive_session(
+        &self,
+        session_id: &SessionId,
+        recorder: Option<&dyn SessionRecorder>,
+    ) -> io::Result<()>;
+
     /// List persisted sessions from the manifest, optionally filtered by cwd.
     fn list_sessions(&self, cwd: Option<&Path>) -> io::Result<Vec<SessionInfo>>;
 }

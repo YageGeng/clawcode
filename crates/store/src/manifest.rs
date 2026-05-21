@@ -95,6 +95,19 @@ pub fn closed_manifest_record(record: &SessionManifestRecord) -> SessionManifest
         .build()
 }
 
+/// Build an archived manifest record for an existing manifest entry.
+pub fn archived_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
+    SessionManifestRecord::builder()
+        .session_id(record.session_id.clone())
+        .path(record.path.clone())
+        .agent_path(record.agent_path.clone())
+        .cwd(record.cwd.clone())
+        .status(SessionManifestStatus::Archived)
+        .updated_at(timestamp_now())
+        .parent_session_id(record.parent_session_id.clone())
+        .build()
+}
+
 /// Read the manifest and return the latest record per session id.
 pub fn read_latest_manifest(
     data_home: &Path,

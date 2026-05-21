@@ -546,4 +546,269 @@ mod tests {
             3
         );
     }
+
+    // ── resolve_target ──
+
+    #[test]
+    fn resolve_by_path_finds_committed_agent() {
+        let registry = AgentRegistry::new();
+        let path = AgentPath::root().join("finder");
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        res.reserve_path(&path).unwrap();
+        res.commit(
+            AgentMetadata::builder()
+                .agent_id(SessionId("f1".to_string()))
+                .agent_path(path.clone())
+                .build(),
+        );
+
+        let resolved = registry.resolve_target("/root/finder").unwrap();
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn resolve_by_nickname_finds_committed_agent() {
+        let registry = AgentRegistry::new();
+        let path = AgentPath::root().join("nick");
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        res.reserve_path(&path).unwrap();
+        let nick = res.reserve_nickname(None).unwrap();
+        res.commit(
+            AgentMetadata::builder()
+                .agent_id(SessionId("n1".to_string()))
+                .agent_path(path.clone())
+                .agent_nickname(nick.clone())
+                .build(),
+        );
+
+        let resolved = registry.resolve_target(&nick).unwrap();
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn resolve_nonexistent_path_fails() {
+        let registry = AgentRegistry::new();
+        registry.resolve_target("/root/nowhere").unwrap_err();
+    }
+
+    #[test]
+    fn resolve_nonexistent_nickname_fails() {
+        let registry = AgentRegistry::new();
+        registry.resolve_target("ghost").unwrap_err();
+    }
+
+    // ── live_agents ──
+
+    #[test]
+    fn live_agents_excludes_root() {
+        let registry = AgentRegistry::new();
+        let child_path = AgentPath::root().join("child");
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        res.reserve_path(&child_path).unwrap();
+        res.commit(
+            AgentMetadata::builder()
+                .agent_id(SessionId("c1".to_string()))
+                .agent_path(child_path.clone())
+                .agent_nickname("childo".to_string())
+                .build(),
+        );
+        registry.register_root_thread(SessionId("root".to_string()));
+
+        let live = registry.live_agents();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].agent_nickname.as_deref(), Some("childo"));
+    }
+
+    #[test]
+    fn live_agents_excludes_uncommitted_entries() {
+        let registry = AgentRegistry::new();
+        let _res = registry.reserve_spawn_slot(None).unwrap();
+        let live = registry.live_agents();
+        assert!(live.is_empty());
+    }
+
+    // ── restore_agent ──
+
+    #[test]
+    fn restore_agent_succeeds_for_new_path() {
+        let registry = AgentRegistry::new();
+        let path = AgentPath::root().join("restored");
+        registry
+            .restore_agent(
+                SessionId("r1".to_string()),
+                path.clone(),
+                Some("restoro".to_string()),
+                Some("default".to_string()),
+                Some(SessionId("parent".to_string())),
+            )
+            .unwrap();
+
+        assert_eq!(
+            registry.agent_id_for_path(&path),
+            Some(SessionId("r1".to_string()))
+        );
+    }
+
+    #[test]
+    fn restore_agent_fails_for_existing_path() {
+        let registry = AgentRegistry::new();
+        let path = AgentPath::root().join("dup_restore");
+        registry
+            .restore_agent(SessionId("r1".to_string()), path.clone(), None, None, None)
+            .unwrap();
+        assert!(
+            registry
+                .restore_agent(SessionId("r2".to_string()), path, None, None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn restore_agent_appends_suffix_on_nickname_collision() {
+        let registry = AgentRegistry::new();
+        registry
+            .restore_agent(
+                SessionId("a".to_string()),
+                AgentPath::root().join("a"),
+                Some("collision".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+        registry
+            .restore_agent(
+                SessionId("b".to_string()),
+                AgentPath::root().join("b"),
+                Some("collision".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let live = registry.live_agents();
+        let nicknames: Vec<&str> = live
+            .iter()
+            .filter_map(|m| m.agent_nickname.as_deref())
+            .collect();
+        assert!(nicknames.contains(&"collision"));
+        assert!(nicknames.contains(&"collision_r"));
+    }
+
+    // ── preferred nickname ──
+
+    #[test]
+    fn preferred_nickname_overrides_pool_selection() {
+        let registry = AgentRegistry::new();
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        let nick = res.reserve_nickname(Some("my_custom_name")).unwrap();
+        assert_eq!(nick, "my_custom_name");
+    }
+
+    // ── pool exhaustion with multiple resets ──
+
+    #[test]
+    fn nickname_pool_multiple_resets_produce_progressive_ordinals() {
+        let registry = AgentRegistry::new();
+        let names: Vec<&str> = AGENT_NAMES.lines().collect();
+
+        // Exhaust pool once
+        let mut res1 = Vec::new();
+        for _ in 0..names.len() {
+            let mut res = registry.reserve_spawn_slot(None).unwrap();
+            let _nick = res.reserve_nickname(None).unwrap();
+            res1.push(res);
+        }
+        // 2nd generation
+        let mut res2 = Vec::new();
+        for _ in 0..names.len() {
+            let mut res = registry.reserve_spawn_slot(None).unwrap();
+            let nick = res.reserve_nickname(None).unwrap();
+            // All names in 2nd generation should have "2nd" suffix
+            assert!(
+                nick.contains("2nd"),
+                "expected 2nd generation suffix, got: {nick}"
+            );
+            res2.push(res);
+        }
+        // 3rd generation
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        let nick3 = res.reserve_nickname(None).unwrap();
+        assert!(
+            nick3.contains("the 3rd"),
+            "expected 3rd generation suffix, got: {nick3}"
+        );
+    }
+
+    // ── release_spawned_thread ──
+
+    #[test]
+    fn release_spawned_thread_removes_non_root_agent() {
+        let registry = AgentRegistry::new();
+        let child_path = AgentPath::root().join("temp_child");
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        res.reserve_path(&child_path).unwrap();
+        res.commit(
+            AgentMetadata::builder()
+                .agent_id(SessionId("tc".to_string()))
+                .agent_path(child_path.clone())
+                .build(),
+        );
+        let before = registry.total_count.load(Ordering::Acquire);
+        assert!(before >= 1);
+
+        registry.release_spawned_thread(SessionId("tc".to_string()));
+        let after = registry.total_count.load(Ordering::Acquire);
+        assert_eq!(after, before - 1);
+        assert!(registry.agent_id_for_path(&child_path).is_none());
+    }
+
+    #[test]
+    fn release_spawned_thread_does_not_decrement_for_root() {
+        let registry = AgentRegistry::new();
+        registry.register_root_thread(SessionId("root".to_string()));
+        let before = registry.total_count.load(Ordering::Acquire);
+        registry.release_spawned_thread(SessionId("root".to_string()));
+        let after = registry.total_count.load(Ordering::Acquire);
+        assert_eq!(after, before, "root release must not decrement counter");
+    }
+
+    // ── register_root_thread ──
+
+    #[test]
+    fn register_root_thread_replaces_stale_root() {
+        let registry = AgentRegistry::new();
+        registry.register_root_thread(SessionId("old_root".to_string()));
+        registry.register_root_thread(SessionId("new_root".to_string()));
+
+        let root_id = registry.agent_id_for_path(&AgentPath::root());
+        assert_eq!(root_id, Some(SessionId("new_root".to_string())));
+    }
+
+    // ── agent_metadata_for_thread ──
+
+    #[test]
+    fn agent_metadata_for_thread_returns_full_metadata() {
+        let registry = AgentRegistry::new();
+        let child_path = AgentPath::root().join("meta_child");
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        res.reserve_path(&child_path).unwrap();
+        let nick = res.reserve_nickname(None).unwrap();
+        let role = "explorer".to_string();
+        res.commit(
+            AgentMetadata::builder()
+                .agent_id(SessionId("mc".to_string()))
+                .agent_path(child_path.clone())
+                .agent_nickname(nick.clone())
+                .agent_role(role.clone())
+                .parent_session_id(SessionId("p".to_string()))
+                .build(),
+        );
+
+        let meta = registry
+            .agent_metadata_for_thread(SessionId("mc".to_string()))
+            .unwrap();
+        assert_eq!(meta.agent_nickname.as_deref(), Some(nick.as_str()));
+        assert_eq!(meta.agent_role.as_deref(), Some(role.as_str()));
+        assert_eq!(meta.parent_session_id, Some(SessionId("p".to_string())));
+    }
 }
