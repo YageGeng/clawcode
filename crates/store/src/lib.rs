@@ -1,3 +1,4 @@
+mod agent_graph;
 mod file_store;
 mod manifest;
 mod record;
@@ -5,6 +6,9 @@ mod recorder;
 mod replay;
 pub mod traits;
 
+pub use agent_graph::AgentEdge;
+pub use agent_graph::AgentEdgeStatus;
+pub use agent_graph::AgentGraphStore;
 pub use file_store::FileSessionStore;
 pub use manifest::SessionManifestRecord;
 pub use manifest::SessionManifestStatus;

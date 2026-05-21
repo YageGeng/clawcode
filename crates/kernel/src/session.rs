@@ -7,7 +7,11 @@ use std::sync::Arc;
 
 use config::AppConfig;
 use futures::Stream;
-use protocol::{AgentPath, Event, KernelError, Op, ReviewDecision, SessionId, StopReason, TurnId};
+use protocol::message::{AssistantContent, Message};
+use protocol::{
+    AgentPath, AgentStatus, Event, InterAgentMessage, KernelError, Op, ReviewDecision, SessionId,
+    StopReason, TurnId,
+};
 use provider::factory::ArcLlm;
 use skills::SkillRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -17,7 +21,8 @@ use crate::agent::mailbox::{Mailbox, MailboxReceiver, mailbox_pair};
 use crate::context::ContextManager;
 use crate::turn::{TurnContext, execute_turn};
 use store::{
-    PersistedPayload, SessionRecorder, TurnAbortedRecord, TurnCompleteRecord, TurnKindRecord,
+    MessageRecord, PersistedPayload, SessionRecorder, TurnAbortedRecord, TurnCompleteRecord,
+    TurnKindRecord,
 };
 use tools::ToolRegistry;
 
@@ -112,6 +117,9 @@ pub(crate) struct Session {
     /// Optional file-backed recorder for canonical session history.
     #[builder(default, setter(strip_option))]
     pub recorder: Option<Arc<dyn SessionRecorder>>,
+    /// Inter-agent messages queued for model-visible delivery at the next turn boundary.
+    #[builder(default)]
+    pub pending_inter_agent_messages: Vec<InterAgentMessage>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
@@ -226,68 +234,18 @@ async fn run_loop(mut rt: Session) {
             // Inter-agent messages are processed identically to user prompts.
             // The content is injected as the turn input, and the turn loop
             // handles tool calls, approvals, and cancellation the same way.
-            Some(Op::InterAgentMessage { content, .. }) => {
-                let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
-                let ctx = TurnContext::builder()
-                    .session_id(rt.session_id.clone())
-                    .turn_id(turn_id.clone())
-                    .turn_kind(TurnKindRecord::InterAgentMessage)
-                    .llm(Arc::clone(&rt.llm))
-                    .tools(Arc::clone(&rt.tools))
-                    .cwd(rt.cwd.clone())
-                    .provider_id(active_provider_id(&rt.app_config))
-                    .pending_approvals(Arc::clone(&rt.pending_approvals))
-                    .agent_path(rt.agent_path.clone())
-                    .approval(Arc::clone(&rt.approval))
-                    .app_config(Arc::clone(&rt.app_config))
-                    .skill_registry(Arc::clone(&rt.skill_registry))
-                    .build();
-                let ctx = with_recorder(ctx, rt.recorder.clone());
-
-                let tx = { rt.tx_event.lock().await.clone() };
-                let turn = execute_turn(&ctx, content, &mut rt.context, &tx);
-                tokio::pin!(turn);
-
-                loop {
-                    tokio::select! {
-                        result = &mut turn => {
-                            if let Err(e) = result {
-                                persist_turn_aborted(&rt.recorder, &turn_id, e.to_string()).await;
-                                let _ = tx.send(Event::turn_complete(
-                                    rt.session_id.clone(),
-                                    StopReason::Error,
-                                ));
-                                tracing::error!(
-                                    session_id = %rt.session_id,
-                                    error = %e,
-                                    "Turn execution failed"
-                                );
-                            } else {
-                                persist_turn_complete(&rt.recorder, &turn_id, StopReason::EndTurn).await;
-                                let _ = tx.send(Event::turn_complete(
-                                    rt.session_id.clone(),
-                                    StopReason::EndTurn,
-                                ));
-                            }
-                            break;
-                        }
-                        op = rt.rx_op.recv() => match op {
-                            Some(Op::ExecApprovalResponse { call_id, decision })
-                            | Some(Op::PatchApprovalResponse { call_id, decision }) => {
-                                if let Some(tx) =
-                                    rt.pending_approvals.lock().await.remove(&call_id)
-                                {
-                                    let _ = tx.send(decision);
-                                }
-                            }
-                            Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
-                                return;
-                            }
-                            Some(other) => {
-                                tracing::debug!(?other, "Ignoring operation while turn is running");
-                            }
-                        }
+            Some(Op::InterAgentMessage { message }) if !message.trigger_turn => {
+                persist_inter_agent_message(&mut *rt.context, &rt.recorder, message).await;
+            }
+            Some(Op::InterAgentMessage { message }) => {
+                let mut next_message = Some(message);
+                while let Some(message) = next_message {
+                    let keep_running = run_inter_agent_turn(&mut rt, message).await;
+                    if !keep_running {
+                        return;
                     }
+                    next_message =
+                        take_next_triggering_message(&mut rt.pending_inter_agent_messages);
                 }
             }
             Some(Op::Prompt { text, system, .. }) => {
@@ -311,49 +269,80 @@ async fn run_loop(mut rt: Session) {
 
                 let tx = { rt.tx_event.lock().await.clone() };
 
-                let turn = execute_turn(&ctx, text, &mut rt.context, &tx);
-                tokio::pin!(turn);
-
-                loop {
-                    tokio::select! {
-                        result = &mut turn => {
-                            if let Err(e) = result {
-                                persist_turn_aborted(&rt.recorder, &turn_id, e.to_string()).await;
-                                let _ = tx.send(Event::turn_complete(
-                                    rt.session_id.clone(),
-                                    StopReason::Error,
-                                ));
-                                tracing::error!(
-                                    session_id = %rt.session_id,
-                                    error = %e,
-                                    "Turn execution failed"
-                                );
-                            } else {
-                                persist_turn_complete(&rt.recorder, &turn_id, StopReason::EndTurn).await;
-                                let _ = tx.send(Event::turn_complete(
-                                    rt.session_id.clone(),
-                                    StopReason::EndTurn,
-                                ));
-                            }
-                            break;
-                        }
-                        op = rt.rx_op.recv() => match op {
-                            Some(Op::ExecApprovalResponse { call_id, decision })
-                            | Some(Op::PatchApprovalResponse { call_id, decision }) => {
-                                if let Some(tx) =
-                                    rt.pending_approvals.lock().await.remove(&call_id)
-                                {
-                                    let _ = tx.send(decision);
+                // Pending inter-agent messages are drained at the turn boundary so
+                // non-triggering messages become visible during the next natural turn.
+                drain_pending_inter_agent_messages(
+                    &mut *rt.context,
+                    rt.recorder.clone(),
+                    &mut rt.pending_inter_agent_messages,
+                )
+                .await;
+                let terminal_status = {
+                    let turn = execute_turn(&ctx, text, &mut rt.context, &tx);
+                    tokio::pin!(turn);
+                    let terminal_status;
+                    loop {
+                        tokio::select! {
+                            result = &mut turn => {
+                                if let Err(e) = result {
+                                    let reason = e.to_string();
+                                    persist_turn_aborted(&rt.recorder, &turn_id, reason.clone()).await;
+                                    terminal_status = Some(AgentStatus::Errored { reason: reason.clone() });
+                                    let _ = tx.send(Event::turn_complete(
+                                        rt.session_id.clone(),
+                                        StopReason::Error,
+                                    ));
+                                    tracing::error!(
+                                        session_id = %rt.session_id,
+                                        error = %e,
+                                        "Turn execution failed"
+                                    );
+                                } else {
+                                    persist_turn_complete(&rt.recorder, &turn_id, StopReason::EndTurn).await;
+                                    terminal_status = Some(AgentStatus::Completed { message: None });
+                                    let _ = tx.send(Event::turn_complete(
+                                        rt.session_id.clone(),
+                                        StopReason::EndTurn,
+                                    ));
                                 }
+                                break;
                             }
-                            Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
-                                return;
-                            }
-                            Some(other) => {
-                                tracing::debug!(?other, "Ignoring operation while turn is running");
+                            op = rt.rx_op.recv() => match op {
+                                Some(Op::ExecApprovalResponse { call_id, decision })
+                                | Some(Op::PatchApprovalResponse { call_id, decision }) => {
+                                    if let Some(tx) =
+                                        rt.pending_approvals.lock().await.remove(&call_id)
+                                    {
+                                        let _ = tx.send(decision);
+                                    }
+                                }
+                                Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
+                                    return;
+                                }
+                                Some(Op::InterAgentMessage { message }) => {
+                                    rt.pending_inter_agent_messages.push(message);
+                                }
+                                Some(other) => {
+                                    tracing::debug!(?other, "Ignoring operation while turn is running");
+                                }
                             }
                         }
                     }
+                    terminal_status
+                };
+                if let Some(status) = terminal_status {
+                    let status = with_final_message(status, &*rt.context);
+                    notify_terminal_turn(&rt.agent_control, &rt.session_id, status).await;
+                }
+                let mut next_message =
+                    take_next_triggering_message(&mut rt.pending_inter_agent_messages);
+                while let Some(message) = next_message {
+                    let keep_running = run_inter_agent_turn(&mut rt, message).await;
+                    if !keep_running {
+                        return;
+                    }
+                    next_message =
+                        take_next_triggering_message(&mut rt.pending_inter_agent_messages);
                 }
             }
             Some(Op::ExecApprovalResponse { call_id, decision })
@@ -372,6 +361,198 @@ async fn run_loop(mut rt: Session) {
 fn with_recorder(mut ctx: TurnContext, recorder: Option<Arc<dyn SessionRecorder>>) -> TurnContext {
     ctx.recorder = recorder;
     ctx
+}
+
+/// Execute one inter-agent turn and return whether the session should keep running.
+async fn run_inter_agent_turn(rt: &mut Session, message: InterAgentMessage) -> bool {
+    let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
+    let ctx = TurnContext::builder()
+        .session_id(rt.session_id.clone())
+        .turn_id(turn_id.clone())
+        .turn_kind(TurnKindRecord::InterAgentMessage)
+        .llm(Arc::clone(&rt.llm))
+        .tools(Arc::clone(&rt.tools))
+        .cwd(rt.cwd.clone())
+        .provider_id(active_provider_id(&rt.app_config))
+        .pending_approvals(Arc::clone(&rt.pending_approvals))
+        .agent_path(rt.agent_path.clone())
+        .approval(Arc::clone(&rt.approval))
+        .app_config(Arc::clone(&rt.app_config))
+        .skill_registry(Arc::clone(&rt.skill_registry))
+        .build();
+    let ctx = with_recorder(ctx, rt.recorder.clone());
+    let tx = { rt.tx_event.lock().await.clone() };
+    // Pending inter-agent messages are drained at the turn boundary so
+    // non-triggering messages become visible without starting their own turn.
+    drain_pending_inter_agent_messages(
+        &mut *rt.context,
+        rt.recorder.clone(),
+        &mut rt.pending_inter_agent_messages,
+    )
+    .await;
+    let terminal_status = {
+        let turn = execute_turn(&ctx, message.content, &mut rt.context, &tx);
+        tokio::pin!(turn);
+        let terminal_status;
+        loop {
+            tokio::select! {
+                result = &mut turn => {
+                    if let Err(e) = result {
+                        let reason = e.to_string();
+                        persist_turn_aborted(&rt.recorder, &turn_id, reason.clone()).await;
+                        terminal_status = Some(AgentStatus::Errored { reason: reason.clone() });
+                        let _ = tx.send(Event::turn_complete(
+                            rt.session_id.clone(),
+                            StopReason::Error,
+                        ));
+                        tracing::error!(
+                            session_id = %rt.session_id,
+                            error = %e,
+                            "Turn execution failed"
+                        );
+                    } else {
+                        persist_turn_complete(&rt.recorder, &turn_id, StopReason::EndTurn).await;
+                        terminal_status = Some(AgentStatus::Completed { message: None });
+                        let _ = tx.send(Event::turn_complete(
+                            rt.session_id.clone(),
+                            StopReason::EndTurn,
+                        ));
+                    }
+                    break;
+                }
+                op = rt.rx_op.recv() => match op {
+                    Some(Op::ExecApprovalResponse { call_id, decision })
+                    | Some(Op::PatchApprovalResponse { call_id, decision }) => {
+                        if let Some(tx) =
+                            rt.pending_approvals.lock().await.remove(&call_id)
+                        {
+                            let _ = tx.send(decision);
+                        }
+                    }
+                    Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
+                        return false;
+                    }
+                    Some(Op::InterAgentMessage { message }) => {
+                        rt.pending_inter_agent_messages.push(message);
+                    }
+                    Some(other) => {
+                        tracing::debug!(?other, "Ignoring operation while turn is running");
+                    }
+                }
+            }
+        }
+        terminal_status
+    };
+    if let Some(status) = terminal_status {
+        let status = with_final_message(status, &*rt.context);
+        notify_terminal_turn(&rt.agent_control, &rt.session_id, status).await;
+    }
+    true
+}
+
+/// Remove the next queued message that requested a follow-up turn.
+fn take_next_triggering_message(pending: &mut Vec<InterAgentMessage>) -> Option<InterAgentMessage> {
+    let index = pending.iter().position(|message| message.trigger_turn)?;
+    Some(pending.remove(index))
+}
+
+/// Render an inter-agent message as model-visible user context.
+fn render_inter_agent_message(message: &InterAgentMessage) -> String {
+    format!(
+        "[inter-agent message from {} to {}]\n{}",
+        message.from, message.to, message.content
+    )
+}
+
+/// Persist and inject all pending inter-agent messages into context.
+async fn drain_pending_inter_agent_messages(
+    context: &mut dyn ContextManager,
+    recorder: Option<Arc<dyn SessionRecorder>>,
+    pending: &mut Vec<InterAgentMessage>,
+) {
+    let messages = std::mem::take(pending);
+    for message in messages {
+        persist_inter_agent_message(context, &recorder, message).await;
+    }
+}
+
+/// Persist and inject one inter-agent message into context without starting a turn.
+async fn persist_inter_agent_message(
+    context: &mut dyn ContextManager,
+    recorder: &Option<Arc<dyn SessionRecorder>>,
+    message: InterAgentMessage,
+) {
+    let rendered = render_inter_agent_message(&message);
+    let user_message = Message::user(rendered);
+    context.push(user_message.clone());
+    persist_message(
+        recorder,
+        &TurnId(uuid::Uuid::new_v4().to_string()),
+        user_message,
+    )
+    .await;
+}
+
+/// Persist a message accepted into the session context.
+async fn persist_message(
+    recorder: &Option<Arc<dyn SessionRecorder>>,
+    turn_id: &TurnId,
+    message: Message,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let record = MessageRecord::builder()
+        .turn_id(String::from(turn_id))
+        .message(message)
+        .build();
+    if let Err(error) = recorder.append(&[PersistedPayload::Message(record)]).await {
+        tracing::warn!(%error, "failed to persist session message");
+    }
+}
+
+/// Notify agent control when this session reaches a terminal turn state.
+async fn notify_terminal_turn(
+    agent_control: &Option<Arc<AgentControl>>,
+    session_id: &SessionId,
+    status: AgentStatus,
+) {
+    let Some(agent_control) = agent_control else {
+        return;
+    };
+    if let Err(error) = agent_control
+        .notify_child_terminal_turn(session_id, status)
+        .await
+    {
+        tracing::warn!(%error, "failed to notify parent of terminal child turn");
+    }
+}
+
+/// Attach the latest assistant text to completed statuses.
+fn with_final_message(status: AgentStatus, context: &dyn ContextManager) -> AgentStatus {
+    match status {
+        AgentStatus::Completed { .. } => AgentStatus::Completed {
+            message: last_assistant_text(context),
+        },
+        status => status,
+    }
+}
+
+/// Extract the latest assistant text from the session context.
+fn last_assistant_text(context: &dyn ContextManager) -> Option<String> {
+    context.history().into_iter().rev().find_map(|message| {
+        let Message::Assistant { content, .. } = message else {
+            return None;
+        };
+        content.iter().find_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.clone()),
+            AssistantContent::Reasoning(reasoning) => {
+                let text = reasoning.display_text();
+                if text.is_empty() { None } else { Some(text) }
+            }
+            AssistantContent::ToolCall(_) | AssistantContent::Image(_) => None,
+        })
+    })
 }
 
 /// Return the provider id portion of the configured active model.
@@ -452,4 +633,35 @@ pub(crate) fn event_stream(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_next_triggering_message_removes_first_trigger_only() {
+        let mut pending = vec![
+            test_message("first", false),
+            test_message("second", true),
+            test_message("third", true),
+        ];
+
+        let message = take_next_triggering_message(&mut pending).expect("triggering message");
+
+        assert_eq!(message.content, "second");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].content, "first");
+        assert_eq!(pending[1].content, "third");
+    }
+
+    /// Build an inter-agent message for session queue tests.
+    fn test_message(content: &str, trigger_turn: bool) -> InterAgentMessage {
+        InterAgentMessage::builder()
+            .from(AgentPath::root())
+            .to(AgentPath::root().join("child"))
+            .content(content.to_string())
+            .trigger_turn(trigger_turn)
+            .build()
+    }
 }

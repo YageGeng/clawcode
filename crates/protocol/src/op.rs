@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentPath;
+use crate::agent::{AgentPath, InterAgentMessage};
 use crate::permission::ReviewDecision;
 use crate::session::SessionId;
 
@@ -49,11 +49,7 @@ pub enum Op {
         prompt: String,
     },
     /// Deliver a message between agents.
-    InterAgentMessage {
-        from: AgentPath,
-        to: AgentPath,
-        content: String,
-    },
+    InterAgentMessage { message: InterAgentMessage },
     /// User's response to an exec approval request.
     ExecApprovalResponse {
         /// Matches the `call_id` from ExecApprovalRequested.
@@ -66,4 +62,28 @@ pub enum Op {
         call_id: String,
         decision: ReviewDecision,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn inter_agent_message_op_preserves_trigger_turn() {
+        let op = Op::InterAgentMessage {
+            message: InterAgentMessage::builder()
+                .from(AgentPath::root())
+                .to(AgentPath::root().join("child"))
+                .content("hello".to_string())
+                .trigger_turn(true)
+                .build(),
+        };
+
+        let encoded = serde_json::to_string(&op).expect("serialize op");
+        let decoded: Op = serde_json::from_str(&encoded).expect("deserialize op");
+
+        let Op::InterAgentMessage { message } = decoded else {
+            panic!("expected inter-agent message op");
+        };
+        assert!(message.trigger_turn);
+    }
 }
