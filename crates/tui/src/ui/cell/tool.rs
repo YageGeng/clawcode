@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 
 use super::super::theme::Theme;
 use super::terminal_output::terminal_display_lines;
+use crate::ui::transcript::cell::TranscriptCell;
 
 const TOOL_OUTPUT_PREVIEW_LINES: usize = 5;
 const TOOL_DIFF_PREVIEW_LINES: usize = 24;
@@ -114,47 +115,18 @@ impl ToolCallCell {
     }
 
     /// Returns styled logical lines for this tool-call cell.
-    pub fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        self.display_lines_with_theme(_width, &Theme::dark())
+    pub fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        <Self as TranscriptCell>::display_lines(self, width, &Theme::dark())
     }
 
     /// Returns styled logical lines using the configured render theme.
-    pub fn display_lines_with_theme(&self, _width: u16, theme: &Theme) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        lines.push(Line::from(vec![
-            status_bullet(self.status, theme),
-            " ".into(),
-            Span::styled(
-                format!("{} {}", status_verb(self.status), self.summary()),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        append_tool_output_preview_lines(
-            &mut lines,
-            self.status,
-            &self.output,
-            self.diffs.is_empty(),
-        );
-        append_tool_diff_preview_lines(&mut lines, &self.diffs, theme);
-        lines
+    pub fn display_lines_with_theme(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        <Self as TranscriptCell>::display_lines(self, width, theme)
     }
 
     /// Returns plain logical lines suitable for copy/raw transcript modes.
     pub fn raw_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!(
-            "{} {}",
-            status_verb(self.status),
-            self.summary()
-        ))];
-        lines.extend(
-            terminal_display_lines(&self.output)
-                .into_iter()
-                .map(Line::from),
-        );
-        for diff in &self.diffs {
-            lines.extend(diff.raw_lines().into_iter().map(Line::from));
-        }
-        lines
+        <Self as TranscriptCell>::raw_lines(self)
     }
 
     /// Builds a concise category-specific title for this tool call.
@@ -176,6 +148,47 @@ impl ToolCallCell {
             name if name.starts_with("mcp__") => mcp_summary(name, &args),
             name => unknown_tool_summary(name, self.arguments()),
         }
+    }
+}
+
+impl TranscriptCell for ToolCallCell {
+    /// Returns styled logical lines using the configured render theme.
+    fn display_lines(&self, _width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![
+            status_bullet(self.status, theme),
+            " ".into(),
+            Span::styled(
+                format!("{} {}", status_verb(self.status), self.summary()),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        append_tool_output_preview_lines(
+            &mut lines,
+            self.status,
+            &self.output,
+            self.diffs.is_empty(),
+        );
+        append_tool_diff_preview_lines(&mut lines, &self.diffs, theme);
+        lines
+    }
+
+    /// Returns plain logical lines suitable for copy/raw transcript modes.
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(format!(
+            "{} {}",
+            status_verb(self.status),
+            self.summary()
+        ))];
+        lines.extend(
+            terminal_display_lines(&self.output)
+                .into_iter()
+                .map(Line::from),
+        );
+        for diff in &self.diffs {
+            lines.extend(diff.raw_lines().into_iter().map(Line::from));
+        }
+        lines
     }
 }
 

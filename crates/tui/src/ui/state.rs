@@ -2,16 +2,18 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agent_client_protocol::schema::{
     ContentBlock, SessionId, SessionNotification, SessionUpdate, StopReason, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallUpdate, UsageUpdate,
+    ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, UsageUpdate,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::approval::PendingApproval;
-use crate::ui::cell::{TextRole, ToolCallCell, TranscriptCell};
+use crate::ui::cell::{TextCell, TextRole, ToolCallCell, TranscriptCell};
 use crate::ui::theme::Theme;
+use crate::ui::transcript::entry::{TranscriptEntry, TranscriptEntryId, TranscriptEntryState};
 
 /// Token usage totals for the current turn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -71,10 +73,13 @@ pub struct AppState {
     /// Color theme used by TUI renderers.
     #[builder(default)]
     theme: Theme,
-    /// Ordered transcript cells ready for rendering.
+    /// Ordered transcript entries ready for rendering.
     #[builder(default)]
-    transcript: Vec<TranscriptCell>,
-    /// Transcript index for each tool call id.
+    transcript: Vec<TranscriptEntry>,
+    /// Next stable transcript entry id.
+    #[builder(default)]
+    next_transcript_entry_id: u64,
+    /// Transcript entry index for each tool call id.
     #[builder(default)]
     tool_call_indices: HashMap<String, usize>,
     /// Latest token usage update.
@@ -139,8 +144,8 @@ impl AppState {
         &self.theme
     }
 
-    /// Returns the renderable transcript cells.
-    pub fn transcript(&self) -> &[TranscriptCell] {
+    /// Returns the renderable transcript entries.
+    pub fn transcript(&self) -> &[TranscriptEntry] {
         &self.transcript
     }
 
@@ -158,18 +163,17 @@ impl AppState {
         match notification.update {
             SessionUpdate::UserMessageChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    self.transcript
-                        .push(TranscriptCell::text_cell(TextRole::User, text));
+                    self.push_committed_text(TextRole::User, text);
                 }
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    Self::append_to_last_or_push(&mut self.transcript, text, TextRole::Assistant);
+                    self.append_to_active_text_or_push(TextRole::Assistant, text);
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    Self::append_to_last_or_push(&mut self.transcript, text, TextRole::Reasoning);
+                    self.append_to_active_text_or_push(TextRole::Reasoning, text);
                 }
             }
             SessionUpdate::ToolCall(tool_call) => self.apply_tool_call(tool_call),
@@ -182,8 +186,7 @@ impl AppState {
 
     /// Appends a user prompt and marks the runtime as waiting for a turn result.
     pub fn append_user_message(&mut self, text: impl Into<String>) {
-        self.transcript
-            .push(TranscriptCell::text_cell(TextRole::User, text));
+        self.push_committed_text(TextRole::User, text);
         self.running_prompt = true;
         self.last_error = None;
         self.last_stop_reason = None;
@@ -192,6 +195,11 @@ impl AppState {
 
     /// Records a prompt completion returned by ACP.
     pub fn finish_prompt(&mut self, stop_reason: StopReason) {
+        for entry in &mut self.transcript {
+            if entry.state() == TranscriptEntryState::Active && entry.text_cell().is_some() {
+                entry.commit();
+            }
+        }
         self.running_prompt = false;
         self.last_stop_reason = Some(stop_reason);
         self.pending_approval = None;
@@ -206,8 +214,7 @@ impl AppState {
     pub fn set_error(&mut self, message: impl Into<String>) {
         let message = message.into();
         self.last_error = Some(message.clone());
-        self.transcript
-            .push(TranscriptCell::text_cell(TextRole::System, message));
+        self.push_committed_text(TextRole::System, message);
         self.running_prompt = false;
         self.pending_approval = None;
     }
@@ -296,20 +303,20 @@ impl AppState {
             .unwrap_or_default();
         let content = tool_call.content;
 
-        let entry = self.pending_tool_call_cell(call_id.clone());
-        entry.set_name(title);
-        entry.set_arguments(raw_input);
-        entry.set_status(status);
-        for content in content {
-            apply_tool_call_content(entry, content);
-        }
+        self.mutate_tool_call(call_id, |entry| {
+            entry.set_name(title);
+            entry.set_arguments(raw_input);
+            entry.set_status(status);
+            for content in content {
+                apply_tool_call_content(entry, content);
+            }
+        });
     }
 
     /// Applies an ACP tool-call field update to an existing or placeholder view.
     fn apply_tool_call_update(&mut self, update: ToolCallUpdate) {
         let call_id = tool_call_id_string(&update.tool_call_id);
-        {
-            let entry = self.pending_tool_call_cell(call_id.clone());
+        self.mutate_tool_call(call_id, |entry| {
             if let Some(title) = update.fields.title {
                 entry.set_name(title);
             }
@@ -335,7 +342,7 @@ impl AppState {
             if let Some(status) = update.fields.status {
                 entry.set_status(status);
             }
-        }
+        });
     }
 
     /// Applies an ACP token usage update.
@@ -343,39 +350,99 @@ impl AppState {
         self.usage = UsageView::from_total(update.used);
     }
 
-    /// Returns an existing tool view or creates a pending placeholder for updates.
-    fn pending_tool_call_cell(&mut self, call_id: String) -> &mut ToolCallCell {
-        let index = if let Some(index) = self.tool_call_indices.get(&call_id) {
-            *index
-        } else {
-            let index = self.transcript.len();
-            self.transcript
-                .push(TranscriptCell::tool_call(ToolCallCell::pending(
-                    call_id.clone(),
-                )));
-            self.tool_call_indices.insert(call_id.clone(), index);
-            index
-        };
-
-        let Some(cell) = self.transcript.get_mut(index) else {
-            unreachable!("tool call index must point inside transcript");
-        };
-        match cell {
-            TranscriptCell::ToolCall(tool) => tool,
-            _ => unreachable!("tool call index must point at a tool call transcript cell"),
-        }
+    /// Allocates the next stable transcript entry id.
+    fn next_entry_id(&mut self) -> TranscriptEntryId {
+        let id = TranscriptEntryId::new(self.next_transcript_entry_id);
+        self.next_transcript_entry_id = self.next_transcript_entry_id.wrapping_add(1);
+        id
     }
 
-    /// Appends text to the previous compatible cell or pushes a new cell.
-    fn append_to_last_or_push(transcript: &mut Vec<TranscriptCell>, text: String, role: TextRole) {
-        // Coalescing adjacent chunks keeps rendering stable while preserving role boundaries.
-        match transcript.last_mut() {
-            Some(TranscriptCell::Text(existing)) if existing.role() == role => {
-                existing.push_str(&text);
-            }
-            _ => {
-                transcript.push(TranscriptCell::text_cell(role, text));
-            }
+    /// Pushes a new transcript entry and returns its index.
+    fn push_entry(&mut self, state: TranscriptEntryState, cell: Arc<dyn TranscriptCell>) -> usize {
+        let id = self.next_entry_id();
+        let index = self.transcript.len();
+        self.transcript.push(TranscriptEntry::new(id, state, cell));
+        index
+    }
+
+    /// Pushes a committed text entry.
+    fn push_committed_text(&mut self, role: TextRole, text: impl Into<String>) {
+        self.push_entry(
+            TranscriptEntryState::Committed,
+            Arc::new(TextCell::new(role, text)),
+        );
+    }
+
+    /// Returns the trailing active text entry index for the requested role.
+    fn trailing_active_text_entry_index(&self, role: TextRole) -> Option<usize> {
+        let index = self.transcript.len().checked_sub(1)?;
+        let entry = self.transcript.get(index)?;
+        if entry.state() != TranscriptEntryState::Active {
+            return None;
+        }
+        let text = entry.text_cell()?;
+        (text.role() == role).then_some(index)
+    }
+
+    /// Appends text to the last active text entry or creates a new active entry.
+    fn append_to_active_text_or_push(&mut self, role: TextRole, text: String) {
+        if let Some(index) = self.trailing_active_text_entry_index(role)
+            && let Some(entry) = self.transcript.get_mut(index)
+            && let Some(cell) = entry.text_cell()
+        {
+            let mut updated = cell.clone();
+            updated.push_str(&text);
+            entry.replace_cell(Arc::new(updated));
+            return;
+        }
+
+        self.push_entry(
+            TranscriptEntryState::Active,
+            Arc::new(TextCell::new(role, text)),
+        );
+    }
+
+    /// Returns an existing tool entry index or creates a pending placeholder.
+    fn pending_tool_call_entry_index(&mut self, call_id: String) -> usize {
+        if let Some(index) = self.tool_call_indices.get(&call_id) {
+            return *index;
+        }
+
+        let index = self.push_entry(
+            TranscriptEntryState::Active,
+            Arc::new(ToolCallCell::pending(call_id.clone())),
+        );
+        self.tool_call_indices.insert(call_id, index);
+        index
+    }
+
+    /// Applies a mutation to a copied tool-call entry and bumps only that entry.
+    fn mutate_tool_call(&mut self, call_id: String, mutate: impl FnOnce(&mut ToolCallCell)) {
+        let index = self.pending_tool_call_entry_index(call_id);
+        let Some(entry) = self.transcript.get_mut(index) else {
+            unreachable!("tool call index must point inside transcript");
+        };
+        let Some(tool) = entry.tool_call() else {
+            unreachable!("tool call index must point at a tool call transcript cell");
+        };
+        let was_committed = entry.state() == TranscriptEntryState::Committed;
+        let mut updated = tool.clone();
+        mutate(&mut updated);
+        if was_committed {
+            entry.replace_cell(Arc::new(updated));
+            entry.commit();
+            return;
+        }
+
+        let is_terminal = matches!(
+            updated.status(),
+            ToolCallStatus::Completed | ToolCallStatus::Failed
+        );
+        entry.replace_cell(Arc::new(updated));
+        if is_terminal {
+            entry.commit();
+        } else {
+            entry.activate();
         }
     }
 
@@ -474,10 +541,16 @@ mod tests {
 
     /// Returns the tool call cell at the given transcript index.
     fn transcript_tool(state: &AppState, index: usize) -> &ToolCallCell {
-        match &state.transcript()[index] {
-            TranscriptCell::ToolCall(tool) => tool,
-            other => panic!("expected tool cell, got {other:?}"),
-        }
+        state.transcript()[index]
+            .tool_call()
+            .expect("expected tool cell")
+    }
+
+    /// Returns the text cell at the given transcript index.
+    fn transcript_text(state: &AppState, index: usize) -> &TextCell {
+        state.transcript()[index]
+            .text_cell()
+            .expect("expected text cell")
     }
 
     /// Verifies ACP assistant message chunks are coalesced into one transcript cell.
@@ -499,7 +572,8 @@ mod tests {
             SessionUpdate::AgentMessageChunk(ContentChunk::new(text("lo"))),
         ));
 
-        assert_eq!(state.transcript()[0].text(), "hello");
+        assert_eq!(transcript_text(&state, 0).text(), "hello");
+        assert_eq!(state.transcript()[0].state(), TranscriptEntryState::Active);
     }
 
     /// Verifies ACP reasoning chunks are coalesced independently from assistant text.
@@ -517,7 +591,7 @@ mod tests {
             SessionUpdate::AgentThoughtChunk(ContentChunk::new(text("ing"))),
         ));
 
-        assert_eq!(state.transcript()[0].text(), "thinking");
+        assert_eq!(transcript_text(&state, 0).text(), "thinking");
     }
 
     /// Verifies ACP tool-call snapshots and updates become renderable tool state.
@@ -584,11 +658,11 @@ mod tests {
         ));
 
         assert_eq!(state.transcript().len(), 3);
-        assert_eq!(state.transcript()[0].text(), "before");
+        assert_eq!(transcript_text(&state, 0).text(), "before");
         let tool = transcript_tool(&state, 1);
         assert_eq!(tool.output(), "done");
         assert_eq!(tool.status(), ToolCallStatus::Completed);
-        assert_eq!(state.transcript()[2].text(), "after");
+        assert_eq!(transcript_text(&state, 2).text(), "after");
     }
 
     /// Verifies updates arriving before snapshots create a pending transcript tool cell.
@@ -689,6 +763,59 @@ mod tests {
 
         assert!(!rendered.iter().any(|line| line.contains("+fn v1() {}")));
         assert!(rendered.iter().any(|line| line.contains("+fn v2() {}")));
+    }
+
+    /// Verifies completed prompts mark streaming text entries as committed.
+    #[test]
+    fn state_finish_prompt_commits_active_text_entries() {
+        let session_id = sid("s1");
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(text("hello"))),
+        ));
+        state.finish_prompt(StopReason::EndTurn);
+
+        assert_eq!(
+            state.transcript()[0].state(),
+            TranscriptEntryState::Committed
+        );
+    }
+
+    /// Verifies late tool updates cannot reactivate a committed tool entry.
+    #[test]
+    fn state_late_tool_update_keeps_committed_tool_entry_committed() {
+        let session_id = sid("s1");
+        let call_id = "call-1".to_string();
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        state.apply_session_update(notification(
+            session_id.clone(),
+            SessionUpdate::ToolCall(
+                ToolCall::new(ToolCallId::new(call_id.as_str()), "shell")
+                    .status(ToolCallStatus::Completed),
+            ),
+        ));
+        let first_revision = state.transcript()[0].revision();
+
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new(call_id.as_str()),
+                ToolCallUpdateFields::new()
+                    .content(vec![ToolCallContent::Content(Content::new(text(
+                        "late output",
+                    )))])
+                    .status(ToolCallStatus::InProgress),
+            )),
+        ));
+
+        assert!(state.transcript()[0].revision() > first_revision);
+        assert_eq!(
+            state.transcript()[0].state(),
+            TranscriptEntryState::Committed
+        );
     }
 
     /// Verifies ACP updates from another session do not mutate renderable state.

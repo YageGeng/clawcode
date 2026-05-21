@@ -4,6 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::super::theme::Theme;
+use crate::ui::transcript::cell::TranscriptCell;
 
 /// Role-specific styling for text transcript cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,12 +50,24 @@ impl TextCell {
     }
 
     /// Returns styled logical lines for this text cell.
-    pub fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        self.display_lines_with_theme(_width, &Theme::dark())
+    pub fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        <Self as TranscriptCell>::display_lines(self, width, &Theme::dark())
     }
 
     /// Returns styled logical lines using the configured render theme.
-    pub fn display_lines_with_theme(&self, _width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    pub fn display_lines_with_theme(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        <Self as TranscriptCell>::display_lines(self, width, theme)
+    }
+
+    /// Returns plain logical lines suitable for copy/raw transcript modes.
+    pub fn raw_lines(&self) -> Vec<Line<'static>> {
+        <Self as TranscriptCell>::raw_lines(self)
+    }
+}
+
+impl TranscriptCell for TextCell {
+    /// Returns styled logical lines using the configured render theme.
+    fn display_lines(&self, _width: u16, theme: &Theme) -> Vec<Line<'static>> {
         let (first_prefix, style) = match self.role {
             TextRole::Assistant => ("", Style::default().fg(theme.text)),
             TextRole::Reasoning => (
@@ -70,7 +83,7 @@ impl TextCell {
     }
 
     /// Returns plain logical lines suitable for copy/raw transcript modes.
-    pub fn raw_lines(&self) -> Vec<Line<'static>> {
+    fn raw_lines(&self) -> Vec<Line<'static>> {
         self.text
             .split('\n')
             .map(|line| Line::from(line.to_string()))

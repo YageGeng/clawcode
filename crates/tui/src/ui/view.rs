@@ -1,7 +1,11 @@
 //! View-only state for local TUI scrolling.
 
+use std::cell::RefCell;
+
+use super::transcript::cache::TranscriptRenderCache;
+
 /// Mutable UI-only state for transcript scrolling.
-#[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
+#[derive(typed_builder::TypedBuilder)]
 pub struct ViewState {
     /// Manual transcript distance from the latest rendered transcript content.
     #[builder(default)]
@@ -9,7 +13,37 @@ pub struct ViewState {
     /// Whether the transcript should follow the newest rendered content.
     #[builder(default = true)]
     follow_tail: bool,
+    /// Per-entry transcript render cache reset on cloned view state.
+    #[builder(default = RefCell::new(TranscriptRenderCache::new()))]
+    transcript_render_cache: RefCell<TranscriptRenderCache>,
 }
+
+impl std::fmt::Debug for ViewState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewState")
+            .field("transcript_scroll", &self.transcript_scroll)
+            .field("follow_tail", &self.follow_tail)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for ViewState {
+    fn clone(&self) -> Self {
+        Self {
+            transcript_scroll: self.transcript_scroll,
+            follow_tail: self.follow_tail,
+            transcript_render_cache: RefCell::new(TranscriptRenderCache::new()),
+        }
+    }
+}
+
+impl PartialEq for ViewState {
+    fn eq(&self, other: &Self) -> bool {
+        self.transcript_scroll == other.transcript_scroll && self.follow_tail == other.follow_tail
+    }
+}
+
+impl Eq for ViewState {}
 
 impl Default for ViewState {
     fn default() -> Self {
@@ -50,6 +84,14 @@ impl ViewState {
     pub fn follow_bottom(&mut self) {
         self.transcript_scroll = 0;
         self.follow_tail = true;
+    }
+
+    /// Provides mutable access to the transcript render cache.
+    pub(super) fn with_transcript_render_cache<R>(
+        &self,
+        use_cache: impl FnOnce(&mut TranscriptRenderCache) -> R,
+    ) -> R {
+        use_cache(&mut self.transcript_render_cache.borrow_mut())
     }
 }
 
@@ -98,5 +140,14 @@ mod tests {
 
         assert_eq!(view.transcript_scroll(), u16::MAX);
         assert!(!view.is_following_tail());
+    }
+
+    /// Verifies cloned views start with an independent render cache.
+    #[test]
+    fn view_state_clone_resets_transcript_render_cache() {
+        let view = ViewState::default();
+        let cloned = view.clone();
+
+        assert_eq!(view, cloned);
     }
 }
