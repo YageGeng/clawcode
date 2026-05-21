@@ -219,6 +219,11 @@ impl AppState {
         self.pending_approval = None;
     }
 
+    /// Adds a system message without changing prompt or error state.
+    pub fn add_system_message(&mut self, message: impl Into<String>) {
+        self.push_committed_text(TextRole::System, message);
+    }
+
     /// Builds a compact status line suitable for the top TUI chrome.
     pub fn top_status_line(&self) -> String {
         if let Some(error) = &self.last_error {

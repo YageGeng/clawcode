@@ -35,7 +35,8 @@ fn render_cached_transcript(
     cache: &mut TranscriptRenderCache,
 ) {
     cache.retain_entries(state.transcript().iter().map(TranscriptEntry::id));
-    let total_rows = transcript_row_count(area.width, state, cache);
+    let render_mode = view.transcript_render_mode();
+    let total_rows = transcript_row_count(area.width, state, cache, render_mode);
     if total_rows == 0 {
         viewport::render_transcript_lines(
             frame,
@@ -47,18 +48,23 @@ fn render_cached_transcript(
     }
 
     let (start, end) = viewport::visible_row_range(total_rows, area, view);
-    let visible = visible_transcript_lines(area.width, state, cache, start, end);
+    let visible = visible_transcript_lines(area.width, state, cache, render_mode, start, end);
     viewport::render_transcript_lines_at_top(frame, area, &visible);
 }
 
 /// Counts transcript rows without cloning cached row contents.
-fn transcript_row_count(width: u16, state: &AppState, cache: &mut TranscriptRenderCache) -> usize {
+fn transcript_row_count(
+    width: u16,
+    state: &AppState,
+    cache: &mut TranscriptRenderCache,
+    render_mode: cell::TranscriptRenderMode,
+) -> usize {
     state
         .transcript()
         .iter()
         .map(|entry| {
             cache
-                .entry_line_count(width, state.theme(), entry)
+                .entry_line_count(width, state.theme(), entry, render_mode)
                 .saturating_add(1)
         })
         .sum()
@@ -69,13 +75,14 @@ fn visible_transcript_lines(
     width: u16,
     state: &AppState,
     cache: &mut TranscriptRenderCache,
+    render_mode: cell::TranscriptRenderMode,
     start: usize,
     end: usize,
 ) -> Vec<Line<'static>> {
     let mut visible = Vec::new();
     let mut cursor = 0usize;
     for entry in state.transcript() {
-        let lines = cache.entry_lines(width, state.theme(), entry);
+        let lines = cache.entry_lines(width, state.theme(), entry, render_mode);
         append_visible_rows(&mut visible, lines, cursor, start, end);
         cursor = cursor.saturating_add(lines.len());
         append_visible_rows(&mut visible, &[Line::from("")], cursor, start, end);

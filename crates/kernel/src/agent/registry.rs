@@ -184,11 +184,11 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Resolve a target string (path or nickname) to an AgentPath.
+    /// Resolve a target string (path, nickname, or session id) to an AgentPath.
     ///
     /// If the target starts with `/`, it is treated as an agent path and
-    /// verified against the registry. Otherwise it is treated as a nickname
-    /// and the corresponding agent path is looked up.
+    /// verified against the registry. Otherwise it is matched against both
+    /// nicknames and session ids so tool calls can use notification payloads.
     pub(crate) fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
         let agents = self
             .active_agents
@@ -200,7 +200,9 @@ impl AgentRegistry {
             }
         } else {
             for meta in agents.agent_tree.values() {
-                if meta.agent_nickname.as_deref() == Some(target) {
+                let matches_nickname = meta.agent_nickname.as_deref() == Some(target);
+                let matches_session_id = meta.agent_id.as_ref().is_some_and(|id| id.0 == target);
+                if matches_nickname || matches_session_id {
                     return meta
                         .agent_path
                         .clone()
@@ -613,6 +615,24 @@ mod tests {
         );
 
         let resolved = registry.resolve_target(&nick).unwrap();
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn resolve_by_session_id_finds_committed_agent() {
+        let registry = AgentRegistry::new();
+        let path = AgentPath::root().join("by_id");
+        let mut res = registry.reserve_spawn_slot(None).unwrap();
+        res.reserve_path(&path).unwrap();
+        res.commit(
+            AgentMetadata::builder()
+                .agent_id(SessionId("session-1".to_string()))
+                .agent_path(path.clone())
+                .agent_nickname("finder".to_string())
+                .build(),
+        );
+
+        let resolved = registry.resolve_target("session-1").unwrap();
         assert_eq!(resolved, path);
     }
 

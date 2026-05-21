@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 
 use super::transcript::cache::TranscriptRenderCache;
+use super::transcript::cell::TranscriptRenderMode;
 
 /// Mutable UI-only state for transcript scrolling.
 #[derive(typed_builder::TypedBuilder)]
@@ -16,6 +17,9 @@ pub struct ViewState {
     /// Per-entry transcript render cache reset on cloned view state.
     #[builder(default = RefCell::new(TranscriptRenderCache::new()))]
     transcript_render_cache: RefCell<TranscriptRenderCache>,
+    /// Whether transcript cells render plain copy-friendly rows.
+    #[builder(default)]
+    raw_output_mode: bool,
 }
 
 impl std::fmt::Debug for ViewState {
@@ -23,6 +27,7 @@ impl std::fmt::Debug for ViewState {
         f.debug_struct("ViewState")
             .field("transcript_scroll", &self.transcript_scroll)
             .field("follow_tail", &self.follow_tail)
+            .field("raw_output_mode", &self.raw_output_mode)
             .finish_non_exhaustive()
     }
 }
@@ -33,13 +38,16 @@ impl Clone for ViewState {
             transcript_scroll: self.transcript_scroll,
             follow_tail: self.follow_tail,
             transcript_render_cache: RefCell::new(TranscriptRenderCache::new()),
+            raw_output_mode: self.raw_output_mode,
         }
     }
 }
 
 impl PartialEq for ViewState {
     fn eq(&self, other: &Self) -> bool {
-        self.transcript_scroll == other.transcript_scroll && self.follow_tail == other.follow_tail
+        self.transcript_scroll == other.transcript_scroll
+            && self.follow_tail == other.follow_tail
+            && self.raw_output_mode == other.raw_output_mode
     }
 }
 
@@ -60,6 +68,31 @@ impl ViewState {
     /// Returns whether transcript rendering follows the latest content.
     pub fn is_following_tail(&self) -> bool {
         self.follow_tail
+    }
+
+    /// Returns whether transcript rendering uses copy-friendly raw rows.
+    pub fn raw_output_mode(&self) -> bool {
+        self.raw_output_mode
+    }
+
+    /// Returns the transcript render mode derived from the current view state.
+    pub fn transcript_render_mode(&self) -> TranscriptRenderMode {
+        if self.raw_output_mode {
+            TranscriptRenderMode::Raw
+        } else {
+            TranscriptRenderMode::Rich
+        }
+    }
+
+    /// Sets whether transcript rendering uses copy-friendly raw rows.
+    pub fn set_raw_output_mode(&mut self, enabled: bool) {
+        self.raw_output_mode = enabled;
+    }
+
+    /// Toggles copy-friendly raw transcript rendering and returns the new state.
+    pub fn toggle_raw_output_mode(&mut self) -> bool {
+        self.raw_output_mode = !self.raw_output_mode;
+        self.raw_output_mode
     }
 
     /// Scrolls transcript history up by one page and disables tail following.
@@ -140,6 +173,18 @@ mod tests {
 
         assert_eq!(view.transcript_scroll(), u16::MAX);
         assert!(!view.is_following_tail());
+    }
+
+    /// Verifies raw output mode can be toggled without changing scroll state.
+    #[test]
+    fn view_state_tracks_raw_output_mode() {
+        let mut view = ViewState::default();
+        view.scroll_page_up(7);
+
+        view.set_raw_output_mode(true);
+
+        assert!(view.raw_output_mode());
+        assert_eq!(view.transcript_scroll(), 7);
     }
 
     /// Verifies cloned views start with an independent render cache.

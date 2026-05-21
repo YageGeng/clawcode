@@ -299,6 +299,9 @@ fn handle_key_event(
             if let ComposerAction::Submit(text) = action
                 && !text.trim().is_empty()
             {
+                if handle_raw_command(ui, &text) {
+                    return Ok(false);
+                }
                 run_prompt(client, app_tx, ui.state, text, prompt_task);
             }
             Ok(false)
@@ -335,6 +338,50 @@ fn handle_approval_key(
     Ok(false)
 }
 
+/// Handles `/raw` transcript mode commands before they reach the ACP prompt path.
+fn handle_raw_command(ui: &mut UiRuntime<'_>, text: &str) -> bool {
+    let trimmed = text.trim();
+    if !is_raw_command(trimmed) {
+        return false;
+    }
+    let Some(explicit) = parse_raw_command(trimmed) else {
+        ui.state.add_system_message("Usage: /raw [on|off]");
+        return true;
+    };
+    let enabled = explicit.unwrap_or_else(|| ui.view.toggle_raw_output_mode());
+    ui.view.set_raw_output_mode(enabled);
+    ui.state.add_system_message(raw_output_mode_notice(enabled));
+    true
+}
+
+/// Returns whether the submitted text targets the local `/raw` command.
+fn is_raw_command(text: &str) -> bool {
+    text == "/raw" || text.starts_with("/raw ")
+}
+
+/// Parses `/raw`, `/raw on`, and `/raw off` command text.
+fn parse_raw_command(text: &str) -> Option<Option<bool>> {
+    let mut parts = text.split_whitespace();
+    if parts.next()? != "/raw" {
+        return None;
+    }
+    match (parts.next(), parts.next()) {
+        (None, None) => Some(None),
+        (Some("on"), None) => Some(Some(true)),
+        (Some("off"), None) => Some(Some(false)),
+        _ => None,
+    }
+}
+
+/// Returns the user-visible raw output mode notice.
+fn raw_output_mode_notice(enabled: bool) -> &'static str {
+    if enabled {
+        "Raw output mode on: transcript text is shown for clean terminal selection."
+    } else {
+        "Raw output mode off: rich transcript rendering restored."
+    }
+}
+
 /// Starts one ACP prompt and streams ACP notifications back into AppState.
 fn run_prompt(
     client: &AcpClient,
@@ -364,4 +411,65 @@ fn run_prompt(
     });
 
     *prompt_task = Some(handle);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies raw slash command parsing accepts toggle and explicit states.
+    #[test]
+    fn raw_command_parses_toggle_and_explicit_modes() {
+        assert_eq!(parse_raw_command("/raw"), Some(None));
+        assert_eq!(parse_raw_command("/raw on"), Some(Some(true)));
+        assert_eq!(parse_raw_command("/raw off"), Some(Some(false)));
+        assert_eq!(parse_raw_command("/raw nope"), None);
+        assert_eq!(parse_raw_command("hello"), None);
+    }
+
+    /// Verifies raw command handling mutates only local TUI state.
+    #[test]
+    fn raw_command_toggles_view_state_and_adds_notice() {
+        let mut state = AppState::new(
+            agent_client_protocol::schema::SessionId::new("s1".to_string()),
+            std::path::PathBuf::from("."),
+            "provider/model".to_string(),
+        );
+        let mut view = ViewState::default();
+        let mut composer = Composer::default();
+        let mut ui = UiRuntime {
+            state: &mut state,
+            view: &mut view,
+            composer: &mut composer,
+        };
+
+        assert!(handle_raw_command(&mut ui, "/raw"));
+
+        assert!(ui.view.raw_output_mode());
+        assert!(ui.state.transcript().iter().any(|entry| {
+            entry
+                .text_cell()
+                .is_some_and(|cell| cell.text().contains("Raw output mode on"))
+        }));
+    }
+
+    /// Verifies non-command text that merely shares the prefix is not consumed.
+    #[test]
+    fn raw_command_does_not_consume_prefix_matches() {
+        let mut state = AppState::new(
+            agent_client_protocol::schema::SessionId::new("s1".to_string()),
+            std::path::PathBuf::from("."),
+            "provider/model".to_string(),
+        );
+        let mut view = ViewState::default();
+        let mut composer = Composer::default();
+        let mut ui = UiRuntime {
+            state: &mut state,
+            view: &mut view,
+            composer: &mut composer,
+        };
+
+        assert!(!handle_raw_command(&mut ui, "/rawhide"));
+        assert!(!ui.view.raw_output_mode());
+    }
 }

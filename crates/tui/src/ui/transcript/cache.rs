@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use ratatui::text::Line;
 
 use crate::ui::theme::Theme;
+use crate::ui::transcript::cell::TranscriptRenderMode;
 use crate::ui::transcript::entry::{TranscriptEntry, TranscriptEntryId};
 use crate::ui::transcript::wrap::wrap_display_lines;
 
@@ -22,6 +23,8 @@ pub(in crate::ui) struct CachedEntryLines {
 pub(in crate::ui) struct TranscriptRenderCache {
     /// Terminal width used by all cached entries.
     width: Option<u16>,
+    /// Transcript render mode used by all cached entries.
+    render_mode: Option<TranscriptRenderMode>,
     /// Cached rows keyed by stable transcript entry id.
     entries: HashMap<TranscriptEntryId, CachedEntryLines>,
     /// Number of entry rebuilds observed by cache tests.
@@ -41,9 +44,11 @@ impl TranscriptRenderCache {
         width: u16,
         theme: &Theme,
         entry: &TranscriptEntry,
+        render_mode: TranscriptRenderMode,
     ) -> &[Line<'static>] {
-        if self.width != Some(width) {
+        if self.width != Some(width) || self.render_mode != Some(render_mode) {
             self.width = Some(width);
+            self.render_mode = Some(render_mode);
             self.entries.clear();
         }
 
@@ -58,7 +63,12 @@ impl TranscriptRenderCache {
             {
                 self.rebuild_count = self.rebuild_count.saturating_add(1);
             }
-            let lines = wrap_display_lines(entry.cell().transcript_lines(width, theme), width);
+            let lines = wrap_display_lines(
+                entry
+                    .cell()
+                    .display_lines_for_mode(width, theme, render_mode),
+                width,
+            );
             self.entries.insert(
                 entry.id(),
                 CachedEntryLines {
@@ -80,8 +90,9 @@ impl TranscriptRenderCache {
         width: u16,
         theme: &Theme,
         entry: &TranscriptEntry,
+        render_mode: TranscriptRenderMode,
     ) -> usize {
-        self.entry_lines(width, theme, entry).len()
+        self.entry_lines(width, theme, entry, render_mode).len()
     }
 
     /// Retains cache entries that still exist in transcript state.
@@ -123,17 +134,49 @@ mod tests {
             Arc::new(TextCell::new(TextRole::Assistant, "hel")),
         );
 
-        let _ = cache.entry_lines(80, &theme, &committed);
-        let _ = cache.entry_lines(80, &theme, &active);
+        let _ = cache.entry_lines(80, &theme, &committed, TranscriptRenderMode::Rich);
+        let _ = cache.entry_lines(80, &theme, &active, TranscriptRenderMode::Rich);
         assert_eq!(cache.rebuild_count(), 2);
 
         let text = active.text_cell().expect("text cell");
         let mut updated = text.clone();
         updated.push_str("lo");
         active.replace_cell(Arc::new(updated));
-        let _ = cache.entry_lines(80, &theme, &committed);
-        let _ = cache.entry_lines(80, &theme, &active);
+        let _ = cache.entry_lines(80, &theme, &committed, TranscriptRenderMode::Rich);
+        let _ = cache.entry_lines(80, &theme, &active, TranscriptRenderMode::Rich);
 
         assert_eq!(cache.rebuild_count(), 3);
+    }
+
+    /// Verifies rich and raw transcript modes do not reuse the same cached rows.
+    #[test]
+    fn render_cache_rebuilds_when_render_mode_changes() {
+        let theme = Theme::dark();
+        let mut cache = TranscriptRenderCache::new();
+        let entry = TranscriptEntry::new(
+            TranscriptEntryId::new(1),
+            TranscriptEntryState::Committed,
+            Arc::new(TextCell::new(TextRole::User, "copy me")),
+        );
+
+        let rich = cache.entry_lines(80, &theme, &entry, TranscriptRenderMode::Rich);
+        assert_eq!(line_text(rich), vec!["> copy me".to_string()]);
+
+        let raw = cache.entry_lines(80, &theme, &entry, TranscriptRenderMode::Raw);
+        assert_eq!(line_text(raw), vec!["copy me".to_string()]);
+        assert_eq!(cache.rebuild_count(), 2);
+    }
+
+    /// Converts cached line slices into owned text for cache tests.
+    fn line_text(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
     }
 }

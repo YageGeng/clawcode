@@ -521,11 +521,17 @@ impl AgentControl {
         &self,
         thread_id: &SessionId,
     ) -> Option<watch::Receiver<AgentStatus>> {
-        self.status_watchers
-            .lock()
-            .await
-            .get(thread_id)
-            .map(|tx| tx.subscribe())
+        let initial_status = self
+            .registry
+            .agent_metadata_for_thread(thread_id.clone())
+            .map(|metadata| metadata.agent_status)?;
+        let mut status_watchers = self.status_watchers.lock().await;
+        // Restored or partially registered agents may not have an in-memory watcher yet.
+        // Recreate it from registry state so wait_agent can still observe terminal status.
+        let status_tx = status_watchers
+            .entry(thread_id.clone())
+            .or_insert_with(|| watch::channel(initial_status).0);
+        Some(status_tx.subscribe())
     }
 
     /// Resolve the LLM for a role: try the role's model override first,
@@ -923,6 +929,34 @@ mod tests {
         assert!(!message.trigger_turn);
         assert!(message.content.contains("kid"));
         assert!(message.content.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_status_recreates_missing_watcher_from_registry_status() {
+        let control = agent_control_no_persistence();
+        let child_id = SessionId("child".to_string());
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+        seed_agent(&control, "child", "child", Some("Child"), Some("root"));
+        control.registry.update_agent_status(
+            &child_id,
+            AgentStatus::Completed {
+                message: Some("done".to_string()),
+            },
+        );
+
+        let status_rx = control
+            .subscribe_status(&child_id)
+            .await
+            .expect("status watcher");
+
+        assert_eq!(
+            status_rx.borrow().clone(),
+            AgentStatus::Completed {
+                message: Some("done".to_string())
+            }
+        );
     }
 
     // ── list_agents ──

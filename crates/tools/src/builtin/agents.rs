@@ -89,7 +89,10 @@ impl Tool for SpawnAgent {
     fn description(&self) -> &str {
         "Spawn a sub-agent to work on a task independently. \
          The sub-agent runs in parallel and can be communicated with \
-         via send_message/followup_task."
+         via send_message/followup_task. \
+         The task_name is NOT the agent's address — use the returned \
+         nickname or agent_path instead. \
+         To send messages back to the parent, use /root as the target."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -182,16 +185,19 @@ impl Tool for SendMessage {
         "send_message"
     }
     fn description(&self) -> &str {
-        "Send a message to another agent. The message will be queued and \
-         delivered when the target agent next checks its mailbox. Does NOT \
-         trigger a turn on its own."
+        "Send a message to another agent. Does NOT wake the target \u{2014} the \
+         message is silently queued and only delivered when the target is \
+         awakened by something else (e.g. a followup_task or wait_agent call). \
+         Prefer followup_task when you need the target to process the message \
+         and respond immediately. Use send_message only for fire-and-forget \
+         notifications where no response is expected."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "to": { "type": "string", "description": "Agent path or nickname" },
+                "to": { "type": "string", "description": "Agent path or nickname (use /root for the main agent)" },
                 "content": { "type": "string", "description": "Message content" }
             },
             "required": ["to", "content"]
@@ -245,15 +251,18 @@ impl Tool for FollowupTask {
         "followup_task"
     }
     fn description(&self) -> &str {
-        "Send a message to another agent and trigger a turn. \
-         The target agent will wake up and process the message."
+        "Send a message to another agent and wake it up immediately. \
+         The target agent will process the message and respond in the same \
+         turn. This is the primary tool for dispatching tasks or instructions \
+         to sub-agents. Prefer this over send_message for any inter-agent \
+         communication that requires the target to take action."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "to": { "type": "string", "description": "Agent path or nickname" },
+                "to": { "type": "string", "description": "Agent path or nickname (use /root for the main agent)" },
                 "content": { "type": "string", "description": "Task content for the agent to process" }
             },
             "required": ["to", "content"]
@@ -705,6 +714,34 @@ mod tests {
             .expect("send status");
 
         let output = waiter.await.expect("wait task").expect("wait output");
+
+        assert!(output.contains("\"timed_out\":false"), "{output}");
+        assert!(output.contains("completed"), "{output}");
+        assert!(output.contains("done"), "{output}");
+    }
+
+    /// Verifies wait_agent returns an already-terminal targeted child immediately.
+    #[tokio::test]
+    async fn wait_agent_returns_already_completed_target() {
+        let (control, status_tx) = FakeAgentControl::with_running_child();
+        status_tx
+            .send(AgentStatus::Completed {
+                message: Some("done".to_string()),
+            })
+            .expect("send status");
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "agent_path": "child",
+                    "timeout_ms": 500
+                }),
+                &ctx,
+            )
+            .await
+            .expect("wait output");
 
         assert!(output.contains("\"timed_out\":false"), "{output}");
         assert!(output.contains("completed"), "{output}");
