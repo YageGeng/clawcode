@@ -347,6 +347,8 @@ impl AgentControl {
         child_session_id: &SessionId,
         status: AgentStatus,
     ) -> Result<(), String> {
+        self.registry
+            .update_agent_status(child_session_id, status.clone());
         if let Some(status_tx) = self.status_watchers.lock().await.get(child_session_id) {
             let _ = status_tx.send(status.clone());
         }
@@ -401,7 +403,7 @@ impl AgentControl {
                 if let Some(prefix) = prefix {
                     m.agent_path
                         .as_ref()
-                        .is_some_and(|p| p.0.starts_with(&prefix.0))
+                        .is_some_and(|p| p == prefix || is_descendant_path(p, prefix.as_str()))
                 } else {
                     true
                 }
@@ -413,7 +415,7 @@ impl AgentControl {
                         .map(|p| p.to_string())
                         .unwrap_or_default()
                 }),
-                agent_status: AgentStatus::Running,
+                agent_status: m.agent_status,
                 last_task_message: m.last_task_message,
             })
             .collect()
@@ -453,12 +455,12 @@ impl AgentControl {
         let prefix = agent_path.to_string();
         let descendants: Vec<SessionId> = self
             .registry
-            .live_agents()
+            .registered_agents()
             .into_iter()
             .filter(|m| {
                 m.agent_path
                     .as_ref()
-                    .is_some_and(|p| p.0.starts_with(&prefix) && p.0 != prefix)
+                    .is_some_and(|p| is_descendant_path(p, &prefix))
             })
             .filter_map(|m| m.agent_id)
             .collect();
@@ -564,6 +566,13 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Returns true when `path` is a strict hierarchical child of `prefix`.
+fn is_descendant_path(path: &AgentPath, prefix: &str) -> bool {
+    path.0
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -973,6 +982,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_agents_omits_terminal_agents() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+        let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
+        control
+            .thread_manager
+            .insert_thread(test_thread(SessionId("root".to_string()), tx_parent))
+            .await;
+        seed_agent(&control, "done", "done", Some("Done"), Some("root"));
+        let (status_tx, _status_rx) = watch::channel(AgentStatus::PendingInit);
+        control
+            .status_watchers
+            .lock()
+            .await
+            .insert(SessionId("done".to_string()), status_tx);
+
+        control
+            .notify_child_terminal_turn(
+                &SessionId("done".to_string()),
+                AgentStatus::Completed {
+                    message: Some("finished".to_string()),
+                },
+            )
+            .await
+            .expect("notify terminal status");
+
+        let list = control.list_agents(None);
+
+        assert!(list.is_empty());
+    }
+
+    #[tokio::test]
     async fn list_agents_filters_by_path_prefix() {
         let control = agent_control_no_persistence();
         control
@@ -980,6 +1023,7 @@ mod tests {
             .register_root_thread(SessionId("root".to_string()));
         seed_agent(&control, "alpha", "team/alpha", Some("Alpha"), Some("root"));
         seed_agent(&control, "beta", "team/beta", Some("Beta"), Some("root"));
+        seed_agent(&control, "sibling", "team_ab", Some("TeamAB"), Some("root"));
         seed_agent(&control, "other", "other", Some("Other"), Some("root"));
 
         let list = control.list_agents(Some(&AgentPath::root().join("team")));
@@ -987,6 +1031,7 @@ mod tests {
         let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
         assert!(names.contains(&"Alpha"));
         assert!(names.contains(&"Beta"));
+        assert!(!names.contains(&"TeamAB"));
         assert!(!names.contains(&"Other"));
     }
 
@@ -1058,6 +1103,7 @@ mod tests {
             Some("Deep"),
             Some("sub_1"),
         );
+        seed_agent(&control, "team_ab", "team_ab", Some("TeamAB"), Some("root"));
         seed_agent(&control, "team_b", "team_b", Some("TeamB"), Some("root"));
 
         let team_a_path = AgentPath::root().join("team_a");
@@ -1088,6 +1134,70 @@ mod tests {
                 .registry
                 .agent_id_for_path(&AgentPath::root().join("team_b"))
                 .is_some()
+        );
+        // Prefix siblings must not be treated as descendants.
+        assert!(
+            control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("team_ab"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn close_agent_cascades_to_terminal_descendants() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+        let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
+        let (tx_child, _rx_child) = mpsc::unbounded_channel::<Op>();
+        let (tx_deep, _rx_deep) = mpsc::unbounded_channel::<Op>();
+        control
+            .thread_manager
+            .insert_thread(test_thread(SessionId("team_a".to_string()), tx_parent))
+            .await;
+        control
+            .thread_manager
+            .insert_thread(test_thread(SessionId("deep".to_string()), tx_deep))
+            .await;
+        control
+            .thread_manager
+            .insert_thread(test_thread(SessionId("child".to_string()), tx_child))
+            .await;
+        seed_agent(&control, "team_a", "team_a", Some("TeamA"), Some("root"));
+        seed_agent(
+            &control,
+            "child",
+            "team_a/child",
+            Some("Child"),
+            Some("team_a"),
+        );
+        seed_agent(
+            &control,
+            "deep",
+            "team_a/child/deep",
+            Some("Deep"),
+            Some("child"),
+        );
+
+        control.registry.update_agent_status(
+            &SessionId("deep".to_string()),
+            AgentStatus::Completed {
+                message: Some("done".to_string()),
+            },
+        );
+
+        control
+            .close_agent(&AgentPath::root().join("team_a"))
+            .await
+            .expect("close parent");
+
+        assert!(
+            control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("team_a/child/deep"))
+                .is_none()
         );
     }
 

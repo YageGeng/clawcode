@@ -65,6 +65,28 @@ pub enum AgentStatus {
     NotFound,
 }
 
+impl AgentStatus {
+    /// Returns whether this status cannot transition back to running.
+    #[must_use]
+    pub fn is_final(&self) -> bool {
+        matches!(
+            self,
+            AgentStatus::Interrupted
+                | AgentStatus::Completed { .. }
+                | AgentStatus::Errored { .. }
+                | AgentStatus::Shutdown
+                | AgentStatus::NotFound
+        )
+    }
+}
+
+impl Default for AgentStatus {
+    /// Returns the default live status for registered agents.
+    fn default() -> Self {
+        Self::Running
+    }
+}
+
 /// Message sent between agents in a multi-agent session.
 #[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub struct InterAgentMessage {

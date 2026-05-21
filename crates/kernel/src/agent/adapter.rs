@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use protocol::AgentPath;
+use protocol::{AgentPath, AgentStatus};
+use tokio::sync::watch;
 use tools::builtin::agents::AgentControlRef;
 
 use super::control::AgentControl;
@@ -84,6 +85,21 @@ impl AgentControlRef for AgentControlAdapter {
             .into_iter()
             .map(|a| a.agent_name)
             .collect()
+    }
+
+    async fn subscribe_status(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Result<watch::Receiver<AgentStatus>, String> {
+        let thread_id = self
+            .inner
+            .registry
+            .agent_id_for_path(agent_path)
+            .ok_or_else(|| format!("agent not found: {agent_path}"))?;
+        self.inner
+            .subscribe_status(&thread_id)
+            .await
+            .ok_or_else(|| format!("agent status not found: {agent_path}"))
     }
 
     async fn close_agent(&self, agent_path: &AgentPath) -> Result<(), String> {

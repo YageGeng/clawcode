@@ -6,11 +6,26 @@
 //! trait, which is implemented by the kernel crate.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use protocol::AgentStatus;
 use serde_json::json;
+use tokio::sync::watch;
+use tokio::time::Instant;
+use tokio::time::timeout_at;
 
 use crate::Tool;
+
+/// Default wait timeout for sub-agent completion.
+const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
+/// Minimum accepted wait timeout to avoid tight polling loops.
+const MIN_WAIT_TIMEOUT_MS: u64 = 20 * 1_000;
+/// Maximum accepted wait timeout to keep tool calls bounded.
+const MAX_WAIT_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 
 /// Object-safe reference to AgentControl operations used by tools.
 /// Implemented by the kernel crate's adapter to avoid circular deps.
@@ -40,6 +55,12 @@ pub trait AgentControlRef: Send + Sync {
 
     /// List active sub-agents. Returns agent names.
     fn list_agents(&self, prefix: Option<&protocol::AgentPath>) -> Vec<String>;
+
+    /// Subscribe to status changes for a specific agent.
+    async fn subscribe_status(
+        &self,
+        agent_path: &protocol::AgentPath,
+    ) -> Result<watch::Receiver<AgentStatus>, String>;
 
     /// Close an agent and its descendants.
     async fn close_agent(&self, agent_path: &protocol::AgentPath) -> Result<(), String>;
@@ -296,6 +317,12 @@ impl Tool for WaitAgent {
                 "agent_path": {
                     "type": ["string", "null"],
                     "description": "Specific agent to wait for, or null to wait for any sub-agent"
+                },
+                "timeout_ms": {
+                    "type": ["integer", "null"],
+                    "minimum": MIN_WAIT_TIMEOUT_MS,
+                    "maximum": MAX_WAIT_TIMEOUT_MS,
+                    "description": "Maximum time to wait before returning a timeout"
                 }
             },
             "required": []
@@ -315,9 +342,118 @@ impl Tool for WaitAgent {
             .get("agent_path")
             .and_then(|v| v.as_str())
             .map(|s| protocol::AgentPath(s.to_string()));
+        let timeout_ms = arguments
+            .get("timeout_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
+            .clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS);
 
-        let agents = self.agent_control.list_agents(prefix.as_ref());
-        Ok(serde_json::to_string(&agents).unwrap_or_else(|_| "[]".to_string()))
+        let mut receivers = Vec::new();
+        let mut immediate_statuses = std::collections::HashMap::new();
+        if let Some(target) = prefix {
+            let resolved = self.agent_control.resolve_target(target.as_str()).await?;
+            match self.agent_control.subscribe_status(&resolved).await {
+                Ok(rx) => receivers.push((target.to_string(), rx)),
+                Err(_) => {
+                    immediate_statuses.insert(target.to_string(), AgentStatus::NotFound);
+                }
+            }
+        } else {
+            for agent in self.agent_control.list_agents(None) {
+                let resolved = self.agent_control.resolve_target(&agent).await?;
+                match self.agent_control.subscribe_status(&resolved).await {
+                    Ok(rx) => receivers.push((agent, rx)),
+                    Err(_) => {
+                        immediate_statuses.insert(agent, AgentStatus::NotFound);
+                    }
+                }
+            }
+        }
+
+        let result = wait_for_agent_statuses(receivers, immediate_statuses, timeout_ms).await;
+
+        serde_json::to_string(&result).map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WaitAgentResult {
+    status: std::collections::HashMap<String, AgentStatus>,
+    timed_out: bool,
+}
+
+/// Waits for at least one subscribed agent to reach a final status.
+async fn wait_for_agent_statuses(
+    receivers: Vec<(String, watch::Receiver<AgentStatus>)>,
+    mut statuses: std::collections::HashMap<String, AgentStatus>,
+    timeout_ms: u64,
+) -> WaitAgentResult {
+    for (target, rx) in &receivers {
+        let status = rx.borrow().clone();
+        if status.is_final() {
+            statuses.insert(target.clone(), status);
+        }
+    }
+    if !statuses.is_empty() {
+        return WaitAgentResult {
+            status: statuses,
+            timed_out: false,
+        };
+    }
+
+    let mut futures = FuturesUnordered::new();
+    for (target, rx) in receivers {
+        futures.push(wait_for_final_status(target, rx));
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        match timeout_at(deadline, futures.next()).await {
+            Ok(Some(Some((target, status)))) => {
+                statuses.insert(target, status);
+                break;
+            }
+            Ok(Some(None)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    if !statuses.is_empty() {
+        loop {
+            match futures.next().now_or_never() {
+                Some(Some(Some((target, status)))) => {
+                    statuses.insert(target, status);
+                }
+                Some(Some(None)) => continue,
+                Some(None) | None => break,
+            }
+        }
+    }
+
+    WaitAgentResult {
+        timed_out: statuses.is_empty(),
+        status: statuses,
+    }
+}
+
+/// Waits for one status watcher to report a final agent status.
+async fn wait_for_final_status(
+    target: String,
+    mut status_rx: watch::Receiver<AgentStatus>,
+) -> Option<(String, AgentStatus)> {
+    let status = status_rx.borrow().clone();
+    if status.is_final() {
+        return Some((target, status));
+    }
+
+    loop {
+        if status_rx.changed().await.is_err() {
+            return None;
+        }
+        let status = status_rx.borrow().clone();
+        if status.is_final() {
+            return Some((target, status));
+        }
     }
 }
 
@@ -426,5 +562,186 @@ impl Tool for CloseAgent {
         let path = self.agent_control.resolve_target(path_str).await?;
         self.agent_control.close_agent(&path).await?;
         Ok(format!("agent {path} closed"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use protocol::{AgentPath, AgentStatus, ToolContext};
+    use tokio::sync::watch;
+
+    use super::*;
+
+    /// In-memory agent control used by wait-agent tool tests.
+    struct FakeAgentControl {
+        paths: HashMap<String, AgentPath>,
+        statuses: Mutex<HashMap<String, watch::Sender<AgentStatus>>>,
+        _status_rx: watch::Receiver<AgentStatus>,
+    }
+
+    impl FakeAgentControl {
+        /// Creates a fake control with one child agent in a running state.
+        fn with_running_child() -> (Arc<Self>, watch::Sender<AgentStatus>) {
+            let (tx, status_rx) = watch::channel(AgentStatus::Running);
+            let mut paths = HashMap::new();
+            paths.insert("child".to_string(), AgentPath::root().join("child"));
+            let mut statuses = HashMap::new();
+            statuses.insert("/root/child".to_string(), tx.clone());
+            (
+                Arc::new(Self {
+                    paths,
+                    statuses: Mutex::new(statuses),
+                    _status_rx: status_rx,
+                }),
+                tx,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl AgentControlRef for FakeAgentControl {
+        /// Test stub: spawning is not used by wait-agent tests.
+        async fn spawn_agent(
+            &self,
+            _parent_path: &AgentPath,
+            _task_name: &str,
+            _role: &str,
+            _prompt: &str,
+            _cwd: std::path::PathBuf,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+
+        /// Resolves a nickname or path into a fake agent path.
+        async fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+            self.paths
+                .get(target)
+                .cloned()
+                .or_else(|| {
+                    target
+                        .starts_with('/')
+                        .then(|| AgentPath(target.to_string()))
+                })
+                .ok_or_else(|| format!("agent not found: {target}"))
+        }
+
+        /// Test stub: message sending is not used by wait-agent tests.
+        async fn send_message_to(
+            &self,
+            _from: AgentPath,
+            _to: AgentPath,
+            _content: String,
+            _trigger_turn: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        /// Lists the fake child agent by nickname.
+        fn list_agents(&self, _prefix: Option<&AgentPath>) -> Vec<String> {
+            let statuses = self
+                .statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(status) = statuses
+                .get("/root/child")
+                .map(|sender| sender.borrow().clone())
+            else {
+                return Vec::new();
+            };
+            if status.is_final() {
+                Vec::new()
+            } else {
+                vec!["child".to_string()]
+            }
+        }
+
+        /// Test stub: close is not used by wait-agent tests.
+        async fn close_agent(&self, _agent_path: &AgentPath) -> Result<(), String> {
+            Ok(())
+        }
+
+        /// Subscribes to a fake status watcher for wait-agent tests.
+        async fn subscribe_status(
+            &self,
+            agent_path: &AgentPath,
+        ) -> Result<watch::Receiver<AgentStatus>, String> {
+            self.statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(agent_path.as_str())
+                .map(watch::Sender::subscribe)
+                .ok_or_else(|| format!("agent not found: {agent_path}"))
+        }
+    }
+
+    /// Verifies wait_agent blocks until a child reaches a terminal status.
+    #[tokio::test]
+    async fn wait_agent_waits_for_child_terminal_status() {
+        let (control, status_tx) = FakeAgentControl::with_running_child();
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let waiter = tokio::spawn(async move {
+            tool.execute(
+                serde_json::json!({
+                    "agent_path": "child",
+                    "timeout_ms": 500
+                }),
+                &ctx,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        status_tx
+            .send(AgentStatus::Completed {
+                message: Some("done".to_string()),
+            })
+            .expect("send status");
+
+        let output = waiter.await.expect("wait task").expect("wait output");
+
+        assert!(output.contains("\"timed_out\":false"), "{output}");
+        assert!(output.contains("completed"), "{output}");
+        assert!(output.contains("done"), "{output}");
+    }
+
+    /// Verifies wait_agent uses the expected timeout bounds.
+    #[test]
+    fn wait_agent_timeout_bounds_are_configured() {
+        assert_eq!(DEFAULT_WAIT_TIMEOUT_MS, 5 * 60 * 1_000);
+        assert_eq!(MIN_WAIT_TIMEOUT_MS, 20 * 1_000);
+        assert_eq!(MAX_WAIT_TIMEOUT_MS, 30 * 60 * 1_000);
+    }
+
+    /// Verifies untargeted waits do not return already-completed agents again.
+    #[tokio::test]
+    async fn wait_agent_without_target_ignores_initial_completed_agents() {
+        let (control, status_tx) = FakeAgentControl::with_running_child();
+        status_tx
+            .send(AgentStatus::Completed {
+                message: Some("done".to_string()),
+            })
+            .expect("send status");
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "timeout_ms": 1
+                }),
+                &ctx,
+            )
+            .await
+            .expect("wait output");
+
+        assert!(output.contains("\"timed_out\":true"), "{output}");
+        assert!(!output.contains("done"), "{output}");
     }
 }

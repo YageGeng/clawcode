@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use protocol::{AgentPath, SessionId};
+use protocol::{AgentPath, AgentStatus, SessionId};
 use rand::prelude::IndexedRandom;
 
 /// Compile-time embedded pool of agent nicknames.
@@ -29,6 +29,9 @@ pub struct AgentMetadata {
     pub(crate) agent_role: Option<String>,
     #[builder(default, setter(strip_option))]
     pub(crate) last_task_message: Option<String>,
+    /// Latest known runtime status for this agent.
+    #[builder(default = AgentStatus::Running)]
+    pub(crate) agent_status: AgentStatus,
     /// Parent session id for subagent edge tracking.
     #[builder(default, setter(strip_option))]
     pub(crate) parent_session_id: Option<SessionId>,
@@ -241,8 +244,36 @@ impl AgentRegistry {
             .agent_tree
             .values()
             .filter(|m| m.agent_id.is_some() && !m.agent_path.as_ref().is_some_and(|p| p.is_root()))
+            .filter(|m| !m.agent_status.is_final())
             .cloned()
             .collect()
+    }
+
+    /// Return metadata for all registered non-root agents, including terminal agents.
+    pub(crate) fn registered_agents(&self) -> Vec<AgentMetadata> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agent_tree
+            .values()
+            .filter(|m| m.agent_id.is_some() && !m.agent_path.as_ref().is_some_and(|p| p.is_root()))
+            .cloned()
+            .collect()
+    }
+
+    /// Update the latest known status for a thread.
+    pub(crate) fn update_agent_status(&self, thread_id: &SessionId, status: AgentStatus) {
+        let mut agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(meta) = agents
+            .agent_tree
+            .values_mut()
+            .find(|m| m.agent_id.as_ref() == Some(thread_id))
+        {
+            meta.agent_status = status;
+        }
     }
 
     /// Update last_task_message for a thread.
