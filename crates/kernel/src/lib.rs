@@ -76,7 +76,6 @@ impl Kernel {
     ) -> Self {
         let cfg = config.current();
         let file_store = Arc::new(FileSessionStore::new(
-            cfg.session_persistence.enabled,
             cfg.session_persistence.data_home.as_deref(),
         ));
         let store: Arc<dyn SessionStore> = Arc::clone(&file_store) as Arc<dyn SessionStore>;
@@ -159,7 +158,7 @@ impl Kernel {
         session_id: SessionId,
         cwd: PathBuf,
         context: Box<dyn crate::context::ContextManager>,
-        recorder: Option<Arc<dyn SessionRecorder>>,
+        recorder: Arc<dyn SessionRecorder>,
         app_cfg: Arc<config::AppConfig>,
     ) -> Result<Thread, KernelError> {
         let llm = self.default_llm().ok_or_else(|| {
@@ -170,7 +169,7 @@ impl Kernel {
             ))
         })?;
         let approval = Arc::new(ApprovalPolicy::new(app_cfg.approval));
-        let builder = SpawnThreadParams::builder()
+        let params = SpawnThreadParams::builder()
             .session_id(session_id)
             .cwd(cwd)
             .llm(llm)
@@ -179,12 +178,9 @@ impl Kernel {
             .agent_path(AgentPath::root())
             .agent_control(Arc::clone(&self.agent_control))
             .approval(approval)
-            .app_config(app_cfg);
-        let params = if let Some(recorder) = recorder {
-            builder.recorder(recorder).build()
-        } else {
-            builder.build()
-        };
+            .app_config(app_cfg)
+            .recorder(recorder)
+            .build();
         self.thread_manager.spawn_thread(params).await
     }
 
@@ -388,13 +384,11 @@ impl AgentKernel for Kernel {
             )
             .await
             .map_err(|error| KernelError::Internal(error.into()))?;
-        let recorder: Option<Arc<dyn SessionRecorder>> = recorder.map(Arc::from);
+        let recorder: Arc<dyn SessionRecorder> = Arc::from(recorder);
         // Register root recorder so subagent spawns can write AgentEdge to parent.
-        if let Some(ref rec) = recorder {
-            agent_ctrl
-                .register_recorder(session_id.clone(), Arc::clone(rec))
-                .await;
-        }
+        agent_ctrl
+            .register_recorder(session_id.clone(), Arc::clone(&recorder))
+            .await;
         let handle = self
             .spawn_live_thread(
                 session_id.clone(),
@@ -591,7 +585,7 @@ impl AgentKernel for Kernel {
             .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
 
         self.session_store
-            .close_session(session_id, handle.recorder.as_deref())
+            .close_session(session_id, handle.recorder.as_ref())
             .await
             .map_err(|error| KernelError::Internal(error.into()))?;
 
@@ -826,7 +820,7 @@ mod tests {
         let data_home = temp.path().to_string_lossy().to_string();
         let mut app_config = app_config_with_provider();
         app_config.session_persistence.data_home = Some(data_home.clone());
-        let store = FileSessionStore::new(true, Some(&data_home));
+        let store = FileSessionStore::new(Some(&data_home));
         let root_id = SessionId("root-session".to_string());
         let open_id = SessionId("open-child".to_string());
         let closed_id = SessionId("closed-child".to_string());
@@ -842,8 +836,7 @@ mod tests {
                 None,
             ))
             .await
-            .expect("create root")
-            .expect("root recorder");
+            .expect("create root");
         store
             .create_session(persisted_session_params(
                 open_id.clone(),
@@ -852,8 +845,7 @@ mod tests {
                 Some(root_id.clone()),
             ))
             .await
-            .expect("create open child")
-            .expect("open recorder");
+            .expect("create open child");
         store
             .create_session(persisted_session_params(
                 closed_id.clone(),
@@ -862,8 +854,7 @@ mod tests {
                 Some(root_id.clone()),
             ))
             .await
-            .expect("create closed child")
-            .expect("closed recorder");
+            .expect("create closed child");
         store
             .upsert_agent_edge(
                 root_id.clone(),

@@ -14,12 +14,11 @@ use super::replay::ReplayedSession;
 /// and produce [`SessionRecorder`] handles for per-session appends.
 #[async_trait]
 pub trait SessionStore: Send + Sync {
-    /// Create a new session file, write `SessionMeta`, and append a manifest entry.
-    /// Returns a recorder for subsequent turn/message appends, or `None` when persistence is disabled.
+    /// Create a new session file, write `SessionMeta`, and return a recorder for appends.
     async fn create_session(
         &self,
         params: CreateSessionParams,
-    ) -> io::Result<Option<Box<dyn SessionRecorder>>>;
+    ) -> io::Result<Box<dyn SessionRecorder>>;
 
     /// Load a persisted session by id, returning replayed state and a recorder for appending.
     /// Returns `None` when the session is not found or has been archived.
@@ -32,14 +31,14 @@ pub trait SessionStore: Send + Sync {
     async fn close_session(
         &self,
         session_id: &SessionId,
-        recorder: Option<&dyn SessionRecorder>,
+        recorder: &dyn SessionRecorder,
     ) -> io::Result<()>;
 
     /// Mark a session archived in the manifest and flush its recorder.
     async fn archive_session(
         &self,
         session_id: &SessionId,
-        recorder: Option<&dyn SessionRecorder>,
+        recorder: &dyn SessionRecorder,
     ) -> io::Result<()>;
 
     /// List persisted sessions from the manifest, optionally filtered by cwd.

@@ -17,23 +17,21 @@ use super::replay::{ReplayedSession, replay_session_file};
 /// File-backed session store rooted at a data-home directory.
 pub struct FileSessionStore {
     data_home: PathBuf,
-    enabled: bool,
 }
 
 impl FileSessionStore {
-    /// Create a store from the enabled flag and optional data home path.
-    pub fn new(enabled: bool, data_home: Option<&str>) -> Self {
+    /// Create a store from an optional data home path.
+    pub fn new(data_home: Option<&str>) -> Self {
         let data_home = data_home
             .map(expand_tilde)
             .unwrap_or_else(default_data_home);
-        Self { data_home, enabled }
+        Self { data_home }
     }
 
     /// Create a store using the default data-home directory.
     pub fn new_default() -> Self {
         Self {
             data_home: default_data_home(),
-            enabled: true,
         }
     }
 
@@ -88,10 +86,7 @@ impl super::traits::SessionStore for FileSessionStore {
     async fn create_session(
         &self,
         params: CreateSessionParams,
-    ) -> io::Result<Option<Box<dyn SessionRecorder>>> {
-        if !self.enabled {
-            return Ok(None);
-        }
+    ) -> io::Result<Box<dyn SessionRecorder>> {
         let path = self.session_file_path(&params.session_id);
         let recorder = FileSessionRecorder::new(path.clone());
         let cwd = params.cwd;
@@ -122,16 +117,13 @@ impl super::traits::SessionStore for FileSessionStore {
             parent_session_id,
         );
         append_manifest_record(&self.data_home, &manifest)?;
-        Ok(Some(Box::new(recorder)))
+        Ok(Box::new(recorder))
     }
 
     fn load_session(
         &self,
         session_id: &SessionId,
     ) -> io::Result<Option<(ReplayedSession, Box<dyn SessionRecorder>)>> {
-        if !self.enabled {
-            return Ok(None);
-        }
         let manifest = read_latest_manifest(&self.data_home)?;
         let Some(record) = manifest.get(session_id) else {
             return Ok(None);
@@ -148,14 +140,9 @@ impl super::traits::SessionStore for FileSessionStore {
     async fn close_session(
         &self,
         session_id: &SessionId,
-        recorder: Option<&dyn SessionRecorder>,
+        recorder: &dyn SessionRecorder,
     ) -> io::Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
-        if let Some(recorder) = recorder {
-            recorder.flush().await?;
-        }
+        recorder.flush().await?;
         let manifest = read_latest_manifest(&self.data_home)?;
         if let Some(record) = manifest.get(session_id) {
             append_manifest_record(&self.data_home, &closed_manifest_record(record))?;
@@ -166,14 +153,9 @@ impl super::traits::SessionStore for FileSessionStore {
     async fn archive_session(
         &self,
         session_id: &SessionId,
-        recorder: Option<&dyn SessionRecorder>,
+        recorder: &dyn SessionRecorder,
     ) -> io::Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
-        if let Some(recorder) = recorder {
-            recorder.flush().await?;
-        }
+        recorder.flush().await?;
         let manifest = read_latest_manifest(&self.data_home)?;
         if let Some(record) = manifest.get(session_id) {
             append_manifest_record(&self.data_home, &archived_manifest_record(record))?;
@@ -182,9 +164,6 @@ impl super::traits::SessionStore for FileSessionStore {
     }
 
     fn list_sessions(&self, cwd: Option<&Path>) -> io::Result<Vec<SessionInfo>> {
-        if !self.enabled {
-            return Ok(Vec::new());
-        }
         let manifest = read_latest_manifest(&self.data_home)?;
         let mut sessions = Vec::new();
         for record in manifest.values() {
@@ -228,9 +207,6 @@ impl AgentGraphStore for FileSessionStore {
         child_role: Option<String>,
         status: AgentEdgeStatus,
     ) -> io::Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
         let edge = AgentEdgeRecord::builder()
             .parent_session_id(parent_session_id.clone())
             .child_session_id(child_session_id)
@@ -247,9 +223,6 @@ impl AgentGraphStore for FileSessionStore {
         child_session_id: &SessionId,
         status: AgentEdgeStatus,
     ) -> io::Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
         let current = self
             .list_agent_children(parent_session_id, None)?
             .into_iter()
@@ -275,9 +248,6 @@ impl AgentGraphStore for FileSessionStore {
         parent_session_id: &SessionId,
         status: Option<AgentEdgeStatus>,
     ) -> io::Result<Vec<super::agent_graph::AgentEdge>> {
-        if !self.enabled {
-            return Ok(Vec::new());
-        }
         let Some(path) = self.session_path_for_id(parent_session_id)? else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -350,10 +320,7 @@ mod store_tests {
     #[tokio::test]
     async fn create_load_and_list_session_roundtrips_messages() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore {
-            data_home: temp.path().to_path_buf(),
-            enabled: true,
-        };
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
         let session_id = SessionId("session-1".to_string());
         let recorder = store
             .create_session(
@@ -367,8 +334,7 @@ mod store_tests {
                     .build(),
             )
             .await
-            .expect("create session")
-            .expect("recorder");
+            .expect("create session");
         recorder
             .append(&[PersistedPayload::Message(
                 MessageRecord::builder()
@@ -392,10 +358,7 @@ mod store_tests {
     #[tokio::test]
     async fn close_session_keeps_session_available_for_resume() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore {
-            data_home: temp.path().to_path_buf(),
-            enabled: true,
-        };
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
         let session_id = SessionId("session-closed".to_string());
         let recorder = store
             .create_session(
@@ -409,11 +372,10 @@ mod store_tests {
                     .build(),
             )
             .await
-            .expect("create session")
-            .expect("recorder");
+            .expect("create session");
 
         store
-            .close_session(&session_id, Some(recorder.as_ref()))
+            .close_session(&session_id, recorder.as_ref())
             .await
             .expect("close session");
 
@@ -427,10 +389,7 @@ mod store_tests {
     #[tokio::test]
     async fn agent_graph_store_lists_latest_open_children() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore {
-            data_home: temp.path().to_path_buf(),
-            enabled: true,
-        };
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
         let parent = SessionId("parent".to_string());
         let child = SessionId("child".to_string());
         let path = AgentPath("/root/child".to_string());
@@ -438,8 +397,7 @@ mod store_tests {
         store
             .create_session(root_params(parent.clone()))
             .await
-            .expect("create")
-            .expect("recorder");
+            .expect("create");
         store
             .upsert_agent_edge(
                 parent.clone(),
@@ -463,10 +421,7 @@ mod store_tests {
     #[tokio::test]
     async fn agent_graph_store_closed_child_is_not_returned_as_open() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore {
-            data_home: temp.path().to_path_buf(),
-            enabled: true,
-        };
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
         let parent = SessionId("parent".to_string());
         let child = SessionId("child".to_string());
         let path = AgentPath("/root/child".to_string());
@@ -474,8 +429,7 @@ mod store_tests {
         store
             .create_session(root_params(parent.clone()))
             .await
-            .expect("create")
-            .expect("recorder");
+            .expect("create");
         store
             .upsert_agent_edge(
                 parent.clone(),
@@ -496,32 +450,5 @@ mod store_tests {
             .expect("list open");
 
         assert!(open.is_empty());
-    }
-
-    #[tokio::test]
-    async fn disabled_agent_graph_store_is_noop() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore {
-            data_home: temp.path().to_path_buf(),
-            enabled: false,
-        };
-        let parent = SessionId("parent".to_string());
-        let child = SessionId("child".to_string());
-
-        store
-            .upsert_agent_edge(
-                parent.clone(),
-                child,
-                AgentPath("/root/child".to_string()),
-                None,
-                AgentEdgeStatus::Open,
-            )
-            .await
-            .expect("disabled write");
-
-        let children = store
-            .list_agent_children(&parent, None)
-            .expect("disabled list");
-        assert!(children.is_empty());
     }
 }

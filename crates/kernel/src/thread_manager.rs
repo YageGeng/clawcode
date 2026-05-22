@@ -30,16 +30,14 @@ pub(crate) struct SpawnThreadParams {
     pub(crate) context: Box<dyn ContextManager>,
     /// Agent path associated with the thread.
     pub(crate) agent_path: AgentPath,
-    /// Optional agent control handle for multi-agent routing.
-    #[builder(default, setter(strip_option))]
-    pub(crate) agent_control: Option<Arc<AgentControl>>,
+    /// Agent control handle for multi-agent routing.
+    pub(crate) agent_control: Arc<AgentControl>,
     /// Approval policy used by the thread.
     pub(crate) approval: Arc<ApprovalPolicy>,
     /// Application config snapshot used by the thread.
     pub(crate) app_config: Arc<AppConfig>,
-    /// Optional recorder attached before the first turn starts.
-    #[builder(default, setter(strip_option))]
-    pub(crate) recorder: Option<Arc<dyn SessionRecorder>>,
+    /// Recorder attached before the first turn starts.
+    pub(crate) recorder: Arc<dyn SessionRecorder>,
 }
 
 /// Parameters required to load a persisted thread runtime.
@@ -57,16 +55,14 @@ pub(crate) struct LoadThreadParams {
     pub(crate) tools: Arc<ToolRegistry>,
     /// Agent path associated with the thread.
     pub(crate) agent_path: AgentPath,
-    /// Optional agent control handle for multi-agent routing.
-    #[builder(default, setter(strip_option))]
-    pub(crate) agent_control: Option<Arc<AgentControl>>,
+    /// Agent control handle for multi-agent routing.
+    pub(crate) agent_control: Arc<AgentControl>,
     /// Approval policy used by the thread.
     pub(crate) approval: Arc<ApprovalPolicy>,
     /// Application config snapshot used by the thread.
     pub(crate) app_config: Arc<AppConfig>,
-    /// Optional recorder attached before the restored thread runs again.
-    #[builder(default, setter(strip_option))]
-    pub(crate) recorder: Option<Arc<dyn SessionRecorder>>,
+    /// Recorder attached before the restored thread runs again.
+    pub(crate) recorder: Arc<dyn SessionRecorder>,
 }
 
 /// Owns live thread handles and routes operations to them.
@@ -188,25 +184,18 @@ impl ThreadManager {
     ) -> Result<Thread, KernelError> {
         let context: Box<dyn ContextManager> =
             Box::new(InMemoryContext::from_messages(params.history));
-        let builder = SpawnThreadParams::builder()
+        let params = SpawnThreadParams::builder()
             .session_id(params.session_id)
             .cwd(params.cwd)
             .llm(params.llm)
             .tools(params.tools)
             .context(context)
             .agent_path(params.agent_path)
+            .agent_control(params.agent_control)
             .approval(params.approval)
-            .app_config(params.app_config);
-        // Option setters use `strip_option`, so preserve absent handles with explicit branches.
-        let params = match (params.agent_control, params.recorder) {
-            (Some(agent_control), Some(recorder)) => builder
-                .agent_control(agent_control)
-                .recorder(recorder)
-                .build(),
-            (Some(agent_control), None) => builder.agent_control(agent_control).build(),
-            (None, Some(recorder)) => builder.recorder(recorder).build(),
-            (None, None) => builder.build(),
-        };
+            .app_config(params.app_config)
+            .recorder(params.recorder)
+            .build();
         self.spawn_thread(params).await
     }
 }
@@ -219,6 +208,13 @@ mod tests {
     use crate::agent::mailbox::mailbox_pair;
     use protocol::{KernelError, Op, SessionId};
     use tokio::sync::{mpsc, oneshot, watch};
+
+    /// Build a real recorder for thread-manager tests.
+    fn test_recorder() -> Arc<dyn SessionRecorder> {
+        Arc::new(store::FileSessionRecorder::new(
+            std::env::temp_dir().join(format!("clawcode-thread-{}.jsonl", uuid::Uuid::new_v4())),
+        ))
+    }
 
     #[tokio::test]
     async fn thread_manager_returns_session_not_found_for_missing_send() {
@@ -281,13 +277,13 @@ mod tests {
                 oneshot::Sender<protocol::ReviewDecision>,
             >::new())))
             .cancel_tx(cancel_tx)
-            .agent_control(None)
             .mailbox(mailbox)
             .tools(Arc::new(ToolRegistry::new()))
             .mcp_manager(Arc::new(mcp::McpConnectionManager::new(
                 Vec::new(),
                 PathBuf::from("/tmp/clawcode-test-auth"),
             )))
+            .recorder(test_recorder())
             .build()
     }
 }

@@ -116,8 +116,12 @@ impl AgentControl {
     pub(crate) async fn unregister_recorder(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<dyn SessionRecorder>> {
-        self.recorders.lock().await.remove(session_id)
+    ) -> Result<Arc<dyn SessionRecorder>, String> {
+        self.recorders
+            .lock()
+            .await
+            .remove(session_id)
+            .ok_or_else(|| format!("missing recorder for session {session_id}"))
     }
 
     /// Spawn a sub-agent under `parent_path` and kick off its first turn.
@@ -181,39 +185,39 @@ impl AgentControl {
         let child_cwd = cwd.clone();
         let app_config = self.config_handle.current();
         let approval = Arc::new(ApprovalPolicy::new(app_config.approval));
-        let child_recorder = if let Some(store) = &self.session_store {
-            let (provider_id, model_id) = self
-                .config_handle
-                .current()
-                .active_model
-                .split_once('/')
-                .map(|(provider_id, model_id)| (provider_id.to_string(), model_id.to_string()))
-                .unwrap_or_default();
-            store
-                .create_session(
-                    CreateSessionParams::builder()
-                        .session_id(session_id.clone())
-                        .agent_path(child_path.clone())
-                        .cwd(child_cwd.clone())
-                        .provider_id(provider_id)
-                        .model_id(model_id)
-                        .base_system_prompt(String::new())
-                        .parent_session_id(parent_sid.clone().ok_or_else(|| {
-                            "cannot persist subagent without parent session id".to_string()
-                        })?)
-                        .agent_role(role_name.to_string())
-                        .agent_nickname(nickname.clone())
-                        .build(),
-                )
-                .await
-                .map_err(|error| error.to_string())?
-                .map(Arc::from)
-        } else {
-            None
-        };
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or_else(|| "cannot spawn subagent without session store".to_string())?;
+        let (provider_id, model_id) = self
+            .config_handle
+            .current()
+            .active_model
+            .split_once('/')
+            .map(|(provider_id, model_id)| (provider_id.to_string(), model_id.to_string()))
+            .unwrap_or_default();
+        let child_recorder: Arc<dyn SessionRecorder> = store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(session_id.clone())
+                    .agent_path(child_path.clone())
+                    .cwd(child_cwd.clone())
+                    .provider_id(provider_id)
+                    .model_id(model_id)
+                    .base_system_prompt(String::new())
+                    .parent_session_id(parent_sid.clone().ok_or_else(|| {
+                        "cannot persist subagent without parent session id".to_string()
+                    })?)
+                    .agent_role(role_name.to_string())
+                    .agent_nickname(nickname.clone())
+                    .build(),
+            )
+            .await
+            .map_err(|error| error.to_string())?
+            .into();
 
         // Step 5: create the child session thread after its recorder exists.
-        let builder = SpawnThreadParams::builder()
+        let params = SpawnThreadParams::builder()
             .session_id(session_id.clone())
             .cwd(cwd)
             .llm(llm)
@@ -222,12 +226,10 @@ impl AgentControl {
             .agent_path(child_path.clone())
             .agent_control(Arc::clone(self))
             .approval(approval)
-            .app_config(app_config);
-        let params = if let Some(recorder) = child_recorder.as_ref() {
-            builder.recorder(Arc::clone(recorder)).build()
-        } else {
-            builder.build()
-        };
+            .app_config(app_config)
+            .recorder(Arc::clone(&child_recorder))
+            .build();
+
         let handle = self
             .thread_manager
             .spawn_thread(params)
@@ -254,12 +256,10 @@ impl AgentControl {
             }
         };
 
-        if let Some(recorder) = child_recorder {
-            self.recorders
-                .lock()
-                .await
-                .insert(session_id.clone(), recorder);
-        }
+        self.recorders
+            .lock()
+            .await
+            .insert(session_id.clone(), Arc::clone(&child_recorder));
 
         if let (Some(graph_store), Some(parent_sid)) = (&self.agent_graph_store, &parent_sid) {
             let edge_result = graph_store
@@ -273,10 +273,10 @@ impl AgentControl {
                 .await;
             if let Err(error) = edge_result {
                 let _ = self.thread_manager.close_thread(&session_id).await;
-                let child_recorder = self.unregister_recorder(&session_id).await;
                 if let Some(store) = &self.session_store {
+                    let child_recorder = self.unregister_recorder(&session_id).await?;
                     let _ = store
-                        .archive_session(&session_id, child_recorder.as_deref())
+                        .archive_session(&session_id, child_recorder.as_ref())
                         .await;
                 }
                 return Err(error.to_string());
@@ -469,16 +469,15 @@ impl AgentControl {
         if let Some(ref store) = self.session_store {
             // Write AgentEdge(Closed) to parent before removing the child recorder.
             self.write_closed_agent_edge(&thread_id).await;
-            let child_recorder = self.unregister_recorder(&thread_id).await;
-            if let Some(rec) = child_recorder {
-                let _ = store.close_session(&thread_id, Some(rec.as_ref())).await;
-            }
+            let child_recorder = self.unregister_recorder(&thread_id).await?;
+            let _ = store
+                .close_session(&thread_id, child_recorder.as_ref())
+                .await;
             // Also handle descendants
             for desc_id in &descendants {
                 self.write_closed_agent_edge(desc_id).await;
-                if let Some(r) = self.unregister_recorder(desc_id).await {
-                    let _ = store.close_session(desc_id, Some(r.as_ref())).await;
-                }
+                let recorder = self.unregister_recorder(desc_id).await?;
+                let _ = store.close_session(desc_id, recorder.as_ref()).await;
             }
         }
 
@@ -638,21 +637,28 @@ mod tests {
                 oneshot::Sender<protocol::ReviewDecision>,
             >::new())))
             .cancel_tx(cancel_tx)
-            .agent_control(None)
             .mailbox(mailbox)
             .tools(Arc::new(ToolRegistry::new()))
             .mcp_manager(Arc::new(mcp::McpConnectionManager::new(
                 Vec::new(),
                 PathBuf::from("/tmp/clawcode-test-auth"),
             )))
+            .recorder(test_recorder())
             .build()
+    }
+
+    /// Build a real recorder for agent-control routing tests.
+    fn test_recorder() -> Arc<dyn SessionRecorder> {
+        Arc::new(store::FileSessionRecorder::new(
+            std::env::temp_dir().join(format!("clawcode-agent-{}.jsonl", uuid::Uuid::new_v4())),
+        ))
     }
 
     #[tokio::test]
     async fn spawn_creates_child_session_and_open_graph_edge_before_returning() {
         let temp = tempfile::tempdir().expect("temp data home");
         let data_home = temp.path().to_string_lossy().to_string();
-        let store = Arc::new(FileSessionStore::new(true, Some(&data_home)));
+        let store = Arc::new(FileSessionStore::new(Some(&data_home)));
         let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
         let app_config = app_config_with_provider();
         let config_handle = ConfigHandle::from_config(app_config.clone());
@@ -681,8 +687,7 @@ mod tests {
                     .build(),
             )
             .await
-            .expect("create parent session")
-            .expect("parent recorder");
+            .expect("create parent session");
         let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id.clone());
         control
@@ -718,7 +723,7 @@ mod tests {
     async fn spawn_closes_child_session_when_graph_edge_write_fails() {
         let temp = tempfile::tempdir().expect("temp data home");
         let data_home = temp.path().to_string_lossy().to_string();
-        let store = Arc::new(FileSessionStore::new(true, Some(&data_home)));
+        let store = Arc::new(FileSessionStore::new(Some(&data_home)));
         let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
         let app_config = app_config_with_provider();
         let config_handle = ConfigHandle::from_config(app_config.clone());
@@ -746,8 +751,7 @@ mod tests {
                     .build(),
             )
             .await
-            .expect("create parent")
-            .expect("parent recorder");
+            .expect("create parent");
         let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id);
         control

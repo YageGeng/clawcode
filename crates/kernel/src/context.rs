@@ -1,7 +1,7 @@
 //! Conversation history management for sessions.
 
 use futures::future::BoxFuture;
-use protocol::message::Message;
+use protocol::message::{AssistantContent, Message};
 use provider::factory::Llm;
 
 /// Manages conversation history for a session.
@@ -14,13 +14,30 @@ pub trait ContextManager: Send + Sync {
     fn push(&mut self, msg: Message);
 
     /// Return all messages in the current history, oldest first.
-    fn history(&self) -> Vec<Message>;
+    fn history(&self) -> &[Message];
 
     /// Estimate total token count of the stored history.
     fn token_count(&self) -> usize;
 
     /// Clear all history.
     fn clear(&mut self);
+
+    /// Extract the latest displayable assistant text from the conversation history.
+    fn last_assistant_text(&self) -> Option<String> {
+        self.history().iter().rev().find_map(|message| {
+            let Message::Assistant { content, .. } = message else {
+                return None;
+            };
+            content.iter().find_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text.clone()),
+                AssistantContent::Reasoning(reasoning) => {
+                    let text = reasoning.display_text();
+                    if text.is_empty() { None } else { Some(text) }
+                }
+                AssistantContent::ToolCall(_) | AssistantContent::Image(_) => None,
+            })
+        })
+    }
 
     // ── Reserved for future compaction ──
 
@@ -69,8 +86,8 @@ impl ContextManager for InMemoryContext {
         self.messages.push(msg);
     }
 
-    fn history(&self) -> Vec<Message> {
-        self.messages.clone()
+    fn history(&self) -> &[Message] {
+        &self.messages
     }
 
     fn token_count(&self) -> usize {
@@ -93,11 +110,13 @@ mod tests {
     #[test]
     fn in_memory_context_push_and_history() {
         let mut ctx = InMemoryContext::new();
-        assert!(ctx.history().is_empty());
+        let empty_history: &[Message] = ctx.history();
+        assert!(empty_history.is_empty());
 
         let msg = Message::user("hello");
         ctx.push(msg.clone());
-        assert_eq!(ctx.history().len(), 1);
+        let history: &[Message] = ctx.history();
+        assert_eq!(history.len(), 1);
     }
 
     #[test]
@@ -119,5 +138,20 @@ mod tests {
     fn default_should_compact_returns_false() {
         let ctx = InMemoryContext::new();
         assert!(!ctx.should_compact());
+    }
+
+    #[test]
+    fn default_last_assistant_text_returns_latest_displayable_assistant_content() {
+        let mut ctx = InMemoryContext::new();
+        ctx.push(Message::assistant("older answer"));
+        ctx.push(Message::user("ignored user message"));
+        ctx.push(Message::from(AssistantContent::reasoning(
+            "latest reasoning",
+        )));
+
+        assert_eq!(
+            ctx.last_assistant_text(),
+            Some("latest reasoning".to_string())
+        );
     }
 }

@@ -11,23 +11,11 @@ use crate::skills::SkillsConfig;
 use crate::tui::TuiConfig;
 
 /// File-backed session persistence settings.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionPersistenceConfig {
-    /// Whether sessions should be written to and restored from data home.
-    #[serde(default = "default_session_persistence_enabled")]
-    pub enabled: bool,
     /// Optional override for the data directory that stores session transcripts.
     #[serde(default)]
     pub data_home: Option<String>,
-}
-
-impl Default for SessionPersistenceConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_session_persistence_enabled(),
-            data_home: None,
-        }
-    }
 }
 
 /// Top-level application configuration.
@@ -59,11 +47,6 @@ pub struct AppConfig {
     pub tui: TuiConfig,
 }
 
-/// Return the default session persistence enablement.
-fn default_session_persistence_enabled() -> bool {
-    true
-}
-
 fn default_active_model() -> String {
     "deepseek/deepseek-v4-flash".to_string()
 }
@@ -84,6 +67,14 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Return the provider id portion of the configured active model.
+    pub fn active_provider_id(&self) -> String {
+        self.active_model
+            .split_once('/')
+            .map(|(provider_id, _)| provider_id.to_string())
+            .unwrap_or_default()
+    }
+
     /// Validate cross-field invariants that serde cannot express directly.
     pub fn validate(&self) -> Result<(), crate::mcp::McpConfigError> {
         for server in &self.mcp_servers {
@@ -117,5 +108,27 @@ theme = "light"
         .expect("parse app config");
 
         assert_eq!(cfg.tui.theme, crate::tui::TuiTheme::Light);
+    }
+
+    /// AppConfig extracts the provider id from the active model setting.
+    #[test]
+    fn app_config_active_provider_id_uses_active_model_prefix() {
+        let cfg = AppConfig {
+            active_model: "openai/gpt-5".to_string(),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(cfg.active_provider_id(), "openai");
+    }
+
+    /// AppConfig returns an empty provider id for malformed active model values.
+    #[test]
+    fn app_config_active_provider_id_is_empty_without_separator() {
+        let cfg = AppConfig {
+            active_model: "gpt-5".to_string(),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(cfg.active_provider_id(), "");
     }
 }

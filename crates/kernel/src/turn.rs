@@ -27,6 +27,7 @@ use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
+use crate::session::Session;
 use store::{MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord, TurnKindRecord};
 use tools::{ToolArgumentsConsumer, ToolContext, ToolRegistry};
 
@@ -69,17 +70,13 @@ pub(crate) struct TurnContext {
     pub app_config: Arc<AppConfig>,
     /// Skill registry for this turn's working directory.
     pub skill_registry: Arc<SkillRegistry>,
-    /// Optional file-backed recorder for canonical turn history.
-    #[builder(default, setter(strip_option))]
-    pub recorder: Option<Arc<dyn SessionRecorder>>,
+    /// Recorder for canonical turn history.
+    pub recorder: Arc<dyn SessionRecorder>,
 }
 
 impl TurnContext {
     /// Persist the durable turn context snapshot for replay and audit.
     async fn persist_turn_context(&self, rendered_preamble: String) {
-        let Some(recorder) = &self.recorder else {
-            return;
-        };
         let record = TurnContextRecord::builder()
             .turn_id(String::from(&self.turn_id))
             .kind(self.turn_kind.clone())
@@ -88,7 +85,8 @@ impl TurnContext {
             .model_id(self.llm.model_id().to_string())
             .rendered_preamble(rendered_preamble)
             .build();
-        if let Err(error) = recorder
+        if let Err(error) = self
+            .recorder
             .append(&[PersistedPayload::TurnContext(record)])
             .await
         {
@@ -98,16 +96,42 @@ impl TurnContext {
 
     /// Persist one canonical message after it has been accepted into context history.
     async fn persist_message(&self, message: Message) {
-        let Some(recorder) = &self.recorder else {
-            return;
-        };
         let record = MessageRecord::builder()
             .turn_id(String::from(&self.turn_id))
             .message(message)
             .build();
-        if let Err(error) = recorder.append(&[PersistedPayload::Message(record)]).await {
+        if let Err(error) = self
+            .recorder
+            .append(&[PersistedPayload::Message(record)])
+            .await
+        {
             tracing::warn!(%error, "failed to persist conversation message");
         }
+    }
+
+    /// Build a turn context from session state for a prompt or inter-agent turn.
+    pub(crate) fn from_session(
+        rt: &Session,
+        turn_id: TurnId,
+        turn_kind: TurnKindRecord,
+        user_system_prompt: Option<String>,
+    ) -> Self {
+        Self::builder()
+            .session_id(rt.session_id.clone())
+            .turn_id(turn_id)
+            .turn_kind(turn_kind)
+            .llm(Arc::clone(&rt.llm))
+            .tools(Arc::clone(&rt.tools))
+            .cwd(rt.cwd.clone())
+            .provider_id(rt.app_config.active_provider_id())
+            .pending_approvals(Arc::clone(&rt.pending_approvals))
+            .agent_path(rt.agent_path.clone())
+            .approval(Arc::clone(&rt.approval))
+            .user_system_prompt(user_system_prompt)
+            .app_config(Arc::clone(&rt.app_config))
+            .skill_registry(Arc::clone(&rt.skill_registry))
+            .recorder(Arc::clone(&rt.recorder))
+            .build()
     }
 }
 
@@ -163,7 +187,7 @@ pub(crate) async fn execute_turn(
         .build();
 
     loop {
-        let history = context.history();
+        let history = context.history().to_vec();
         let history = OneOrMany::many(history).map_err(|e| KernelError::Internal(e.into()))?;
 
         let request = CompletionRequest::builder()
@@ -743,7 +767,15 @@ mod tests {
             .provider_id("test".to_string())
             .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
             .skill_registry(Arc::new(SkillRegistry::default()))
+            .recorder(test_recorder())
             .build()
+    }
+
+    /// Build a real recorder for turn tests.
+    fn test_recorder() -> Arc<dyn SessionRecorder> {
+        Arc::new(store::FileSessionRecorder::new(
+            std::env::temp_dir().join(format!("clawcode-turn-{}.jsonl", uuid::Uuid::new_v4())),
+        ))
     }
 
     #[test]
