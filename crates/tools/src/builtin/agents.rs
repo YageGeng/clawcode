@@ -9,9 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::FutureExt;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use protocol::AgentStatus;
 use serde_json::json;
 use tokio::sync::watch;
@@ -26,6 +23,14 @@ const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 const MIN_WAIT_TIMEOUT_MS: u64 = 20 * 1_000;
 /// Maximum accepted wait timeout to keep tool calls bounded.
 const MAX_WAIT_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
+
+/// Public agent summary returned by the control plane to V2 agent tools.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AgentToolSummary {
+    pub agent_name: String,
+    pub agent_status: AgentStatus,
+    pub last_task_message: Option<String>,
+}
 
 /// Object-safe reference to AgentControl operations used by tools.
 /// Implemented by the kernel crate's adapter to avoid circular deps.
@@ -53,8 +58,8 @@ pub trait AgentControlRef: Send + Sync {
         trigger_turn: bool,
     ) -> Result<(), String>;
 
-    /// List active sub-agents. Returns agent names.
-    fn list_agents(&self, prefix: Option<&protocol::AgentPath>) -> Vec<String>;
+    /// List active sub-agents with their model-visible V2 summary fields.
+    fn list_agents(&self, prefix: Option<&protocol::AgentPath>) -> Vec<AgentToolSummary>;
 
     /// Subscribe to status changes for a specific agent.
     async fn subscribe_status(
@@ -62,14 +67,43 @@ pub trait AgentControlRef: Send + Sync {
         agent_path: &protocol::AgentPath,
     ) -> Result<watch::Receiver<AgentStatus>, String>;
 
-    /// Close an agent and its descendants.
-    async fn close_agent(&self, agent_path: &protocol::AgentPath) -> Result<(), String>;
+    /// Subscribe to mailbox activity for a specific agent.
+    async fn subscribe_mailbox_activity(
+        &self,
+        agent_path: &protocol::AgentPath,
+    ) -> Result<watch::Receiver<()>, String>;
+
+    /// Subscribe to mailbox activity for the current executing session.
+    async fn subscribe_session_mailbox_activity(
+        &self,
+        session_id: &protocol::SessionId,
+    ) -> Result<watch::Receiver<()>, String>;
+
+    /// Close an agent and its descendants, returning its previous status.
+    async fn close_agent(&self, agent_path: &protocol::AgentPath) -> Result<AgentStatus, String>;
 }
 
 // ── SpawnAgent ──
 
 pub struct SpawnAgent {
     agent_control: Arc<dyn AgentControlRef>,
+}
+
+/// Strict MultiAgent V2 arguments for spawning a sub-agent.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnAgentArgs {
+    task_name: String,
+    #[serde(default)]
+    agent_type: Option<String>,
+    message: String,
+}
+
+impl SpawnAgentArgs {
+    /// Return the internal role name requested by the V2 agent_type field.
+    fn role_name(&self) -> &str {
+        self.agent_type.as_deref().unwrap_or("default")
+    }
 }
 
 impl SpawnAgent {
@@ -87,12 +121,7 @@ impl Tool for SpawnAgent {
     }
 
     fn description(&self) -> &str {
-        "Spawn a sub-agent to work on a task independently. \
-         The sub-agent runs in parallel and can be communicated with \
-         via send_message/followup_task. \
-         The task_name is NOT the agent's address — use the returned \
-         nickname or agent_path instead. \
-         To send messages back to the parent, use /root as the target."
+        "Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name \"task_3\" the agent will have canonical task name `/root/task1/task_3`."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -101,20 +130,20 @@ impl Tool for SpawnAgent {
             "properties": {
                 "task_name": {
                     "type": "string",
-                    "description": "Short kebab-case name for the task (used in agent path)"
+                    "description": "Task name for the spawned agent"
                 },
-                "role": {
+                "agent_type": {
                     "type": "string",
                     "enum": ["default", "explorer", "worker"],
                     "default": "default",
-                    "description": "Role profile for the sub-agent"
+                    "description": "Optional role profile for the sub-agent."
                 },
-                "prompt": {
+                "message": {
                     "type": "string",
                     "description": "Initial task description for the sub-agent"
                 }
             },
-            "required": ["task_name", "prompt"]
+            "required": ["task_name", "message"]
         })
     }
 
@@ -127,38 +156,15 @@ impl Tool for SpawnAgent {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        #[derive(serde::Deserialize)]
-        #[serde(default)]
-        struct Args {
-            task_name: String,
-            #[serde(default = "default_role")]
-            role: String,
-            prompt: String,
-        }
-
-        fn default_role() -> String {
-            "default".to_string()
-        }
-
-        impl Default for Args {
-            fn default() -> Self {
-                Self {
-                    task_name: "task".to_string(),
-                    role: "default".to_string(),
-                    prompt: String::new(),
-                }
-            }
-        }
-
-        let args: Args =
+        let args: SpawnAgentArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
 
         self.agent_control
             .spawn_agent(
                 &ctx.agent_path,
                 &args.task_name,
-                &args.role,
-                &args.prompt,
+                args.role_name(),
+                &args.message,
                 ctx.cwd.clone(),
             )
             .await
@@ -169,6 +175,14 @@ impl Tool for SpawnAgent {
 
 pub struct SendMessage {
     agent_control: Arc<dyn AgentControlRef>,
+}
+
+/// Strict MultiAgent V2 arguments for text-only agent messaging.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageArgs {
+    target: String,
+    message: String,
 }
 
 impl SendMessage {
@@ -185,22 +199,17 @@ impl Tool for SendMessage {
         "send_message"
     }
     fn description(&self) -> &str {
-        "Send a message to another agent. Does NOT wake the target \u{2014} the \
-         message is silently queued and only delivered when the target is \
-         awakened by something else (e.g. a followup_task or wait_agent call). \
-         Prefer followup_task when you need the target to process the message \
-         and respond immediately. Use send_message only for fire-and-forget \
-         notifications where no response is expected."
+        "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "to": { "type": "string", "description": "Agent path or nickname (use /root for the main agent)" },
-                "content": { "type": "string", "description": "Message content" }
+                "target": { "type": "string", "description": "Relative or canonical task name to message (from spawn_agent)." },
+                "message": { "type": "string", "description": "Message text to queue on the target agent." }
             },
-            "required": ["to", "content"]
+            "required": ["target", "message"]
         })
     }
 
@@ -213,19 +222,14 @@ impl Tool for SendMessage {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let to_str = arguments
-            .get("to")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'to' argument")?;
-        let content = arguments
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'content' argument")?;
-        let to = self.agent_control.resolve_target(to_str).await?;
+        let args: MessageArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        validate_message_content(&args.message)?;
+        let to = self.agent_control.resolve_target(&args.target).await?;
         let from = ctx.agent_path.clone();
 
         self.agent_control
-            .send_message_to(from, to, content.to_string(), false)
+            .send_message_to(from, to, args.message, false)
             .await?;
         Ok("message sent".to_string())
     }
@@ -251,21 +255,17 @@ impl Tool for FollowupTask {
         "followup_task"
     }
     fn description(&self) -> &str {
-        "Send a message to another agent and wake it up immediately. \
-         The target agent will process the message and respond in the same \
-         turn. This is the primary tool for dispatching tasks or instructions \
-         to sub-agents. Prefer this over send_message for any inter-agent \
-         communication that requires the target to take action."
+        "Send a message to an existing non-root target agent and trigger a turn in that target. If the target is currently mid-turn, the message is queued and will be used to start the target's next turn, after the current turn completes."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "to": { "type": "string", "description": "Agent path or nickname (use /root for the main agent)" },
-                "content": { "type": "string", "description": "Task content for the agent to process" }
+                "target": { "type": "string", "description": "Agent id or canonical task name to message (from spawn_agent)." },
+                "message": { "type": "string", "description": "Message text to send to the target agent." }
             },
-            "required": ["to", "content"]
+            "required": ["target", "message"]
         })
     }
 
@@ -278,28 +278,58 @@ impl Tool for FollowupTask {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let to_str = arguments
-            .get("to")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'to' argument")?;
-        let content = arguments
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'content' argument")?;
-        let to = self.agent_control.resolve_target(to_str).await?;
+        let args: MessageArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        validate_message_content(&args.message)?;
+        let to = self.agent_control.resolve_target(&args.target).await?;
+        if to.is_root() {
+            return Err("Tasks can't be assigned to the root agent".to_string());
+        }
         let from = ctx.agent_path.clone();
 
         self.agent_control
-            .send_message_to(from, to, content.to_string(), true)
+            .send_message_to(from, to, args.message, true)
             .await?;
         Ok("followup sent".to_string())
     }
+}
+
+/// Validate that a V2 inter-agent text message contains non-whitespace content.
+fn validate_message_content(message: &str) -> Result<(), String> {
+    if message.trim().is_empty() {
+        return Err("Empty message can't be sent to an agent".to_string());
+    }
+    Ok(())
 }
 
 // ── WaitAgent ──
 
 pub struct WaitAgent {
     agent_control: Arc<dyn AgentControlRef>,
+}
+
+/// Strict MultiAgent V2 arguments for waiting on mailbox activity.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitAgentArgs {
+    timeout_ms: Option<i64>,
+}
+
+impl WaitAgentArgs {
+    /// Validate timeout bounds and return the effective wait duration.
+    fn timeout_ms(self) -> Result<u64, String> {
+        match self.timeout_ms {
+            Some(ms) if ms < MIN_WAIT_TIMEOUT_MS as i64 => {
+                Err(format!("timeout_ms must be at least {MIN_WAIT_TIMEOUT_MS}"))
+            }
+            Some(ms) if ms > MAX_WAIT_TIMEOUT_MS as i64 => {
+                Err(format!("timeout_ms must be at most {MAX_WAIT_TIMEOUT_MS}"))
+            }
+            Some(ms) => u64::try_from(ms)
+                .map_err(|_error| format!("timeout_ms must be at least {MIN_WAIT_TIMEOUT_MS}")),
+            None => Ok(DEFAULT_WAIT_TIMEOUT_MS),
+        }
+    }
 }
 
 impl WaitAgent {
@@ -316,25 +346,20 @@ impl Tool for WaitAgent {
         "wait_agent"
     }
     fn description(&self) -> &str {
-        "Wait for a sub-agent to complete. Returns the agent's final status and message."
+        "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. Does not return the content; returns either a summary of which agents have updates (if any), or a timeout summary if no mailbox update arrives before the deadline."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "agent_path": {
-                    "type": ["string", "null"],
-                    "description": "Specific agent to wait for, or null to wait for any sub-agent"
-                },
                 "timeout_ms": {
                     "type": ["integer", "null"],
                     "minimum": MIN_WAIT_TIMEOUT_MS,
                     "maximum": MAX_WAIT_TIMEOUT_MS,
-                    "description": "Maximum time to wait before returning a timeout"
+                    "description": "Optional timeout in milliseconds."
                 }
-            },
-            "required": []
+            }
         })
     }
 
@@ -345,41 +370,17 @@ impl Tool for WaitAgent {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _ctx: &crate::ToolContext,
+        ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let prefix = arguments
-            .get("agent_path")
-            .and_then(|v| v.as_str())
-            .map(|s| protocol::AgentPath(s.to_string()));
-        let timeout_ms = arguments
-            .get("timeout_ms")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
-            .clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS);
+        let timeout_ms = serde_json::from_value::<WaitAgentArgs>(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?
+            .timeout_ms()?;
 
-        let mut receivers = Vec::new();
-        let mut immediate_statuses = std::collections::HashMap::new();
-        if let Some(target) = prefix {
-            let resolved = self.agent_control.resolve_target(target.as_str()).await?;
-            match self.agent_control.subscribe_status(&resolved).await {
-                Ok(rx) => receivers.push((target.to_string(), rx)),
-                Err(_) => {
-                    immediate_statuses.insert(target.to_string(), AgentStatus::NotFound);
-                }
-            }
-        } else {
-            for agent in self.agent_control.list_agents(None) {
-                let resolved = self.agent_control.resolve_target(&agent).await?;
-                match self.agent_control.subscribe_status(&resolved).await {
-                    Ok(rx) => receivers.push((agent, rx)),
-                    Err(_) => {
-                        immediate_statuses.insert(agent, AgentStatus::NotFound);
-                    }
-                }
-            }
-        }
-
-        let result = wait_for_agent_statuses(receivers, immediate_statuses, timeout_ms).await;
+        let mailbox_rx = self
+            .agent_control
+            .subscribe_session_mailbox_activity(&ctx.session_id)
+            .await?;
+        let result = wait_for_session_mailbox_update(mailbox_rx, timeout_ms).await;
 
         serde_json::to_string(&result).map_err(|error| error.to_string())
     }
@@ -387,82 +388,29 @@ impl Tool for WaitAgent {
 
 #[derive(Debug, serde::Serialize)]
 struct WaitAgentResult {
-    status: std::collections::HashMap<String, AgentStatus>,
+    message: String,
     timed_out: bool,
 }
 
-/// Waits for at least one subscribed agent to reach a final status.
-async fn wait_for_agent_statuses(
-    receivers: Vec<(String, watch::Receiver<AgentStatus>)>,
-    mut statuses: std::collections::HashMap<String, AgentStatus>,
+/// Wait for the current session mailbox to receive a model-visible update.
+async fn wait_for_session_mailbox_update(
+    mut mailbox_rx: watch::Receiver<()>,
     timeout_ms: u64,
 ) -> WaitAgentResult {
-    for (target, rx) in &receivers {
-        let status = rx.borrow().clone();
-        if status.is_final() {
-            statuses.insert(target.clone(), status);
-        }
-    }
-    if !statuses.is_empty() {
-        return WaitAgentResult {
-            status: statuses,
-            timed_out: false,
-        };
-    }
-
-    let mut futures = FuturesUnordered::new();
-    for (target, rx) in receivers {
-        futures.push(wait_for_final_status(target, rx));
-    }
-
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        match timeout_at(deadline, futures.next()).await {
-            Ok(Some(Some((target, status)))) => {
-                statuses.insert(target, status);
-                break;
-            }
-            Ok(Some(None)) => continue,
-            Ok(None) | Err(_) => break,
-        }
-    }
-
-    if !statuses.is_empty() {
-        loop {
-            match futures.next().now_or_never() {
-                Some(Some(Some((target, status)))) => {
-                    statuses.insert(target, status);
-                }
-                Some(Some(None)) => continue,
-                Some(None) | None => break,
-            }
-        }
-    }
-
+    let timed_out = !matches!(timeout_at(deadline, mailbox_rx.changed()).await, Ok(Ok(())));
     WaitAgentResult {
-        timed_out: statuses.is_empty(),
-        status: statuses,
+        message: wait_agent_message(timed_out),
+        timed_out,
     }
 }
 
-/// Waits for one status watcher to report a final agent status.
-async fn wait_for_final_status(
-    target: String,
-    mut status_rx: watch::Receiver<AgentStatus>,
-) -> Option<(String, AgentStatus)> {
-    let status = status_rx.borrow().clone();
-    if status.is_final() {
-        return Some((target, status));
-    }
-
-    loop {
-        if status_rx.changed().await.is_err() {
-            return None;
-        }
-        let status = status_rx.borrow().clone();
-        if status.is_final() {
-            return Some((target, status));
-        }
+/// Return the Codex V2 wait summary text for the timeout outcome.
+fn wait_agent_message(timed_out: bool) -> String {
+    if timed_out {
+        "Wait timed out.".to_string()
+    } else {
+        "Wait completed.".to_string()
     }
 }
 
@@ -470,6 +418,29 @@ async fn wait_for_final_status(
 
 pub struct ListAgents {
     agent_control: Arc<dyn AgentControlRef>,
+}
+
+/// Strict MultiAgent V2 arguments for listing agents.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListAgentsArgs {
+    path_prefix: Option<String>,
+}
+
+impl ListAgentsArgs {
+    /// Resolve a list prefix relative to the current agent path.
+    fn resolved_prefix(
+        &self,
+        current_agent_path: &protocol::AgentPath,
+    ) -> Option<protocol::AgentPath> {
+        self.path_prefix.as_deref().map(|prefix| {
+            if prefix.starts_with('/') {
+                protocol::AgentPath(prefix.to_string())
+            } else {
+                current_agent_path.join(prefix)
+            }
+        })
+    }
 }
 
 impl ListAgents {
@@ -509,15 +480,15 @@ impl Tool for ListAgents {
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _ctx: &crate::ToolContext,
+        ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let prefix = arguments
-            .get("path_prefix")
-            .and_then(|v| v.as_str())
-            .map(|s| protocol::AgentPath(s.to_string()));
+        let args: ListAgentsArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let prefix = args.resolved_prefix(&ctx.agent_path);
 
         let agents = self.agent_control.list_agents(prefix.as_ref());
-        Ok(serde_json::to_string(&agents).unwrap_or_else(|_| "[]".to_string()))
+        serde_json::to_string(&serde_json::json!({ "agents": agents }))
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -525,6 +496,13 @@ impl Tool for ListAgents {
 
 pub struct CloseAgent {
     agent_control: Arc<dyn AgentControlRef>,
+}
+
+/// Strict MultiAgent V2 arguments for closing an agent.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseAgentArgs {
+    target: String,
 }
 
 impl CloseAgent {
@@ -541,17 +519,16 @@ impl Tool for CloseAgent {
         "close_agent"
     }
     fn description(&self) -> &str {
-        "Close a sub-agent and all its descendants. The agent will no longer \
-         be available for communication."
+        "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "agent_path": { "type": "string", "description": "Agent path or nickname to close" }
+                "target": { "type": "string", "description": "Agent id or canonical task name to close (from spawn_agent)." }
             },
-            "required": ["agent_path"]
+            "required": ["target"]
         })
     }
 
@@ -564,13 +541,15 @@ impl Tool for CloseAgent {
         arguments: serde_json::Value,
         _ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let path_str = arguments
-            .get("agent_path")
-            .and_then(|v| v.as_str())
-            .ok_or("missing 'agent_path' argument")?;
-        let path = self.agent_control.resolve_target(path_str).await?;
-        self.agent_control.close_agent(&path).await?;
-        Ok(format!("agent {path} closed"))
+        let args: CloseAgentArgs =
+            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let path = self.agent_control.resolve_target(&args.target).await?;
+        if path.is_root() {
+            return Err("The root agent can't be closed with close_agent".to_string());
+        }
+        let status = self.agent_control.close_agent(&path).await?;
+        serde_json::to_string(&serde_json::json!({ "status": status }))
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -586,11 +565,15 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
+    use crate::ToolRegistry;
 
     /// In-memory agent control used by wait-agent tool tests.
     struct FakeAgentControl {
         paths: HashMap<String, AgentPath>,
         statuses: Mutex<HashMap<String, watch::Sender<AgentStatus>>>,
+        mailbox_activity: Mutex<HashMap<String, watch::Sender<()>>>,
+        session_mailbox_activity: watch::Sender<()>,
+        last_list_prefix: Mutex<Option<AgentPath>>,
         _status_rx: watch::Receiver<AgentStatus>,
     }
 
@@ -602,14 +585,34 @@ mod tests {
             paths.insert("child".to_string(), AgentPath::root().join("child"));
             let mut statuses = HashMap::new();
             statuses.insert("/root/child".to_string(), tx.clone());
+            let (mailbox_tx, _mailbox_rx) = watch::channel(());
+            let mut mailbox_activity = HashMap::new();
+            mailbox_activity.insert("/root/child".to_string(), mailbox_tx);
+            let (session_mailbox_activity, _session_mailbox_rx) = watch::channel(());
             (
                 Arc::new(Self {
                     paths,
                     statuses: Mutex::new(statuses),
+                    mailbox_activity: Mutex::new(mailbox_activity),
+                    session_mailbox_activity,
+                    last_list_prefix: Mutex::new(None),
                     _status_rx: status_rx,
                 }),
                 tx,
             )
+        }
+
+        /// Signals a fake mailbox update for the current session.
+        fn notify_session_mailbox(&self) {
+            self.session_mailbox_activity.send_replace(());
+        }
+
+        /// Return the most recent prefix passed to list_agents.
+        fn last_prefix(&self) -> Option<AgentPath> {
+            self.last_list_prefix
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
     }
 
@@ -618,13 +621,17 @@ mod tests {
         /// Test stub: spawning is not used by wait-agent tests.
         async fn spawn_agent(
             &self,
-            _parent_path: &AgentPath,
-            _task_name: &str,
+            parent_path: &AgentPath,
+            task_name: &str,
             _role: &str,
             _prompt: &str,
             _cwd: std::path::PathBuf,
         ) -> Result<String, String> {
-            Err("not implemented".to_string())
+            Ok(serde_json::json!({
+                "task_name": parent_path.join(task_name).to_string(),
+                "nickname": "child"
+            })
+            .to_string())
         }
 
         /// Resolves a nickname or path into a fake agent path.
@@ -651,8 +658,12 @@ mod tests {
             Ok(())
         }
 
-        /// Lists the fake child agent by nickname.
-        fn list_agents(&self, _prefix: Option<&AgentPath>) -> Vec<String> {
+        /// Lists the fake child agent by canonical path.
+        fn list_agents(&self, prefix: Option<&AgentPath>) -> Vec<AgentToolSummary> {
+            *self
+                .last_list_prefix
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = prefix.cloned();
             let statuses = self
                 .statuses
                 .lock()
@@ -666,13 +677,17 @@ mod tests {
             if status.is_final() {
                 Vec::new()
             } else {
-                vec!["child".to_string()]
+                vec![AgentToolSummary {
+                    agent_name: "/root/child".to_string(),
+                    agent_status: status,
+                    last_task_message: None,
+                }]
             }
         }
 
         /// Test stub: close is not used by wait-agent tests.
-        async fn close_agent(&self, _agent_path: &AgentPath) -> Result<(), String> {
-            Ok(())
+        async fn close_agent(&self, _agent_path: &AgentPath) -> Result<AgentStatus, String> {
+            Ok(AgentStatus::Running)
         }
 
         /// Subscribes to a fake status watcher for wait-agent tests.
@@ -687,65 +702,96 @@ mod tests {
                 .map(watch::Sender::subscribe)
                 .ok_or_else(|| format!("agent not found: {agent_path}"))
         }
+
+        /// Subscribes to a fake mailbox watcher for wait-agent tests.
+        async fn subscribe_mailbox_activity(
+            &self,
+            agent_path: &AgentPath,
+        ) -> Result<watch::Receiver<()>, String> {
+            self.mailbox_activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(agent_path.as_str())
+                .map(watch::Sender::subscribe)
+                .ok_or_else(|| format!("agent not found: {agent_path}"))
+        }
+
+        /// Subscribes to the fake current-session mailbox watcher.
+        async fn subscribe_session_mailbox_activity(
+            &self,
+            _session_id: &protocol::SessionId,
+        ) -> Result<watch::Receiver<()>, String> {
+            Ok(self.session_mailbox_activity.subscribe())
+        }
     }
 
-    /// Verifies wait_agent blocks until a child reaches a terminal status.
+    /// Verifies wait_agent validates timeout before observing status-only updates.
     #[tokio::test]
-    async fn wait_agent_waits_for_child_terminal_status() {
+    async fn wait_agent_rejects_short_timeout_before_status_only_updates() {
         let (control, status_tx) = FakeAgentControl::with_running_child();
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        status_tx
+            .send(AgentStatus::Completed {
+                message: Some("done".to_string()),
+            })
+            .expect("send status");
+
+        let error = tool
+            .execute(serde_json::json!({ "timeout_ms": 500 }), &ctx)
+            .await
+            .expect_err("too-short timeout should be rejected");
+
+        assert_eq!(error, "timeout_ms must be at least 20000");
+    }
+
+    /// Verifies wait_agent validates timeout before checking terminal child state.
+    #[tokio::test]
+    async fn wait_agent_rejects_short_timeout_for_completed_target() {
+        let (control, status_tx) = FakeAgentControl::with_running_child();
+        status_tx
+            .send(AgentStatus::Completed {
+                message: Some("done".to_string()),
+            })
+            .expect("send status");
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(serde_json::json!({ "timeout_ms": 500 }), &ctx)
+            .await
+            .expect_err("too-short timeout should be rejected");
+
+        assert_eq!(error, "timeout_ms must be at least 20000");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_returns_for_mailbox_activity() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let notifier = Arc::clone(&control);
         let tool = WaitAgent::new(control);
         let ctx = ToolContext::for_test(Path::new("."));
 
         let waiter = tokio::spawn(async move {
             tool.execute(
                 serde_json::json!({
-                    "agent_path": "child",
-                    "timeout_ms": 500
+                    "timeout_ms": 20000
                 }),
                 &ctx,
             )
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        status_tx
-            .send(AgentStatus::Completed {
-                message: Some("done".to_string()),
-            })
-            .expect("send status");
+        notifier.notify_session_mailbox();
 
         let output = waiter.await.expect("wait task").expect("wait output");
 
         assert!(output.contains("\"timed_out\":false"), "{output}");
-        assert!(output.contains("completed"), "{output}");
-        assert!(output.contains("done"), "{output}");
-    }
-
-    /// Verifies wait_agent returns an already-terminal targeted child immediately.
-    #[tokio::test]
-    async fn wait_agent_returns_already_completed_target() {
-        let (control, status_tx) = FakeAgentControl::with_running_child();
-        status_tx
-            .send(AgentStatus::Completed {
-                message: Some("done".to_string()),
-            })
-            .expect("send status");
-        let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
-
-        let output = tool
-            .execute(
-                serde_json::json!({
-                    "agent_path": "child",
-                    "timeout_ms": 500
-                }),
-                &ctx,
-            )
-            .await
-            .expect("wait output");
-
-        assert!(output.contains("\"timed_out\":false"), "{output}");
-        assert!(output.contains("completed"), "{output}");
-        assert!(output.contains("done"), "{output}");
+        assert!(
+            output.contains("\"message\":\"Wait completed.\""),
+            "{output}"
+        );
     }
 
     /// Verifies wait_agent uses the expected timeout bounds.
@@ -754,6 +800,114 @@ mod tests {
         assert_eq!(DEFAULT_WAIT_TIMEOUT_MS, 5 * 60 * 1_000);
         assert_eq!(MIN_WAIT_TIMEOUT_MS, 20 * 1_000);
         assert_eq!(MAX_WAIT_TIMEOUT_MS, 30 * 60 * 1_000);
+    }
+
+    #[test]
+    fn send_message_uses_codex_v2_target_message_parameters() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SendMessage::new(control);
+        let parameters = tool.parameters();
+        let properties = parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object properties");
+
+        assert!(properties.contains_key("target"));
+        assert!(properties.contains_key("message"));
+        assert!(!properties.contains_key("to"));
+        assert!(!properties.contains_key("content"));
+        assert_eq!(
+            parameters.get("required"),
+            Some(&serde_json::json!(["target", "message"]))
+        );
+    }
+
+    #[test]
+    fn followup_task_uses_codex_v2_target_message_parameters() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = FollowupTask::new(control);
+        let parameters = tool.parameters();
+        let properties = parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object properties");
+
+        assert!(properties.contains_key("target"));
+        assert!(properties.contains_key("message"));
+        assert!(!properties.contains_key("to"));
+        assert!(!properties.contains_key("content"));
+        assert_eq!(
+            parameters.get("required"),
+            Some(&serde_json::json!(["target", "message"]))
+        );
+    }
+
+    #[test]
+    fn wait_agent_uses_codex_v2_timeout_only_parameters() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = WaitAgent::new(control);
+        let parameters = tool.parameters();
+        let properties = parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object properties");
+
+        assert_eq!(properties.len(), 1);
+        assert!(properties.contains_key("timeout_ms"));
+        assert!(parameters.get("required").is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_returns_codex_v2_task_name_output() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SpawnAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "task_name": "child",
+                    "message": "do work"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("spawn output");
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("spawn output should be json");
+
+        assert_eq!(
+            payload.get("task_name"),
+            Some(&serde_json::json!("/root/child"))
+        );
+        assert_eq!(payload.get("nickname"), Some(&serde_json::json!("child")));
+        assert!(payload.get("agent_path").is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_accepts_codex_v2_agent_type_parameter() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SpawnAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "task_name": "child",
+                    "agent_type": "worker",
+                    "message": "do work"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("spawn output");
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("spawn output should be json");
+
+        assert_eq!(
+            payload.get("task_name"),
+            Some(&serde_json::json!("/root/child"))
+        );
     }
 
     /// Verifies untargeted waits do not return already-completed agents again.
@@ -768,7 +922,7 @@ mod tests {
         let tool = WaitAgent::new(control);
         let ctx = ToolContext::for_test(Path::new("."));
 
-        let output = tool
+        let error = tool
             .execute(
                 serde_json::json!({
                     "timeout_ms": 1
@@ -776,9 +930,250 @@ mod tests {
                 &ctx,
             )
             .await
-            .expect("wait output");
+            .expect_err("too-short timeout should be rejected");
 
-        assert!(output.contains("\"timed_out\":true"), "{output}");
-        assert!(!output.contains("done"), "{output}");
+        assert_eq!(error, "timeout_ms must be at least 20000");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_missing_task_name() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SpawnAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "message": "do work"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("missing task_name should be rejected");
+
+        assert!(error.contains("missing field `task_name`"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_unknown_fields() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SpawnAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "task_name": "child",
+                    "message": "do work",
+                    "prompt": "legacy"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("unknown fields should be rejected");
+
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_rejects_timeout_below_minimum() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(serde_json::json!({ "timeout_ms": 1 }), &ctx)
+            .await
+            .expect_err("timeout below minimum should be rejected");
+
+        assert_eq!(error, "timeout_ms must be at least 20000");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_rejects_timeout_above_maximum() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = WaitAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(serde_json::json!({ "timeout_ms": 1_800_001 }), &ctx)
+            .await
+            .expect_err("timeout above maximum should be rejected");
+
+        assert_eq!(error, "timeout_ms must be at most 1800000");
+    }
+
+    #[test]
+    fn registered_agent_tools_do_not_include_resume_agent_in_v2() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let registry = ToolRegistry::new();
+
+        registry.register_agent_tools(control);
+
+        assert!(registry.get("resume_agent").is_none());
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_empty_message() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SendMessage::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "target": "child",
+                    "message": "   "
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("empty messages should be rejected");
+
+        assert_eq!(error, "Empty message can't be sent to an agent");
+    }
+
+    #[tokio::test]
+    async fn followup_task_rejects_root_target() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = FollowupTask::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "target": "/root",
+                    "message": "do this"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("followup_task should not target root");
+
+        assert_eq!(error, "Tasks can't be assigned to the root agent");
+    }
+
+    #[tokio::test]
+    async fn list_agents_returns_codex_v2_object() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = ListAgents::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let output = tool
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("list output");
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("list output should be json");
+
+        assert!(payload.get("agents").is_some(), "{output}");
+        assert_eq!(
+            payload["agents"][0]["agent_name"],
+            serde_json::json!("/root/child")
+        );
+        assert_eq!(
+            payload["agents"][0]["agent_status"],
+            serde_json::json!("running")
+        );
+        assert_eq!(
+            payload["agents"][0]["last_task_message"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn list_agents_resolves_relative_prefix_from_current_agent_path() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool_control: Arc<dyn AgentControlRef> = control.clone();
+        let tool = ListAgents::new(tool_control);
+        let ctx = ToolContext::builder()
+            .session_id(protocol::SessionId("test-session".to_string()))
+            .cwd(Path::new(".").to_path_buf())
+            .agent_path(AgentPath::root().join("parent"))
+            .approval_mode(protocol::ApprovalMode::default())
+            .build();
+
+        let _output = tool
+            .execute(serde_json::json!({ "path_prefix": "child" }), &ctx)
+            .await
+            .expect("list output");
+
+        assert_eq!(
+            control.last_prefix(),
+            Some(AgentPath::root().join("parent/child"))
+        );
+    }
+
+    #[test]
+    fn close_agent_uses_codex_v2_target_parameter() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = CloseAgent::new(control);
+        let parameters = tool.parameters();
+        let properties = parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object properties");
+
+        assert!(properties.contains_key("target"));
+        assert!(!properties.contains_key("agent_path"));
+        assert_eq!(
+            parameters.get("required"),
+            Some(&serde_json::json!(["target"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn close_agent_returns_previous_status_object() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = CloseAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "target": "child"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("close output");
+        let payload: serde_json::Value =
+            serde_json::from_str(&output).expect("close output should be json");
+
+        assert_eq!(payload.get("status"), Some(&serde_json::json!("running")));
+    }
+
+    #[tokio::test]
+    async fn close_agent_rejects_root_target() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = CloseAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(serde_json::json!({ "target": "/root" }), &ctx)
+            .await
+            .expect_err("close_agent should reject root");
+
+        assert_eq!(error, "The root agent can't be closed with close_agent");
+    }
+
+    #[tokio::test]
+    async fn close_agent_rejects_unknown_fields() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = CloseAgent::new(control);
+        let ctx = ToolContext::for_test(Path::new("."));
+
+        let error = tool
+            .execute(
+                serde_json::json!({
+                    "target": "child",
+                    "extra": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("unknown fields should be rejected");
+
+        assert!(error.contains("unknown field"), "{error}");
     }
 }

@@ -284,6 +284,9 @@ mod tests {
                 PathBuf::from("/tmp/clawcode-test-auth"),
             )))
             .recorder(test_recorder())
+            .input_queue(Arc::new(tokio::sync::Mutex::new(
+                crate::input_queue::InputQueue::default(),
+            )))
             .build()
     }
 }

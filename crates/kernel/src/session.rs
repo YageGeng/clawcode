@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::agent::control::AgentControl;
 use crate::agent::mailbox::{Mailbox, MailboxReceiver, mailbox_pair};
 use crate::context::ContextManager;
+use crate::input_queue::InputQueue;
 use crate::turn::{TurnContext, execute_turn};
 use store::{
     MessageRecord, PersistedPayload, SessionRecorder, TurnAbortedRecord, TurnCompleteRecord,
@@ -53,6 +54,8 @@ pub struct Thread {
     pub(crate) mcp_manager: Arc<mcp::McpConnectionManager>,
     /// Recorder for canonical session history.
     pub(crate) recorder: Arc<dyn SessionRecorder>,
+    /// Session-scoped queue used to deliver inter-agent mailbox messages.
+    pub(crate) input_queue: Arc<tokio::sync::Mutex<InputQueue>>,
 }
 
 impl Thread {
@@ -110,9 +113,9 @@ pub(crate) struct Session {
     pub mcp_manager: Arc<mcp::McpConnectionManager>,
     /// Recorder for canonical session history.
     pub recorder: Arc<dyn SessionRecorder>,
-    /// Inter-agent messages queued for model-visible delivery at the next turn boundary.
-    #[builder(default)]
-    pub pending_inter_agent_messages: Vec<InterAgentMessage>,
+    /// Session-scoped queue for model-visible inter-agent mailbox delivery.
+    #[builder(default = Arc::new(tokio::sync::Mutex::new(InputQueue::default())))]
+    pub input_queue: Arc<tokio::sync::Mutex<InputQueue>>,
 }
 
 /// Spawn the background task for a session and return the frontend handle.
@@ -177,6 +180,7 @@ pub(crate) fn spawn_thread(
     let pending_approvals: Arc<
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
     > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let input_queue = Arc::new(tokio::sync::Mutex::new(InputQueue::default()));
 
     let thread_cwd = cwd.clone();
     let runtime = Session::builder()
@@ -197,6 +201,7 @@ pub(crate) fn spawn_thread(
         .skill_registry(skill_registry)
         .mcp_manager(Arc::clone(&mcp_manager))
         .recorder(Arc::clone(&recorder))
+        .input_queue(Arc::clone(&input_queue))
         .build();
 
     tokio::spawn(run_loop(runtime));
@@ -212,6 +217,7 @@ pub(crate) fn spawn_thread(
         .tools(tools)
         .mcp_manager(mcp_manager)
         .recorder(recorder)
+        .input_queue(input_queue)
         .build()
 }
 
@@ -220,11 +226,13 @@ async fn run_loop(mut rt: Session) {
     loop {
         let op = rt.rx_op.recv().await;
         match op {
-            // Inter-agent messages are processed identically to user prompts.
-            // The content is injected as the turn input, and the turn loop
-            // handles tool calls, approvals, and cancellation the same way.
+            // Queue mailbox-only messages until a turn boundary can deliver them
+            // as model-visible context without starting a new turn.
             Some(Op::InterAgentMessage { message }) if !message.trigger_turn => {
-                persist_inter_agent_message(&mut *rt.context, rt.recorder.as_ref(), message).await;
+                rt.input_queue
+                    .lock()
+                    .await
+                    .enqueue_mailbox_communication(message);
             }
             Some(Op::InterAgentMessage { message }) => {
                 let mut next_message = Some(message);
@@ -233,9 +241,14 @@ async fn run_loop(mut rt: Session) {
                     if !keep_running {
                         return;
                     }
-                    next_message =
-                        take_next_triggering_message(&mut rt.pending_inter_agent_messages);
+                    next_message = rt.input_queue.lock().await.take_next_triggering_message();
                 }
+                drain_pending_inter_agent_messages(
+                    &mut *rt.context,
+                    Arc::clone(&rt.recorder),
+                    Arc::clone(&rt.input_queue),
+                )
+                .await;
             }
             Some(Op::Prompt { text, system, .. }) => {
                 let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
@@ -245,7 +258,7 @@ async fn run_loop(mut rt: Session) {
                 drain_pending_inter_agent_messages(
                     &mut *rt.context,
                     Arc::clone(&rt.recorder),
-                    &mut rt.pending_inter_agent_messages,
+                    Arc::clone(&rt.input_queue),
                 )
                 .await;
 
@@ -257,16 +270,20 @@ async fn run_loop(mut rt: Session) {
                     }
                 }
 
-                let mut next_message =
-                    take_next_triggering_message(&mut rt.pending_inter_agent_messages);
+                let mut next_message = rt.input_queue.lock().await.take_next_triggering_message();
                 while let Some(message) = next_message {
                     let keep_running = run_inter_agent_turn(&mut rt, message).await;
                     if !keep_running {
                         return;
                     }
-                    next_message =
-                        take_next_triggering_message(&mut rt.pending_inter_agent_messages);
+                    next_message = rt.input_queue.lock().await.take_next_triggering_message();
                 }
+                drain_pending_inter_agent_messages(
+                    &mut *rt.context,
+                    Arc::clone(&rt.recorder),
+                    Arc::clone(&rt.input_queue),
+                )
+                .await;
             }
             Some(Op::ExecApprovalResponse { call_id, decision })
             | Some(Op::PatchApprovalResponse { call_id, decision }) => {
@@ -346,7 +363,10 @@ async fn run_turn_select_loop(
                     return TurnStepOutcome::Shutdown;
                 }
                 Some(Op::InterAgentMessage { message }) => {
-                    rt.pending_inter_agent_messages.push(message);
+                    rt.input_queue
+                        .lock()
+                        .await
+                        .enqueue_mailbox_communication(message);
                 }
                 Some(other) => {
                     tracing::debug!(?other, "Ignoring operation while turn is running");
@@ -364,11 +384,11 @@ async fn run_inter_agent_turn(rt: &mut Session, message: InterAgentMessage) -> b
     drain_pending_inter_agent_messages(
         &mut *rt.context,
         Arc::clone(&rt.recorder),
-        &mut rt.pending_inter_agent_messages,
+        Arc::clone(&rt.input_queue),
     )
     .await;
 
-    match run_turn_select_loop(rt, &ctx, message.content, &tx).await {
+    match run_turn_select_loop(rt, &ctx, message.render_turn_input(), &tx).await {
         TurnStepOutcome::Shutdown => false,
         TurnStepOutcome::Finished(status) => {
             let status = with_final_message(status, &*rt.context);
@@ -378,27 +398,13 @@ async fn run_inter_agent_turn(rt: &mut Session, message: InterAgentMessage) -> b
     }
 }
 
-/// Remove the next queued message that requested a follow-up turn.
-fn take_next_triggering_message(pending: &mut Vec<InterAgentMessage>) -> Option<InterAgentMessage> {
-    let index = pending.iter().position(|message| message.trigger_turn)?;
-    Some(pending.remove(index))
-}
-
-/// Render an inter-agent message as model-visible user context.
-fn render_inter_agent_message(message: &InterAgentMessage) -> String {
-    format!(
-        "[inter-agent message from {} to {}]\n{}",
-        message.from, message.to, message.content
-    )
-}
-
 /// Persist and inject all pending inter-agent messages into context.
 async fn drain_pending_inter_agent_messages(
     context: &mut dyn ContextManager,
     recorder: Arc<dyn SessionRecorder>,
-    pending: &mut Vec<InterAgentMessage>,
+    input_queue: Arc<tokio::sync::Mutex<InputQueue>>,
 ) {
-    let messages = std::mem::take(pending);
+    let messages = input_queue.lock().await.drain_mailbox_input_items();
     for message in messages {
         persist_inter_agent_message(context, recorder.as_ref(), message).await;
     }
@@ -410,7 +416,7 @@ async fn persist_inter_agent_message(
     recorder: &dyn SessionRecorder,
     message: InterAgentMessage,
 ) {
-    let rendered = render_inter_agent_message(&message);
+    let rendered = message.render_model_context();
     let user_message = Message::user(rendered);
     context.push(user_message.clone());
     persist_message(
@@ -522,19 +528,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn take_next_triggering_message_removes_first_trigger_only() {
-        let mut pending = vec![
-            test_message("first", false),
-            test_message("second", true),
-            test_message("third", true),
-        ];
+    fn render_inter_agent_message_uses_structured_context_markers() {
+        let rendered = test_message("hello", false).render_model_context();
 
-        let message = take_next_triggering_message(&mut pending).expect("triggering message");
+        assert!(rendered.contains("<inter_agent_communication>"));
+        assert!(rendered.contains("\"from\":\"/root\""));
+        assert!(rendered.contains("\"to\":\"/root/child\""));
+        assert!(rendered.contains("\"content\":\"hello\""));
+        assert!(rendered.contains("</inter_agent_communication>"));
+    }
 
-        assert_eq!(message.content, "second");
-        assert_eq!(pending.len(), 2);
-        assert_eq!(pending[0].content, "first");
-        assert_eq!(pending[1].content, "third");
+    #[test]
+    fn inter_agent_turn_input_preserves_message_envelope() {
+        let rendered = test_message("do work", true).render_turn_input();
+
+        assert!(rendered.contains("<inter_agent_communication>"));
+        assert!(rendered.contains("\"trigger_turn\":true"));
+        assert!(rendered.contains("\"content\":\"do work\""));
+    }
+
+    #[test]
+    fn idle_non_trigger_message_is_queued_before_delivery() {
+        let mut queue = InputQueue::default();
+        queue.enqueue_mailbox_communication(test_message("queued", false));
+
+        let pending = queue.subscribe_mailbox();
+        let messages = queue.drain_mailbox_input_items();
+
+        assert!(pending.has_changed().expect("mailbox receiver open"));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "queued");
     }
 
     /// Build an inter-agent message for session queue tests.

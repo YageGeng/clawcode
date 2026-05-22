@@ -25,6 +25,7 @@ use skills::SkillRegistry;
 
 use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::ContextManager;
+use crate::input_queue::InputQueue;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
 use crate::session::Session;
@@ -72,6 +73,8 @@ pub(crate) struct TurnContext {
     pub skill_registry: Arc<SkillRegistry>,
     /// Recorder for canonical turn history.
     pub recorder: Arc<dyn SessionRecorder>,
+    /// Session-scoped inter-agent input queue drained between LLM requests.
+    pub input_queue: Arc<tokio::sync::Mutex<InputQueue>>,
 }
 
 impl TurnContext {
@@ -131,6 +134,7 @@ impl TurnContext {
             .app_config(Arc::clone(&rt.app_config))
             .skill_registry(Arc::clone(&rt.skill_registry))
             .recorder(Arc::clone(&rt.recorder))
+            .input_queue(Arc::clone(&rt.input_queue))
             .build()
     }
 }
@@ -187,6 +191,7 @@ pub(crate) async fn execute_turn(
         .build();
 
     loop {
+        drain_inter_agent_inputs_for_turn(ctx, &mut **context).await;
         let history = context.history().to_vec();
         let history = OneOrMany::many(history).map_err(|e| KernelError::Internal(e.into()))?;
 
@@ -343,6 +348,16 @@ pub(crate) async fn execute_turn(
             context.push(tool_message.clone());
             ctx.persist_message(tool_message).await;
         }
+    }
+}
+
+/// Drain queued inter-agent messages into the active turn before the next LLM request.
+async fn drain_inter_agent_inputs_for_turn(ctx: &TurnContext, context: &mut dyn ContextManager) {
+    let messages = ctx.input_queue.lock().await.drain_mailbox_input_items();
+    for message in messages {
+        let user_message = Message::user(message.render_model_context());
+        context.push(user_message.clone());
+        ctx.persist_message(user_message).await;
     }
 }
 
@@ -768,6 +783,7 @@ mod tests {
             .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
             .skill_registry(Arc::new(SkillRegistry::default()))
             .recorder(test_recorder())
+            .input_queue(Arc::new(tokio::sync::Mutex::new(InputQueue::default())))
             .build()
     }
 

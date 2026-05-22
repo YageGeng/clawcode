@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::{AgentPath, AgentStatus};
 use tokio::sync::watch;
-use tools::builtin::agents::AgentControlRef;
+use tools::builtin::agents::{AgentControlRef, AgentToolSummary};
 
 use super::control::AgentControl;
 
@@ -57,7 +57,7 @@ impl AgentControlRef for AgentControlAdapter {
         let nick = live.metadata.agent_nickname.unwrap_or_default();
 
         Ok(serde_json::json!({
-            "agent_path": path,
+            "task_name": path,
             "nickname": nick
         })
         .to_string())
@@ -79,11 +79,15 @@ impl AgentControlRef for AgentControlAdapter {
             .await
     }
 
-    fn list_agents(&self, prefix: Option<&AgentPath>) -> Vec<String> {
+    fn list_agents(&self, prefix: Option<&AgentPath>) -> Vec<AgentToolSummary> {
         self.inner
             .list_agents(prefix)
             .into_iter()
-            .map(|a| a.agent_name)
+            .map(|agent| AgentToolSummary {
+                agent_name: agent.agent_name,
+                agent_status: agent.agent_status,
+                last_task_message: agent.last_task_message,
+            })
             .collect()
     }
 
@@ -102,7 +106,24 @@ impl AgentControlRef for AgentControlAdapter {
             .ok_or_else(|| format!("agent status not found: {agent_path}"))
     }
 
-    async fn close_agent(&self, agent_path: &AgentPath) -> Result<(), String> {
+    async fn subscribe_mailbox_activity(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Result<watch::Receiver<()>, String> {
+        self.inner.subscribe_mailbox_activity(agent_path).await
+    }
+
+    /// Delegates current-session mailbox observation to [`AgentControl`].
+    async fn subscribe_session_mailbox_activity(
+        &self,
+        session_id: &protocol::SessionId,
+    ) -> Result<watch::Receiver<()>, String> {
+        self.inner
+            .subscribe_session_mailbox_activity(session_id)
+            .await
+    }
+
+    async fn close_agent(&self, agent_path: &AgentPath) -> Result<AgentStatus, String> {
         self.inner.close_agent(agent_path).await
     }
 }

@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod approval;
 pub mod context;
+pub(crate) mod input_queue;
 pub(crate) mod prompt;
 pub mod session;
 pub(crate) mod thread_manager;
@@ -597,20 +598,43 @@ impl AgentKernel for Kernel {
     async fn spawn_agent(
         &self,
         parent_session: &SessionId,
-        _agent_path: AgentPath,
-        _role: &str,
-        _prompt: &str,
+        agent_path: AgentPath,
+        role: &str,
+        prompt: &str,
     ) -> Result<(), KernelError> {
-        if self
+        let parent_thread = self
             .thread_manager
             .get_thread(parent_session)
             .await
-            .is_none()
-        {
-            return Err(KernelError::SessionNotFound(parent_session.clone()));
-        }
-        // Sub-agent spawning will be implemented in a subsequent plan.
-        Ok(())
+            .ok_or_else(|| KernelError::SessionNotFound(parent_session.clone()))?;
+        let parent_path = self
+            .agent_control
+            .registry
+            .agent_metadata_for_thread(parent_session.clone())
+            .and_then(|metadata| metadata.agent_path)
+            .unwrap_or_else(AgentPath::root);
+        let direct_child_prefix = format!("{}/", parent_path.as_str());
+        let child_name = agent_path
+            .as_str()
+            .strip_prefix(&direct_child_prefix)
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+            .ok_or_else(|| {
+                KernelError::Internal(anyhow::anyhow!(
+                    "agent_path must be a direct child of {parent_path}: {agent_path}"
+                ))
+            })?;
+
+        self.agent_control
+            .spawn(
+                &parent_path,
+                child_name,
+                role,
+                prompt,
+                parent_thread.cwd.clone(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| KernelError::Internal(anyhow::anyhow!(error)))
     }
 
     fn available_modes(&self) -> Vec<SessionMode> {
@@ -902,6 +926,69 @@ mod tests {
                 .agent_control
                 .registry
                 .agent_id_for_path(&closed_path)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_spawn_agent_creates_child_thread() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home);
+        let kernel = kernel_with_config(app_config);
+        let created = kernel
+            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .await
+            .expect("create root session");
+        let child_path = AgentPath::root().join("worker");
+
+        kernel
+            .spawn_agent(
+                &created.session_id,
+                child_path.clone(),
+                "default",
+                "do the work",
+            )
+            .await
+            .expect("spawn child");
+
+        let child_id = kernel
+            .agent_control
+            .registry
+            .agent_id_for_path(&child_path)
+            .expect("child path registered");
+        assert!(kernel.thread_manager.get_thread(&child_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn kernel_spawn_agent_rejects_non_direct_child_path() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home);
+        let kernel = kernel_with_config(app_config);
+        let created = kernel
+            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .await
+            .expect("create root session");
+
+        let error = kernel
+            .spawn_agent(
+                &created.session_id,
+                AgentPath::root().join("team/worker"),
+                "default",
+                "do the work",
+            )
+            .await
+            .expect_err("non-direct child paths should be rejected");
+
+        assert!(error.to_string().contains("direct child"), "{error}");
+        assert!(
+            kernel
+                .agent_control
+                .registry
+                .agent_id_for_path(&AgentPath::root().join("worker"))
                 .is_none()
         );
     }

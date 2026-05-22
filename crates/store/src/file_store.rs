@@ -223,16 +223,14 @@ impl AgentGraphStore for FileSessionStore {
         child_session_id: &SessionId,
         status: AgentEdgeStatus,
     ) -> io::Result<()> {
-        let current = self
+        let Some(current) = self
             .list_agent_children(parent_session_id, None)?
             .into_iter()
             .find(|edge| &edge.child_session_id == child_session_id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("agent edge not found for child: {child_session_id}"),
-                )
-            })?;
+        else {
+            return Ok(());
+        };
+
         let edge = AgentEdgeRecord::builder()
             .parent_session_id(parent_session_id.clone())
             .child_session_id(child_session_id.clone())
@@ -450,5 +448,28 @@ mod store_tests {
             .expect("list open");
 
         assert!(open.is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_graph_store_missing_child_status_update_is_noop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let parent = SessionId("parent".to_string());
+        let missing = SessionId("missing-child".to_string());
+
+        store
+            .create_session(root_params(parent.clone()))
+            .await
+            .expect("create");
+
+        store
+            .set_agent_edge_status(&parent, &missing, AgentEdgeStatus::Closed)
+            .await
+            .expect("missing edge close should be a no-op");
+
+        let children = store
+            .list_agent_children(&parent, None)
+            .expect("list children");
+        assert!(children.is_empty());
     }
 }

@@ -338,7 +338,8 @@ impl AgentControl {
         self.thread_manager
             .send_op(&target_id, Op::InterAgentMessage { message })
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Notify a parent agent that a child reached a terminal turn status.
@@ -370,6 +371,7 @@ impl AgentControl {
             .agent_metadata_for_thread(parent_session_id.clone())
             .and_then(|metadata| metadata.agent_path)
             .unwrap_or_else(AgentPath::root);
+
         let final_message = match &status {
             AgentStatus::Completed { message } => message.as_deref().unwrap_or(""),
             AgentStatus::Errored { reason } => reason.as_str(),
@@ -377,48 +379,74 @@ impl AgentControl {
             AgentStatus::Shutdown => "shutdown",
             AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound => "",
         };
-        let content = format!(
-            "Subagent {child_name} ({child_session_id}) reached terminal status: {status:?}\n{final_message}"
+
+        let content = render_subagent_notification(
+            &child_path,
+            child_name.as_str(),
+            child_session_id,
+            &status,
+            final_message,
         );
+
         let message = InterAgentMessage::builder()
             .from(child_path)
             .to(parent_path)
             .content(content)
             .trigger_turn(false)
             .build();
+
         self.thread_manager
             .send_op(&parent_session_id, Op::InterAgentMessage { message })
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+
+        Ok(())
     }
 
     /// List active sub-agents, optionally filtered by path prefix.
     ///
-    /// Falls back to the agent path string when no nickname is assigned.
+    /// Uses the canonical agent path string for Codex V2 output.
     pub(crate) fn list_agents(&self, prefix: Option<&AgentPath>) -> Vec<ListedAgent> {
-        let agents = self.registry.live_agents();
-        agents
-            .into_iter()
-            .filter(|m| {
-                if let Some(prefix) = prefix {
-                    m.agent_path
-                        .as_ref()
-                        .is_some_and(|p| p == prefix || is_descendant_path(p, prefix.as_str()))
-                } else {
-                    true
-                }
-            })
-            .map(|m| ListedAgent {
-                agent_name: m.agent_nickname.unwrap_or_else(|| {
-                    m.agent_path
+        let root_path = AgentPath::root();
+        let mut listed_agents = Vec::new();
+
+        if prefix.as_ref().is_none_or(|prefix| {
+            &root_path == *prefix || is_descendant_path(&root_path, prefix.as_str())
+        }) && self.registry.agent_id_for_path(&root_path).is_some()
+        {
+            listed_agents.push(ListedAgent {
+                agent_name: root_path.to_string(),
+                agent_status: AgentStatus::Running,
+                last_task_message: Some("Main thread".to_string()),
+            });
+        }
+
+        listed_agents.extend(
+            self.registry
+                .live_agents()
+                .into_iter()
+                .filter(|m| {
+                    if let Some(prefix) = prefix {
+                        m.agent_path
+                            .as_ref()
+                            .is_some_and(|p| p == prefix || is_descendant_path(p, prefix.as_str()))
+                    } else {
+                        true
+                    }
+                })
+                .map(|m| ListedAgent {
+                    agent_name: m
+                        .agent_path
                         .as_ref()
                         .map(|p| p.to_string())
-                        .unwrap_or_default()
+                        .or_else(|| m.agent_id.as_ref().map(ToString::to_string))
+                        .unwrap_or_default(),
+                    agent_status: m.agent_status,
+                    last_task_message: m.last_task_message,
                 }),
-                agent_status: m.agent_status,
-                last_task_message: m.last_task_message,
-            })
-            .collect()
+        );
+        listed_agents.sort_by(|left, right| left.agent_name.cmp(&right.agent_name));
+        listed_agents
     }
 
     /// Write AgentEdge(Closed) to the parent session's recorder before closing a subagent.
@@ -445,11 +473,20 @@ impl AgentControl {
     /// but not `/root/explorer-other`). Removes entries from registry,
     /// mailbox map, and status watchers. Descendants are cleaned up
     /// before the target agent itself.
-    pub(crate) async fn close_agent(&self, agent_path: &AgentPath) -> Result<(), String> {
+    pub(crate) async fn close_agent(&self, agent_path: &AgentPath) -> Result<AgentStatus, String> {
+        if agent_path.is_root() {
+            return Err("The root agent can't be closed with close_agent".to_string());
+        }
+
         let thread_id = self
             .registry
             .agent_id_for_path(agent_path)
             .ok_or_else(|| format!("agent not found: {agent_path}"))?;
+        let previous_status = self
+            .registry
+            .agent_metadata_for_thread(thread_id.clone())
+            .map(|metadata| metadata.agent_status)
+            .unwrap_or(AgentStatus::NotFound);
 
         // Identify descendants by path prefix: anything under agent_path/...
         let prefix = agent_path.to_string();
@@ -506,7 +543,7 @@ impl AgentControl {
             let _ = self.thread_manager.close_thread(desc_id).await;
         }
 
-        Ok(())
+        Ok(previous_status)
     }
 
     /// Register a mailbox for an existing session.
@@ -531,6 +568,31 @@ impl AgentControl {
             .entry(thread_id.clone())
             .or_insert_with(|| watch::channel(initial_status).0);
         Some(status_tx.subscribe())
+    }
+
+    /// Subscribe to mailbox activity for a registered agent path.
+    pub(crate) async fn subscribe_mailbox_activity(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Result<watch::Receiver<()>, String> {
+        let thread_id = self
+            .registry
+            .agent_id_for_path(agent_path)
+            .ok_or_else(|| format!("agent not found: {agent_path}"))?;
+        self.subscribe_session_mailbox_activity(&thread_id).await
+    }
+
+    /// Subscribe to mailbox activity for a concrete live session id.
+    pub(crate) async fn subscribe_session_mailbox_activity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<watch::Receiver<()>, String> {
+        let thread = self
+            .thread_manager
+            .get_thread(session_id)
+            .await
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        Ok(thread.input_queue.lock().await.subscribe_mailbox())
     }
 
     /// Resolve the LLM for a role: try the role's model override first,
@@ -578,6 +640,27 @@ fn is_descendant_path(path: &AgentPath, prefix: &str) -> bool {
     path.0
         .strip_prefix(prefix)
         .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+/// Render a terminal child update in a structured, Codex-style notification envelope.
+fn render_subagent_notification(
+    child_path: &AgentPath,
+    child_name: &str,
+    child_session_id: &SessionId,
+    status: &AgentStatus,
+    final_message: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "agent_path": child_path,
+        "agent_name": child_name,
+        "child_session_id": child_session_id,
+        "status": status,
+        "final_message": final_message,
+    });
+    format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        payload
+    )
 }
 
 #[cfg(test)]
@@ -644,6 +727,9 @@ mod tests {
                 PathBuf::from("/tmp/clawcode-test-auth"),
             )))
             .recorder(test_recorder())
+            .input_queue(Arc::new(tokio::sync::Mutex::new(
+                crate::input_queue::InputQueue::default(),
+            )))
             .build()
     }
 
@@ -936,6 +1022,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_terminal_turn_uses_structured_subagent_notification() {
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            tools,
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            None,
+            None,
+        );
+        let parent_id = SessionId("parent".to_string());
+        let child_id = SessionId("child".to_string());
+        let child_path = AgentPath::root().join("child");
+        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
+        thread_manager
+            .insert_thread(test_thread(parent_id.clone(), tx_op))
+            .await;
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .registry
+            .restore_agent(
+                child_id.clone(),
+                child_path,
+                Some("kid".to_string()),
+                Some("default".to_string()),
+                Some(parent_id),
+            )
+            .expect("restore child");
+
+        control
+            .notify_child_terminal_turn(
+                &child_id,
+                AgentStatus::Completed {
+                    message: Some("done".to_string()),
+                },
+            )
+            .await
+            .expect("notify parent");
+
+        let Op::InterAgentMessage { message } = rx_op.recv().await.expect("parent notification")
+        else {
+            panic!("expected inter-agent message");
+        };
+        assert!(!message.trigger_turn);
+        assert!(message.content.contains("<subagent_notification>"));
+        assert!(message.content.contains("\"agent_path\":\"/root/child\""));
+        assert!(message.content.contains("\"child_session_id\":\"child\""));
+        assert!(message.content.contains("\"final_message\":\"done\""));
+        assert!(message.content.contains("</subagent_notification>"));
+    }
+
+    #[tokio::test]
     async fn subscribe_status_recreates_missing_watcher_from_registry_status() {
         let control = agent_control_no_persistence();
         let child_id = SessionId("child".to_string());
@@ -1003,6 +1146,46 @@ mod tests {
             .expect("seed agent");
     }
 
+    /// Build a test inter-agent message for mailbox queue assertions.
+    fn test_inter_agent_message(content: &str) -> InterAgentMessage {
+        InterAgentMessage::builder()
+            .from(AgentPath::root().join("child"))
+            .to(AgentPath::root())
+            .content(content.to_string())
+            .trigger_turn(false)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn session_mailbox_subscription_reflects_pending_queue_only() {
+        let control = agent_control_no_persistence();
+        let root_id = SessionId("root".to_string());
+        control.registry.register_root_thread(root_id.clone());
+        let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
+        let root_thread = test_thread(root_id.clone(), tx_parent);
+        let input_queue = Arc::clone(&root_thread.input_queue);
+        control.thread_manager.insert_thread(root_thread).await;
+
+        input_queue
+            .lock()
+            .await
+            .enqueue_mailbox_communication(test_inter_agent_message("pending"));
+        let pending_rx = control
+            .subscribe_session_mailbox_activity(&root_id)
+            .await
+            .expect("mailbox subscription");
+        assert!(pending_rx.has_changed().expect("mailbox watcher open"));
+
+        let drained = input_queue.lock().await.drain_mailbox_input_items();
+        let fresh_rx = control
+            .subscribe_session_mailbox_activity(&root_id)
+            .await
+            .expect("fresh mailbox subscription");
+
+        assert_eq!(drained.len(), 1);
+        assert!(!fresh_rx.has_changed().expect("mailbox watcher open"));
+    }
+
     #[tokio::test]
     async fn list_agents_returns_non_root_agents() {
         let control = agent_control_no_persistence();
@@ -1013,10 +1196,11 @@ mod tests {
         seed_agent(&control, "b", "bob", Some("Bob"), Some("root"));
 
         let list = control.list_agents(None);
-        assert_eq!(list.len(), 2);
+        assert_eq!(list.len(), 3);
         let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
-        assert!(names.contains(&"Alice"));
-        assert!(names.contains(&"Bob"));
+        assert_eq!(names[0], "/root");
+        assert!(names.contains(&"/root/alice"));
+        assert!(names.contains(&"/root/bob"));
     }
 
     #[tokio::test]
@@ -1050,7 +1234,8 @@ mod tests {
 
         let list = control.list_agents(None);
 
-        assert!(list.is_empty());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].agent_name, "/root");
     }
 
     #[tokio::test]
@@ -1067,10 +1252,10 @@ mod tests {
         let list = control.list_agents(Some(&AgentPath::root().join("team")));
         assert_eq!(list.len(), 2);
         let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
-        assert!(names.contains(&"Alpha"));
-        assert!(names.contains(&"Beta"));
-        assert!(!names.contains(&"TeamAB"));
-        assert!(!names.contains(&"Other"));
+        assert!(names.contains(&"/root/team/alpha"));
+        assert!(names.contains(&"/root/team/beta"));
+        assert!(!names.contains(&"/root/team_ab"));
+        assert!(!names.contains(&"/root/other"));
     }
 
     #[tokio::test]
@@ -1080,7 +1265,9 @@ mod tests {
             .registry
             .register_root_thread(SessionId("lonely_root".to_string()));
         let list = control.list_agents(None);
-        assert!(list.is_empty());
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].agent_name, "/root");
+        assert_eq!(list[0].last_task_message.as_deref(), Some("Main thread"));
     }
 
     // ── close_agent ──
@@ -1247,7 +1434,65 @@ mod tests {
             .register_root_thread(SessionId("root".to_string()));
 
         let result = control.close_agent(&AgentPath::root().join("ghost")).await;
-        assert!(result.is_err());
+        result.expect_err("closing a missing agent should fail");
+    }
+
+    #[tokio::test]
+    async fn close_agent_rejects_root_agent() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+
+        let result = control.close_agent(&AgentPath::root()).await;
+
+        assert_eq!(
+            result.expect_err("closing root should fail"),
+            "The root agent can't be closed with close_agent"
+        );
+        assert_eq!(
+            control.registry.agent_id_for_path(&AgentPath::root()),
+            Some(SessionId("root".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn followup_to_closed_agent_fails_after_registry_release() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId("root".to_string()));
+        let target_id = SessionId("target".to_string());
+        let (tx_target, _rx_target) = mpsc::unbounded_channel::<Op>();
+        control
+            .thread_manager
+            .insert_thread(test_thread(target_id.clone(), tx_target))
+            .await;
+        seed_agent(
+            &control,
+            target_id.0.as_str(),
+            "target",
+            Some("Target"),
+            Some("root"),
+        );
+
+        control
+            .close_agent(&AgentPath::root().join("target"))
+            .await
+            .expect("close target");
+        let result = control
+            .send_message(
+                AgentPath::root().join("child"),
+                AgentPath::root().join("target"),
+                "followup".to_string(),
+                true,
+            )
+            .await;
+
+        assert_eq!(
+            result.expect_err("closed target should reject followup"),
+            "agent not found: /root/target"
+        );
     }
 
     // ── spawn depth limit ──

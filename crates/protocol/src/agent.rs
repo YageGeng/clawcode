@@ -96,3 +96,31 @@ pub struct InterAgentMessage {
     #[builder(default)]
     pub trigger_turn: bool,
 }
+
+impl InterAgentMessage {
+    /// Render this message as model-visible user context.
+    #[must_use]
+    pub fn render_model_context(&self) -> String {
+        self.format_model_visible_envelope()
+    }
+
+    /// Render this message as the model-visible input for a triggered turn.
+    #[must_use]
+    pub fn render_turn_input(&self) -> String {
+        self.format_model_visible_envelope()
+    }
+
+    /// Render this message in a structured, Codex-style envelope.
+    fn format_model_visible_envelope(&self) -> String {
+        let payload = serde_json::json!({
+            "from": &self.from,
+            "to": &self.to,
+            "content": &self.content,
+            "trigger_turn": self.trigger_turn,
+        });
+        format!(
+            "<inter_agent_communication>\n{}\n</inter_agent_communication>",
+            payload
+        )
+    }
+}
