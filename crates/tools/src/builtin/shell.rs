@@ -63,13 +63,27 @@ impl Tool for ShellCommand {
                     "description": "The shell command to execute"
                 },
                 "cwd": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": "Optional working directory for the command"
                 },
                 "env": {
-                    "type": "object",
-                    "description": "Optional environment variables as key-value pairs",
-                    "additionalProperties": { "type": "string" }
+                    "type": ["array", "null"],
+                    "description": "Optional environment variables as name/value pairs",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Environment variable name"
+                            },
+                            "value": {
+                                "type": "string",
+                                "description": "Environment variable value"
+                            }
+                        },
+                        "required": ["name", "value"],
+                        "additionalProperties": false
+                    }
                 }
             },
             "required": ["command"]
@@ -282,19 +296,48 @@ fn parse_args(
         .unwrap_or_else(|| ctx.cwd.clone());
     let env_vars = arguments
         .get("env")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .map(|(k, v)| {
-                    TerminalEnvVariable::builder()
-                        .name(k.clone())
-                        .value(v.as_str().unwrap_or_default().to_string())
-                        .build()
-                })
-                .collect()
-        })
+        .map(parse_env_vars)
+        .transpose()?
         .unwrap_or_default();
     Ok((command, work_dir, env_vars))
+}
+
+/// Parse environment variables from the strict array shape or legacy object shape.
+fn parse_env_vars(value: &serde_json::Value) -> Result<Vec<TerminalEnvVariable>, String> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    if let Some(obj) = value.as_object() {
+        return Ok(obj
+            .iter()
+            .map(|(k, v)| {
+                TerminalEnvVariable::builder()
+                    .name(k.clone())
+                    .value(v.as_str().unwrap_or_default().to_string())
+                    .build()
+            })
+            .collect());
+    }
+    let Some(items) = value.as_array() else {
+        return Err("'env' must be an array of {name, value} objects".to_string());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or("'env' entries must include string 'name'")?;
+            let value = item
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or("'env' entries must include string 'value'")?;
+            Ok(TerminalEnvVariable::builder()
+                .name(name.to_string())
+                .value(value.to_string())
+                .build())
+        })
+        .collect()
 }
 
 /// Build the model-facing text and `End` lifecycle item for a completed shell command.
@@ -392,6 +435,52 @@ mod tests {
             &serde_json::json!({"command": "ls"}),
             &ToolContext::for_test(Path::new("."))
         ));
+    }
+
+    #[test]
+    fn shell_parameters_use_strict_env_array_schema() {
+        let parameters = ShellCommand::new().parameters();
+        let env = &parameters["properties"]["env"];
+
+        assert_eq!(env["type"], serde_json::json!(["array", "null"]));
+        assert_eq!(
+            env["items"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert!(env.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn parse_args_accepts_strict_env_array() {
+        let (command, _cwd, env) = parse_args(
+            serde_json::json!({
+                "command": "printenv FOO",
+                "env": [{"name": "FOO", "value": "bar"}]
+            }),
+            &ToolContext::for_test(Path::new(".")),
+        )
+        .unwrap();
+
+        assert_eq!(command, "printenv FOO");
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].name, "FOO");
+        assert_eq!(env[0].value, "bar");
+    }
+
+    #[test]
+    fn parse_args_accepts_legacy_env_object() {
+        let (_command, _cwd, env) = parse_args(
+            serde_json::json!({
+                "command": "printenv FOO",
+                "env": {"FOO": "bar"}
+            }),
+            &ToolContext::for_test(Path::new(".")),
+        )
+        .unwrap();
+
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].name, "FOO");
+        assert_eq!(env[0].value, "bar");
     }
 
     #[test]

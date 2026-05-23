@@ -2,6 +2,7 @@
 
 mod stream_parser;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -43,7 +44,8 @@ Example patch:
 It is important to remember:
 
 - You must include a header with your intended action (Add/Delete/Update)
-- You must prefix new lines with `+` even when creating a new file"#;
+- You must prefix new lines with `+` even when creating a new file
+"#;
 
 /// Captures one update chunk from an `Update File` hunk.
 #[derive(Debug, Clone, TypedBuilder)]
@@ -240,7 +242,9 @@ impl PreparedHunk {
         match self {
             Self::Add { path, .. } => format!("A {}", path.display()),
             Self::Delete { path, .. } => format!("D {}", path.display()),
-            Self::Update { path, .. } => format!("M {}", path.display()),
+            Self::Update {
+                path, move_path, ..
+            } => format!("M {}", move_path.as_ref().unwrap_or(path).display()),
         }
     }
 
@@ -333,26 +337,25 @@ fn parse_patch(text: &str) -> Result<Vec<Hunk>, String> {
             continue;
         }
         if let Some(move_path) = line.strip_prefix("*** Move to: ") {
-            let update = current_update
-                .as_mut()
-                .ok_or("Move to must follow Update File")?;
-            update.move_path = Some(move_path.to_string());
+            if let Some(update) = current_update.as_mut() {
+                update.move_path = Some(move_path.to_string());
+            }
             index += 1;
             continue;
         }
         if line.starts_with("@@") {
-            let update = current_update
-                .as_mut()
-                .ok_or("update chunk must follow Update File")?;
-            update.start_chunk(parse_change_context(line));
+            if let Some(update) = current_update.as_mut() {
+                update.start_chunk(parse_change_context(line));
+            }
             index += 1;
             continue;
         }
         if line == "*** End of File" {
-            let update = current_update
-                .as_mut()
-                .ok_or("End of File must follow Update File")?;
-            update.ensure_chunk(None).is_end_of_file = true;
+            if let Some(update) = current_update.as_mut()
+                && let Some(chunk) = update.chunks.last_mut()
+            {
+                chunk.is_end_of_file = true;
+            }
             index += 1;
             continue;
         }
@@ -361,14 +364,20 @@ fn parse_patch(text: &str) -> Result<Vec<Hunk>, String> {
             continue;
         }
         if let Some(update_line) = line.chars().next().filter(|c| matches!(c, '+' | '-' | ' ')) {
-            let update = current_update
-                .as_mut()
-                .ok_or("update content must follow Update File")?;
-            update.push_line(update_line, &line[update_line.len_utf8()..]);
+            if let Some(update) = current_update.as_mut()
+                && !update.chunks.is_empty()
+            {
+                update.push_line(update_line, &line[update_line.len_utf8()..]);
+            }
             index += 1;
             continue;
         }
-        return Err(format!("unsupported patch line: {line}"));
+        if line.starts_with("*** ") {
+            return Err(format!("unknown patch operation: {line}"));
+        }
+        // Match opencode's permissive patch parser by ignoring unsupported
+        // lines inside the envelope instead of failing the entire patch.
+        index += 1;
     }
     flush_update(&mut hunks, &mut current_update)?;
 
@@ -486,10 +495,11 @@ fn parse_add_file(lines: &[&str], mut index: usize) -> Result<(String, usize), S
         if line.starts_with("*** ") {
             break;
         }
-        let added = line
-            .strip_prefix('+')
-            .ok_or_else(|| format!("add file line must start with '+': {line}"))?;
-        content.push(added.to_string());
+        // opencode ignores non-prefixed lines in add-file bodies, so copied
+        // prose around a patch does not become file content or reject the edit.
+        if let Some(added) = line.strip_prefix('+') {
+            content.push(added.to_string());
+        }
         index += 1;
     }
     Ok((content.join("\n"), index))
@@ -501,9 +511,6 @@ fn flush_update(
     current_update: &mut Option<UpdateAccumulator>,
 ) -> Result<(), String> {
     if let Some(update) = current_update.take() {
-        if update.chunks.is_empty() {
-            return Err(format!("update for {} has no chunks", update.path));
-        }
         hunks.push(update.into_hunk());
     }
     Ok(())
@@ -512,16 +519,12 @@ fn flush_update(
 /// Validate all parsed hunks and prepare disk writes without mutating files.
 async fn prepare_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<PreparedHunk>, String> {
     let mut prepared = Vec::with_capacity(hunks.len());
+    let mut planned_write_paths = HashSet::new();
     for hunk in hunks {
         match hunk {
             Hunk::Add { path, contents } => {
                 let path = resolve_path(cwd, path);
-                if fs::try_exists(&path)
-                    .await
-                    .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?
-                {
-                    return Err(format!("file already exists: {}", path.display()));
-                }
+                planned_write_paths.insert(path.clone());
                 prepared.push(PreparedHunk::Add {
                     path,
                     contents: ensure_trailing_newline(contents),
@@ -547,9 +550,26 @@ async fn prepare_hunks(cwd: &Path, hunks: &[Hunk]) -> Result<Vec<PreparedHunk>, 
                     .await
                     .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
                 let new_contents = derive_new_contents_from_chunks(&content, chunks)?;
+                let resolved_move_path = move_path.as_ref().map(|target| resolve_path(cwd, target));
+                if let Some(target) = &resolved_move_path
+                    && target != &path
+                    && planned_write_paths.contains(target)
+                {
+                    return Err(format!("move target already planned: {}", target.display()));
+                }
+                if let Some(target) = &resolved_move_path
+                    && target != &path
+                    && fs::try_exists(target)
+                        .await
+                        .map_err(|e| format!("failed to inspect {}: {e}", target.display()))?
+                {
+                    return Err(format!("move target already exists: {}", target.display()));
+                }
+                planned_write_paths
+                    .insert(resolved_move_path.clone().unwrap_or_else(|| path.clone()));
                 prepared.push(PreparedHunk::Update {
                     path,
-                    move_path: move_path.as_ref().map(|target| resolve_path(cwd, target)),
+                    move_path: resolved_move_path,
                     old_contents: content,
                     contents: new_contents,
                 });
@@ -634,15 +654,39 @@ fn derive_new_contents_from_chunks(
     content: &str,
     chunks: &[UpdateChunk],
 ) -> Result<String, String> {
-    let replacements = compute_replacements(content, chunks)?;
-    let mut result = content.to_string();
+    let (body, had_bom) = split_utf8_bom(content);
+    let replacements = compute_replacements(body, chunks)?;
+    let mut result = body.to_string();
     for replacement in replacements {
         result.replace_range(
             replacement.start_byte..replacement.end_byte,
             &replacement.new_text,
         );
     }
-    Ok(result)
+    let result = ensure_update_trailing_newline(&result);
+    if had_bom {
+        Ok(format!("\u{feff}{result}"))
+    } else {
+        Ok(result)
+    }
+}
+
+/// Split an optional UTF-8 BOM from text before line-based patch matching.
+fn split_utf8_bom(content: &str) -> (&str, bool) {
+    if let Some(body) = content.strip_prefix('\u{feff}') {
+        (body, true)
+    } else {
+        (content, false)
+    }
+}
+
+/// Ensure non-empty updated files end with a newline, matching opencode updates.
+fn ensure_update_trailing_newline(contents: &str) -> String {
+    if contents.is_empty() || contents.ends_with('\n') {
+        contents.to_string()
+    } else {
+        format!("{contents}\n")
+    }
 }
 
 /// Compute byte-range replacements for all update chunks.
@@ -653,14 +697,9 @@ fn compute_replacements(content: &str, chunks: &[UpdateChunk]) -> Result<Vec<Rep
     let mut replacements = Vec::new();
 
     for chunk in chunks {
-        if let Some(context) = &chunk.change_context
-            && let Some(context_index) = content_lines
-                .get(line_index..)
-                .unwrap_or(&[])
-                .iter()
-                .position(|line| line.contains(context))
-        {
-            line_index += context_index;
+        if let Some(context) = &chunk.change_context {
+            let context_index = seek_change_context(context, &content_lines, line_index)?;
+            line_index = context_index + 1;
         }
 
         let old_refs = chunk
@@ -669,7 +708,11 @@ fn compute_replacements(content: &str, chunks: &[UpdateChunk]) -> Result<Vec<Rep
             .map(String::as_str)
             .collect::<Vec<_>>();
         let start_line = if old_refs.is_empty() {
-            content_lines.len()
+            if chunk.change_context.is_some() {
+                line_index
+            } else {
+                content_lines.len()
+            }
         } else if chunk.is_end_of_file {
             seek_sequence_from_end(&old_refs, &content_lines, line_index)
                 .ok_or_else(|| "Could not find matching lines for end-of-file chunk".to_string())?
@@ -718,6 +761,47 @@ fn seek_sequence(old_lines: &[&str], content_lines: &[&str], start: usize) -> Op
                 normalize_unicode_punctuation(line).trim().to_string()
             })
         })
+}
+
+/// Find an `@@` context line, falling back to a unique substring match.
+fn seek_change_context(
+    context: &str,
+    content_lines: &[&str],
+    start: usize,
+) -> Result<usize, String> {
+    let context_refs = [context];
+    if let Some(line_index) = seek_sequence(&context_refs, content_lines, start) {
+        return Ok(line_index);
+    }
+    seek_unique_context_substring(context, content_lines, start)
+}
+
+/// Find a unique substring context match after full-line matching fails.
+fn seek_unique_context_substring(
+    context: &str,
+    content_lines: &[&str],
+    start: usize,
+) -> Result<usize, String> {
+    let mut matched = None;
+    for (line_index, line) in content_lines.iter().enumerate().skip(start) {
+        if context_substring_matches(context, line) {
+            if matched.is_some() {
+                return Err(format!("Ambiguous context '{context}'"));
+            }
+            matched = Some(line_index);
+        }
+    }
+    matched.ok_or_else(|| format!("Failed to find context '{context}'"))
+}
+
+/// Check whether one context string is a tolerant substring of one content line.
+fn context_substring_matches(context: &str, line: &str) -> bool {
+    let trimmed_context = context.trim();
+    line.contains(context)
+        || line.trim().contains(trimmed_context)
+        || normalize_unicode_punctuation(line)
+            .trim()
+            .contains(&normalize_unicode_punctuation(trimmed_context))
 }
 
 /// Find an old line sequence by scanning backwards from the end of the file.
@@ -833,6 +917,14 @@ fn build_replacement_text(
     if end_byte > start_byte && content[..end_byte].ends_with('\n') && !new_text.ends_with('\n') {
         new_text.push('\n');
     }
+    if start_byte == end_byte
+        && start_byte < content.len()
+        && !new_text.is_empty()
+        && !new_text.ends_with('\n')
+    {
+        // Middle-of-file insertions must end before the existing target line.
+        new_text.push('\n');
+    }
     new_text
 }
 
@@ -857,6 +949,17 @@ mod tests {
     fn parse_patch_strips_heredoc_wrappers() {
         let hunks = parse_patch(
             "cat <<'EOF'\n*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch\nEOF",
+        )
+        .unwrap();
+
+        assert_eq!(hunks.len(), 1);
+    }
+
+    /// Verifies that parser accepts prose before and after the patch envelope.
+    #[test]
+    fn parse_patch_ignores_outer_prose() {
+        let hunks = parse_patch(
+            "before\n*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch\nafter",
         )
         .unwrap();
 
@@ -900,41 +1003,72 @@ mod tests {
         assert!(error.contains("no hunks"));
     }
 
-    /// Verifies that added file contents must use `+` prefixes.
+    /// Verifies that add-file parsing ignores lines without `+` prefixes.
     #[test]
-    fn parse_patch_rejects_add_without_plus_prefix() {
-        let error =
-            parse_patch("*** Begin Patch\n*** Add File: a.txt\nhello\n*** End Patch").unwrap_err();
-        assert!(error.contains("add file line must start"));
+    fn parse_patch_ignores_add_without_plus_prefix() {
+        let hunks =
+            parse_patch("*** Begin Patch\n*** Add File: a.txt\nhello\n+kept\n*** End Patch")
+                .unwrap();
+        assert!(matches!(
+            hunks.as_slice(),
+            [Hunk::Add { contents, .. }] if contents == "kept"
+        ));
     }
 
-    /// Verifies that invalid update prefixes produce an unsupported-line error.
+    /// Verifies that invalid update prefixes are ignored like opencode.
     #[test]
-    fn parse_patch_rejects_update_with_invalid_prefix() {
-        let error = parse_patch("*** Begin Patch\n*** Update File: a.txt\n*bad\n*** End Patch")
-            .unwrap_err();
-        assert!(error.contains("unsupported patch line"));
+    fn parse_patch_ignores_update_with_invalid_prefix() {
+        let hunks = parse_patch(
+            "*** Begin Patch\n*** Update File: a.txt\n@@\n*bad\n-ok\n+OK\n*** End Patch",
+        )
+        .unwrap();
+        assert!(matches!(
+            hunks.as_slice(),
+            [Hunk::Update { chunks, .. }] if chunks[0].old_lines == ["ok"] && chunks[0].new_lines == ["OK"]
+        ));
     }
 
-    /// Verifies that move metadata cannot appear outside an update hunk.
+    /// Verifies that update lines before an explicit chunk marker are ignored like opencode.
     #[test]
-    fn parse_patch_rejects_move_without_update() {
+    fn parse_patch_ignores_update_lines_before_chunk_marker() {
+        let hunks = parse_patch(
+            "*** Begin Patch\n*** Update File: a.txt\n-old\n@@\n-old\n+new\n*** End Patch",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            hunks.as_slice(),
+            [Hunk::Update { chunks, .. }] if chunks.len() == 1 && chunks[0].old_lines == ["old"]
+        ));
+    }
+
+    /// Verifies that move metadata outside an update hunk is ignored.
+    #[test]
+    fn parse_patch_ignores_move_without_update() {
         let error = parse_patch("*** Begin Patch\n*** Move to: b.txt\n*** End Patch").unwrap_err();
-        assert!(error.contains("Move to must follow Update File"));
+        assert!(error.contains("no hunks"));
     }
 
-    /// Verifies that chunk markers cannot appear outside an update hunk.
+    /// Verifies that chunk markers outside an update hunk are ignored.
     #[test]
-    fn parse_patch_rejects_chunk_without_update() {
+    fn parse_patch_ignores_chunk_without_update() {
         let error = parse_patch("*** Begin Patch\n@@\n*** End Patch").unwrap_err();
-        assert!(error.contains("update chunk must follow Update File"));
+        assert!(error.contains("no hunks"));
     }
 
-    /// Verifies that end-of-file markers cannot appear outside an update hunk.
+    /// Verifies that end-of-file markers outside an update hunk are ignored.
     #[test]
-    fn parse_patch_rejects_eof_without_update() {
+    fn parse_patch_ignores_eof_without_update() {
         let error = parse_patch("*** Begin Patch\n*** End of File\n*** End Patch").unwrap_err();
-        assert!(error.contains("End of File must follow Update File"));
+        assert!(error.contains("no hunks"));
+    }
+
+    /// Verifies that unknown operation headers get a targeted parser error.
+    #[test]
+    fn parse_patch_rejects_unknown_operation_header() {
+        let error =
+            parse_patch("*** Begin Patch\n*** Unknown File: a.txt\n*** End Patch").unwrap_err();
+        assert!(error.contains("unknown patch operation"));
     }
 
     /// Verifies that exact line-sequence matching returns the expected position.
@@ -980,22 +1114,56 @@ mod tests {
         );
     }
 
-    /// Verifies that adding an already existing file is rejected.
+    /// Verifies that EOF matching falls back to forward search when the tail differs.
+    #[test]
+    fn seek_sequence_from_end_falls_back_to_forward_match() {
+        let content_lines = vec!["target", "middle", "tail"];
+        let old_lines = vec!["target"];
+        assert_eq!(
+            seek_sequence_from_end(&old_lines, &content_lines, 0),
+            Some(0)
+        );
+    }
+
+    /// Verifies that adding an already existing file overwrites it like opencode.
     #[tokio::test]
-    async fn apply_patch_rejects_file_already_exists() {
+    async fn apply_patch_add_overwrites_file_already_exists() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("exists.txt"), "old").unwrap();
         let patch = "*** Begin Patch\n*** Add File: exists.txt\n+new\n*** End Patch";
 
-        let error = ApplyPatch::new()
+        ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
                 &ToolContext::for_test(dir.path()),
             )
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error.contains("already exists"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("exists.txt")).unwrap(),
+            "new\n"
+        );
+    }
+
+    /// Verifies that add-file bodies ignore unprefixed lines like opencode.
+    #[tokio::test]
+    async fn apply_patch_add_ignores_unprefixed_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let patch = "*** Begin Patch\n*** Add File: added.txt\nignored\n+kept\n*** End Patch";
+
+        ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("added.txt")).unwrap(),
+            "kept\n"
+        );
     }
 
     /// Verifies that deleting a missing file is rejected.
@@ -1033,23 +1201,227 @@ mod tests {
         assert!(dir.path().join("delete.txt").exists());
     }
 
-    /// Verifies that move-only updates are rejected as empty update hunks.
+    /// Verifies that move-only updates preserve file contents like opencode.
     #[tokio::test]
-    async fn apply_patch_update_update_move_only() {
+    async fn apply_patch_update_move_only_preserves_contents() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("move.txt"), "move me").unwrap();
         let patch =
             "*** Begin Patch\n*** Update File: move.txt\n*** Move to: moved.txt\n*** End Patch";
 
-        let error = ApplyPatch::new()
+        ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
                 &ToolContext::for_test(dir.path()),
             )
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error.contains("no chunks"));
+        assert!(!dir.path().join("move.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("moved.txt")).unwrap(),
+            "move me\n"
+        );
+    }
+
+    /// Verifies that move targets are rejected when they would overwrite a file.
+    #[tokio::test]
+    async fn apply_patch_rejects_move_target_that_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("source.txt"), "source\n").unwrap();
+        std::fs::write(dir.path().join("target.txt"), "target\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: source.txt\n*** Move to: target.txt\n@@\n-source\n+updated\n*** End Patch";
+
+        let result = ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await;
+
+        let error = result.unwrap_err();
+        assert!(error.contains("move target already exists"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
+            "target\n"
+        );
+    }
+
+    /// Verifies that move targets cannot overwrite files created earlier in the same patch.
+    #[tokio::test]
+    async fn apply_patch_rejects_move_target_planned_by_add_hunk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("source.txt"), "source\n").unwrap();
+        let patch = "*** Begin Patch\n*** Add File: target.txt\n+created\n*** Update File: source.txt\n*** Move to: target.txt\n@@\n-source\n+updated\n*** End Patch";
+
+        let result = ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await;
+
+        let error = result.unwrap_err();
+        assert!(error.contains("move target already planned"));
+        assert!(!dir.path().join("target.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("source.txt")).unwrap(),
+            "source\n"
+        );
+    }
+
+    /// Verifies that a missing change context rejects the update instead of falling back.
+    #[tokio::test]
+    async fn apply_patch_rejects_missing_change_context() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("context.txt"), "fn a\nx = 1\nfn b\nx = 1\n").unwrap();
+        let patch =
+            "*** Begin Patch\n*** Update File: context.txt\n@@ fn c\n-x = 1\n+x = 2\n*** End Patch";
+
+        let result = ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await;
+
+        let error = result.unwrap_err();
+        assert!(error.contains("Failed to find context"));
+    }
+
+    /// Verifies that change context can locate a unique substring inside a line.
+    #[tokio::test]
+    async fn apply_patch_change_context_accepts_unique_substring() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("context.txt"),
+            "async fn a() {\n    value = 1\n}\nasync fn b() {\n    value = 1\n}\n",
+        )
+        .unwrap();
+        let patch = "*** Begin Patch\n*** Update File: context.txt\n@@ fn b\n-    value = 1\n+    value = 2\n*** End Patch";
+
+        ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("context.txt")).unwrap(),
+            "async fn a() {\n    value = 1\n}\nasync fn b() {\n    value = 2\n}\n"
+        );
+    }
+
+    /// Verifies that ambiguous substring context is rejected instead of guessing.
+    #[tokio::test]
+    async fn apply_patch_rejects_ambiguous_substring_context() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("context.txt"),
+            "async fn handler_a() {\n    value = 1\n}\nasync fn handler_b() {\n    value = 1\n}\n",
+        )
+        .unwrap();
+        let patch = "*** Begin Patch\n*** Update File: context.txt\n@@ handler\n-    value = 1\n+    value = 2\n*** End Patch";
+
+        let result = ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await;
+
+        let error = result.unwrap_err();
+        assert!(error.contains("Ambiguous context"));
+    }
+
+    /// Verifies that pure insertion chunks append before the final trailing newline.
+    #[tokio::test]
+    async fn apply_patch_pure_addition_appends_to_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("append.txt"), "one\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: append.txt\n@@\n+two\n*** End Patch";
+
+        ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("append.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+    }
+
+    /// Verifies that append-only chunks use their own anchors in multi-hunk updates.
+    #[tokio::test]
+    async fn apply_patch_multi_hunk_append_only_uses_each_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("append.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: append.txt\n@@ alpha\n+after alpha\n@@ beta\n+after beta\n*** End Patch";
+
+        ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("append.txt")).unwrap(),
+            "alpha\nafter alpha\nbeta\nafter beta\ngamma\n"
+        );
+    }
+
+    /// Verifies that EOF anchors update the final matching block when duplicates exist.
+    #[tokio::test]
+    async fn apply_patch_eof_anchor_prefers_last_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tail.txt"),
+            "start\nmarker\nmiddle\nmarker\nend\n",
+        )
+        .unwrap();
+        let patch = "*** Begin Patch\n*** Update File: tail.txt\n@@\n-marker\n-end\n+marker changed\n+end\n*** End of File\n*** End Patch";
+
+        ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("tail.txt")).unwrap(),
+            "start\nmarker\nmiddle\nmarker changed\nend\n"
+        );
+    }
+
+    /// Verifies that BOM-prefixed files can update the first visible line and preserve the BOM.
+    #[tokio::test]
+    async fn apply_patch_preserves_bom_when_updating_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bom.txt"), "\u{feff}first\nsecond\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: bom.txt\n@@\n-first\n+FIRST\n*** End Patch";
+
+        ApplyPatch::new()
+            .execute(
+                serde_json::json!({"patchText": patch}),
+                &ToolContext::for_test(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bom.txt")).unwrap(),
+            "\u{feff}FIRST\nsecond\n"
+        );
     }
 
     /// Verifies that separate update hunks can both succeed.
@@ -1103,7 +1475,7 @@ mod tests {
         std::fs::write(dir.path().join("delete.txt"), "remove me").unwrap();
         std::fs::write(dir.path().join("move.txt"), "move me").unwrap();
 
-        let patch = "*** Begin Patch\n*** Add File: nested/new.txt\n+created\n*** Update File: modify.txt\n@@ two\n two\n-three\n+THREE\n*** Delete File: delete.txt\n*** Update File: move.txt\n*** Move to: moved/renamed.txt\n@@\n move me\n*** End Patch";
+        let patch = "*** Begin Patch\n*** Add File: nested/new.txt\n+created\n*** Update File: modify.txt\n@@ two\n-three\n+THREE\n*** Delete File: delete.txt\n*** Update File: move.txt\n*** Move to: moved/renamed.txt\n@@\n move me\n*** End Patch";
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
@@ -1119,7 +1491,7 @@ mod tests {
                 dir.path().join("nested/new.txt").display(),
                 dir.path().join("modify.txt").display(),
                 dir.path().join("delete.txt").display(),
-                dir.path().join("move.txt").display()
+                dir.path().join("moved/renamed.txt").display()
             )
         );
         assert_eq!(
@@ -1133,7 +1505,7 @@ mod tests {
         assert!(!dir.path().join("delete.txt").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("moved/renamed.txt")).unwrap(),
-            "move me"
+            "move me\n"
         );
     }
 

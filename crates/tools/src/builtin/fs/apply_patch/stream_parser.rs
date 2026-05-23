@@ -373,10 +373,11 @@ impl StreamingPatchParser {
                 if self.process_hunk_header(trimmed).is_ok() {
                     return Ok(());
                 }
-                let Some(line_to_add) = line.strip_prefix('+') else {
-                    return Err(format!("add file line must start with '+': {line}"));
-                };
-                if let Some(Hunk::Add { contents, .. }) = self.state.hunks.last_mut() {
+                // Keep the preview parser aligned with opencode's permissive
+                // add-file body parser by ignoring lines without a `+` prefix.
+                if let Some(line_to_add) = line.strip_prefix('+')
+                    && let Some(Hunk::Add { contents, .. }) = self.state.hunks.last_mut()
+                {
                     contents.push_str(line_to_add);
                     contents.push('\n');
                 }
@@ -433,10 +434,7 @@ impl StreamingPatchParser {
             return Err("update content must follow Update File".to_string());
         };
 
-        if chunks.is_empty()
-            && move_path.is_none()
-            && let Some(target) = line.trim_end().strip_prefix("*** Move to: ")
-        {
+        if let Some(target) = line.trim_end().strip_prefix("*** Move to: ") {
             *move_path = Some(target.to_string());
             return Ok(());
         }
@@ -451,19 +449,16 @@ impl StreamingPatchParser {
         if line.trim_end() == "*** End of File" {
             if let Some(chunk) = chunks.last_mut() {
                 chunk.is_end_of_file = true;
-                return Ok(());
             }
-            return Err("End of File must follow an update chunk".to_string());
+            return Ok(());
         }
 
         if chunks.is_empty() {
-            chunks.push(new_preview_chunk(None));
+            // opencode only records update lines after an explicit `@@` chunk.
+            return Ok(());
         }
         let chunk = chunks.last_mut().expect("chunk exists after insertion");
-        if line.is_empty() {
-            chunk.old_lines.push(String::new());
-            chunk.new_lines.push(String::new());
-        } else if let Some(value) = line.strip_prefix(' ') {
+        if let Some(value) = line.strip_prefix(' ') {
             chunk.old_lines.push(value.to_string());
             chunk.new_lines.push(value.to_string());
         } else if let Some(value) = line.strip_prefix('+') {
@@ -471,7 +466,7 @@ impl StreamingPatchParser {
         } else if let Some(value) = line.strip_prefix('-') {
             chunk.old_lines.push(value.to_string());
         } else {
-            return Err(format!("unexpected update line: {line}"));
+            // Unknown update lines are ignored to match the full parser.
         }
         Ok(())
     }
@@ -645,6 +640,86 @@ mod tests {
             .unwrap();
 
         assert_eq!(hunks.len(), 1);
+    }
+
+    /// Verifies that add-file previews ignore non-prefixed lines like the executor.
+    #[test]
+    fn streaming_parser_ignores_unprefixed_add_lines() {
+        let mut parser = StreamingPatchParser::new();
+
+        let hunks = parser
+            .push_delta("*** Begin Patch\n*** Add File: added.txt\nignored\n+kept\n")
+            .unwrap();
+
+        assert!(matches!(
+            preview_changes_from_hunks(&hunks).as_slice(),
+            [PatchPreviewChange::Add { content, .. }] if content == "kept\n"
+        ));
+    }
+
+    /// Verifies that update preview lines before a chunk marker are ignored.
+    #[test]
+    fn streaming_parser_ignores_update_lines_before_chunk_marker() {
+        let mut parser = StreamingPatchParser::new();
+
+        let hunks = parser
+            .push_delta("*** Begin Patch\n*** Update File: file.txt\n-old\n@@\n-old\n+new\n")
+            .unwrap();
+
+        assert!(matches!(
+            preview_changes_from_hunks(&hunks).as_slice(),
+            [PatchPreviewChange::Update { old_text, new_text, .. }]
+                if old_text == "old\n" && new_text == "new\n"
+        ));
+    }
+
+    /// Verifies that move-only updates still appear in preview output.
+    #[test]
+    fn streaming_parser_previews_move_only_update() {
+        let mut parser = StreamingPatchParser::new();
+
+        let hunks = parser
+            .push_delta("*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n")
+            .unwrap();
+
+        assert!(matches!(
+            preview_changes_from_hunks(&hunks).as_slice(),
+            [PatchPreviewChange::Update { path, move_path, old_text, new_text }]
+                if path == &PathBuf::from("old.txt")
+                    && move_path.as_ref() == Some(&PathBuf::from("new.txt"))
+                    && old_text.is_empty()
+                    && new_text.is_empty()
+        ));
+    }
+
+    /// Verifies that EOF preview markers attach to the active update chunk.
+    #[test]
+    fn streaming_parser_marks_eof_chunk() {
+        let mut parser = StreamingPatchParser::new();
+
+        let hunks = parser
+            .push_delta(
+                "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End of File\n",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            hunks.as_slice(),
+            [Hunk::Update { chunks, .. }] if chunks[0].is_end_of_file
+        ));
+    }
+
+    /// Verifies that malformed JSON escapes disable preview instead of panicking.
+    #[test]
+    fn arguments_consumer_disables_preview_on_invalid_json_escape() {
+        let mut consumer = ApplyPatchArgumentsConsumer::new();
+
+        let first = consumer.consume_delta("call-1", "{\"patchText\":\"bad\\x");
+        let second =
+            consumer.consume_delta("call-1", "*** Begin Patch\\n*** Add File: a.txt\\n+ok\\n");
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
     }
 
     /// Verifies that the arguments consumer emits patch preview stream items.
