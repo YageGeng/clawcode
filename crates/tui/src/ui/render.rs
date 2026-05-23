@@ -1,26 +1,27 @@
 //! Ratatui rendering for the local TUI.
 
-use ratatui::style::Style;
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Position, Rect},
+    style::Style,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
+use crate::ui::composer::Composer;
 use crate::ui::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
 use crate::ui::{approval, layout, status, transcript};
 
 /// Render the complete TUI frame for the current application state.
-pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, composer_text: &str) {
-    let Some(rows) = layout::frame_rows(frame.area(), composer_text) else {
+pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, composer: &Composer) {
+    let Some(rows) = layout::frame_rows(frame.area(), composer.text()) else {
         return;
     };
 
     transcript::render_transcript(frame, rows.transcript, state, view);
     status::render_top_status(frame, rows.top_status, state);
-    render_composer(frame, rows.composer, composer_text, state.theme());
+    render_composer(frame, rows.composer, composer, state.theme());
     status::render_bottom_status(frame, rows.bottom_status, state);
 
     if let Some(approval) = state.pending_approval() {
@@ -35,8 +36,9 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, compose
 }
 
 /// Renders the input composer row.
-fn render_composer(frame: &mut Frame<'_>, area: Rect, text: &str, theme: &Theme) {
+fn render_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, theme: &Theme) {
     // No explicit background; lets the terminal background show through.
+    let text = composer.text();
     let composer_style = Style::default().bg(theme.composer_bg());
     let vertical_padding = area
         .height
@@ -55,6 +57,15 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, text: &str, theme: &Theme)
             .style(composer_style),
         input_area,
     );
+
+    let (cursor_column, cursor_row) = composer.cursor_cell_offset(input_area.width, 2);
+    let cursor_x = input_area
+        .x
+        .saturating_add(cursor_column.min(input_area.width.saturating_sub(1)));
+    let cursor_y = input_area
+        .y
+        .saturating_add(cursor_row.min(input_area.height.saturating_sub(1)));
+    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
 #[cfg(test)]
@@ -66,6 +77,7 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
 
     /// Builds an ACP session id for render tests.
     fn sid(value: &str) -> SessionId {
@@ -145,7 +157,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
     }
 
@@ -161,11 +173,74 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), "hello"))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("hello")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
         assert!(screen.iter().any(|line| line.contains("> hello")));
+    }
+
+    /// Verifies the borderless composer places the terminal cursor in the input row.
+    #[test]
+    fn render_places_cursor_at_end_of_composer_text() {
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+
+        terminal
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("hello")))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        let input_y = screen
+            .iter()
+            .position(|line| line.contains("> hello"))
+            .expect("input row") as u16;
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(7, input_y));
+    }
+
+    /// Verifies the composer cursor follows the editable prompt cursor offset.
+    #[test]
+    fn render_places_cursor_at_composer_cursor_offset() {
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+        let mut composer = composer("hello");
+        composer.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        composer.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        composer.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('f'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+
+        terminal
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        let input_y = screen
+            .iter()
+            .position(|line| line.contains("> hello"))
+            .expect("input row") as u16;
+        terminal
+            .backend_mut()
+            .assert_cursor_position(Position::new(4, input_y));
     }
 
     /// Verifies the composer follows the Codex-style borderless input treatment.
@@ -180,7 +255,14 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), "borderless"))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &ViewState::default(),
+                    &composer("borderless"),
+                )
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -210,7 +292,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), "spaced"))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("spaced")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -238,7 +320,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
@@ -260,7 +342,7 @@ mod tests {
         push_assistant(&mut state, &session_id, "assistant body");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -292,7 +374,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -319,7 +401,7 @@ mod tests {
         push_assistant(&mut state, &session_id, " kappa");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -341,7 +423,7 @@ mod tests {
         push_assistant(&mut state, &session_id, "qrstuvwxyz");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -362,12 +444,12 @@ mod tests {
         state.append_user_message("a long prompt that should survive terminal resizing");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), "resize"))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("resize")))
             .expect("draw");
         terminal.backend_mut().resize(36, 8);
         terminal.resize(Rect::new(0, 0, 36, 8)).expect("resize");
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), "resize"))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("resize")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -393,7 +475,7 @@ mod tests {
         push_assistant(&mut state, &session_id, "latest assistant output");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -424,7 +506,7 @@ mod tests {
         view.scroll_page_up(16);
 
         terminal
-            .draw(|frame| render(frame, &state, &view, ""))
+            .draw(|frame| render(frame, &state, &view, &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -455,7 +537,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -478,7 +560,7 @@ mod tests {
         push_tool_output(&mut state, &session_id, "stdout:\nfull shell output\n");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -523,7 +605,7 @@ mod tests {
         ));
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -560,7 +642,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -646,7 +728,7 @@ mod tests {
         }
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
@@ -688,7 +770,7 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), ""))
+            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
@@ -696,6 +778,13 @@ mod tests {
         assert!(screen.contains("..."));
         assert!(screen.contains("• Ran Follow up Galileo · run focused tests"));
         assert!(!screen.contains("description please inspect this very long task description"));
+    }
+
+    /// Builds a composer fixture with the cursor at the end of the provided text.
+    fn composer(text: &str) -> Composer {
+        let mut composer = Composer::default();
+        composer.insert_str(text);
+        composer
     }
 
     /// Returns the test backend screen as printable rows.

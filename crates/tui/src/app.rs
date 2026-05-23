@@ -149,7 +149,7 @@ async fn run_loop(
     terminal: &mut TuiTerminal,
     ui: &mut UiRuntime<'_>,
 ) -> anyhow::Result<()> {
-    terminal.draw(|frame| render(frame, ui.state, ui.view, ui.composer.text()))?;
+    terminal.draw(|frame| render(frame, ui.state, ui.view, ui.composer))?;
 
     let mut terminal_events = EventStream::new().fuse();
     let mut redraw = time::interval(Duration::from_millis(100));
@@ -205,7 +205,7 @@ async fn run_loop(
         if should_exit {
             break;
         }
-        terminal.draw(|frame| render(frame, ui.state, ui.view, ui.composer.text()))?;
+        terminal.draw(|frame| render(frame, ui.state, ui.view, ui.composer))?;
     }
 
     client.reject_pending_permissions();
@@ -275,11 +275,11 @@ fn handle_key_event(
             ui.view.scroll_page_down(SCROLL_LINES);
             Ok(false)
         }
-        KeyCode::Home => {
+        KeyCode::Home if key_event.modifiers == KeyModifiers::CONTROL => {
             ui.view.scroll_top();
             Ok(false)
         }
-        KeyCode::End => {
+        KeyCode::End if key_event.modifiers == KeyModifiers::CONTROL => {
             ui.view.follow_bottom();
             Ok(false)
         }

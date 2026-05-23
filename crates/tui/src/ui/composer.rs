@@ -1,6 +1,7 @@
 //! Editable prompt composer state.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
 
 /// Describes the UI action requested after handling a composer key event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,44 @@ impl Composer {
     /// Returns the current cursor byte offset.
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Returns the cursor cell offset from the start of the composer area.
+    pub fn cursor_cell_offset(&self, available_width: u16, prompt_prefix_width: u16) -> (u16, u16) {
+        let width = usize::from(available_width.max(1));
+        let mut row = 0usize;
+        let mut column = usize::from(prompt_prefix_width);
+
+        // The composer is rendered with a prompt prefix on the first visual
+        // row only, so explicit newlines reset to column zero.
+        for ch in self
+            .text
+            .char_indices()
+            .take_while(|(index, _)| *index < self.cursor)
+            .map(|(_, ch)| ch)
+        {
+            if ch == '\n' {
+                row = row.saturating_add(1);
+                column = 0;
+                continue;
+            }
+
+            let char_width = ch.width().unwrap_or(0);
+            if char_width == 0 {
+                continue;
+            }
+            if column.saturating_add(char_width) > width {
+                row = row.saturating_add(1);
+                column = 0;
+            }
+            column = column.saturating_add(char_width);
+            if column >= width {
+                row = row.saturating_add(1);
+                column = 0;
+            }
+        }
+
+        (column as u16, row as u16)
     }
 
     /// Returns whether the prompt buffer is empty.
@@ -66,6 +105,38 @@ impl Composer {
             }
             (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                 self.insert_str("\n");
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                self.cursor = 0;
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                self.cursor = self.text.len();
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                self.delete_word_before_cursor();
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                self.move_left();
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                self.move_right();
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.delete_at_cursor();
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.delete_before_cursor_to_start();
+                ComposerAction::Redraw
+            }
+            (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                self.delete_from_cursor_to_end();
                 ComposerAction::Redraw
             }
             (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
@@ -119,6 +190,45 @@ impl Composer {
 
         let next = self.next_boundary();
         self.text.drain(self.cursor..next);
+    }
+
+    /// Deletes the word immediately before the cursor, skipping trailing spaces first.
+    fn delete_word_before_cursor(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let mut delete_start = self.cursor;
+        let mut seen_word = false;
+        for (index, ch) in self
+            .text
+            .char_indices()
+            .filter(|(index, _)| *index < self.cursor)
+            .rev()
+        {
+            if ch.is_whitespace() {
+                if seen_word {
+                    break;
+                }
+            } else {
+                seen_word = true;
+            }
+            delete_start = index;
+        }
+
+        self.text.drain(delete_start..self.cursor);
+        self.cursor = delete_start;
+    }
+
+    /// Deletes all prompt text before the cursor.
+    fn delete_before_cursor_to_start(&mut self) {
+        self.text.drain(..self.cursor);
+        self.cursor = 0;
+    }
+
+    /// Deletes all prompt text after the cursor.
+    fn delete_from_cursor_to_end(&mut self) {
+        self.text.truncate(self.cursor);
     }
 
     /// Moves the cursor one UTF-8 character to the left.
@@ -198,6 +308,122 @@ mod tests {
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "a\n");
+    }
+
+    /// Verifies Ctrl+A moves the cursor to the start of the prompt.
+    #[test]
+    fn composer_ctrl_a_moves_cursor_to_start() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello");
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.cursor(), 0);
+    }
+
+    /// Verifies Ctrl+E moves the cursor to the end of the prompt.
+    #[test]
+    fn composer_ctrl_e_moves_cursor_to_end() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello");
+        composer.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.cursor(), composer.text().len());
+    }
+
+    /// Verifies Ctrl+W deletes the previous word and leaves preceding text intact.
+    #[test]
+    fn composer_ctrl_w_deletes_word_before_cursor() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello   world");
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.text(), "hello   ");
+        assert_eq!(composer.cursor(), "hello   ".len());
+    }
+
+    /// Verifies Ctrl+W skips whitespace before deleting the previous word.
+    #[test]
+    fn composer_ctrl_w_skips_whitespace_before_word() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello world   ");
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.text(), "hello ");
+        assert_eq!(composer.cursor(), "hello ".len());
+    }
+
+    /// Verifies Ctrl+B and Ctrl+F move the cursor by one character.
+    #[test]
+    fn composer_ctrl_b_and_ctrl_f_move_by_character() {
+        let mut composer = Composer::default();
+        composer.insert_str("a你b");
+
+        assert_eq!(
+            composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            ComposerAction::Redraw
+        );
+        assert_eq!(composer.cursor(), "a你".len());
+
+        assert_eq!(
+            composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            ComposerAction::Redraw
+        );
+        assert_eq!(composer.cursor(), "a你b".len());
+    }
+
+    /// Verifies Ctrl+D deletes one UTF-8 character at the cursor.
+    #[test]
+    fn composer_ctrl_d_deletes_character_at_cursor() {
+        let mut composer = Composer::default();
+        composer.insert_str("a你b");
+        composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.text(), "ab");
+        assert_eq!(composer.cursor(), 1);
+    }
+
+    /// Verifies Ctrl+U deletes text before the cursor.
+    #[test]
+    fn composer_ctrl_u_deletes_before_cursor() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello world");
+        composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.text(), "ld");
+        assert_eq!(composer.cursor(), 0);
+    }
+
+    /// Verifies Ctrl+K deletes text after the cursor.
+    #[test]
+    fn composer_ctrl_k_deletes_after_cursor() {
+        let mut composer = Composer::default();
+        composer.insert_str("hello world");
+        composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.text(), "he");
+        assert_eq!(composer.cursor(), 2);
     }
 
     #[test]
