@@ -880,7 +880,9 @@ mod tests {
     #[test]
     fn arguments_consumers_emit_patch_preview_events() {
         let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(tools::builtin::fs::apply_patch::ApplyPatch::new()));
+        tools.register(Arc::new(
+            tools::builtin::fs::legacy::apply_patch::ApplyPatch::new(),
+        ));
         let mut consumers = ArgumentsConsumers::default();
 
         consumers.maybe_create("call-1", "apply_patch", &tools);
@@ -939,7 +941,9 @@ mod tests {
         )
         .expect("write fixture");
         let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(tools::builtin::fs::apply_patch::ApplyPatch::new()));
+        tools.register(Arc::new(
+            tools::builtin::fs::legacy::apply_patch::ApplyPatch::new(),
+        ));
         let mut ctx = test_turn_context(Arc::clone(&tools));
         ctx.cwd = dir.path().to_path_buf();
         let tool_ctx = ToolContext::builder()

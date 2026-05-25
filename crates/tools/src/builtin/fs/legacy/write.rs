@@ -97,7 +97,7 @@ impl Tool for WriteFile {
 mod tests {
     use super::*;
     use crate::ToolContext;
-    use crate::builtin::fs::read::ReadFile;
+    use crate::builtin::fs::legacy::read::ReadFile;
     use crate::{FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteResponse};
     use async_trait::async_trait;
     use std::path::Path;

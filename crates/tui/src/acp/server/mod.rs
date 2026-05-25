@@ -8,6 +8,7 @@ use provider::factory::LlmFactory;
 use tokio::io::DuplexStream;
 use tokio::task::JoinHandle;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tools::builtin::fs::FsToolSet;
 use tools::{FsBackend, LocalTerminalBackend, ToolRegistry};
 
 pub mod fs;
@@ -36,8 +37,12 @@ pub fn start() -> anyhow::Result<(InProcessTransport, InProcessAcpServer)> {
     let fs_backend: Arc<dyn FsBackend> =
         Arc::new(acp::backend::fs::AcpFsBackend::new(Arc::clone(&fs_router)));
     let tools = Arc::new(ToolRegistry::new());
-    // TUI executes shell locally; only filesystem I/O is delegated to the ACP client.
-    tools.register_builtins_with_backends(fs_backend, Arc::new(LocalTerminalBackend::new()));
+    // TUI executes shell locally; filesystem tool selection remains explicit at this boundary.
+    tools.register_builtins_with_backends(
+        fs_backend,
+        Arc::new(LocalTerminalBackend::new()),
+        FsToolSet::Hashline,
+    );
 
     let kernel = Kernel::new(
         Arc::new(LlmFactory::new(config.clone())),

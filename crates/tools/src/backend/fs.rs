@@ -32,6 +32,9 @@ pub struct FsReadRequest {
     /// Optional maximum number of lines to return.
     #[builder(default, setter(strip_option))]
     pub limit: Option<usize>,
+    /// Return exact file content without line slicing when set.
+    #[builder(default)]
+    pub preserve_full: bool,
 }
 
 /// Response returned by a backend read operation.
@@ -116,6 +119,10 @@ impl FsBackend for LocalFsBackend {
         let content = fs::read_to_string(&resolved).await.map_err(|e| {
             FsBackendError::Io(format!("failed to read {}: {e}", resolved.display()))
         })?;
+
+        if request.preserve_full && request.offset == 0 && request.limit.is_none() {
+            return Ok(FsReadResponse { content });
+        }
 
         let lines: Vec<&str> = content.lines().collect();
         let start = request.offset.min(lines.len());
