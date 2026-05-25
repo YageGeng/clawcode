@@ -180,6 +180,8 @@ struct PtyTerminator {
 impl LocalTerminator for PtyTerminator {
     fn terminate(&mut self) {
         if let Some(process_group_id) = self.process_group_id {
+            // Kill the whole process group first so shell-launched descendants
+            // do not survive after the PTY child itself is terminated.
             let _ = killpg(Pid::from_raw(process_group_id as i32), Signal::SIGKILL);
         }
         let _ = self.killer.kill();

@@ -661,44 +661,21 @@ impl ShellArgsInput {
         let tty = self.tty.unwrap_or(false);
         let yield_time_ms = self.yield_time_ms.unwrap_or(DEFAULT_YIELD_TIME_MS);
 
-        Ok(match (self.timeout_ms, self.max_output_tokens) {
-            (Some(timeout_ms), Some(max_output_tokens)) => ShellArgs::builder()
-                .command(command)
-                .shell(shell)
-                .cwd(cwd)
-                .env(env)
-                .tty(tty)
-                .yield_time_ms(yield_time_ms)
-                .timeout_ms(timeout_ms)
-                .max_output_tokens(max_output_tokens)
-                .build(),
-            (Some(timeout_ms), None) => ShellArgs::builder()
-                .command(command)
-                .shell(shell)
-                .cwd(cwd)
-                .env(env)
-                .tty(tty)
-                .yield_time_ms(yield_time_ms)
-                .timeout_ms(timeout_ms)
-                .build(),
-            (None, Some(max_output_tokens)) => ShellArgs::builder()
-                .command(command)
-                .shell(shell)
-                .cwd(cwd)
-                .env(env)
-                .tty(tty)
-                .yield_time_ms(yield_time_ms)
-                .max_output_tokens(max_output_tokens)
-                .build(),
-            (None, None) => ShellArgs::builder()
-                .command(command)
-                .shell(shell)
-                .cwd(cwd)
-                .env(env)
-                .tty(tty)
-                .yield_time_ms(yield_time_ms)
-                .build(),
-        })
+        let mut args = ShellArgs::builder()
+            .command(command)
+            .shell(shell)
+            .cwd(cwd)
+            .env(env)
+            .tty(tty)
+            .yield_time_ms(yield_time_ms)
+            .build();
+
+        // `strip_option` builder setters intentionally accept bare values, while
+        // deserialization already gives us normalized optional fields.
+        args.timeout_ms = self.timeout_ms;
+        args.max_output_tokens = self.max_output_tokens;
+
+        Ok(args)
     }
 }
 
@@ -776,19 +753,15 @@ impl WriteStdinArgs {
         yield_time_ms: u64,
         max_output_tokens: Option<usize>,
     ) -> Self {
-        match max_output_tokens {
-            Some(max_output_tokens) => Self::builder()
-                .process_id(process_id)
-                .chars(chars)
-                .yield_time_ms(yield_time_ms)
-                .max_output_tokens(max_output_tokens)
-                .build(),
-            None => Self::builder()
-                .process_id(process_id)
-                .chars(chars)
-                .yield_time_ms(yield_time_ms)
-                .build(),
-        }
+        let mut args = Self::builder()
+            .process_id(process_id)
+            .chars(chars)
+            .yield_time_ms(yield_time_ms)
+            .build();
+        // Preserve the builder API's `strip_option` contract while accepting
+        // already-normalized optional input from JSON parsing.
+        args.max_output_tokens = max_output_tokens;
+        args
     }
 
     /// Return the output byte budget derived from max_output_tokens.
