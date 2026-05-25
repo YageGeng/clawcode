@@ -9,31 +9,29 @@ use std::sync::Arc;
 
 use crate::{FsBackend, LocalFsBackend, LocalTerminalBackend, TerminalBackend, ToolRegistry};
 
+use self::fs::FsToolSet;
+
 impl ToolRegistry {
-    /// Register basic built-in tools (shell, file I/O) with default local backends.
-    pub fn register_builtins(&self) {
+    /// Register basic built-in tools using the selected file-system tool set.
+    pub fn register_builtins_with_fs_tool_set(&self, fs_tool_set: FsToolSet) {
         self.register_builtins_with_backends(
             Arc::new(LocalFsBackend::new()),
             Arc::new(LocalTerminalBackend::new()),
+            fs_tool_set,
         );
     }
 
-    /// Register basic built-in tools using the provided backends.
+    /// Register basic built-in tools using the provided backends and filesystem tool set.
     pub fn register_builtins_with_backends(
         &self,
         fs_backend: Arc<dyn FsBackend>,
         terminal_backend: Arc<dyn TerminalBackend>,
+        fs_tool_set: FsToolSet,
     ) {
         self.register(Arc::new(shell::ShellCommand::with_backend(
             terminal_backend,
         )));
-        self.register_fs_tools_with_backend(false, fs_backend);
-    }
-
-    /// Register basic built-in tools using the provided filesystem backend
-    /// and a default local terminal backend.
-    pub fn register_builtins_with_fs_backend(&self, fs_backend: Arc<dyn FsBackend>) {
-        self.register_builtins_with_backends(fs_backend, Arc::new(LocalTerminalBackend::new()));
+        self.register_fs_tools_with_backend_and_set(false, fs_backend, fs_tool_set);
     }
 
     /// Register the skill tool, backed by the given registry.
@@ -56,12 +54,27 @@ impl ToolRegistry {
 mod tests {
     use super::*;
 
-    /// Verifies that basic built-ins expose apply_patch (edit is gated by is_anthropic).
+    /// Verifies that built-in registration can select hashline filesystem tools.
     #[test]
-    fn register_builtins_includes_apply_patch() {
+    fn register_builtins_with_fs_tool_set_includes_hashline_edit_file() {
         let registry = ToolRegistry::new();
-        registry.register_builtins();
+        registry.register_builtins_with_fs_tool_set(FsToolSet::Hashline);
 
-        assert!(registry.get("apply_patch").is_some());
+        assert!(registry.get("edit_file").is_some());
+        assert!(registry.get("apply_patch").is_none());
+    }
+
+    /// Verifies backend-based built-in registration requires an explicit filesystem tool set.
+    #[test]
+    fn register_builtins_with_backends_accepts_explicit_fs_tool_set() {
+        let registry = ToolRegistry::new();
+        registry.register_builtins_with_backends(
+            Arc::new(LocalFsBackend::new()),
+            Arc::new(LocalTerminalBackend::new()),
+            FsToolSet::Hashline,
+        );
+
+        assert!(registry.get("edit_file").is_some());
+        assert!(registry.get("apply_patch").is_none());
     }
 }
