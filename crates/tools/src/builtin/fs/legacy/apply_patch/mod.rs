@@ -153,10 +153,7 @@ impl Tool for ApplyPatch {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<
-        (
-            String,
-            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
-        ),
+        std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
         String,
     > {
         let (model_output, changes) = self.do_apply(arguments, ctx).await?;
@@ -178,11 +175,15 @@ impl Tool for ApplyPatch {
                 .model_output(model_output.clone())
                 .build(),
         ));
+        let text = protocol::ToolStreamItem::Final {
+            content: model_output,
+            is_error: false,
+        };
 
         let stream: std::pin::Pin<
             Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>,
-        > = Box::pin(futures::stream::iter([begin, end]));
-        Ok((model_output, stream))
+        > = Box::pin(futures::stream::iter([begin, end, text]));
+        Ok(stream)
     }
 }
 
@@ -1519,7 +1520,7 @@ mod tests {
         std::fs::write(dir.path().join("delete.txt"), "remove me\n").unwrap();
 
         let patch = "*** Begin Patch\n*** Add File: added.txt\n+created\n*** Update File: modify.txt\n@@\n-two\n+TWO\n*** Delete File: delete.txt\n*** End Patch";
-        let (model_output, mut stream) = ApplyPatch::new()
+        let mut stream = ApplyPatch::new()
             .execute_streaming(
                 serde_json::json!({"patchText": patch}),
                 &ToolContext::for_test(dir.path()),
@@ -1527,14 +1528,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!model_output.is_empty());
-
+        let mut model_output = String::new();
         let mut changes = Vec::new();
         while let Some(item) = stream.next().await {
-            if let protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) = item {
-                changes = item.changes;
+            match item {
+                protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) => {
+                    changes = item.changes;
+                }
+                protocol::ToolStreamItem::Final { content, .. } => {
+                    model_output = content;
+                }
+                _ => {}
             }
         }
+        assert!(!model_output.is_empty());
         assert_eq!(changes.len(), 3);
         assert_eq!(changes[0].path, dir.path().join("added.txt"));
         assert_eq!(changes[0].old_text, None);

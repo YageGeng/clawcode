@@ -986,7 +986,7 @@ mod tests {
         let backend = memory_backend("aaa\nbbb\nccc");
         let tool = HashlineEditFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
 
-        let (model_output, mut stream) = tool
+        let mut stream = tool
             .execute_streaming(
                 serde_json::json!({
                     "path": "file.txt",
@@ -997,11 +997,10 @@ mod tests {
             .await
             .expect("streaming edit should succeed");
 
-        assert_eq!(model_output, "Updated file.txt");
-        let item = stream.next().await.expect("text item should exist");
+        let item = stream.next().await.expect("final item should exist");
         assert!(stream.next().await.is_none());
         match item {
-            protocol::ToolStreamItem::Text { content, is_error } => {
+            protocol::ToolStreamItem::Final { content, is_error } => {
                 assert_eq!(content, "Updated file.txt");
                 assert!(!is_error);
             }

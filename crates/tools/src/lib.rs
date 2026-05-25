@@ -73,34 +73,28 @@ pub trait Tool: Send + Sync {
     /// Execute the tool and return a stream of lifecycle/display items.
     ///
     /// The default implementation calls [`execute`] and wraps the result text in
-    /// a single [`ToolStreamItem::Text`] event. Streaming-capable tools should
+    /// a single [`ToolStreamItem::Final`] event. Streaming-capable tools should
     /// override this to emit [`ToolStreamItem::Begin`]/[`ToolStreamItem::End`]
     /// lifecycle events and [`ToolStreamItem::Delta`] incremental updates.
     async fn execute_streaming(
         &self,
         arguments: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
-        ),
-        String,
-    > {
+    ) -> Result<Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>, String> {
         match self.execute(arguments, ctx).await {
             Ok(text) => {
-                let item = protocol::ToolStreamItem::Text {
+                let item = protocol::ToolStreamItem::Final {
                     content: text.clone(),
                     is_error: false,
                 };
-                Ok((text, Box::pin(futures::stream::once(async move { item }))))
+                Ok(Box::pin(futures::stream::once(async move { item })))
             }
             Err(err) => {
-                let item = protocol::ToolStreamItem::Text {
+                let item = protocol::ToolStreamItem::Final {
                     content: err.clone(),
                     is_error: true,
                 };
-                Ok((err, Box::pin(futures::stream::once(async move { item }))))
+                Ok(Box::pin(futures::stream::once(async move { item })))
             }
         }
     }
@@ -175,13 +169,7 @@ impl ToolRegistry {
         name: &str,
         arguments: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<
-        (
-            String,
-            Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
-        ),
-        String,
-    > {
+    ) -> Result<Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>, String> {
         match self.get(name) {
             Some(tool) => tool.execute_streaming(arguments, ctx).await,
             None => Err(format!("unknown tool: {name}")),

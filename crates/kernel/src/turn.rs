@@ -561,7 +561,7 @@ async fn dispatch_tool(
         .get(tool_name)
         .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("unknown tool: {tool_name}")))?;
 
-    let (text, mut stream) = match tool.execute_streaming(arguments.clone(), tool_ctx).await {
+    let mut stream = match tool.execute_streaming(arguments.clone(), tool_ctx).await {
         Ok(result) => result,
         Err(err) => {
             // Tool-level failures are model-visible results, not kernel failures.
@@ -577,6 +577,7 @@ async fn dispatch_tool(
     };
 
     let mut succeeded = true;
+    let mut output_text = String::new();
     while let Some(item) = stream.next().await {
         match item {
             ToolStreamItem::Begin(turn_item) => {
@@ -625,8 +626,11 @@ async fn dispatch_tool(
                     chunk,
                 });
             }
-            ToolStreamItem::Text { content, is_error } => {
+            ToolStreamItem::Final { content, is_error } => {
                 succeeded = !is_error;
+                // Streaming tools can only know the final model-facing result
+                // after their live output loop completes.
+                output_text = content.clone();
                 let _ = tx_event.send(Event::tool_call_update(
                     ctx.session_id.clone(),
                     call_id,
@@ -641,7 +645,7 @@ async fn dispatch_tool(
         }
     }
 
-    Ok((text, succeeded))
+    Ok((output_text, succeeded))
 }
 
 /// Request approval for a tool call and return the frontend decision.
@@ -759,15 +763,54 @@ mod tests {
             _arguments: serde_json::Value,
             _ctx: &ToolContext,
         ) -> Result<
-            (
-                String,
-                std::pin::Pin<
-                    Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>,
-                >,
-            ),
+            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
             String,
         > {
             Err("tool failed normally".to_string())
+        }
+    }
+
+    struct StreamingTextTool;
+
+    #[async_trait]
+    impl Tool for StreamingTextTool {
+        fn name(&self) -> &str {
+            "streaming_text_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test streaming text tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn needs_approval(&self, _: &serde_json::Value, _: &ToolContext) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<String, String> {
+            Ok("initial text".to_string())
+        }
+
+        async fn execute_streaming(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<
+            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
+            String,
+        > {
+            let items = vec![protocol::ToolStreamItem::Final {
+                content: "final streamed text".to_string(),
+                is_error: false,
+            }];
+            Ok(Box::pin(futures::stream::iter(items)))
         }
     }
 
@@ -929,6 +972,39 @@ mod tests {
                 status: Some(protocol::ToolCallStatus::Failed),
                 ..
             }) if output == "tool failed normally"
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_uses_final_streamed_text_as_model_output() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(StreamingTextTool));
+        let ctx = test_turn_context(Arc::clone(&tools));
+        let tool_ctx = ToolContext::builder()
+            .session_id(ctx.session_id.clone())
+            .cwd(ctx.cwd.clone())
+            .agent_path(ctx.agent_path.clone())
+            .approval_mode(ctx.approval.mode())
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tool_call = ToolCall::new(
+            "call-1".to_string(),
+            protocol::ToolFunction::new("streaming_text_tool".to_string(), serde_json::json!({})),
+        );
+
+        let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+            .await
+            .expect("streaming tool dispatch");
+
+        assert_eq!(result, ("final streamed text".to_string(), true));
+        assert!(matches!(rx.recv().await, Some(Event::ToolCall { .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::ToolCallUpdate {
+                output_delta: Some(output),
+                status: Some(protocol::ToolCallStatus::Completed),
+                ..
+            }) if output == "final streamed text"
         ));
     }
 

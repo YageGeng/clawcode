@@ -83,10 +83,7 @@ impl Tool for EditFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<
-        (
-            String,
-            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
-        ),
+        std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
         String,
     > {
         let (model_output, changes) = self.do_edit(arguments, ctx).await?;
@@ -108,10 +105,14 @@ impl Tool for EditFile {
                 .model_output(model_output.clone())
                 .build(),
         ));
+        let text = protocol::ToolStreamItem::Final {
+            content: model_output,
+            is_error: false,
+        };
 
         let stream: Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>> =
-            Box::pin(futures::stream::iter([begin, end]));
-        Ok((model_output, stream))
+            Box::pin(futures::stream::iter([begin, end, text]));
+        Ok(stream)
     }
 }
 
@@ -841,7 +842,7 @@ mod tests {
         std::fs::write(&path, "before\ntarget\nafter").unwrap();
         let tool = EditFile::new();
 
-        let (model_output, mut stream) = tool
+        let mut stream = tool
             .execute_streaming(
                 serde_json::json!({"filePath": "structured.txt", "oldString": "target", "newString": "REPLACED"}),
                 &ToolContext::for_test(dir.path()),
@@ -849,14 +850,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(model_output.contains("edited"));
-
+        let mut model_output = String::new();
         let mut changes = Vec::new();
         while let Some(item) = stream.next().await {
-            if let protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) = item {
-                changes = item.changes;
+            match item {
+                protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) => {
+                    changes = item.changes;
+                }
+                protocol::ToolStreamItem::Final { content, .. } => {
+                    model_output = content;
+                }
+                _ => {}
             }
         }
+        assert!(model_output.contains("edited"));
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, path.canonicalize().unwrap());
         assert_eq!(

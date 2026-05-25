@@ -28,9 +28,14 @@ impl ToolRegistry {
         terminal_backend: Arc<dyn TerminalBackend>,
         fs_tool_set: FsToolSet,
     ) {
-        self.register(Arc::new(shell::ShellCommand::with_backend(
-            terminal_backend,
-        )));
+        let shell_runtime = Arc::new(shell::ShellRuntime::new(terminal_backend));
+        self.register(Arc::new(shell::ShellCommand::with_runtime(Arc::clone(
+            &shell_runtime,
+        ))));
+        self.register(Arc::new(shell::ShellCommand::exec_command(Arc::clone(
+            &shell_runtime,
+        ))));
+        self.register(Arc::new(shell::WriteStdin::new(shell_runtime)));
         self.register_fs_tools_with_backend_and_set(false, fs_backend, fs_tool_set);
     }
 
@@ -76,5 +81,7 @@ mod tests {
 
         assert!(registry.get("edit_file").is_some());
         assert!(registry.get("apply_patch").is_none());
+        assert!(registry.get("exec_command").is_some());
+        assert!(registry.get("write_stdin").is_some());
     }
 }

@@ -414,7 +414,7 @@ pub enum ToolStreamItem {
     },
     /// Final model-facing text → dispatch emits [`Event::ToolCallUpdate`].
     /// `is_error` indicates whether the tool execution failed.
-    Text { content: String, is_error: bool },
+    Final { content: String, is_error: bool },
 }
 
 /// A single item yielded by a tool arguments consumer while arguments stream.

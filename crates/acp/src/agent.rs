@@ -932,24 +932,14 @@ impl ClawcodeAgent {
                     let update = Self::patch_apply_updated_to_acp(call_id, changes);
                     let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }
-                Event::ExecCommandOutputDelta {
-                    call_id,
-                    stream,
-                    chunk,
-                    ..
-                } => {
-                    // Translate shell output stream chunks into ACP ToolCallUpdate
-                    // events so the terminal-like progress remains visible in Zed.
-                    let stream_name = match stream {
-                        protocol::event::ExecOutputStream::Stdout => "stdout",
-                        protocol::event::ExecOutputStream::Stderr => "stderr",
-                    };
+                Event::ExecCommandOutputDelta { call_id, chunk, .. } => {
+                    // Forward shell output chunks verbatim; the kernel event
+                    // already carries stdout/stderr metadata for non-text clients.
                     let decoded = String::from_utf8_lossy(&chunk);
                     if !decoded.is_empty() {
-                        let line = format!("[{stream_name}] {decoded}");
                         let mut fields = ToolCallUpdateFields::default();
                         fields.content = Some(vec![ToolCallContent::Content(Content::new(
-                            ContentBlock::Text(TextContent::new(line)),
+                            ContentBlock::Text(TextContent::new(decoded.into_owned())),
                         ))]);
                         fields.status = Some(AcpToolCallStatus::InProgress);
                         let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);

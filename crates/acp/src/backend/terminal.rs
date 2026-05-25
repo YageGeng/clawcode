@@ -208,4 +208,10 @@ impl RunningTerminal for AcpRunningTerminal {
             })?;
         Ok(())
     }
+
+    async fn write_stdin(&self, _bytes: &[u8]) -> Result<(), TerminalBackendError> {
+        Err(TerminalBackendError::InvalidRequest(
+            "ACP terminal backend does not support stdin writes".to_string(),
+        ))
+    }
 }

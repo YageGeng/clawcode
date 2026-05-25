@@ -118,6 +118,10 @@ crossterm = "0.28"
 ratatui = "0.29"
 unicode-width = "0.2"
 
+# pty
+portable-pty = "0.8"
+nix = { version = "0.29", features = ["signal", "process"] }
+
 # misc
 arc-swap = "1.7"
 wiremock = "0.6"
