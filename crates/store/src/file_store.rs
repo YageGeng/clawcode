@@ -318,6 +318,7 @@ mod store_tests {
     use crate::record::{CreateSessionParams, MessageRecord, PersistedPayload};
     use crate::traits::SessionStore;
     use protocol::AgentPath;
+    use protocol::Usage;
     use protocol::message::Message;
 
     /// Build minimal root session creation parameters for store tests.
@@ -368,6 +369,93 @@ mod store_tests {
 
         let listed = store.list_sessions(None).expect("list sessions");
         assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn message_usage_is_written_top_level_and_replayed_as_total() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let session_id = SessionId::from("session-usage");
+        let recorder = store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(session_id.clone())
+                    .agent_path(AgentPath::root())
+                    .cwd(PathBuf::from("/tmp/project"))
+                    .provider_id("provider".to_string())
+                    .model_id("model".to_string())
+                    .base_system_prompt("base".to_string())
+                    .build(),
+            )
+            .await
+            .expect("create session");
+
+        recorder
+            .append(&[
+                PersistedPayload::Message(
+                    MessageRecord::builder()
+                        .turn_id("turn-1".to_string())
+                        .message(Message::assistant("one"))
+                        .usage(Usage {
+                            input_tokens: 10,
+                            output_tokens: 2,
+                            total_tokens: 12,
+                            cached_input_tokens: 0,
+                            cache_creation_input_tokens: 0,
+                        })
+                        .build(),
+                ),
+                PersistedPayload::Message(
+                    MessageRecord::builder()
+                        .turn_id("turn-2".to_string())
+                        .message(Message::assistant("two"))
+                        .usage(Usage {
+                            input_tokens: 7,
+                            output_tokens: 3,
+                            total_tokens: 10,
+                            cached_input_tokens: 0,
+                            cache_creation_input_tokens: 0,
+                        })
+                        .build(),
+                ),
+            ])
+            .await
+            .expect("append messages");
+
+        let session_path = store
+            .session_path_for_id(&session_id)
+            .expect("lookup path")
+            .expect("session path");
+        let text = std::fs::read_to_string(session_path).expect("read session jsonl");
+        let message_records: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).expect("json record");
+                (value["payload"]["type"] == "message").then_some(value)
+            })
+            .collect();
+
+        assert_eq!(message_records[0]["usage"]["input_tokens"], 10);
+        assert!(
+            message_records[0]["payload"]["payload"]
+                .get("usage")
+                .is_none()
+        );
+
+        let (replayed, _) = store
+            .load_session(&session_id)
+            .expect("load result")
+            .expect("loaded session");
+        assert_eq!(
+            replayed.usage,
+            Some(Usage {
+                input_tokens: 17,
+                output_tokens: 5,
+                total_tokens: 22,
+                cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        );
     }
 
     #[tokio::test]

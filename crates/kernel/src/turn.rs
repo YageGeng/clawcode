@@ -14,7 +14,7 @@ use protocol::message::{
 use protocol::one_or_many::OneOrMany;
 use protocol::{
     AgentPath, Event, ExecCommandStatus, FileChangeStatus, KernelError, McpToolCallStatus,
-    ReviewDecision, SessionId, ToolStreamItem, TurnId, TurnItem,
+    ReviewDecision, SessionId, ToolStreamItem, TurnId, TurnItem, Usage,
 };
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
@@ -98,11 +98,19 @@ impl TurnContext {
     }
 
     /// Persist one canonical message after it has been accepted into context history.
-    async fn persist_message(&self, message: Message) {
-        let record = MessageRecord::builder()
-            .turn_id(String::from(&self.turn_id))
-            .message(message)
-            .build();
+    async fn persist_message(&self, message: Message, usage: Option<Usage>) {
+        let record = if let Some(usage) = usage {
+            MessageRecord::builder()
+                .turn_id(String::from(&self.turn_id))
+                .message(message)
+                .usage(usage)
+                .build()
+        } else {
+            MessageRecord::builder()
+                .turn_id(String::from(&self.turn_id))
+                .message(message)
+                .build()
+        };
         if let Err(error) = self
             .recorder
             .append(&[PersistedPayload::Message(record)])
@@ -178,7 +186,7 @@ pub(crate) async fn execute_turn(
     let user_message = Message::user(user_text);
     context.push(user_message.clone());
     // Persist only after the message is accepted into context so the file mirrors replay order.
-    ctx.persist_message(user_message).await;
+    ctx.persist_message(user_message, None).await;
 
     let tool_defs = ctx.tools.definitions();
     let sid = &ctx.session_id;
@@ -212,6 +220,7 @@ pub(crate) async fn execute_turn(
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
         let mut streamed_reasoning_preview = String::new();
         let mut argument_consumers = ArgumentsConsumers::default();
+        let mut response_usage = None;
 
         while let Some(event) = stream.next().await {
             let event = event
@@ -308,6 +317,7 @@ pub(crate) async fn execute_turn(
                 LlmStreamEvent::Final {
                     usage: Some(usage), ..
                 } => {
+                    response_usage = Some(usage);
                     let _ = tx_event.send(Event::usage_update(
                         sid.clone(),
                         usage.input_tokens,
@@ -326,7 +336,7 @@ pub(crate) async fn execute_turn(
                     .unwrap_or_else(|_| OneOrMany::one(AssistantContent::text(""))),
             };
             context.push(assistant_message.clone());
-            ctx.persist_message(assistant_message).await;
+            ctx.persist_message(assistant_message, response_usage).await;
         }
 
         // If no tool calls were made, the turn is done
@@ -346,7 +356,7 @@ pub(crate) async fn execute_turn(
                 })),
             };
             context.push(tool_message.clone());
-            ctx.persist_message(tool_message).await;
+            ctx.persist_message(tool_message, None).await;
         }
     }
 }
@@ -357,7 +367,7 @@ async fn drain_inter_agent_inputs_for_turn(ctx: &TurnContext, context: &mut dyn 
     for message in messages {
         let user_message = Message::user(message.render_model_context());
         context.push(user_message.clone());
-        ctx.persist_message(user_message).await;
+        ctx.persist_message(user_message, None).await;
     }
 }
 
@@ -705,6 +715,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use provider::completion::CompletionError;
+    use provider::message::Text;
     use provider::wasm_compat::WasmBoxedFuture;
     use tools::Tool;
 
@@ -740,6 +751,58 @@ mod tests {
                 Err(CompletionError::ProviderError(
                     "test llm stream is unused".to_string(),
                 ))
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct UsageLlm;
+
+    impl provider::factory::Llm for UsageLlm {
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<'_, Result<provider::factory::LlmCompletion, CompletionError>>
+        {
+            Box::pin(async {
+                Err(CompletionError::ProviderError(
+                    "test llm completion is unused".to_string(),
+                ))
+            })
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<'_, Result<provider::factory::DynLlmStream, CompletionError>> {
+            Box::pin(async {
+                let usage = Usage {
+                    input_tokens: 11,
+                    output_tokens: 4,
+                    total_tokens: 15,
+                    cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                };
+                let events: Vec<Result<LlmStreamEvent, CompletionError>> = vec![
+                    Ok(LlmStreamEvent::Text(Text {
+                        text: "hello".to_string(),
+                    })),
+                    Ok(LlmStreamEvent::Final {
+                        raw: serde_json::json!({}),
+                        usage: Some(usage),
+                    }),
+                ];
+                let stream: provider::factory::DynLlmStream =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
             })
         }
     }
@@ -844,11 +907,64 @@ mod tests {
             .build()
     }
 
+    /// Build a turn context that writes to the provided recorder path.
+    fn test_turn_context_with_recorder(
+        tools: Arc<ToolRegistry>,
+        llm: ArcLlm,
+        recorder: Arc<dyn SessionRecorder>,
+    ) -> TurnContext {
+        TurnContext::builder()
+            .session_id(SessionId::from("session-1"))
+            .turn_id(TurnId("turn-1".to_string()))
+            .turn_kind(TurnKindRecord::Prompt)
+            .llm(llm)
+            .tools(tools)
+            .cwd(PathBuf::from("/tmp"))
+            .provider_id("test".to_string())
+            .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
+            .skill_registry(Arc::new(SkillRegistry::default()))
+            .recorder(recorder)
+            .input_queue(Arc::new(tokio::sync::Mutex::new(InputQueue::default())))
+            .build()
+    }
+
     /// Build a real recorder for turn tests.
     fn test_recorder() -> Arc<dyn SessionRecorder> {
         Arc::new(store::FileSessionRecorder::new(
             std::env::temp_dir().join(format!("clawcode-turn-{}.jsonl", uuid::Uuid::new_v4())),
         ))
+    }
+
+    #[tokio::test]
+    async fn execute_turn_persists_final_usage_on_assistant_message() {
+        let path = std::env::temp_dir().join(format!(
+            "clawcode-turn-usage-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let recorder: Arc<dyn SessionRecorder> =
+            Arc::new(store::FileSessionRecorder::new(path.clone()));
+        let ctx = test_turn_context_with_recorder(
+            Arc::new(ToolRegistry::default()),
+            Arc::new(UsageLlm),
+            recorder,
+        );
+        let mut context: Box<dyn ContextManager> = Box::new(crate::context::InMemoryContext::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should complete");
+
+        let text = std::fs::read_to_string(path).expect("read persisted turn");
+        let usage_records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json record"))
+            .filter(|record: &serde_json::Value| record["usage"].is_object())
+            .collect();
+
+        assert_eq!(usage_records.len(), 1);
+        assert_eq!(usage_records[0]["usage"]["input_tokens"], 11);
+        assert_eq!(usage_records[0]["usage"]["output_tokens"], 4);
     }
 
     #[test]

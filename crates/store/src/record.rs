@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use protocol::message::Message;
-use protocol::{AgentPath, SessionId, StopReason};
+use protocol::{AgentPath, SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 
 /// Parameters required to create a persisted session file.
@@ -42,6 +42,10 @@ pub struct PersistedRecord {
     pub schema_version: u32,
     /// Typed payload for session replay.
     pub payload: PersistedPayload,
+    /// Provider-reported usage associated with a message payload, when available.
+    #[builder(default, setter(strip_option))]
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// Replayable payloads written to the session JSONL file.
@@ -127,6 +131,24 @@ pub struct MessageRecord {
     pub turn_id: String,
     /// Message persisted after it is accepted into ContextManager.
     pub message: Message,
+    /// Runtime-only usage copied to the top-level persisted record field.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing)]
+    pub usage: Option<Usage>,
+}
+
+impl PersistedPayload {
+    /// Return usage that should be written beside this payload in the JSONL envelope.
+    pub fn usage(&self) -> Option<Usage> {
+        match self {
+            PersistedPayload::Message(record) => record.usage,
+            PersistedPayload::SessionMeta(_)
+            | PersistedPayload::TurnContext(_)
+            | PersistedPayload::TurnComplete(_)
+            | PersistedPayload::TurnAborted(_)
+            | PersistedPayload::AgentEdge(_) => None,
+        }
+    }
 }
 
 /// Marks a turn as durably completed.

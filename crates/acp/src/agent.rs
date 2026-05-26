@@ -15,7 +15,7 @@ use futures::StreamExt;
 use protocol::acp_conv::TurnItemAcpExt;
 use protocol::mcp::{McpServerConfig, McpTransportConfig};
 use protocol::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
-use protocol::{AgentKernel, Event, SessionId, SessionLaunchOptions};
+use protocol::{AgentKernel, Event, SessionId, SessionLaunchOptions, Usage};
 
 use crate::backend::fs::AcpClientFsRouter;
 use crate::backend::terminal::AcpClientTerminalRouter;
@@ -493,9 +493,10 @@ impl ClawcodeAgent {
     async fn replay_history(
         session_id: &AcpSessionId,
         history: &[Message],
+        usage: Option<Usage>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        if history.is_empty() {
+        if history.is_empty() && usage.is_none() {
             return Ok(());
         }
 
@@ -504,6 +505,15 @@ impl ClawcodeAgent {
                 cx.send_notification(SessionNotification::new(session_id.clone(), update))?;
             }
         }
+
+        if let Some(usage) = usage {
+            // ACP status follows the live event path and displays input + output tokens.
+            cx.send_notification(SessionNotification::new(
+                session_id.clone(),
+                SessionUpdate::UsageUpdate(UsageUpdate::new(usage.display_tokens(), 0)),
+            ))?;
+        }
+
         Ok(())
     }
 
@@ -788,7 +798,13 @@ impl ClawcodeAgent {
             &created.modes,
             &created.models,
         );
-        Self::replay_history(&acp_session_id, &created.history, &cx).await?;
+        Self::replay_history(
+            &acp_session_id,
+            &created.history,
+            created.history_usage,
+            &cx,
+        )
+        .await?;
 
         let model_state = created.acp_model_state();
         let mode_state = created.acp_mode_state();
@@ -1323,7 +1339,7 @@ mod tests {
     use protocol::{
         AgentPath, EventStream, KernelError, ModelInfo, OneOrMany, ReviewDecision, SessionCreated,
         SessionId, SessionInfo, SessionLaunchOptions, SessionListPage, SessionMode, Text,
-        ToolFunction,
+        ToolFunction, Usage,
     };
     use std::path::{Path, PathBuf};
     use tools::{FsBackend, FsReadRequest};
@@ -2034,6 +2050,36 @@ mod tests {
             tool_call.raw_input,
             Some(serde_json::json!({"cmd": "printf 'one\\ntwo\\n'"}))
         );
+    }
+
+    #[tokio::test]
+    async fn replay_history_sends_accumulated_usage_update_after_messages() {
+        let session_id = AcpSessionId::new("session-usage");
+        let history = vec![Message::user("hello")];
+        let usage = Usage {
+            input_tokens: 12,
+            output_tokens: 8,
+            total_tokens: 99,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
+        let (client, mut notifications) = test_connection_to_client_recording_notifications().await;
+
+        ClawcodeAgent::replay_history(&session_id, &history, Some(usage), &client)
+            .await
+            .expect("history replay should send notifications");
+
+        let first = notifications.recv().await.expect("message notification");
+        assert!(matches!(first.update, SessionUpdate::AgentMessageChunk(_)));
+        let second = notifications.recv().await.expect("usage notification");
+        let SessionUpdate::UsageUpdate(update) = second.update else {
+            panic!("expected usage update after replayed messages");
+        };
+        assert_eq!(update.used, 20);
+        match notifications.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            other => panic!("expected no extra replay notifications, got {other:?}"),
+        }
     }
 
     #[test]

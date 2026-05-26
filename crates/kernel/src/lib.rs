@@ -432,20 +432,26 @@ impl AgentKernel for Kernel {
                 .await?;
             // Active sessions may still be loaded by the TUI when switching agents. Replay the
             // persisted message log so ACP can hydrate the newly-created TUI session state.
-            let history = self
+            let replayed = self
                 .session_store
                 .load_session(session_id)
                 .map_err(|error| KernelError::Internal(error.into()))?
-                .map(|(replayed, _)| replayed.messages)
+                .map(|(replayed, _)| replayed);
+            let history = replayed
+                .as_ref()
+                .map(|replayed| replayed.messages.clone())
                 .unwrap_or_default();
+            let history_usage = replayed.and_then(|replayed| replayed.usage);
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
                 .current_model(handle.current_model().await)
                 .modes(self.build_modes())
                 .models(self.build_models())
                 .history(history)
+                .history_usage(history_usage)
                 .build());
         }
+
         let Some((replayed, recorder)) = self
             .session_store
             .load_session(session_id)
@@ -454,6 +460,7 @@ impl AgentKernel for Kernel {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         };
         let app_cfg = self.config.current();
+        let history_usage = replayed.usage;
         let history = replayed.messages;
         let recorder: Arc<dyn SessionRecorder> = Arc::from(recorder);
         let llm = self.default_llm().ok_or_else(|| {
@@ -490,12 +497,14 @@ impl AgentKernel for Kernel {
             .await;
         self.restore_subagent_tree(session_id, &agent_ctrl, &app_cfg)
             .await;
+
         Ok(SessionCreated::builder()
             .session_id(session_id.clone())
             .current_model(handle.current_model().await)
             .modes(self.build_modes())
             .models(self.build_models())
             .history(history)
+            .history_usage(history_usage)
             .build())
     }
 

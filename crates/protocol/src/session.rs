@@ -7,6 +7,7 @@ use agent_client_protocol::schema;
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
+use crate::usage::Usage;
 
 /// Unique session identifier generated when a new session is created.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,6 +51,9 @@ pub struct SessionCreated {
     /// Replayed message history when loading an existing session.
     #[builder(default)]
     pub history: Vec<Message>,
+    /// Accumulated provider-reported usage for replayed history.
+    #[builder(default)]
+    pub history_usage: Option<Usage>,
 }
 
 /// Paginated session list result.

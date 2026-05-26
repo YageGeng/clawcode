@@ -22,6 +22,7 @@ pub mod permission;
 pub mod plan;
 pub mod session;
 pub mod tool;
+pub mod usage;
 
 pub use agent::*;
 pub use agent_ui::*;
@@ -36,3 +37,4 @@ pub use permission::*;
 pub use plan::*;
 pub use session::*;
 pub use tool::*;
+pub use usage::*;
