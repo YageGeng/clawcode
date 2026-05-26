@@ -205,7 +205,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::agent::mailbox::mailbox_pair;
     use protocol::{KernelError, Op, SessionId};
     use tokio::sync::{mpsc, oneshot, watch};
 
@@ -266,7 +265,6 @@ mod tests {
     fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
         let (tx_event, _rx_event) = mpsc::unbounded_channel();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        let (mailbox, _mailbox_rx) = mailbox_pair();
         Thread::builder()
             .session_id(session_id)
             .cwd(PathBuf::from("/tmp/project"))
@@ -277,7 +275,6 @@ mod tests {
                 oneshot::Sender<protocol::ReviewDecision>,
             >::new())))
             .cancel_tx(cancel_tx)
-            .mailbox(mailbox)
             .tools(Arc::new(ToolRegistry::new()))
             .mcp_manager(Arc::new(mcp::McpConnectionManager::new(
                 Vec::new(),

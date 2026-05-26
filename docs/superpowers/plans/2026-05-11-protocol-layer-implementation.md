@@ -1471,9 +1471,7 @@ use provider::factory::LlmFactory;
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
     kernel: Arc<dyn AgentKernel>,
-    #[allow(dead_code)]
     llm_factory: Arc<LlmFactory>,
-    #[allow(dead_code)]
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
 }
 

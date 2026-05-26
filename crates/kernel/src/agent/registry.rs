@@ -17,7 +17,6 @@ const AGENT_NAMES: &str = include_str!("agent_names.txt");
 
 /// Metadata tracked for each active agent.
 #[derive(Clone, Debug, Default, typed_builder::TypedBuilder)]
-#[allow(dead_code)]
 pub struct AgentMetadata {
     #[builder(default, setter(strip_option))]
     pub(crate) agent_id: Option<SessionId>,
@@ -224,7 +223,6 @@ impl AgentRegistry {
     }
 
     /// Look up agent metadata by thread id.
-    #[allow(dead_code)]
     pub(crate) fn agent_metadata_for_thread(&self, thread_id: SessionId) -> Option<AgentMetadata> {
         self.active_agents
             .lock()
@@ -275,22 +273,6 @@ impl AgentRegistry {
             .find(|m| m.agent_id.as_ref() == Some(thread_id))
         {
             meta.agent_status = status;
-        }
-    }
-
-    /// Update last_task_message for a thread.
-    #[allow(dead_code)]
-    pub(crate) fn update_last_task_message(&self, thread_id: SessionId, msg: String) {
-        let mut agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(meta) = agents
-            .agent_tree
-            .values_mut()
-            .find(|m| m.agent_id.as_ref() == Some(&thread_id))
-        {
-            meta.last_task_message = Some(msg);
         }
     }
 

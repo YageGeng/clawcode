@@ -17,7 +17,6 @@ use skills::SkillRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::agent::control::AgentControl;
-use crate::agent::mailbox::{Mailbox, MailboxReceiver, mailbox_pair};
 use crate::context::ContextManager;
 use crate::input_queue::InputQueue;
 use crate::turn::{TurnContext, execute_turn};
@@ -45,9 +44,6 @@ pub struct Thread {
         Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
     /// Signal cancellation.
     pub(crate) cancel_tx: watch::Sender<bool>,
-    /// Mailbox for receiving inter-agent messages.
-    #[allow(dead_code)]
-    pub(crate) mailbox: Mailbox,
     /// Tool registry available to this live session.
     pub(crate) tools: Arc<ToolRegistry>,
     /// MCP connection manager for this live session.
@@ -79,9 +75,6 @@ pub(crate) struct Session {
     pub rx_op: mpsc::UnboundedReceiver<Op>,
     /// Current event sender used by prompt streams.
     pub tx_event: Arc<tokio::sync::Mutex<mpsc::UnboundedSender<Event>>>,
-    #[allow(dead_code)]
-    /// Cancellation signal receiver for the active stream.
-    pub cancel_rx: watch::Receiver<bool>,
     /// Conversation context owned by this session.
     pub context: Box<dyn ContextManager>,
     /// LLM used for turn execution.
@@ -96,9 +89,6 @@ pub(crate) struct Session {
     pub agent_path: AgentPath,
     /// Approval policy — controls tool confirmation behaviour.
     pub approval: Arc<crate::approval::ApprovalPolicy>,
-    /// Mailbox receiver for inter-agent messages.
-    #[allow(dead_code)]
-    pub mailbox_rx: MailboxReceiver,
     /// AgentControl shared across session tree.
     pub agent_control: Arc<AgentControl>,
     /// Application configuration.
@@ -107,10 +97,6 @@ pub(crate) struct Session {
     /// Skill registry for this session's working directory.
     #[builder(default)]
     pub skill_registry: Arc<SkillRegistry>,
-    /// MCP connection manager for this session.
-    /// Held to keep server connections alive — tool dispatch goes through ToolRegistry.
-    #[allow(dead_code)]
-    pub mcp_manager: Arc<mcp::McpConnectionManager>,
     /// Recorder for canonical session history.
     pub recorder: Arc<dyn SessionRecorder>,
     /// Session-scoped queue for model-visible inter-agent mailbox delivery.
@@ -120,7 +106,7 @@ pub(crate) struct Session {
 
 /// Spawn the background task for a session and return the frontend handle.
 ///
-/// Creates all channel pairs (ops, events, approval, cancel, mailbox) and
+/// Creates all channel pairs (ops, events, approval, cancel) and
 /// wires them into the [`Session`] and [`Thread`] halves.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_thread(
@@ -137,8 +123,7 @@ pub(crate) fn spawn_thread(
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
-    let (cancel_tx, cancel_rx) = watch::channel(false);
-    let (mailbox, mailbox_rx) = mailbox_pair();
+    let (cancel_tx, _cancel_rx) = watch::channel(false);
 
     let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
     tools.register_skill_tools(Arc::clone(&skill_registry));
@@ -188,18 +173,15 @@ pub(crate) fn spawn_thread(
         .cwd(cwd)
         .rx_op(rx_op)
         .tx_event(Arc::clone(&tx_event))
-        .cancel_rx(cancel_rx)
         .context(context)
         .llm(llm)
         .tools(Arc::clone(&tools))
         .pending_approvals(Arc::clone(&pending_approvals))
         .agent_path(agent_path)
         .approval(approval)
-        .mailbox_rx(mailbox_rx)
         .agent_control(Arc::clone(&agent_control))
         .app_config(app_config)
         .skill_registry(skill_registry)
-        .mcp_manager(Arc::clone(&mcp_manager))
         .recorder(Arc::clone(&recorder))
         .input_queue(Arc::clone(&input_queue))
         .build();
@@ -213,7 +195,6 @@ pub(crate) fn spawn_thread(
         .tx_event(tx_event)
         .pending_approvals(pending_approvals)
         .cancel_tx(cancel_tx)
-        .mailbox(mailbox)
         .tools(tools)
         .mcp_manager(mcp_manager)
         .recorder(recorder)

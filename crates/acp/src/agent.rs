@@ -26,7 +26,6 @@ pub struct ClawcodeAgent {
     /// Reference to the kernel for session operations.
     kernel: Arc<dyn AgentKernel>,
     /// Capabilities reported by the connected ACP client.
-    #[allow(dead_code)]
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
     /// Routes ACP filesystem backend calls to client sessions.
     fs_router: Arc<AcpClientFsRouter>,

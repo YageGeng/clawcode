@@ -52,7 +52,7 @@ struct SkillFrontmatter {
 ///   → deduplicates by name (Repo > User), sorts by (scope, name)
 /// ```
 ///
-/// Individual parse failures are collected in [`errors`](SkillLoader::errors)
+/// Individual parse failures are collected in the loader's internal `errors`
 /// and do not block the remaining skills from loading.
 pub(crate) struct SkillLoader {
     roots: Vec<SkillRoot>,
@@ -147,12 +147,6 @@ impl SkillLoader {
 
         skills.sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.name.cmp(&b.name)));
         skills
-    }
-
-    /// Soft errors collected during loading (individual parse failures).
-    #[allow(dead_code)]
-    pub fn errors(&self) -> &[SkillError] {
-        &self.errors
     }
 
     // -- private helpers ----------------------------------------------------
@@ -335,7 +329,7 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "demo");
         assert_eq!(skills[0].description, "A demo skill");
-        assert!(loader.errors().is_empty());
+        assert!(loader.errors.is_empty());
     }
 
     #[test]
@@ -381,6 +375,6 @@ mod tests {
         };
         let skills = loader.load();
         assert!(skills.is_empty());
-        assert_eq!(loader.errors().len(), 1);
+        assert_eq!(loader.errors.len(), 1);
     }
 }

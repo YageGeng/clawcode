@@ -299,7 +299,7 @@ impl Kernel {
                     continue;
                 }
             };
-            let handle = match self
+            if let Err(e) = self
                 .thread_manager
                 .load_thread(
                     LoadThreadParams::builder()
@@ -317,12 +317,9 @@ impl Kernel {
                 )
                 .await
             {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(child_id = %edge.child_session_id, error = %e, "failed to restore subagent thread");
-                    continue;
-                }
-            };
+                tracing::warn!(child_id = %edge.child_session_id, error = %e, "failed to restore subagent thread");
+                continue;
+            }
             if let Err(e) = agent_control.registry.restore_agent(
                 edge.child_session_id.clone(),
                 edge.child_agent_path.clone(),
@@ -337,14 +334,9 @@ impl Kernel {
                 tracing::warn!(child_id = %edge.child_session_id, error = %e, "failed to register restored subagent");
                 continue;
             }
-            let sid = edge.child_session_id.clone();
-            let mb = handle.mailbox.clone();
-            let ag = Arc::clone(agent_control);
-            let rec = Arc::clone(&child_recorder);
-            tokio::spawn(async move {
-                ag.register_mailbox(sid.clone(), mb).await;
-                ag.register_recorder(sid, rec).await;
-            });
+            agent_control
+                .register_recorder(edge.child_session_id.clone(), Arc::clone(&child_recorder))
+                .await;
             Box::pin(self.restore_subagent_tree(&edge.child_session_id, agent_control, app_cfg))
                 .await;
         }
@@ -405,13 +397,6 @@ impl AgentKernel for Kernel {
 
         // Register root only after session creation succeeds, avoiding stale registry entries.
         agent_ctrl.registry.register_root_thread(session_id.clone());
-
-        // Register root thread mailbox for inter-agent message routing.
-        let sid_for_ctrl = session_id.clone();
-        let mb = handle.mailbox.clone();
-        tokio::spawn(async move {
-            agent_ctrl.register_mailbox(sid_for_ctrl, mb).await;
-        });
 
         let modes = self.build_modes();
         let models = self.build_models();
@@ -479,12 +464,6 @@ impl AgentKernel for Kernel {
         agent_ctrl
             .register_recorder(session_id.clone(), recorder)
             .await;
-        let sid_for_ctrl = session_id.clone();
-        let mb = handle.mailbox.clone();
-        let ag = Arc::clone(&agent_ctrl);
-        tokio::spawn(async move {
-            ag.register_mailbox(sid_for_ctrl, mb).await;
-        });
         self.restore_subagent_tree(session_id, &agent_ctrl, &app_cfg)
             .await;
         Ok(SessionCreated::builder()

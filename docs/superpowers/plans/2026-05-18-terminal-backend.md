@@ -1205,7 +1205,6 @@ use crate::terminal_backend::AcpClientTerminalRouter;
 ```rust
 pub struct ClawcodeAgent {
     kernel: Arc<dyn AgentKernel>,
-    #[allow(dead_code)]
     client_capabilities: Arc<Mutex<ClientCapabilities>>,
     fs_router: Arc<AcpClientFsRouter>,
     /// Routes ACP terminal backend calls to client sessions.

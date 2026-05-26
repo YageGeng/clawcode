@@ -10,7 +10,6 @@ use std::sync::Arc;
 use protocol::{AgentPath, AgentStatus, InterAgentMessage, Op, SessionId};
 use tokio::sync::{Mutex, watch};
 
-use crate::agent::mailbox::Mailbox;
 use crate::agent::registry::{AgentMetadata, AgentRegistry};
 use crate::agent::role::AgentRoleSet;
 use crate::approval::ApprovalPolicy;
@@ -52,8 +51,6 @@ pub struct AgentControl {
     pub registry: Arc<AgentRegistry>,
     #[builder(default = AgentRoleSet::with_builtins())]
     pub roles: AgentRoleSet,
-    #[builder(default)]
-    mailboxes: Mutex<HashMap<SessionId, Mailbox>>,
     #[builder(default)]
     status_watchers: Mutex<HashMap<SessionId, watch::Sender<AgentStatus>>>,
     pub config: MultiAgentConfig,
@@ -230,17 +227,10 @@ impl AgentControl {
             .recorder(Arc::clone(&child_recorder))
             .build();
 
-        let handle = self
-            .thread_manager
+        self.thread_manager
             .spawn_thread(params)
             .await
             .map_err(|error| error.to_string())?;
-
-        // Step 6: register mailbox so other agents can send messages here
-        self.mailboxes
-            .lock()
-            .await
-            .insert(session_id.clone(), handle.mailbox.clone());
 
         // Step 7: commit — publishes agent metadata to registry
         let metadata = {
@@ -471,7 +461,7 @@ impl AgentControl {
     /// Identifies descendant agents by path prefix matching
     /// (e.g. closing `/root/explorer` closes `/root/explorer/researcher`
     /// but not `/root/explorer-other`). Removes entries from registry,
-    /// mailbox map, and status watchers. Descendants are cleaned up
+    /// status watchers. Descendants are cleaned up
     /// before the target agent itself.
     pub(crate) async fn close_agent(&self, agent_path: &AgentPath) -> Result<AgentStatus, String> {
         if agent_path.is_root() {
@@ -524,13 +514,8 @@ impl AgentControl {
         }
         self.registry.release_spawned_thread(thread_id.clone());
 
-        // Clean up mailboxes and status watchers
+        // Clean up status watchers for the closed session tree.
         {
-            let mut mb = self.mailboxes.lock().await;
-            for desc_id in &descendants {
-                mb.remove(desc_id);
-            }
-            mb.remove(&thread_id);
             let mut sw = self.status_watchers.lock().await;
             for desc_id in &descendants {
                 sw.remove(desc_id);
@@ -546,13 +531,7 @@ impl AgentControl {
         Ok(previous_status)
     }
 
-    /// Register a mailbox for an existing session.
-    pub(crate) async fn register_mailbox(&self, thread_id: SessionId, mailbox: Mailbox) {
-        self.mailboxes.lock().await.insert(thread_id, mailbox);
-    }
-
     /// Subscribe to status changes.
-    #[allow(dead_code)]
     pub(crate) async fn subscribe_status(
         &self,
         thread_id: &SessionId,
@@ -670,7 +649,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::agent::mailbox::mailbox_pair;
     use crate::session::Thread;
     use async_trait::async_trait;
     use config::{AppConfig, ConfigHandle};
@@ -709,7 +687,6 @@ mod tests {
     fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
         let (tx_event, _rx_event) = mpsc::unbounded_channel();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        let (mailbox, _mailbox_rx) = mailbox_pair();
         Thread::builder()
             .session_id(session_id)
             .cwd(PathBuf::from("/tmp/project"))
@@ -720,7 +697,6 @@ mod tests {
                 oneshot::Sender<protocol::ReviewDecision>,
             >::new())))
             .cancel_tx(cancel_tx)
-            .mailbox(mailbox)
             .tools(Arc::new(ToolRegistry::new()))
             .mcp_manager(Arc::new(mcp::McpConnectionManager::new(
                 Vec::new(),

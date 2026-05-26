@@ -1,7 +1,6 @@
-//! Multi-agent runtime: registry, control, mailbox, roles, adapter.
+//! Multi-agent runtime: registry, control, roles, adapter.
 
 pub mod adapter;
 pub mod control;
-pub(crate) mod mailbox;
 pub mod registry;
 pub mod role;
