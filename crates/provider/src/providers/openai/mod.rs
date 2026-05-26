@@ -34,7 +34,8 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value) {
         }
 
         let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
-            || obj.contains_key("properties");
+            || obj.contains_key("properties")
+            || obj.contains_key("required");
 
         // This is required by OpenAI's Responses API when using strict mode.
         // Source: https://platform.openai.com/docs/guides/structured-outputs#additionalproperties-false-must-always-be-set-in-objects
@@ -206,5 +207,35 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(inner_required.contains(&json!("value")));
+    }
+
+    #[test]
+    fn test_sanitize_marks_required_only_any_of_branches_as_closed_objects() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "insert_after": {
+                    "type": "object",
+                    "properties": {
+                        "anchor": { "type": "string" },
+                        "text": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["anchor"],
+                    "anyOf": [
+                        { "required": ["text"] },
+                        { "required": ["content"] }
+                    ]
+                }
+            }
+        });
+
+        sanitize_schema(&mut schema);
+
+        let branches = schema["properties"]["insert_after"]["anyOf"]
+            .as_array()
+            .expect("anyOf should remain an array");
+        assert_eq!(branches[0]["additionalProperties"], json!(false));
+        assert_eq!(branches[1]["additionalProperties"], json!(false));
     }
 }

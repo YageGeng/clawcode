@@ -474,6 +474,11 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                             });
                         }
                         crate::message::AssistantContent::Reasoning(reasoning) => {
+                            if reasoning.id.is_none() {
+                                // Reasoning without an OpenAI-generated id came from another
+                                // provider and cannot be replayed as an OpenAI reasoning item.
+                                continue;
+                            }
                             let openai_reasoning = openai_reasoning_from_core(&reasoning)
                                 .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
                             reasoning_items.push(InputItem {
@@ -1963,6 +1968,36 @@ mod tests {
         };
 
         assert_eq!(service_tier, "provider_experimental");
+    }
+
+    #[test]
+    fn assistant_reasoning_without_openai_id_is_skipped_in_responses_request() {
+        let request = crate::completion::CompletionRequest::builder()
+            .chat_history(crate::OneOrMany::one(
+                crate::completion::Message::Assistant {
+                    id: None,
+                    content: crate::OneOrMany::many(vec![
+                        message::AssistantContent::reasoning("deepseek thinking"),
+                        message::AssistantContent::text("visible answer"),
+                    ])
+                    .expect("assistant content should be non-empty"),
+                },
+            ))
+            .build();
+
+        let openai_request = CompletionRequest::try_from(("gpt-5.5".to_string(), request))
+            .expect("provider-specific reasoning should not block OpenAI request conversion");
+
+        let input = openai_request.input.iter().collect::<Vec<_>>();
+        assert_eq!(input.len(), 1);
+        let InputContent::Message(Message::Assistant { content, .. }) = &input[0].input else {
+            panic!("expected visible assistant message to remain");
+        };
+        assert!(matches!(
+            content.first(),
+            AssistantContentType::Text(AssistantContent::OutputText(Text { text }))
+                if text == "visible answer"
+        ));
     }
 
     #[test]
