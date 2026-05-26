@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod approval;
+pub mod command;
 pub mod context;
 pub(crate) mod input_queue;
 pub(crate) mod prompt;
@@ -38,6 +39,8 @@ use store::{
     SessionStore,
 };
 use tools::ToolRegistry;
+
+const SESSION_LIST_PAGE_SIZE: usize = 10;
 
 /// Central kernel struct implementing [`AgentKernel`].
 ///
@@ -477,8 +480,9 @@ impl AgentKernel for Kernel {
     async fn list_sessions(
         &self,
         cwd: Option<&Path>,
-        _cursor: Option<&str>,
+        cursor: Option<&str>,
     ) -> Result<SessionListPage, KernelError> {
+        let offset = session_list_offset(cursor)?;
         let mut sessions: Vec<SessionInfo> = self
             .thread_manager
             .live_sessions()
@@ -506,10 +510,7 @@ impl AgentKernel for Kernel {
             }
         }
 
-        Ok(SessionListPage {
-            sessions,
-            next_cursor: None,
-        })
+        Ok(paginate_session_list(sessions, offset))
     }
 
     async fn prompt(
@@ -647,6 +648,34 @@ impl AgentKernel for Kernel {
         let _ = tx.send(decision);
 
         Ok(())
+    }
+}
+
+/// Parses the ACP session/list cursor as a zero-based offset.
+fn session_list_offset(cursor: Option<&str>) -> Result<usize, KernelError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    cursor.parse::<usize>().map_err(|error| {
+        KernelError::Internal(anyhow::anyhow!(
+            "invalid session list cursor `{cursor}`: {error}"
+        ))
+    })
+}
+
+/// Returns one fixed-size session page and the next offset cursor when available.
+fn paginate_session_list(sessions: Vec<SessionInfo>, offset: usize) -> SessionListPage {
+    let total = sessions.len();
+    let page: Vec<SessionInfo> = sessions
+        .into_iter()
+        .skip(offset)
+        .take(SESSION_LIST_PAGE_SIZE)
+        .collect();
+    let next_offset = offset.saturating_add(SESSION_LIST_PAGE_SIZE);
+    let next_cursor = (next_offset < total).then(|| next_offset.to_string());
+    SessionListPage {
+        sessions: page,
+        next_cursor,
     }
 }
 
@@ -815,6 +844,48 @@ mod tests {
         } else {
             builder.build()
         }
+    }
+
+    #[tokio::test]
+    async fn list_sessions_paginates_with_cursor_offset() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home.clone());
+        let store = FileSessionStore::new(Some(&data_home));
+        for index in 0..12 {
+            store
+                .create_session(persisted_session_params(
+                    SessionId(format!("session-{index:02}")),
+                    AgentPath::root(),
+                    temp.path().to_path_buf(),
+                    None,
+                ))
+                .await
+                .expect("create persisted session");
+        }
+        let kernel = kernel_with_config(app_config);
+
+        let first_page = kernel
+            .list_sessions(Some(temp.path()), None)
+            .await
+            .expect("list first page");
+        let second_page = kernel
+            .list_sessions(Some(temp.path()), Some("10"))
+            .await
+            .expect("list second page");
+
+        assert_eq!(first_page.sessions.len(), 10);
+        assert_eq!(first_page.next_cursor, Some("10".to_string()));
+        assert_eq!(
+            second_page
+                .sessions
+                .iter()
+                .map(|session| session.session_id.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-10", "session-11"]
+        );
+        assert_eq!(second_page.next_cursor, None);
     }
 
     #[tokio::test]

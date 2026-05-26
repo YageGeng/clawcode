@@ -26,6 +26,8 @@ pub enum AppEvent {
     PromptFailed(String),
     /// ACP connection or callback error.
     AcpError(String),
+    /// `/sessions` command response, displayed as a system message.
+    SessionsListed(String),
 }
 
 /// Builds the TUI initialize request with the client capabilities it implements.
@@ -57,9 +59,13 @@ impl AcpClient {
     }
 
     /// Requests persisted sessions for the provided working directory.
-    pub async fn list_sessions(&self, cwd: PathBuf) -> anyhow::Result<ListSessionsResponse> {
+    pub async fn list_sessions(
+        &self,
+        cwd: PathBuf,
+        cursor: Option<String>,
+    ) -> anyhow::Result<ListSessionsResponse> {
         self.conn
-            .send_request(ListSessionsRequest::new().cwd(cwd))
+            .send_request(ListSessionsRequest::new().cwd(cwd).cursor(cursor))
             .block_task()
             .await
             .context("list ACP sessions")

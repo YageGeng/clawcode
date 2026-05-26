@@ -21,6 +21,8 @@ use crate::ui::render::render;
 use crate::ui::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
+use kernel::command::prompt_args::parse_slash_name;
+use kernel::command::slash_command::SlashCommand;
 
 type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 
@@ -71,7 +73,7 @@ pub async fn list_sessions(cwd: PathBuf) -> anyhow::Result<()> {
     let (app_tx, _app_rx) = mpsc::unbounded_channel::<AppEvent>();
     acp_client::with_in_process_client(app_tx, move |client| async move {
         client.initialize().await?;
-        let response = client.list_sessions(cwd).await?;
+        let response = client.list_sessions(cwd, None).await?;
         print_sessions(response);
         Ok(())
     })
@@ -236,6 +238,9 @@ async fn handle_app_event(
                 let _ = handle.await;
             }
         }
+        AppEvent::SessionsListed(text) => {
+            state.add_system_message(text);
+        }
         AppEvent::PromptFailed(message) | AppEvent::AcpError(message) => {
             state.set_error(message);
             if let Some(handle) = prompt_task.take() {
@@ -299,7 +304,16 @@ fn handle_key_event(
             if let ComposerAction::Submit(text) = action
                 && !text.trim().is_empty()
             {
-                if handle_raw_command(ui, &text) {
+                if let Some(cmd) = SlashCommand::parse_from_text(&text) {
+                    match cmd {
+                        SlashCommand::Raw => {
+                            handle_raw_command(ui, &text);
+                        }
+                        SlashCommand::Sessions => match parse_sessions_cursor(&text) {
+                            Ok(cursor) => handle_sessions_command(client, app_tx, ui.state, cursor),
+                            Err(()) => ui.state.add_system_message("Usage: /sessions [offset]"),
+                        },
+                    }
                     return Ok(false);
                 }
                 run_prompt(client, app_tx, ui.state, text, prompt_task);
@@ -341,10 +355,8 @@ fn handle_approval_key(
 /// Handles `/raw` transcript mode commands before they reach the ACP prompt path.
 fn handle_raw_command(ui: &mut UiRuntime<'_>, text: &str) -> bool {
     let trimmed = text.trim();
-    if !is_raw_command(trimmed) {
-        return false;
-    }
-    let Some(explicit) = parse_raw_command(trimmed) else {
+    let explicit = parse_raw_arg(trimmed);
+    let Some(explicit) = explicit else {
         ui.state.add_system_message("Usage: /raw [on|off]");
         return true;
     };
@@ -354,13 +366,8 @@ fn handle_raw_command(ui: &mut UiRuntime<'_>, text: &str) -> bool {
     true
 }
 
-/// Returns whether the submitted text targets the local `/raw` command.
-fn is_raw_command(text: &str) -> bool {
-    text == "/raw" || text.starts_with("/raw ")
-}
-
-/// Parses `/raw`, `/raw on`, and `/raw off` command text.
-fn parse_raw_command(text: &str) -> Option<Option<bool>> {
+/// Parses `/raw`, `/raw on`, and `/raw off` argument.
+fn parse_raw_arg(text: &str) -> Option<Option<bool>> {
     let mut parts = text.split_whitespace();
     if parts.next()? != "/raw" {
         return None;
@@ -373,6 +380,76 @@ fn parse_raw_command(text: &str) -> Option<Option<bool>> {
     }
 }
 
+/// Parses `/sessions` and its optional offset cursor argument.
+fn parse_sessions_cursor(text: &str) -> Result<Option<String>, ()> {
+    let Some((name, rest, _rest_offset)) = parse_slash_name(text) else {
+        return Err(());
+    };
+    if name != SlashCommand::Sessions.command() {
+        return Err(());
+    }
+    let Some(offset) = rest.split_whitespace().next() else {
+        return Ok(None);
+    };
+    let offset = offset.parse::<usize>().map_err(|_error| ())?;
+    Ok(Some(offset.to_string()))
+}
+
+/// Spawns an async `/sessions` query and sends the result back via AppEvent.
+fn handle_sessions_command(
+    client: &AcpClient,
+    app_tx: &mpsc::UnboundedSender<AppEvent>,
+    state: &AppState,
+    cursor: Option<String>,
+) {
+    let cwd = state.cwd().to_path_buf();
+    let client = client.clone();
+    let tx = app_tx.clone();
+    tokio::spawn(async move {
+        match client.list_sessions(cwd, cursor).await {
+            Ok(response) => {
+                let _ = tx.send(AppEvent::SessionsListed(format_sessions_list(&response)));
+            }
+            Err(error) => {
+                let _ = tx.send(AppEvent::AcpError(format!(
+                    "failed to list sessions: {error}"
+                )));
+            }
+        }
+    });
+}
+
+/// Format a session list response into a human-readable string.
+fn format_sessions_list(response: &ListSessionsResponse) -> String {
+    if response.sessions.is_empty() {
+        return "No sessions found for this working directory.".into();
+    }
+    let lines: Vec<String> = response
+        .sessions
+        .iter()
+        .map(|s| {
+            let title = s
+                .title
+                .as_deref()
+                .map(|t| {
+                    let chars: String = t.chars().take(10).collect();
+                    if t.chars().count() > 10 {
+                        format!("\"{chars}…\"")
+                    } else {
+                        format!("\"{chars}\"")
+                    }
+                })
+                .unwrap_or_else(|| "-".into());
+            let time = s.updated_at.as_deref().unwrap_or("-");
+            format!("{}  {}  {}  {}", s.session_id, s.cwd.display(), title, time)
+        })
+        .collect();
+    let mut output = format!("Recent sessions:\n{}", lines.join("\n"));
+    if let Some(next_cursor) = &response.next_cursor {
+        output.push_str(&format!("\n\nNext: /sessions {next_cursor}"));
+    }
+    output
+}
 /// Returns the user-visible raw output mode notice.
 fn raw_output_mode_notice(enabled: bool) -> &'static str {
     if enabled {
@@ -381,7 +458,6 @@ fn raw_output_mode_notice(enabled: bool) -> &'static str {
         "Raw output mode off: rich transcript rendering restored."
     }
 }
-
 /// Starts one ACP prompt and streams ACP notifications back into AppState.
 fn run_prompt(
     client: &AcpClient,
@@ -417,16 +493,36 @@ fn run_prompt(
 mod tests {
     use super::*;
 
-    /// Verifies raw slash command parsing accepts toggle and explicit states.
+    /// Verifies slash command parsing via handle_raw_command.
     #[test]
     fn raw_command_parses_toggle_and_explicit_modes() {
-        assert_eq!(parse_raw_command("/raw"), Some(None));
-        assert_eq!(parse_raw_command("/raw on"), Some(Some(true)));
-        assert_eq!(parse_raw_command("/raw off"), Some(Some(false)));
-        assert_eq!(parse_raw_command("/raw nope"), None);
-        assert_eq!(parse_raw_command("hello"), None);
-    }
+        let mut state = AppState::new(
+            agent_client_protocol::schema::SessionId::new("s1".to_string()),
+            std::path::PathBuf::from("."),
+            "provider/model".to_string(),
+        );
+        let mut view = ViewState::default();
+        let mut composer = Composer::default();
+        let mut ui = UiRuntime {
+            state: &mut state,
+            view: &mut view,
+            composer: &mut composer,
+        };
 
+        // toggle
+        assert!(handle_raw_command(&mut ui, "/raw"));
+        assert!(ui.view.raw_output_mode());
+
+        // explicit on
+        assert!(handle_raw_command(&mut ui, "/raw on"));
+        assert!(ui.view.raw_output_mode());
+
+        // explicit off
+        assert!(handle_raw_command(&mut ui, "/raw off"));
+        assert!(!ui.view.raw_output_mode());
+        // invalid arg
+        assert!(handle_raw_command(&mut ui, "/raw nope"));
+    }
     /// Verifies raw command handling mutates only local TUI state.
     #[test]
     fn raw_command_toggles_view_state_and_adds_notice() {
@@ -452,24 +548,64 @@ mod tests {
                 .is_some_and(|cell| cell.text().contains("Raw output mode on"))
         }));
     }
-
     /// Verifies non-command text that merely shares the prefix is not consumed.
     #[test]
     fn raw_command_does_not_consume_prefix_matches() {
-        let mut state = AppState::new(
-            agent_client_protocol::schema::SessionId::new("s1".to_string()),
-            std::path::PathBuf::from("."),
-            "provider/model".to_string(),
-        );
-        let mut view = ViewState::default();
-        let mut composer = Composer::default();
-        let mut ui = UiRuntime {
-            state: &mut state,
-            view: &mut view,
-            composer: &mut composer,
-        };
+        assert_eq!(SlashCommand::parse_from_text("/rawhide"), None);
+        assert_eq!(SlashCommand::parse_from_text(" /raw"), None);
+    }
 
-        assert!(!handle_raw_command(&mut ui, "/rawhide"));
-        assert!(!ui.view.raw_output_mode());
+    /// Verifies session list formatting.
+    #[test]
+    fn format_sessions_list_empty() {
+        let response = ListSessionsResponse::new(vec![]);
+        assert_eq!(
+            format_sessions_list(&response),
+            "No sessions found for this working directory."
+        );
+    }
+
+    #[test]
+    fn format_sessions_list_with_sessions() {
+        let response = ListSessionsResponse::new(vec![
+            agent_client_protocol::schema::SessionInfo::new(
+                agent_client_protocol::schema::SessionId::new("thr-1"),
+                std::path::PathBuf::from("/tmp"),
+            )
+            .title(Some("hello world long title".to_string()))
+            .updated_at(Some("2026-01-01T00:00:00Z".to_string())),
+        ]);
+        let result = format_sessions_list(&response);
+        assert!(result.contains("Recent sessions:"));
+        assert!(result.contains("thr-1"));
+        assert!(result.contains("/tmp"));
+        assert!(result.contains("\"hello worl…\""));
+        assert!(result.contains("2026-01-01T00:00:00Z"));
+    }
+
+    /// Verifies `/sessions` accepts an optional offset cursor argument.
+    #[test]
+    fn parse_sessions_cursor_from_command_text() {
+        assert_eq!(parse_sessions_cursor("/sessions"), Ok(None));
+        assert_eq!(
+            parse_sessions_cursor("/sessions 10"),
+            Ok(Some("10".to_string()))
+        );
+        assert_eq!(parse_sessions_cursor("/sessions nope"), Err(()));
+    }
+
+    /// Verifies paginated session output shows the next slash command.
+    #[test]
+    fn format_sessions_list_with_next_cursor() {
+        let response =
+            ListSessionsResponse::new(vec![agent_client_protocol::schema::SessionInfo::new(
+                agent_client_protocol::schema::SessionId::new("thr-1"),
+                std::path::PathBuf::from("/tmp"),
+            )])
+            .next_cursor(Some("10".to_string()));
+
+        let result = format_sessions_list(&response);
+
+        assert!(result.contains("Next: /sessions 10"));
     }
 }
