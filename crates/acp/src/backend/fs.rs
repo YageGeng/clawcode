@@ -119,7 +119,7 @@ impl FsBackend for AcpFsBackend {
             })?;
         let path = Self::resolve_absolute(request.cwd, request.path);
         let mut acp_request =
-            ReadTextFileRequest::new(AcpSessionId::new(request.session_id.0), path).line(line);
+            ReadTextFileRequest::new(AcpSessionId::from(&request.session_id), path).line(line);
 
         if let Some(limit) = request.limit {
             let limit = u32::try_from(limit).map_err(|error| {
@@ -158,7 +158,7 @@ impl FsBackend for AcpFsBackend {
         route
             .client
             .send_request(WriteTextFileRequest::new(
-                AcpSessionId::new(request.session_id.0),
+                AcpSessionId::from(&request.session_id),
                 path.clone(),
                 request.content,
             ))
@@ -260,7 +260,7 @@ mod tests {
     async fn acp_backend_sends_read_text_file_request() {
         let (read_tx, mut read_rx) = mpsc::unbounded_channel();
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
-        let session_id = SessionId("session-1".to_string());
+        let session_id = SessionId::from("session-1");
         let backend = backend_with_route(&session_id, read_tx, write_tx).await;
 
         let response = backend
@@ -287,7 +287,7 @@ mod tests {
     async fn acp_backend_sends_write_text_file_request() {
         let (_read_tx, _read_rx) = mpsc::unbounded_channel();
         let (write_tx, mut write_rx) = mpsc::unbounded_channel();
-        let session_id = SessionId("session-1".to_string());
+        let session_id = SessionId::from("session-1");
         let backend = backend_with_route(&session_id, _read_tx, write_tx).await;
 
         let response = backend

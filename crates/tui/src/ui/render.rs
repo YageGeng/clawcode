@@ -8,10 +8,11 @@ use ratatui::{
 };
 
 use crate::ui::composer::Composer;
+use crate::ui::session_router::SessionRouterState;
 use crate::ui::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
-use crate::ui::{approval, layout, status, transcript};
+use crate::ui::{agent_picker, approval, layout, status, transcript};
 
 /// Render the complete TUI frame for the current application state.
 pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, composer: &Composer) {
@@ -23,6 +24,44 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, compose
     status::render_top_status(frame, rows.top_status, state);
     render_composer(frame, rows.composer, composer, state.theme());
     status::render_bottom_status(frame, rows.bottom_status, state);
+
+    if let Some(approval) = state.pending_approval() {
+        let overlay = layout::centered_rect(72, 8, frame.area());
+        frame.render_widget(Clear, overlay);
+        frame.render_widget(
+            Paragraph::new(approval::approval_lines(approval.title(), approval.body()))
+                .block(Block::default().borders(Borders::ALL)),
+            overlay,
+        );
+    }
+}
+
+/// Render the complete TUI frame for the active session router state.
+pub(crate) fn render_router(
+    frame: &mut Frame<'_>,
+    router: &SessionRouterState,
+    view: &ViewState,
+    composer: &Composer,
+) {
+    let Some(rows) = layout::frame_rows_with_agent_picker(
+        frame.area(),
+        composer.text(),
+        router.agent_picker_height(),
+    ) else {
+        return;
+    };
+    let state = router.active_state();
+
+    transcript::render_transcript(frame, rows.transcript, state, view);
+    status::render_top_status(frame, rows.top_status, state);
+    render_composer(frame, rows.composer, composer, state.theme());
+    agent_picker::render_agent_picker(frame, rows.agent_picker, router, state.theme());
+    status::render_bottom_status_with_agent(
+        frame,
+        rows.bottom_status,
+        state,
+        router.active_agent_label().as_str(),
+    );
 
     if let Some(approval) = state.pending_approval() {
         let overlay = layout::centered_rect(72, 8, frame.area());
@@ -778,6 +817,84 @@ mod tests {
         assert!(screen.contains("..."));
         assert!(screen.contains("• Ran Follow up Galileo · run focused tests"));
         assert!(!screen.contains("description please inspect this very long task description"));
+    }
+
+    /// Verifies `/agent` picker renders Main [default] under the composer.
+    #[test]
+    fn render_agent_picker_shows_main_default_under_composer() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut router = SessionRouterState::new(
+            sid("root-session"),
+            "/tmp/project".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        router.open_agent_picker();
+
+        terminal
+            .draw(|frame| render_router(frame, &router, &ViewState::default(), &composer("")))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        assert!(screen.iter().any(|line| line.contains("Main [default]")));
+    }
+
+    /// Verifies the bottom status keeps the active agent visible when cwd is long.
+    #[test]
+    fn render_bottom_status_shows_active_agent_after_switch() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let root = sid("root-session");
+        let child = sid("child-session");
+        let mut router = SessionRouterState::new(
+            root.clone(),
+            "/tmp/very/long/project/path/that/would/otherwise/hide/the/agent/label".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        let metadata = protocol::AgentUiMetadata::builder()
+            .session_id(protocol::SessionId::from("child-session"))
+            .parent_session_id(protocol::SessionId::from("root-session"))
+            .agent_path(protocol::AgentPath::root().join("inspect"))
+            .nickname("finder".to_string())
+            .role("worker".to_string())
+            .status(protocol::AgentStatus::Running)
+            .is_root(false)
+            .build();
+        let patch = protocol::AgentUiMetadataPatch::builder()
+            .version(1)
+            .event(protocol::AgentUiEventKind::Upsert)
+            .agents(vec![metadata])
+            .build();
+        let meta = serde_json::json!({
+            "clawcode": {
+                "subagents": patch,
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("metadata root should be an object");
+        router.apply_session_notification(SessionNotification::new(
+            root,
+            SessionUpdate::ToolCallUpdate(
+                ToolCallUpdate::new(
+                    ToolCallId::new("clawcode-subagents"),
+                    ToolCallUpdateFields::default(),
+                )
+                .meta(meta),
+            ),
+        ));
+        router
+            .select_agent_session(child, &mut ViewState::default(), &mut Composer::default())
+            .expect("select child");
+
+        terminal
+            .draw(|frame| render_router(frame, &router, &ViewState::default(), &composer("")))
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal).join("\n");
+        assert!(screen.contains("agent: finder [worker]"));
     }
 
     /// Builds a composer fixture with the cursor at the end of the provided text.

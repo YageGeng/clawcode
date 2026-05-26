@@ -292,6 +292,16 @@ mod tests {
     use super::*;
     use crate::{Tool, ToolContext};
 
+    /// Build a test tool context rooted at `cwd`.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     /// Verifies rg match and context output is converted to hashline form.
     #[test]
     fn format_grep_output_marks_matches_and_context_with_hashes() {
@@ -341,7 +351,7 @@ mod tests {
                     "i": true,
                     "limit": 10
                 }),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .expect("grep should succeed");
@@ -368,7 +378,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"pattern": "missing"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .expect("no-match grep should succeed");

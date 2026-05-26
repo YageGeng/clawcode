@@ -9,6 +9,7 @@ use strum_macros::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
 pub enum SlashCommand {
     Raw,
     Sessions,
+    Agent,
 }
 
 impl SlashCommand {
@@ -22,6 +23,7 @@ impl SlashCommand {
         match self {
             Self::Raw => "toggle raw scrollback mode for copy-friendly terminal output",
             Self::Sessions => "list recent sessions",
+            Self::Agent => "switch between main agent and subagents",
         }
     }
 
@@ -55,6 +57,7 @@ mod tests {
             SlashCommand::from_str("sessions"),
             Ok(SlashCommand::Sessions)
         );
+        assert_eq!(SlashCommand::from_str("agent"), Ok(SlashCommand::Agent));
     }
 
     #[test]
@@ -72,6 +75,10 @@ mod tests {
             SlashCommand::parse_from_text("/sessions 10"),
             Some(SlashCommand::Sessions)
         );
+        assert_eq!(
+            SlashCommand::parse_from_text("/agent"),
+            Some(SlashCommand::Agent)
+        );
     }
 
     #[test]
@@ -83,26 +90,30 @@ mod tests {
     fn command_names() {
         assert_eq!(SlashCommand::Raw.command(), "raw");
         assert_eq!(SlashCommand::Sessions.command(), "sessions");
+        assert_eq!(SlashCommand::Agent.command(), "agent");
     }
 
     #[test]
     fn descriptions() {
         assert!(SlashCommand::Raw.description().contains("raw"));
         assert!(SlashCommand::Sessions.description().contains("session"));
+        assert!(SlashCommand::Agent.description().contains("agent"));
     }
 
     #[test]
     fn built_in_commands_contains_all() {
         let commands = built_in_slash_commands();
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 3);
         let names: Vec<&str> = commands.iter().map(|(name, _)| *name).collect();
         assert!(names.contains(&"raw"));
         assert!(names.contains(&"sessions"));
+        assert!(names.contains(&"agent"));
     }
 
     #[test]
     fn supports_inline_args() {
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::Sessions.supports_inline_args());
+        assert!(!SlashCommand::Agent.supports_inline_args());
     }
 }

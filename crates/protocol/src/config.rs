@@ -31,20 +31,6 @@ pub struct ToolContext {
     pub approval_mode: ApprovalMode,
 }
 
-impl ToolContext {
-    /// Create a test context rooted at `cwd` with the root agent path
-    /// and the default approval mode.
-    #[must_use]
-    pub fn for_test(cwd: impl Into<PathBuf>) -> Self {
-        Self::builder()
-            .session_id(SessionId("test-session".to_string()))
-            .cwd(cwd.into())
-            .agent_path(AgentPath::root())
-            .approval_mode(ApprovalMode::default())
-            .build()
-    }
-}
-
 /// A session mode preset (e.g. read-only, auto, full-access).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMode {

@@ -567,6 +567,16 @@ mod tests {
     use super::*;
     use crate::ToolRegistry;
 
+    /// Build a test tool context rooted at `cwd`.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     /// In-memory agent control used by wait-agent tool tests.
     struct FakeAgentControl {
         paths: HashMap<String, AgentPath>,
@@ -730,7 +740,7 @@ mod tests {
     async fn wait_agent_rejects_short_timeout_before_status_only_updates() {
         let (control, status_tx) = FakeAgentControl::with_running_child();
         let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         status_tx
             .send(AgentStatus::Completed {
@@ -756,7 +766,7 @@ mod tests {
             })
             .expect("send status");
         let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(serde_json::json!({ "timeout_ms": 500 }), &ctx)
@@ -771,7 +781,7 @@ mod tests {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let notifier = Arc::clone(&control);
         let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let waiter = tokio::spawn(async move {
             tool.execute(
@@ -861,7 +871,7 @@ mod tests {
     async fn spawn_agent_returns_codex_v2_task_name_output() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SpawnAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let output = tool
             .execute(
@@ -888,7 +898,7 @@ mod tests {
     async fn spawn_agent_accepts_codex_v2_agent_type_parameter() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SpawnAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let output = tool
             .execute(
@@ -920,7 +930,7 @@ mod tests {
             })
             .expect("send status");
         let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(
@@ -939,7 +949,7 @@ mod tests {
     async fn spawn_agent_rejects_missing_task_name() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SpawnAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(
@@ -958,7 +968,7 @@ mod tests {
     async fn spawn_agent_rejects_unknown_fields() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SpawnAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(
@@ -979,7 +989,7 @@ mod tests {
     async fn wait_agent_rejects_timeout_below_minimum() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(serde_json::json!({ "timeout_ms": 1 }), &ctx)
@@ -993,7 +1003,7 @@ mod tests {
     async fn wait_agent_rejects_timeout_above_maximum() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = WaitAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(serde_json::json!({ "timeout_ms": 1_800_001 }), &ctx)
@@ -1017,7 +1027,7 @@ mod tests {
     async fn send_message_rejects_empty_message() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SendMessage::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(
@@ -1037,7 +1047,7 @@ mod tests {
     async fn followup_task_rejects_root_target() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = FollowupTask::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(
@@ -1057,7 +1067,7 @@ mod tests {
     async fn list_agents_returns_codex_v2_object() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = ListAgents::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let output = tool
             .execute(serde_json::json!({}), &ctx)
@@ -1087,7 +1097,7 @@ mod tests {
         let tool_control: Arc<dyn AgentControlRef> = control.clone();
         let tool = ListAgents::new(tool_control);
         let ctx = ToolContext::builder()
-            .session_id(protocol::SessionId("test-session".to_string()))
+            .session_id(protocol::SessionId::from("test-session"))
             .cwd(Path::new(".").to_path_buf())
             .agent_path(AgentPath::root().join("parent"))
             .approval_mode(protocol::ApprovalMode::default())
@@ -1126,7 +1136,7 @@ mod tests {
     async fn close_agent_returns_previous_status_object() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = CloseAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let output = tool
             .execute(
@@ -1147,7 +1157,7 @@ mod tests {
     async fn close_agent_rejects_root_target() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = CloseAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(serde_json::json!({ "target": "/root" }), &ctx)
@@ -1161,7 +1171,7 @@ mod tests {
     async fn close_agent_rejects_unknown_fields() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = CloseAgent::new(control);
-        let ctx = ToolContext::for_test(Path::new("."));
+        let ctx = test_context(Path::new("."));
 
         let error = tool
             .execute(

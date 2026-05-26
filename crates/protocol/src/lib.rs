@@ -9,6 +9,7 @@
 
 pub mod acp_conv;
 pub mod agent;
+pub mod agent_ui;
 pub mod config;
 pub mod event;
 pub mod item;
@@ -23,6 +24,7 @@ pub mod session;
 pub mod tool;
 
 pub use agent::*;
+pub use agent_ui::*;
 pub use config::*;
 pub use event::*;
 pub use item::*;

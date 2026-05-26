@@ -251,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn thread_manager_returns_session_not_found_for_missing_send() {
         let manager = ThreadManager::new();
-        let missing = SessionId("missing".to_string());
+        let missing = SessionId::from("missing");
 
         let error = manager
             .send_op(
@@ -269,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_thread_keeps_operation_channel_open_for_future_prompts() {
         let manager = ThreadManager::new();
-        let session_id = SessionId("session".to_string());
+        let session_id = SessionId::from("session");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
         let thread = test_thread(session_id.clone(), tx_op);
         manager.insert_thread(thread).await;
@@ -297,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn set_model_noops_for_non_root_agent_threads() {
         let manager = ThreadManager::new();
-        let session_id = SessionId("child".to_string());
+        let session_id = SessionId::from("child");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
         let thread =
             test_thread_with_path(session_id.clone(), AgentPath::root().join("child"), tx_op);
@@ -317,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn set_model_enqueues_root_agent_switch_without_runtime_ack() {
         let manager = ThreadManager::new();
-        let session_id = SessionId("root".to_string());
+        let session_id = SessionId::from("root");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
         let thread = test_thread(session_id.clone(), tx_op);
         manager.insert_thread(thread).await;

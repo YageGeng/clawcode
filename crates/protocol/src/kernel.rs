@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use crate::agent::AgentPath;
+use crate::agent_ui::AgentUiMetadata;
 use crate::config::{ModelInfo, SessionMode};
 use crate::event::Event;
 use crate::mcp::McpServerConfig;
@@ -80,6 +81,12 @@ pub trait AgentKernel: Send + Sync {
 
     /// Close a session and release its resources.
     async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError>;
+
+    /// Return UI-only agent metadata for a root session tree.
+    async fn agent_ui_snapshot(
+        &self,
+        root_session_id: &SessionId,
+    ) -> Result<Vec<AgentUiMetadata>, KernelError>;
 
     /// Spawn a sub-agent in a parent session.
     async fn spawn_agent(

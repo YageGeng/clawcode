@@ -103,6 +103,16 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
+    /// Build a test tool context rooted at `cwd`.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     struct RecordingWriteBackend {
         request: Mutex<Option<crate::FsWriteRequest>>,
     }
@@ -142,7 +152,7 @@ mod tests {
         write
             .execute(
                 serde_json::json!({"path": "test.txt", "content": "hello world"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -151,7 +161,7 @@ mod tests {
         let result = read
             .execute(
                 serde_json::json!({"path": "test.txt"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -170,7 +180,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"path": "out.txt", "content": "hello world!"}),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect("write should use fake backend");
@@ -194,7 +204,7 @@ mod tests {
         let tool = WriteFile::new();
         tool.execute(
             serde_json::json!({"path": "nested/test.txt", "content": "cwd scoped"}),
-            &ToolContext::for_test(dir.path()),
+            &test_context(dir.path()),
         )
         .await
         .unwrap();
@@ -209,11 +219,11 @@ mod tests {
         let tool = WriteFile::new();
         assert!(tool.needs_approval(
             &serde_json::json!({"path": "test.txt"}),
-            &ToolContext::for_test(Path::new("."))
+            &test_context(Path::new("."))
         ));
         assert!(tool.needs_approval(
             &serde_json::json!({"path": "../escape.txt"}),
-            &ToolContext::for_test(Path::new("."))
+            &test_context(Path::new("."))
         ));
     }
 }

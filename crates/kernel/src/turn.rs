@@ -830,7 +830,7 @@ mod tests {
 
     fn test_turn_context(tools: Arc<ToolRegistry>) -> TurnContext {
         TurnContext::builder()
-            .session_id(SessionId("session-1".to_string()))
+            .session_id(SessionId::from("session-1"))
             .turn_id(TurnId("turn-1".to_string()))
             .turn_kind(TurnKindRecord::Prompt)
             .llm(Arc::new(TestLlm))
@@ -944,7 +944,7 @@ mod tests {
 
         consumers.maybe_create("call-1", "apply_patch", &tools);
         let events = consumers.consume_delta(
-            &SessionId("session-1".to_string()),
+            &SessionId::from("session-1"),
             "call-1",
             "{\"patchText\":\"*** Begin Patch\\n*** Add File: added.txt\\n+hello\\n",
         );

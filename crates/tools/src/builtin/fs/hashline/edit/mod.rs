@@ -226,6 +226,16 @@ mod tests {
     use futures::StreamExt;
     use std::sync::Mutex;
 
+    /// Build a test tool context rooted at `cwd` with defaults.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     /// Apply hashline edits to a test-only in-memory buffer.
     fn test_apply(
         content: &str,
@@ -930,7 +940,7 @@ mod tests {
                     "path": "file.txt",
                     "edits": [{"set_line": {"anchor": anchor("aaa\nbbb\nccc", 2), "new_text": "BBB"}}]
                 }),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect("edit should succeed");
@@ -957,7 +967,7 @@ mod tests {
                     "path": "file.txt",
                     "edits": [{"set_line": {"anchor": anchor("aaa\nbbb\nccc", 2), "new_text": "bbb"}}]
                 }),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect_err("no-op should fail");
@@ -992,7 +1002,7 @@ mod tests {
                     "path": "file.txt",
                     "edits": [{"set_line": {"anchor": anchor("aaa\nbbb\nccc", 2), "new_text": "BBB"}}]
                 }),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect("streaming edit should succeed");
@@ -1021,7 +1031,7 @@ mod tests {
                     "path": "file.txt",
                     "edits": [{"set_line": {"anchor": anchor(original, 2), "new_text": "TWO"}}]
                 }),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect("edit should succeed");

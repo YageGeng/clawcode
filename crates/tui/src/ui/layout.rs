@@ -12,14 +12,30 @@ pub(super) struct FrameRows {
     pub(super) top_status: Rect,
     /// Area used for the prompt composer.
     pub(super) composer: Rect,
+    /// Area used for the inline agent picker below the composer.
+    pub(super) agent_picker: Rect,
     /// Area used for the bottom status row.
     pub(super) bottom_status: Rect,
 }
 
 /// Splits the terminal frame into stable vertical regions.
 pub(super) fn frame_rows(area: Rect, composer_text: &str) -> Option<FrameRows> {
+    frame_rows_with_agent_picker(area, composer_text, 0)
+}
+
+/// Splits the terminal frame and optionally reserves rows for the agent picker.
+pub(super) fn frame_rows_with_agent_picker(
+    area: Rect,
+    composer_text: &str,
+    agent_picker_height: u16,
+) -> Option<FrameRows> {
+    let picker_height = agent_picker_height.min(5);
     let composer_height = composer_height(composer_text);
-    let transcript_min = if area.height >= composer_height.saturating_add(5) {
+    let transcript_min = if area.height
+        >= composer_height
+            .saturating_add(picker_height)
+            .saturating_add(5)
+    {
         3
     } else {
         1
@@ -28,6 +44,7 @@ pub(super) fn frame_rows(area: Rect, composer_text: &str) -> Option<FrameRows> {
         Constraint::Min(transcript_min),
         Constraint::Length(1),
         Constraint::Length(composer_height),
+        Constraint::Length(picker_height),
         Constraint::Length(1),
     ];
 
@@ -37,11 +54,18 @@ pub(super) fn frame_rows(area: Rect, composer_text: &str) -> Option<FrameRows> {
         .split(area);
 
     match rows.as_ref() {
-        [transcript, top_status, composer, bottom_status] => Some(
+        [
+            transcript,
+            top_status,
+            composer,
+            agent_picker,
+            bottom_status,
+        ] => Some(
             FrameRows::builder()
                 .transcript(*transcript)
                 .top_status(*top_status)
                 .composer(*composer)
+                .agent_picker(*agent_picker)
                 .bottom_status(*bottom_status)
                 .build(),
         ),
@@ -77,6 +101,15 @@ mod tests {
         assert_eq!(composer_height("one"), 3);
         assert_eq!(composer_height("one\ntwo\nthree\nfour"), 4);
         assert_eq!(composer_height("1\n2\n3\n4\n5\n6\n7"), 6);
+    }
+
+    /// Verifies visible agent picker reserves rows under the composer.
+    #[test]
+    fn frame_rows_reserves_agent_picker_height_when_visible() {
+        let rows = frame_rows_with_agent_picker(Rect::new(0, 0, 80, 20), "hello", 3).expect("rows");
+
+        assert_eq!(rows.agent_picker.height, 3);
+        assert!(rows.agent_picker.y > rows.composer.y);
     }
 
     /// Verifies centered rectangles never exceed frame bounds.

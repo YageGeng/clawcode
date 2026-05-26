@@ -121,6 +121,41 @@ impl AgentControl {
             .ok_or_else(|| format!("missing recorder for session {session_id}"))
     }
 
+    /// Build UI-only metadata for the root session tree.
+    pub async fn agent_ui_snapshot(
+        &self,
+        root_session_id: &SessionId,
+    ) -> Vec<protocol::AgentUiMetadata> {
+        let mut entries = self
+            .registry
+            .registered_agent_metadata()
+            .into_iter()
+            .filter_map(|metadata| protocol::AgentUiMetadata::try_from(metadata).ok())
+            .collect::<Vec<_>>();
+
+        // The picker must always offer the main agent as the first switch target.
+        if !entries
+            .iter()
+            .any(|entry| entry.session_id == *root_session_id && entry.is_root)
+        {
+            entries.push(
+                protocol::AgentUiMetadata::builder()
+                    .session_id(root_session_id.clone())
+                    .agent_path(AgentPath::root())
+                    .status(AgentStatus::Running)
+                    .is_root(true)
+                    .build(),
+            );
+        }
+
+        entries.sort_by(|left, right| match (left.is_root, right.is_root) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => left.agent_path.as_str().cmp(right.agent_path.as_str()),
+        });
+        entries
+    }
+
     /// Spawn a sub-agent under `parent_path` and kick off its first turn.
     ///
     /// # Flow
@@ -161,7 +196,7 @@ impl AgentControl {
 
         let nickname = reservation.reserve_nickname(None)?;
 
-        let session_id = SessionId(uuid::Uuid::new_v4().to_string());
+        let session_id = SessionId::from(uuid::Uuid::new_v4().to_string());
 
         // Resolve parent session id before commit so it can be stored in metadata.
         let parent_sid = self.registry.agent_id_for_path(parent_path);
@@ -600,6 +635,29 @@ impl AgentControl {
     }
 }
 
+impl TryFrom<AgentMetadata> for protocol::AgentUiMetadata {
+    type Error = ();
+
+    /// Convert registry metadata into UI metadata when it has a session id and path.
+    fn try_from(metadata: AgentMetadata) -> Result<Self, Self::Error> {
+        let session_id = metadata.agent_id.ok_or(())?;
+        let agent_path = metadata.agent_path.ok_or(())?;
+        let is_root = agent_path.is_root();
+        let mut ui_metadata = protocol::AgentUiMetadata::builder()
+            .session_id(session_id)
+            .agent_path(agent_path)
+            .status(metadata.agent_status)
+            .is_root(is_root)
+            .build();
+        // typed-builder changes the builder type after each optional setter, so optional registry
+        // fields are copied onto the completed value instead of conditionally reassigning builders.
+        ui_metadata.parent_session_id = metadata.parent_session_id;
+        ui_metadata.nickname = metadata.agent_nickname;
+        ui_metadata.role = metadata.agent_role;
+        Ok(ui_metadata)
+    }
+}
+
 /// Sanitize a user-provided task name into a valid [`AgentPath`] segment.
 /// Only lowercase ASCII alphanumerics and underscores are allowed;
 /// everything else is replaced with `_`.
@@ -741,7 +799,7 @@ mod tests {
             Some(session_store),
             Some(Arc::clone(&store) as Arc<dyn AgentGraphStore>),
         );
-        let parent_id = SessionId("parent".to_string());
+        let parent_id = SessionId::from("parent");
         let parent_recorder = store
             .create_session(
                 CreateSessionParams::builder()
@@ -805,7 +863,7 @@ mod tests {
             Some(session_store),
             Some(Arc::new(FailingAgentGraphStore)),
         );
-        let parent_id = SessionId("parent".to_string());
+        let parent_id = SessionId::from("parent");
         let parent_recorder = store
             .create_session(
                 CreateSessionParams::builder()
@@ -822,7 +880,7 @@ mod tests {
         let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id);
         control
-            .register_recorder(SessionId("parent".to_string()), parent_recorder)
+            .register_recorder(SessionId::from("parent"), parent_recorder)
             .await;
 
         let error = control
@@ -890,8 +948,8 @@ mod tests {
             None,
             None,
         );
-        let parent_id = SessionId("parent".to_string());
-        let child_id = SessionId("child".to_string());
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
         let child_path = AgentPath::root().join("child");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
         thread_manager
@@ -951,8 +1009,8 @@ mod tests {
             None,
             None,
         );
-        let parent_id = SessionId("parent".to_string());
-        let child_id = SessionId("child".to_string());
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
         let child_path = AgentPath::root().join("child");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
         thread_manager
@@ -1018,8 +1076,8 @@ mod tests {
             None,
             None,
         );
-        let parent_id = SessionId("parent".to_string());
-        let child_id = SessionId("child".to_string());
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
         let child_path = AgentPath::root().join("child");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
         thread_manager
@@ -1062,10 +1120,10 @@ mod tests {
     #[tokio::test]
     async fn subscribe_status_recreates_missing_watcher_from_registry_status() {
         let control = agent_control_no_persistence();
-        let child_id = SessionId("child".to_string());
+        let child_id = SessionId::from("child");
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
         seed_agent(&control, "child", "child", Some("Child"), Some("root"));
         control.registry.update_agent_status(
             &child_id,
@@ -1106,6 +1164,50 @@ mod tests {
         )
     }
 
+    /// Verifies UI snapshots always include the root session as the first entry.
+    #[tokio::test]
+    async fn agent_ui_snapshot_includes_root_first() {
+        let control = agent_control_no_persistence();
+        let root_id = SessionId::from("root-session");
+        control.registry.register_root_thread(root_id.clone());
+
+        let snapshot = control.agent_ui_snapshot(&root_id).await;
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].session_id, root_id);
+        assert!(snapshot[0].is_root);
+        assert_eq!(snapshot[0].agent_path, AgentPath::root());
+        assert_eq!(snapshot[0].status, AgentStatus::Running);
+    }
+
+    /// Verifies UI snapshots include registered children with session ids and parent ids.
+    #[tokio::test]
+    async fn agent_ui_snapshot_includes_registered_child_metadata() {
+        let control = agent_control_no_persistence();
+        let root_id = SessionId::from("root-session");
+        let child_id = SessionId::from("child-session");
+        control.registry.register_root_thread(root_id.clone());
+        control
+            .registry
+            .restore_agent(
+                child_id.clone(),
+                AgentPath::root().join("inspect"),
+                Some("finder".to_string()),
+                Some("worker".to_string()),
+                Some(root_id.clone()),
+            )
+            .expect("restore child");
+
+        let snapshot = control.agent_ui_snapshot(&root_id).await;
+
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].session_id, root_id);
+        assert_eq!(snapshot[1].session_id, child_id);
+        assert_eq!(snapshot[1].parent_session_id.as_ref(), Some(&root_id));
+        assert_eq!(snapshot[1].nickname.as_deref(), Some("finder"));
+        assert_eq!(snapshot[1].role.as_deref(), Some("worker"));
+    }
+
     /// Seed a non-root agent into the registry via restore for listing tests.
     fn seed_agent(
         control: &Arc<AgentControl>,
@@ -1118,11 +1220,11 @@ mod tests {
         control
             .registry
             .restore_agent(
-                SessionId(id.to_string()),
+                SessionId::from(id.to_string()),
                 path,
                 nick.map(|n| n.to_string()),
                 Some("default".to_string()),
-                parent.map(|p| SessionId(p.to_string())),
+                parent.map(|p| SessionId::from(p.to_string())),
             )
             .expect("seed agent");
     }
@@ -1140,7 +1242,7 @@ mod tests {
     #[tokio::test]
     async fn session_mailbox_subscription_reflects_pending_queue_only() {
         let control = agent_control_no_persistence();
-        let root_id = SessionId("root".to_string());
+        let root_id = SessionId::from("root");
         control.registry.register_root_thread(root_id.clone());
         let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
         let root_thread = test_thread(root_id.clone(), tx_parent);
@@ -1172,7 +1274,7 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
         seed_agent(&control, "a", "alice", Some("Alice"), Some("root"));
         seed_agent(&control, "b", "bob", Some("Bob"), Some("root"));
 
@@ -1189,11 +1291,11 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
         let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
         control
             .thread_manager
-            .insert_thread(test_thread(SessionId("root".to_string()), tx_parent))
+            .insert_thread(test_thread(SessionId::from("root"), tx_parent))
             .await;
         seed_agent(&control, "done", "done", Some("Done"), Some("root"));
         let (status_tx, _status_rx) = watch::channel(AgentStatus::PendingInit);
@@ -1201,11 +1303,11 @@ mod tests {
             .status_watchers
             .lock()
             .await
-            .insert(SessionId("done".to_string()), status_tx);
+            .insert(SessionId::from("done"), status_tx);
 
         control
             .notify_child_terminal_turn(
-                &SessionId("done".to_string()),
+                &SessionId::from("done"),
                 AgentStatus::Completed {
                     message: Some("finished".to_string()),
                 },
@@ -1224,7 +1326,7 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
         seed_agent(&control, "alpha", "team/alpha", Some("Alpha"), Some("root"));
         seed_agent(&control, "beta", "team/beta", Some("Beta"), Some("root"));
         seed_agent(&control, "sibling", "team_ab", Some("TeamAB"), Some("root"));
@@ -1244,7 +1346,7 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("lonely_root".to_string()));
+            .register_root_thread(SessionId::from("lonely_root"));
         let list = control.list_agents(None);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].agent_name, "/root");
@@ -1260,17 +1362,17 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
 
         // Build a three-level tree:
         //   /root/team_a          (has tx_op)
         //   /root/team_a/sub_1    (has tx_op)
         //   /root/team_a/sub_1/deep (has tx_op)
         //   /root/team_b          (unrelated, should NOT be closed)
-        let parent_id = SessionId("team_a".to_string());
-        let sub1_id = SessionId("sub_1".to_string());
-        let deep_id = SessionId("deep".to_string());
-        let team_b_id = SessionId("team_b".to_string());
+        let parent_id = SessionId::from("team_a");
+        let sub1_id = SessionId::from("sub_1");
+        let deep_id = SessionId::from("deep");
+        let team_b_id = SessionId::from("team_b");
 
         let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
         let (tx_sub1, _rx_sub1) = mpsc::unbounded_channel::<Op>();
@@ -1355,21 +1457,21 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
         let (tx_parent, _rx_parent) = mpsc::unbounded_channel::<Op>();
         let (tx_child, _rx_child) = mpsc::unbounded_channel::<Op>();
         let (tx_deep, _rx_deep) = mpsc::unbounded_channel::<Op>();
         control
             .thread_manager
-            .insert_thread(test_thread(SessionId("team_a".to_string()), tx_parent))
+            .insert_thread(test_thread(SessionId::from("team_a"), tx_parent))
             .await;
         control
             .thread_manager
-            .insert_thread(test_thread(SessionId("deep".to_string()), tx_deep))
+            .insert_thread(test_thread(SessionId::from("deep"), tx_deep))
             .await;
         control
             .thread_manager
-            .insert_thread(test_thread(SessionId("child".to_string()), tx_child))
+            .insert_thread(test_thread(SessionId::from("child"), tx_child))
             .await;
         seed_agent(&control, "team_a", "team_a", Some("TeamA"), Some("root"));
         seed_agent(
@@ -1388,7 +1490,7 @@ mod tests {
         );
 
         control.registry.update_agent_status(
-            &SessionId("deep".to_string()),
+            &SessionId::from("deep"),
             AgentStatus::Completed {
                 message: Some("done".to_string()),
             },
@@ -1412,7 +1514,7 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
 
         let result = control.close_agent(&AgentPath::root().join("ghost")).await;
         result.expect_err("closing a missing agent should fail");
@@ -1423,7 +1525,7 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
+            .register_root_thread(SessionId::from("root"));
 
         let result = control.close_agent(&AgentPath::root()).await;
 
@@ -1433,7 +1535,7 @@ mod tests {
         );
         assert_eq!(
             control.registry.agent_id_for_path(&AgentPath::root()),
-            Some(SessionId("root".to_string()))
+            Some(SessionId::from("root"))
         );
     }
 
@@ -1442,8 +1544,8 @@ mod tests {
         let control = agent_control_no_persistence();
         control
             .registry
-            .register_root_thread(SessionId("root".to_string()));
-        let target_id = SessionId("target".to_string());
+            .register_root_thread(SessionId::from("root"));
+        let target_id = SessionId::from("target");
         let (tx_target, _rx_target) = mpsc::unbounded_channel::<Op>();
         control
             .thread_manager
@@ -1451,7 +1553,7 @@ mod tests {
             .await;
         seed_agent(
             &control,
-            target_id.0.as_str(),
+            target_id.0.as_ref(),
             "target",
             Some("Target"),
             Some("root"),

@@ -200,7 +200,10 @@ impl AgentRegistry {
         } else {
             for meta in agents.agent_tree.values() {
                 let matches_nickname = meta.agent_nickname.as_deref() == Some(target);
-                let matches_session_id = meta.agent_id.as_ref().is_some_and(|id| id.0 == target);
+                let matches_session_id = meta
+                    .agent_id
+                    .as_ref()
+                    .is_some_and(|id| id.0.as_ref() == target);
                 if matches_nickname || matches_session_id {
                     return meta
                         .agent_path
@@ -257,6 +260,18 @@ impl AgentRegistry {
             .agent_tree
             .values()
             .filter(|m| m.agent_id.is_some() && !m.agent_path.as_ref().is_some_and(|p| p.is_root()))
+            .cloned()
+            .collect()
+    }
+
+    /// Return metadata for all registered agents that have a session id.
+    pub(crate) fn registered_agent_metadata(&self) -> Vec<AgentMetadata> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agent_tree
+            .values()
+            .filter(|metadata| metadata.agent_id.is_some())
             .cloned()
             .collect()
     }
@@ -474,7 +489,7 @@ mod tests {
         let nick = res.reserve_nickname(None).unwrap();
         assert!(!nick.is_empty());
 
-        let id = SessionId("test-id-1".to_string());
+        let id = SessionId::from("test-id-1");
         res.commit(
             AgentMetadata::builder()
                 .agent_id(id.clone())
@@ -514,7 +529,7 @@ mod tests {
         res1.reserve_path(&path).unwrap();
         res1.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("a".to_string()))
+                .agent_id(SessionId::from("a"))
                 .agent_path(path.clone())
                 .build(),
         );
@@ -572,7 +587,7 @@ mod tests {
         res.reserve_path(&path).unwrap();
         res.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("f1".to_string()))
+                .agent_id(SessionId::from("f1"))
                 .agent_path(path.clone())
                 .build(),
         );
@@ -590,7 +605,7 @@ mod tests {
         let nick = res.reserve_nickname(None).unwrap();
         res.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("n1".to_string()))
+                .agent_id(SessionId::from("n1"))
                 .agent_path(path.clone())
                 .agent_nickname(nick.clone())
                 .build(),
@@ -608,7 +623,7 @@ mod tests {
         res.reserve_path(&path).unwrap();
         res.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("session-1".to_string()))
+                .agent_id(SessionId::from("session-1"))
                 .agent_path(path.clone())
                 .agent_nickname("finder".to_string())
                 .build(),
@@ -640,12 +655,12 @@ mod tests {
         res.reserve_path(&child_path).unwrap();
         res.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("c1".to_string()))
+                .agent_id(SessionId::from("c1"))
                 .agent_path(child_path.clone())
                 .agent_nickname("childo".to_string())
                 .build(),
         );
-        registry.register_root_thread(SessionId("root".to_string()));
+        registry.register_root_thread(SessionId::from("root"));
 
         let live = registry.live_agents();
         assert_eq!(live.len(), 1);
@@ -668,17 +683,17 @@ mod tests {
         let path = AgentPath::root().join("restored");
         registry
             .restore_agent(
-                SessionId("r1".to_string()),
+                SessionId::from("r1"),
                 path.clone(),
                 Some("restoro".to_string()),
                 Some("default".to_string()),
-                Some(SessionId("parent".to_string())),
+                Some(SessionId::from("parent")),
             )
             .unwrap();
 
         assert_eq!(
             registry.agent_id_for_path(&path),
-            Some(SessionId("r1".to_string()))
+            Some(SessionId::from("r1"))
         );
     }
 
@@ -687,11 +702,11 @@ mod tests {
         let registry = AgentRegistry::new();
         let path = AgentPath::root().join("dup_restore");
         registry
-            .restore_agent(SessionId("r1".to_string()), path.clone(), None, None, None)
+            .restore_agent(SessionId::from("r1"), path.clone(), None, None, None)
             .unwrap();
         assert!(
             registry
-                .restore_agent(SessionId("r2".to_string()), path, None, None, None)
+                .restore_agent(SessionId::from("r2"), path, None, None, None)
                 .is_err()
         );
     }
@@ -701,7 +716,7 @@ mod tests {
         let registry = AgentRegistry::new();
         registry
             .restore_agent(
-                SessionId("a".to_string()),
+                SessionId::from("a"),
                 AgentPath::root().join("a"),
                 Some("collision".to_string()),
                 None,
@@ -710,7 +725,7 @@ mod tests {
             .unwrap();
         registry
             .restore_agent(
-                SessionId("b".to_string()),
+                SessionId::from("b"),
                 AgentPath::root().join("b"),
                 Some("collision".to_string()),
                 None,
@@ -782,14 +797,14 @@ mod tests {
         res.reserve_path(&child_path).unwrap();
         res.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("tc".to_string()))
+                .agent_id(SessionId::from("tc"))
                 .agent_path(child_path.clone())
                 .build(),
         );
         let before = registry.total_count.load(Ordering::Acquire);
         assert!(before >= 1);
 
-        registry.release_spawned_thread(SessionId("tc".to_string()));
+        registry.release_spawned_thread(SessionId::from("tc"));
         let after = registry.total_count.load(Ordering::Acquire);
         assert_eq!(after, before - 1);
         assert!(registry.agent_id_for_path(&child_path).is_none());
@@ -798,9 +813,9 @@ mod tests {
     #[test]
     fn release_spawned_thread_does_not_decrement_for_root() {
         let registry = AgentRegistry::new();
-        registry.register_root_thread(SessionId("root".to_string()));
+        registry.register_root_thread(SessionId::from("root"));
         let before = registry.total_count.load(Ordering::Acquire);
-        registry.release_spawned_thread(SessionId("root".to_string()));
+        registry.release_spawned_thread(SessionId::from("root"));
         let after = registry.total_count.load(Ordering::Acquire);
         assert_eq!(after, before, "root release must not decrement counter");
     }
@@ -810,11 +825,11 @@ mod tests {
     #[test]
     fn register_root_thread_replaces_stale_root() {
         let registry = AgentRegistry::new();
-        registry.register_root_thread(SessionId("old_root".to_string()));
-        registry.register_root_thread(SessionId("new_root".to_string()));
+        registry.register_root_thread(SessionId::from("old_root"));
+        registry.register_root_thread(SessionId::from("new_root"));
 
         let root_id = registry.agent_id_for_path(&AgentPath::root());
-        assert_eq!(root_id, Some(SessionId("new_root".to_string())));
+        assert_eq!(root_id, Some(SessionId::from("new_root")));
     }
 
     // ── agent_metadata_for_thread ──
@@ -829,19 +844,19 @@ mod tests {
         let role = "explorer".to_string();
         res.commit(
             AgentMetadata::builder()
-                .agent_id(SessionId("mc".to_string()))
+                .agent_id(SessionId::from("mc"))
                 .agent_path(child_path.clone())
                 .agent_nickname(nick.clone())
                 .agent_role(role.clone())
-                .parent_session_id(SessionId("p".to_string()))
+                .parent_session_id(SessionId::from("p"))
                 .build(),
         );
 
         let meta = registry
-            .agent_metadata_for_thread(SessionId("mc".to_string()))
+            .agent_metadata_for_thread(SessionId::from("mc"))
             .unwrap();
         assert_eq!(meta.agent_nickname.as_deref(), Some(nick.as_str()));
         assert_eq!(meta.agent_role.as_deref(), Some(role.as_str()));
-        assert_eq!(meta.parent_session_id, Some(SessionId("p".to_string())));
+        assert_eq!(meta.parent_session_id, Some(SessionId::from("p")));
     }
 }

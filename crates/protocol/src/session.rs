@@ -1,14 +1,23 @@
 //! Session identifier and metadata types.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use agent_client_protocol::schema;
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
 
 /// Unique session identifier generated when a new session is created.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionId(pub String);
+#[serde(transparent)]
+pub struct SessionId(pub Arc<str>);
+
+impl SessionId {
+    pub fn new(id: impl Into<Arc<str>>) -> Self {
+        Self(id.into())
+    }
+}
 
 impl std::fmt::Display for SessionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,12 +61,48 @@ pub struct SessionListPage {
 
 impl From<SessionId> for String {
     fn from(session_id: SessionId) -> Self {
-        session_id.0
+        session_id.0.to_string()
     }
 }
 
 impl From<&SessionId> for String {
     fn from(session_id: &SessionId) -> Self {
-        session_id.0.clone()
+        session_id.0.to_string()
+    }
+}
+
+impl From<String> for SessionId {
+    fn from(id: String) -> Self {
+        Self(id.into())
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(id: &str) -> Self {
+        Self(id.into())
+    }
+}
+
+impl From<Arc<str>> for SessionId {
+    fn from(id: Arc<str>) -> Self {
+        Self(id)
+    }
+}
+
+impl From<schema::SessionId> for SessionId {
+    fn from(session_id: schema::SessionId) -> Self {
+        Self(session_id.0)
+    }
+}
+
+impl From<SessionId> for schema::SessionId {
+    fn from(session_id: SessionId) -> Self {
+        schema::SessionId::new(session_id.0)
+    }
+}
+
+impl From<&SessionId> for schema::SessionId {
+    fn from(session_id: &SessionId) -> Self {
+        schema::SessionId::new(Arc::clone(&session_id.0))
     }
 }

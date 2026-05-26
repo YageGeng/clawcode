@@ -113,6 +113,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
+    /// Build a test tool context rooted at `cwd`.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     struct RecordingReadBackend {
         request: Mutex<Option<FsReadRequest>>,
     }
@@ -157,10 +167,7 @@ mod tests {
 
         let tool = ReadFile::new();
         let result = tool
-            .execute(
-                serde_json::json!({"path": path}),
-                &ToolContext::for_test(dir.path()),
-            )
+            .execute(serde_json::json!({"path": path}), &test_context(dir.path()))
             .await
             .unwrap();
 
@@ -178,7 +185,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"path": "sample.txt", "offset": 2, "limit": 3}),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect("read should use fake backend");
@@ -212,7 +219,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"path": path, "offset": 1, "limit": 2}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -226,7 +233,7 @@ mod tests {
         let tool = ReadFile::new();
         assert!(!tool.needs_approval(
             &serde_json::json!({"path": "x"}),
-            &ToolContext::for_test(Path::new("."))
+            &test_context(Path::new("."))
         ));
     }
 
@@ -236,12 +243,12 @@ mod tests {
         let tool = ReadFile::new();
         assert!(tool.needs_approval(
             &serde_json::json!({"path": "/etc/passwd"}),
-            &ToolContext::for_test(Path::new("."))
+            &test_context(Path::new("."))
         ));
         let result = tool
             .execute(
                 serde_json::json!({"path": "/etc/hostname"}),
-                &ToolContext::for_test(Path::new(".")),
+                &test_context(Path::new(".")),
             )
             .await;
         let _ = result;
@@ -253,7 +260,7 @@ mod tests {
         let tool = ReadFile::new();
         assert!(tool.needs_approval(
             &serde_json::json!({"path": "../secret"}),
-            &ToolContext::for_test(Path::new("."))
+            &test_context(Path::new("."))
         ));
     }
 }

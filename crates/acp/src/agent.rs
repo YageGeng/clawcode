@@ -20,6 +20,8 @@ use protocol::{AgentKernel, Event, SessionId, SessionLaunchOptions};
 use crate::backend::fs::AcpClientFsRouter;
 use crate::backend::terminal::AcpClientTerminalRouter;
 
+const SUBAGENT_METADATA_TOOL_CALL_ID: &str = "clawcode-subagents";
+
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 pub struct ClawcodeAgent {
     /// Reference to the kernel for session operations.
@@ -77,6 +79,35 @@ impl ClawcodeAgent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Build a metadata-only ACP update for the TUI agent picker.
+    fn subagent_metadata_update(
+        event: protocol::AgentUiEventKind,
+        agents: Vec<protocol::AgentUiMetadata>,
+    ) -> SessionUpdate {
+        let patch = protocol::AgentUiMetadataPatch::builder()
+            .version(1)
+            .event(event)
+            .agents(agents)
+            .build();
+
+        let meta = serde_json::json!({
+            "clawcode": {
+                "subagents": patch,
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("metadata root must be an object");
+
+        SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new(
+                ToolCallId::new(SUBAGENT_METADATA_TOOL_CALL_ID),
+                ToolCallUpdateFields::default(),
+            )
+            .meta(meta),
+        )
     }
 
     /// Build and store the default session configuration options for a session.
@@ -468,27 +499,11 @@ impl ClawcodeAgent {
             return Ok(());
         }
 
-        let header = ContentChunk::new(ContentBlock::Text(TextContent::new(
-            "\n--- restored history ---\n",
-        )));
-        cx.send_notification(SessionNotification::new(
-            session_id.clone(),
-            SessionUpdate::AgentMessageChunk(header),
-        ))?;
-
         for message in history {
             for update in Self::history_replay_updates(message) {
                 cx.send_notification(SessionNotification::new(session_id.clone(), update))?;
             }
         }
-
-        let footer = ContentChunk::new(ContentBlock::Text(TextContent::new(
-            "\n--- end restored history ---\n",
-        )));
-        cx.send_notification(SessionNotification::new(
-            session_id.clone(),
-            SessionUpdate::AgentMessageChunk(footer),
-        ))?;
         Ok(())
     }
 
@@ -705,6 +720,7 @@ impl ClawcodeAgent {
         let acp_session_id = created.acp_session_id();
         let mode_state = created.acp_mode_state();
         let model_state = created.acp_model_state();
+        let root_session_id = created.session_id.clone();
 
         let config_options = self.set_session_config_defaults(
             created.session_id.clone(),
@@ -726,9 +742,17 @@ impl ClawcodeAgent {
         // for unknown sessions).
         let cx_for_cmds = cx.clone();
         let sid = acp_session_id.clone();
+        let acp_snapshot_session_id = acp_session_id.clone();
+        let kernel = Arc::clone(&self.kernel);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let _ = Self::send_available_commands(&sid, &cx_for_cmds);
+            if let Ok(snapshot) = kernel.agent_ui_snapshot(&root_session_id).await {
+                let update =
+                    Self::subagent_metadata_update(protocol::AgentUiEventKind::Snapshot, snapshot);
+                let _ = cx_for_cmds
+                    .send_notification(SessionNotification::new(acp_snapshot_session_id, update));
+            }
         });
         Ok(NewSessionResponse::new(acp_session_id)
             .modes(mode_state)
@@ -748,7 +772,7 @@ impl ClawcodeAgent {
             mcp_servers,
             ..
         } = request;
-        let session_id = SessionId(session_id.0.to_string());
+        let session_id = SessionId::from(session_id);
         let cwd = Self::resolve_request_cwd(cwd)?;
         let options = Self::launch_options_from_mcp_servers(mcp_servers, &cwd)?;
         let created = self
@@ -758,6 +782,7 @@ impl ClawcodeAgent {
             .map_err(|error| Error::internal_error().data(error.to_string()))?;
 
         let acp_session_id = created.acp_session_id();
+        let root_session_id = created.session_id.clone();
         let config_options = self.set_session_config_defaults(
             created.session_id.clone(),
             &created.modes,
@@ -784,10 +809,18 @@ impl ClawcodeAgent {
         // for unknown sessions).
         let cx_for_cmds = cx.clone();
         let sid = acp_session_id.clone();
+        let acp_snapshot_session_id = acp_session_id.clone();
+        let kernel = Arc::clone(&self.kernel);
 
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let _ = Self::send_available_commands(&sid, &cx_for_cmds);
+            if let Ok(snapshot) = kernel.agent_ui_snapshot(&root_session_id).await {
+                let update =
+                    Self::subagent_metadata_update(protocol::AgentUiEventKind::Snapshot, snapshot);
+                let _ = cx_for_cmds
+                    .send_notification(SessionNotification::new(acp_snapshot_session_id, update));
+            }
         });
 
         Ok(LoadSessionResponse::new()
@@ -811,7 +844,7 @@ impl ClawcodeAgent {
             .sessions
             .into_iter()
             .map(|session| {
-                SessionInfo::new(AcpSessionId::new(session.session_id.0), session.cwd)
+                SessionInfo::new(session.session_id, session.cwd)
                     .title(session.title)
                     .updated_at(session.updated_at)
             })
@@ -825,7 +858,7 @@ impl ClawcodeAgent {
         request: PromptRequest,
         cx: ConnectionTo<Client>,
     ) -> Result<PromptResponse, Error> {
-        let session_id = SessionId(request.session_id.0.to_string());
+        let prompt_session_id = SessionId::from(request.session_id);
 
         // Keep supported prompt blocks from ACP and forward them as plain kernel text.
         let text = request
@@ -839,49 +872,58 @@ impl ClawcodeAgent {
             return Err(Error::invalid_params().data("prompt must include a text block"));
         }
 
-        let acp_sid = AcpSessionId::new(request.session_id.0.to_string());
+        let acp_sid: AcpSessionId = (&prompt_session_id).into();
 
         // Call kernel and get event stream
         let mut events = self
             .kernel
-            .prompt(&session_id, text)
+            .prompt(&prompt_session_id, text)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
+        let mut tool_names = HashMap::<String, String>::new();
 
         // Translate events to ACP notifications
         while let Some(event) = events.next().await {
             let event = event.map_err(|e| Error::internal_error().data(e.to_string()))?;
             match event {
-                Event::AgentMessageChunk { text, .. } => {
+                Event::AgentMessageChunk { session_id, text } => {
                     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
                     let update = SessionUpdate::AgentMessageChunk(chunk);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                 }
-                Event::AgentThoughtChunk { text, .. } => {
+                Event::AgentThoughtChunk { session_id, text } => {
                     let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
                     let update = SessionUpdate::AgentThoughtChunk(chunk);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                 }
                 Event::ToolCall {
+                    session_id,
                     call_id,
                     name,
                     arguments,
                     status,
                     ..
                 } => {
+                    tool_names.insert(call_id.clone(), name.clone());
                     let acp_status: AcpToolCallStatus = status.into();
                     let tool_call = ToolCall::new(ToolCallId::new(call_id), name)
                         .status(acp_status)
                         .raw_input(arguments);
                     let update = SessionUpdate::ToolCall(tool_call);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                 }
                 Event::ToolCallUpdate {
+                    session_id,
                     call_id,
                     output_delta,
                     status,
-                    ..
                 } => {
+                    let completed = status == Some(protocol::ToolCallStatus::Completed);
+                    let completed_tool_name = if completed {
+                        tool_names.get(&call_id).cloned()
+                    } else {
+                        None
+                    };
                     let mut fields = ToolCallUpdateFields::default();
                     if let Some(delta) = output_delta {
                         fields.content = Some(vec![ToolCallContent::Content(Content::new(
@@ -894,15 +936,41 @@ impl ClawcodeAgent {
                     }
                     let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
                     let update = SessionUpdate::ToolCallUpdate(update_val);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+                    if matches!(
+                        completed_tool_name.as_deref(),
+                        Some("spawn_agent" | "close_agent")
+                    ) {
+                        // Agent tools mutate the registry, so refresh the UI list from the
+                        // authoritative kernel state instead of parsing model-visible tool output.
+                        if let Ok(snapshot) =
+                            self.kernel.agent_ui_snapshot(&prompt_session_id).await
+                        {
+                            let update = Self::subagent_metadata_update(
+                                protocol::AgentUiEventKind::Snapshot,
+                                snapshot,
+                            );
+                            let _ = cx.send_notification(SessionNotification::new(
+                                acp_sid.clone(),
+                                update,
+                            ));
+                        }
+                    }
                 }
                 Event::PatchApplyUpdated {
-                    call_id, changes, ..
+                    session_id,
+                    call_id,
+                    changes,
                 } => {
                     let update = Self::patch_apply_updated_to_acp(call_id, changes);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                 }
-                Event::ExecCommandOutputDelta { call_id, chunk, .. } => {
+                Event::ExecCommandOutputDelta {
+                    session_id,
+                    call_id,
+                    chunk,
+                    ..
+                } => {
                     // Forward shell output chunks verbatim; the kernel event
                     // already carries stdout/stderr metadata for non-text clients.
                     let decoded = String::from_utf8_lossy(&chunk);
@@ -914,40 +982,45 @@ impl ClawcodeAgent {
                         fields.status = Some(AcpToolCallStatus::InProgress);
                         let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
                         let update = SessionUpdate::ToolCallUpdate(update_val);
-                        let _ =
-                            cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                        let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                     }
                 }
-                Event::ItemStarted { item, .. } => {
+                Event::ItemStarted {
+                    session_id, item, ..
+                } => {
                     if let Some(update) = item.start() {
-                        let _ =
-                            cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                        let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                     }
                 }
-                Event::ItemCompleted { item, .. } => {
+                Event::ItemCompleted {
+                    session_id, item, ..
+                } => {
                     if let Some(update) = item.end() {
-                        let _ =
-                            cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                        let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                     }
                 }
-                Event::PlanUpdate { entries, .. } => {
+                Event::PlanUpdate {
+                    session_id,
+                    entries,
+                } => {
                     let plan_entries: Vec<PlanEntry> = entries
                         .into_iter()
                         .map(|e| PlanEntry::new(e.name, e.priority.into(), e.status.into()))
                         .collect();
                     let update = SessionUpdate::Plan(Plan::new(plan_entries));
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                 }
                 Event::UsageUpdate {
+                    session_id,
                     input_tokens,
                     output_tokens,
-                    ..
                 } => {
                     let usage = UsageUpdate::new(input_tokens + output_tokens, 0);
                     let update = SessionUpdate::UsageUpdate(usage);
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
                 }
                 Event::ExecApprovalRequested {
+                    session_id,
                     call_id,
                     tool_name,
                     arguments,
@@ -965,7 +1038,7 @@ impl ClawcodeAgent {
                         ToolCallUpdate::new(ToolCallId::new(call_id.clone()), tc_fields);
 
                     let perm_req = RequestPermissionRequest::new(
-                        acp_sid.clone(),
+                        &session_id,
                         tc_update,
                         vec![
                             PermissionOption::new(
@@ -996,6 +1069,57 @@ impl ClawcodeAgent {
                         .kernel
                         .resolve_approval(&session_id, &call_id, decision)
                         .await;
+                }
+                Event::AgentSpawned {
+                    session_id,
+                    agent_path,
+                    agent_nickname,
+                    agent_role,
+                } => {
+                    // Spawned agents run inside kernel-created sessions, so they never pass through
+                    // ACP new/load session handlers before their tools execute. Register the current
+                    // client route immediately so child-session fs/terminal tools can delegate to it.
+                    self.fs_router.register_session(
+                        session_id.clone(),
+                        cx.clone(),
+                        self.client_capabilities_snapshot(),
+                    );
+                    self.terminal_router.register_session(
+                        session_id.clone(),
+                        cx.clone(),
+                        self.client_capabilities_snapshot(),
+                    );
+                    let metadata = protocol::AgentUiMetadata::builder()
+                        .session_id(session_id)
+                        .parent_session_id(prompt_session_id.clone())
+                        .agent_path(agent_path)
+                        .nickname(agent_nickname)
+                        .role(agent_role)
+                        .status(protocol::AgentStatus::Running)
+                        .is_root(false)
+                        .build();
+                    let update = Self::subagent_metadata_update(
+                        protocol::AgentUiEventKind::Upsert,
+                        vec![metadata],
+                    );
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
+                }
+                Event::AgentStatusChange {
+                    session_id,
+                    agent_path,
+                    status,
+                } => {
+                    let metadata = protocol::AgentUiMetadata::builder()
+                        .session_id(session_id)
+                        .agent_path(agent_path)
+                        .status(status)
+                        .is_root(false)
+                        .build();
+                    let update = Self::subagent_metadata_update(
+                        protocol::AgentUiEventKind::Status,
+                        vec![metadata],
+                    );
+                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
                 }
                 Event::TurnComplete { stop_reason, .. } => {
                     let reason: AcpStopReason = stop_reason.into();
@@ -1053,7 +1177,7 @@ impl ClawcodeAgent {
     }
 
     async fn handle_cancel(&self, notification: CancelNotification) -> Result<(), Error> {
-        let session_id = SessionId(notification.session_id.0.to_string());
+        let session_id = SessionId::from(notification.session_id);
         self.kernel
             .cancel(&session_id)
             .await
@@ -1075,7 +1199,7 @@ impl ClawcodeAgent {
         &self,
         request: SetSessionModeRequest,
     ) -> Result<SetSessionModeResponse, Error> {
-        let session_id = SessionId(request.session_id.0.to_string());
+        let session_id = SessionId::from(request.session_id);
         self.kernel
             .set_mode(&session_id, &request.mode_id.0)
             .await
@@ -1089,7 +1213,7 @@ impl ClawcodeAgent {
         &self,
         request: SetSessionModelRequest,
     ) -> Result<SetSessionModelResponse, Error> {
-        let session_id = SessionId(request.session_id.0.to_string());
+        let session_id = SessionId::from(request.session_id);
         let parts: Vec<&str> = request.model_id.0.splitn(2, '/').collect();
         // SAFETY: splitn(2, '/') guarantees the Vec has at least 1 element.
         // The len == 2 check ensures both parts[0] and parts[1] are valid.
@@ -1112,7 +1236,7 @@ impl ClawcodeAgent {
         &self,
         request: SetSessionConfigOptionRequest,
     ) -> Result<SetSessionConfigOptionResponse, Error> {
-        let session_id = SessionId(request.session_id.0.to_string());
+        let session_id = SessionId::from(request.session_id.clone());
         let config_id = request.config_id.0.as_ref();
         let requested = match request.value {
             SessionConfigOptionValue::ValueId { value } => value.to_string(),
@@ -1177,7 +1301,7 @@ impl ClawcodeAgent {
         &self,
         request: CloseSessionRequest,
     ) -> Result<CloseSessionResponse, Error> {
-        let session_id = SessionId(request.session_id.0.to_string());
+        let session_id = SessionId::from(request.session_id);
         self.kernel
             .close_session(&session_id)
             .await
@@ -1192,22 +1316,40 @@ impl ClawcodeAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acp::Responder;
     use async_trait::async_trait;
     use futures::stream;
     use protocol::mcp::McpTransportConfig;
     use protocol::{
         AgentPath, EventStream, KernelError, ModelInfo, OneOrMany, ReviewDecision, SessionCreated,
-        SessionInfo, SessionLaunchOptions, SessionListPage, SessionMode, Text, ToolFunction,
+        SessionId, SessionInfo, SessionLaunchOptions, SessionListPage, SessionMode, Text,
+        ToolFunction,
     };
     use std::path::{Path, PathBuf};
+    use tools::{FsBackend, FsReadRequest};
 
-    #[derive(Default)]
+    #[derive(Default, typed_builder::TypedBuilder)]
     struct RecordingKernel {
+        /// New-session options captured by ACP handler tests.
+        #[builder(default)]
         new_session_options: std::sync::Mutex<Option<SessionLaunchOptions>>,
+        /// Load-session options captured by ACP handler tests.
+        #[builder(default)]
         load_session_options: std::sync::Mutex<Option<SessionLaunchOptions>>,
+        /// Events returned by the fake prompt stream in ACP routing tests.
+        #[builder(default)]
+        prompt_events: std::sync::Mutex<Vec<Event>>,
+        /// Mode changes captured by ACP config tests.
+        #[builder(default)]
         set_mode_calls: std::sync::Mutex<Vec<String>>,
+        /// Model changes captured by ACP config tests.
+        #[builder(default)]
         set_model_calls: std::sync::Mutex<Vec<(String, String)>>,
+        /// Available modes returned by the fake kernel.
+        #[builder(default)]
         available_modes: Vec<SessionMode>,
+        /// Available models returned by the fake kernel.
+        #[builder(default)]
         available_models: Vec<ModelInfo>,
     }
 
@@ -1258,13 +1400,18 @@ mod tests {
             })
         }
 
-        /// Return an empty event stream; prompting is outside these tests.
+        /// Return the configured event stream for ACP prompt routing tests.
         async fn prompt(
             &self,
             _session_id: &SessionId,
             _text: String,
         ) -> Result<EventStream, KernelError> {
-            Ok(Box::pin(stream::empty()))
+            let events = self
+                .prompt_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
         }
 
         /// Accept cancellation in the fake kernel.
@@ -1298,6 +1445,21 @@ mod tests {
         /// Accept session close in the fake kernel.
         async fn close_session(&self, _session_id: &SessionId) -> Result<(), KernelError> {
             Ok(())
+        }
+
+        /// Return a root-only agent UI snapshot for ACP handler tests.
+        async fn agent_ui_snapshot(
+            &self,
+            root_session_id: &SessionId,
+        ) -> Result<Vec<protocol::AgentUiMetadata>, KernelError> {
+            Ok(vec![
+                protocol::AgentUiMetadata::builder()
+                    .session_id(root_session_id.clone())
+                    .agent_path(protocol::AgentPath::root())
+                    .status(protocol::AgentStatus::Running)
+                    .is_root(true)
+                    .build(),
+            ])
         }
 
         /// Accept sub-agent spawns in the fake kernel.
@@ -1336,11 +1498,21 @@ mod tests {
         modes: Vec<SessionMode>,
         models: Vec<ModelInfo>,
     ) -> Arc<RecordingKernel> {
-        Arc::new(RecordingKernel {
-            available_modes: modes,
-            available_models: models,
-            ..Default::default()
-        })
+        Arc::new(
+            RecordingKernel::builder()
+                .available_modes(modes)
+                .available_models(models)
+                .build(),
+        )
+    }
+
+    /// Create a fake kernel that returns the provided prompt events.
+    fn kernel_with_prompt_events(events: Vec<Event>) -> Arc<RecordingKernel> {
+        Arc::new(
+            RecordingKernel::builder()
+                .prompt_events(std::sync::Mutex::new(events))
+                .build(),
+        )
     }
 
     fn default_config_modes() -> Vec<SessionMode> {
@@ -1363,7 +1535,7 @@ mod tests {
     /// Build a session-created response for ACP handler tests.
     fn session_created(modes: Vec<SessionMode>, models: Vec<ModelInfo>) -> SessionCreated {
         SessionCreated::builder()
-            .session_id(protocol::SessionId("session-1".to_string()))
+            .session_id(protocol::SessionId::from("session-1"))
             .current_model(
                 models
                     .first()
@@ -1406,6 +1578,89 @@ mod tests {
         rx.await.expect("test ACP connection should start")
     }
 
+    /// Create an ACP connection handle and collect client notifications.
+    async fn test_connection_to_client_recording_notifications() -> (
+        ConnectionTo<Client>,
+        tokio::sync::mpsc::UnboundedReceiver<SessionNotification>,
+    ) {
+        let (agent_channel, client_channel) = acp::Channel::duplex();
+        let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
+        let (notification_tx, notification_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            let _ = Agent
+                .builder()
+                .connect_with(agent_channel, async move |cx: ConnectionTo<Client>| {
+                    let _ = connection_tx.send(cx);
+                    std::future::pending::<Result<(), Error>>().await
+                })
+                .await;
+        });
+
+        tokio::spawn(async move {
+            let _ = Client
+                .builder()
+                .on_receive_notification(
+                    move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
+                        let tx = notification_tx.clone();
+                        async move {
+                            let _ = tx.send(notification);
+                            Ok(())
+                        }
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                )
+                .connect_with(client_channel, async move |_cx| {
+                    std::future::pending::<Result<(), Error>>().await
+                })
+                .await;
+        });
+
+        (
+            connection_rx
+                .await
+                .expect("agent connection should be created"),
+            notification_rx,
+        )
+    }
+
+    /// Create an ACP connection handle whose client side supports fs/read_text_file.
+    async fn test_connection_to_client_with_read_handler() -> ConnectionTo<Client> {
+        let (agent_channel, client_channel) = acp::Channel::duplex();
+        let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let _ = Agent
+                .builder()
+                .connect_with(agent_channel, async move |cx: ConnectionTo<Client>| {
+                    let _ = connection_tx.send(cx);
+                    std::future::pending::<Result<(), Error>>().await
+                })
+                .await;
+        });
+
+        tokio::spawn(async move {
+            let _ = Client
+                .builder()
+                .on_receive_request(
+                    move |_request: ReadTextFileRequest,
+                          responder: Responder<ReadTextFileResponse>,
+                          _cx| async move {
+                        responder.respond(ReadTextFileResponse::new("from subagent route"))
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .connect_with(client_channel, async move |_cx| {
+                    std::future::pending::<Result<(), Error>>().await
+                })
+                .await;
+        });
+
+        connection_rx
+            .await
+            .expect("agent connection should be created")
+    }
+
     /// Build a persisted assistant tool call message for replay tests.
     fn assistant_tool_call_message() -> Message {
         protocol::message::ToolCall::new(
@@ -1420,7 +1675,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialize_records_client_fs_capabilities_and_omits_image() {
-        let kernel = Arc::new(RecordingKernel::default());
+        let kernel = Arc::new(RecordingKernel::builder().build());
         let agent = ClawcodeAgent::new(kernel);
         let request = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
             ClientCapabilities::new().fs(FileSystemCapabilities::new()
@@ -1562,7 +1817,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_prompt_accepts_text_with_other_blocks() {
-        let kernel = Arc::new(RecordingKernel::default());
+        let kernel = Arc::new(RecordingKernel::builder().build());
         let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
         let request = PromptRequest::new(
             AcpSessionId::new("session-1"),
@@ -1579,8 +1834,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_prompt_routes_stream_updates_to_event_session() {
+        let child_session = SessionId::from("child-session");
+        let kernel = kernel_with_prompt_events(vec![
+            Event::message_chunk(child_session.clone(), "child context"),
+            Event::TurnComplete {
+                session_id: child_session.clone(),
+                stop_reason: protocol::StopReason::EndTurn,
+            },
+        ]);
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new("root-session"),
+            vec![ContentBlock::Text(TextContent::new("hello".to_string()))],
+        );
+        let (client, mut notifications) = test_connection_to_client_recording_notifications().await;
+
+        agent
+            .handle_prompt(request, client)
+            .await
+            .expect("prompt should finish");
+
+        let notification =
+            tokio::time::timeout(std::time::Duration::from_secs(1), notifications.recv())
+                .await
+                .expect("notification should be delivered")
+                .expect("notification channel should stay open");
+
+        assert_eq!(notification.session_id.0.as_ref(), child_session.0.as_ref());
+        let SessionUpdate::AgentMessageChunk(chunk) = notification.update else {
+            panic!("expected child message chunk");
+        };
+        let ContentBlock::Text(text) = chunk.content else {
+            panic!("expected text chunk");
+        };
+        assert_eq!(text.text, "child context");
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_registers_spawned_agent_for_client_fs_routes() {
+        let child_session = SessionId::from("child-session");
+        let fs_router = Arc::new(AcpClientFsRouter::default());
+        let kernel = kernel_with_prompt_events(vec![
+            Event::agent_spawned(
+                child_session.clone(),
+                AgentPath::root().join("analyze_cargo"),
+                "Bacon",
+                "default",
+            ),
+            Event::TurnComplete {
+                session_id: SessionId::from("root-session"),
+                stop_reason: protocol::StopReason::EndTurn,
+            },
+        ]);
+        let agent = ClawcodeAgent::with_fs_router(
+            Arc::clone(&kernel) as Arc<dyn AgentKernel>,
+            Arc::clone(&fs_router),
+        );
+        agent
+            .handle_initialize(
+                InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                    ClientCapabilities::new()
+                        .fs(FileSystemCapabilities::new().read_text_file(true)),
+                ),
+            )
+            .await
+            .expect("initialize should record fs capabilities");
+        let client = test_connection_to_client_with_read_handler().await;
+
+        agent
+            .handle_prompt(
+                PromptRequest::new(
+                    AcpSessionId::new("root-session"),
+                    vec![ContentBlock::Text(TextContent::new("spawn".to_string()))],
+                ),
+                client,
+            )
+            .await
+            .expect("prompt should finish");
+
+        let backend = crate::backend::fs::AcpFsBackend::new(fs_router);
+        let response = backend
+            .read_text_file(
+                FsReadRequest::builder()
+                    .session_id(child_session)
+                    .cwd(PathBuf::from("/workspace"))
+                    .path(PathBuf::from("Cargo.toml"))
+                    .offset(0)
+                    .limit(1)
+                    .build(),
+            )
+            .await
+            .expect("spawned agent session should reuse the ACP client fs route");
+
+        assert_eq!(response.content, "from subagent route");
+    }
+
+    #[tokio::test]
     async fn handle_prompt_accepts_resource_link() {
-        let kernel = Arc::new(RecordingKernel::default());
+        let kernel = Arc::new(RecordingKernel::builder().build());
         let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
         let request = PromptRequest::new(
             AcpSessionId::new("session-1"),
@@ -1598,7 +1950,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_prompt_rejects_non_text_only_content() {
-        let kernel = Arc::new(RecordingKernel::default());
+        let kernel = Arc::new(RecordingKernel::builder().build());
         let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
         let request = PromptRequest::new(
             AcpSessionId::new("session-1"),
@@ -1616,7 +1968,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_session_forwards_acp_mcp_servers_to_kernel_options() {
-        let kernel = Arc::new(RecordingKernel::default());
+        let kernel = Arc::new(RecordingKernel::builder().build());
         let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
         let request =
             NewSessionRequest::new(PathBuf::from("/tmp")).mcp_servers(vec![McpServer::Stdio(
@@ -1640,7 +1992,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_session_forwards_acp_mcp_servers_to_kernel_options() {
-        let kernel = Arc::new(RecordingKernel::default());
+        let kernel = Arc::new(RecordingKernel::builder().build());
         let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
         let request =
             LoadSessionRequest::new(AcpSessionId::new("session-1"), PathBuf::from("/tmp"))
@@ -1712,6 +2064,32 @@ mod tests {
         };
 
         assert_eq!(text.text, "one\ntwo\nthree\nfour\nfive\nsix");
+    }
+
+    /// Verifies subagent metadata is carried on ToolCallUpdate._meta and has no visible content.
+    #[test]
+    fn subagent_snapshot_update_uses_tool_call_meta_without_visible_content() {
+        let root = protocol::AgentUiMetadata::builder()
+            .session_id(protocol::SessionId::from("root-session"))
+            .agent_path(protocol::AgentPath::root())
+            .status(protocol::AgentStatus::Running)
+            .is_root(true)
+            .build();
+
+        let update = ClawcodeAgent::subagent_metadata_update(
+            protocol::AgentUiEventKind::Snapshot,
+            vec![root],
+        );
+
+        let SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("subagent metadata should be a ToolCallUpdate");
+        };
+        assert_eq!(update.tool_call_id.to_string(), "clawcode-subagents");
+        assert!(update.fields.content.is_none());
+        assert_eq!(
+            update.meta.as_ref().unwrap()["clawcode"]["subagents"]["event"],
+            "snapshot"
+        );
     }
 
     #[test]

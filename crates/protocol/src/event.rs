@@ -435,7 +435,7 @@ mod tests {
     /// Verifies that item lifecycle events preserve the owning turn id.
     #[test]
     fn item_lifecycle_events_roundtrip_turn_id() {
-        let session_id = SessionId("session-1".to_string());
+        let session_id = SessionId::from("session-1");
         let turn_id = TurnId("turn-1".to_string());
         let item = TurnItem::FileChange(
             FileChangeItem::builder()
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn patch_apply_updated_event_roundtrips_preview_changes() {
         let event = Event::patch_apply_updated(
-            SessionId("session-1".to_string()),
+            SessionId::from("session-1"),
             "call-1",
             vec![PatchPreviewChange::Add {
                 path: PathBuf::from("added.txt"),

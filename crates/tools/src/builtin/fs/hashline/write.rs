@@ -100,6 +100,16 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Mutex;
 
+    /// Build a test tool context rooted at `cwd`.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     struct RecordingWriteBackend {
         request: Mutex<Option<FsWriteRequest>>,
     }
@@ -141,7 +151,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"path": "out.txt", "content": "hello world!"}),
-                &ToolContext::for_test("/workspace"),
+                &test_context("/workspace"),
             )
             .await
             .expect("write should succeed");

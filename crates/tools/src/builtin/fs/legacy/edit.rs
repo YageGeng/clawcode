@@ -757,6 +757,16 @@ mod tests {
     use super::*;
     use crate::ToolContext;
 
+    /// Build a test tool context rooted at `cwd`.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     /// Verifies that the edit tool replaces only the requested exact text.
     #[tokio::test]
     async fn edit_file_replaces_text() {
@@ -769,7 +779,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"filePath": "patch.txt", "oldString": "target", "newString": "REPLACED"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -792,7 +802,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"filePath": "nope.txt", "oldString": "xyz", "newString": "abc"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -809,7 +819,7 @@ mod tests {
                 "oldString": "t",
                 "newString": "r"
             }),
-            &ToolContext::for_test(Path::new(".")),
+            &test_context(Path::new(".")),
         ));
     }
 
@@ -821,7 +831,7 @@ mod tests {
 
         tool.execute(
             serde_json::json!({"filePath": "new.txt", "oldString": "", "newString": "created"}),
-            &ToolContext::for_test(dir.path()),
+            &test_context(dir.path()),
         )
         .await
         .unwrap();
@@ -845,7 +855,7 @@ mod tests {
         let mut stream = tool
             .execute_streaming(
                 serde_json::json!({"filePath": "structured.txt", "oldString": "target", "newString": "REPLACED"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -883,7 +893,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"filePath": "dupe.txt", "oldString": "a", "newString": "b"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -902,7 +912,7 @@ mod tests {
 
         tool.execute(
             serde_json::json!({"filePath": "all.txt", "oldString": "a", "newString": "b", "replaceAll": true}),
-            &ToolContext::for_test(dir.path()),
+            &test_context(dir.path()),
         )
         .await
         .unwrap();
@@ -922,7 +932,7 @@ mod tests {
 
         tool.execute(
             serde_json::json!({"filePath": "crlf.txt", "oldString": "one\ntwo", "newString": "one\nTWO"}),
-            &ToolContext::for_test(dir.path()),
+            &test_context(dir.path()),
         )
         .await
         .unwrap();
@@ -942,7 +952,7 @@ mod tests {
 
         tool.execute(
             serde_json::json!({"filePath": "trimmed.txt", "oldString": "target\n", "newString": "replacement\n"}),
-            &ToolContext::for_test(dir.path()),
+            &test_context(dir.path()),
         )
         .await
         .unwrap();
@@ -962,7 +972,7 @@ mod tests {
 
         tool.execute(
             serde_json::json!({"filePath": "space.txt", "oldString": "hello world", "newString": "hello rust"}),
-            &ToolContext::for_test(dir.path()),
+            &test_context(dir.path()),
         )
         .await
         .unwrap();
@@ -983,7 +993,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({"filePath": "same.txt", "oldString": "same", "newString": "same"}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 

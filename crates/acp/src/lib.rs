@@ -4,8 +4,6 @@
 //! translating between the clawcode internal protocol and
 //! the ACP schema types for Zed editor integration.
 
-#![deny(clippy::print_stdout, clippy::print_stderr)]
-
 pub mod agent;
 pub mod backend;
 pub mod log;

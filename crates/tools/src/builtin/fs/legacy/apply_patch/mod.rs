@@ -934,6 +934,16 @@ mod tests {
     use super::*;
     use crate::ToolContext;
 
+    /// Build a test tool context rooted at `cwd` with defaults.
+    fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(cwd.into())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
+    }
+
     /// Verifies that parser keeps all supported operation kinds in order.
     #[test]
     fn parse_patch_reads_add_update_delete_and_move_operations() {
@@ -1136,7 +1146,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1156,7 +1166,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1176,7 +1186,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1193,7 +1203,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1213,7 +1223,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1236,7 +1246,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1258,7 +1268,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1282,7 +1292,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1304,7 +1314,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1329,7 +1339,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1347,7 +1357,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1368,7 +1378,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1393,7 +1403,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1414,7 +1424,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1436,7 +1446,7 @@ mod tests {
         ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1460,7 +1470,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1480,7 +1490,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1523,7 +1533,7 @@ mod tests {
         let mut stream = ApplyPatch::new()
             .execute_streaming(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await
             .unwrap();
@@ -1565,7 +1575,7 @@ mod tests {
         let result = ApplyPatch::new()
             .execute(
                 serde_json::json!({"patchText": patch}),
-                &ToolContext::for_test(dir.path()),
+                &test_context(dir.path()),
             )
             .await;
 
@@ -1580,7 +1590,7 @@ mod tests {
             &serde_json::json!({
                 "patchText": "*** Begin Patch\n*** End Patch"
             }),
-            &ToolContext::for_test(Path::new(".")),
+            &test_context(Path::new(".")),
         ));
     }
 

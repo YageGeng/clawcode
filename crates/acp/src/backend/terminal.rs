@@ -102,7 +102,7 @@ impl TerminalBackend for AcpTerminalBackend {
             ));
         }
 
-        let acp_session_id = AcpSessionId::new(params.session_id.0.clone());
+        let acp_session_id = AcpSessionId::from(&params.session_id);
         let acp_env: Vec<_> = params
             .env
             .into_iter()
@@ -142,7 +142,7 @@ struct AcpRunningTerminal {
 impl Drop for AcpRunningTerminal {
     fn drop(&mut self) {
         let client = self.client.clone();
-        let session_id = AcpSessionId::new(self.session_id.0.clone());
+        let session_id = AcpSessionId::from(&self.session_id);
         let terminal_id = self.terminal_id.clone();
         tokio::spawn(async move {
             let _ = client
@@ -159,7 +159,7 @@ impl RunningTerminal for AcpRunningTerminal {
         let response = self
             .client
             .send_request(TerminalOutputRequest::new(
-                AcpSessionId::new(self.session_id.0.clone()),
+                AcpSessionId::from(&self.session_id),
                 self.terminal_id.clone(),
             ))
             .block_task()
@@ -181,7 +181,7 @@ impl RunningTerminal for AcpRunningTerminal {
         let response = self
             .client
             .send_request(WaitForTerminalExitRequest::new(
-                AcpSessionId::new(self.session_id.0.clone()),
+                AcpSessionId::from(&self.session_id),
                 self.terminal_id.clone(),
             ))
             .block_task()
@@ -198,7 +198,7 @@ impl RunningTerminal for AcpRunningTerminal {
     async fn kill(&self) -> Result<(), TerminalBackendError> {
         self.client
             .send_request(KillTerminalRequest::new(
-                AcpSessionId::new(self.session_id.0.clone()),
+                AcpSessionId::from(&self.session_id),
                 self.terminal_id.clone(),
             ))
             .block_task()

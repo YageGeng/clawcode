@@ -170,7 +170,7 @@ impl From<schema::McpServerHttp> for McpServerConfig {
 impl SessionCreated {
     /// Convert the created internal session id into an ACP session id.
     pub fn acp_session_id(&self) -> schema::SessionId {
-        schema::SessionId::new(self.session_id.0.clone())
+        (&self.session_id).into()
     }
 
     /// Convert the available kernel session modes into ACP mode state.
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn session_created_model_state_uses_current_model_not_first_available_model() {
         let created = SessionCreated::builder()
-            .session_id(SessionId("session".to_string()))
+            .session_id(SessionId::from("session"))
             .current_model("chatgpt/gpt-5.4".to_string())
             .modes(Vec::new())
             .models(vec![

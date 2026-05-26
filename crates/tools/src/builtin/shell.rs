@@ -968,7 +968,12 @@ mod tests {
 
     /// Build a test tool context rooted at the current directory.
     fn test_ctx() -> ToolContext {
-        ToolContext::for_test(Path::new("."))
+        ToolContext::builder()
+            .session_id(protocol::SessionId::from("test-session"))
+            .cwd(Path::new(".").to_path_buf())
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::default())
+            .build()
     }
 
     /// Drain a stream and return the last model-facing text item.

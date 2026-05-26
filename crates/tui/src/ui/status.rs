@@ -33,8 +33,43 @@ pub(super) fn render_bottom_status(frame: &mut Frame<'_>, area: Rect, state: &Ap
     );
 }
 
+/// Renders the bottom status row with the active agent label.
+pub(super) fn render_bottom_status_with_agent(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    active_agent_label: &str,
+) {
+    frame.render_widget(
+        Paragraph::new(bottom_status_line_with_agent(
+            state,
+            active_agent_label,
+            area.width as usize,
+        )),
+        area,
+    );
+}
+
 /// Builds the styled bottom status line with model, cwd, and token usage.
 fn bottom_status_line(state: &AppState, width: usize) -> Line<'static> {
+    bottom_status_line_with_optional_agent(state, None, width)
+}
+
+/// Builds the styled bottom status line with an optional active agent segment.
+fn bottom_status_line_with_agent(
+    state: &AppState,
+    active_agent_label: &str,
+    width: usize,
+) -> Line<'static> {
+    bottom_status_line_with_optional_agent(state, Some(active_agent_label), width)
+}
+
+/// Builds the styled bottom status line with model, cwd, agent, and token usage.
+fn bottom_status_line_with_optional_agent(
+    state: &AppState,
+    active_agent_label: Option<&str>,
+    width: usize,
+) -> Line<'static> {
     let token_status = format!("tokens: {}", state.usage().total_tokens());
     let token_width = UnicodeWidthStr::width(token_status.as_str());
     if width <= token_width {
@@ -43,11 +78,19 @@ fn bottom_status_line(state: &AppState, width: usize) -> Line<'static> {
 
     let model = state.model_label();
     let cwd = state.cwd().display().to_string();
+    let mut context = String::new();
+    if let Some(agent_label) = active_agent_label {
+        // Keep the active agent before cwd so long paths do not hide session context.
+        context.push_str("agent: ");
+        context.push_str(agent_label);
+        context.push_str(" | ");
+    }
+    context.push_str(&cwd);
     let separator = " | ";
     let suffix_width = UnicodeWidthStr::width(separator) + token_width;
     if width > suffix_width {
         let prefix_width = width - suffix_width;
-        let mut spans = styled_prefix_spans(model, &cwd, prefix_width, state.theme());
+        let mut spans = styled_prefix_spans(model, &context, prefix_width, state.theme());
         spans.push(Span::raw(separator));
         spans.push(Span::raw(token_status));
         return Line::from(spans);

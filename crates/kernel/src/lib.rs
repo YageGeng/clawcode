@@ -361,7 +361,7 @@ impl AgentKernel for Kernel {
         cwd: PathBuf,
         options: SessionLaunchOptions,
     ) -> Result<SessionCreated, KernelError> {
-        let session_id = SessionId(uuid::Uuid::new_v4().to_string());
+        let session_id = SessionId::from(uuid::Uuid::new_v4().to_string());
         let (provider_id, model_id) = self.active_provider_model().ok_or_else(|| {
             KernelError::Internal(anyhow::anyhow!(
                 "active_model is not set or not in 'provider/model' format; \
@@ -430,11 +430,20 @@ impl AgentKernel for Kernel {
         if let Some(handle) = self.thread_manager.get_thread(session_id).await {
             self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
                 .await?;
+            // Active sessions may still be loaded by the TUI when switching agents. Replay the
+            // persisted message log so ACP can hydrate the newly-created TUI session state.
+            let history = self
+                .session_store
+                .load_session(session_id)
+                .map_err(|error| KernelError::Internal(error.into()))?
+                .map(|(replayed, _)| replayed.messages)
+                .unwrap_or_default();
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
                 .current_model(handle.current_model().await)
                 .modes(self.build_modes())
                 .models(self.build_models())
+                .history(history)
                 .build());
         }
         let Some((replayed, recorder)) = self
@@ -601,6 +610,13 @@ impl AgentKernel for Kernel {
         // Signal close only after persistence succeeds so close can be retried on failure.
         self.thread_manager.close_thread(session_id).await?;
         Ok(())
+    }
+
+    async fn agent_ui_snapshot(
+        &self,
+        root_session_id: &SessionId,
+    ) -> Result<Vec<protocol::AgentUiMetadata>, KernelError> {
+        Ok(self.agent_control.agent_ui_snapshot(root_session_id).await)
     }
 
     async fn spawn_agent(
@@ -831,7 +847,10 @@ mod tests {
     use config::{AppConfig, ConfigHandle};
     use futures::StreamExt;
     use protocol::mcp::{McpServerConfig, McpTransportConfig};
-    use store::{AgentEdgeStatus, AgentGraphStore, TurnContextRecord};
+    use protocol::message::Message;
+    use store::{
+        AgentEdgeStatus, AgentGraphStore, MessageRecord, PersistedPayload, TurnContextRecord,
+    };
 
     /// Builds a kernel with config-driven providers for metadata-only tests.
     fn kernel_with_config(app_config: AppConfig) -> Kernel {
@@ -1092,6 +1111,55 @@ mod tests {
         );
     }
 
+    /// Verifies loading an already-live persisted session still returns replayable history.
+    #[tokio::test]
+    async fn active_load_session_returns_persisted_history_for_replay() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home.clone());
+        let session_id = SessionId::from("live-child");
+        let store = FileSessionStore::new(Some(&data_home));
+        let recorder = store
+            .create_session(persisted_session_params(
+                session_id.clone(),
+                AgentPath::root().join("child"),
+                temp.path().to_path_buf(),
+                Some(SessionId::from("root")),
+            ))
+            .await
+            .expect("create persisted child session");
+        recorder
+            .append(&[PersistedPayload::Message(
+                MessageRecord::builder()
+                    .turn_id("turn-1".to_string())
+                    .message(Message::user("child history"))
+                    .build(),
+            )])
+            .await
+            .expect("append child history");
+        let kernel = kernel_with_config(app_config);
+
+        kernel
+            .load_session(
+                &session_id,
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
+            .await
+            .expect("initial load should restore child");
+        let active_load = kernel
+            .load_session(
+                &session_id,
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
+            .await
+            .expect("active load should succeed");
+
+        assert_eq!(active_load.history, vec![Message::user("child history")]);
+    }
+
     /// Builds minimal session creation parameters for restore tests.
     fn persisted_session_params(
         session_id: SessionId,
@@ -1124,7 +1192,7 @@ mod tests {
         for index in 0..12 {
             store
                 .create_session(persisted_session_params(
-                    SessionId(format!("session-{index:02}")),
+                    SessionId::from(format!("session-{index:02}")),
                     AgentPath::root(),
                     temp.path().to_path_buf(),
                     None,
@@ -1149,7 +1217,7 @@ mod tests {
             second_page
                 .sessions
                 .iter()
-                .map(|session| session.session_id.0.as_str())
+                .map(|session| session.session_id.0.as_ref())
                 .collect::<Vec<_>>(),
             vec!["session-10", "session-11"]
         );
@@ -1209,7 +1277,7 @@ mod tests {
         for index in 0..12 {
             store
                 .create_session(persisted_session_params(
-                    SessionId(format!("session-{index:02}")),
+                    SessionId::from(format!("session-{index:02}")),
                     AgentPath::root(),
                     temp.path().to_path_buf(),
                     None,
@@ -1265,9 +1333,9 @@ mod tests {
         let mut app_config = app_config_with_provider();
         app_config.session_persistence.data_home = Some(data_home.clone());
         let store = FileSessionStore::new(Some(&data_home));
-        let root_id = SessionId("root-session".to_string());
-        let open_id = SessionId("open-child".to_string());
-        let closed_id = SessionId("closed-child".to_string());
+        let root_id = SessionId::from("root-session");
+        let open_id = SessionId::from("open-child");
+        let closed_id = SessionId::from("closed-child");
         let root_path = AgentPath::root();
         let open_path = root_path.join("open_child");
         let closed_path = root_path.join("closed_child");

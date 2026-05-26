@@ -336,7 +336,7 @@ mod store_tests {
     async fn create_load_and_list_session_roundtrips_messages() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
-        let session_id = SessionId("session-1".to_string());
+        let session_id = SessionId::from("session-1");
         let recorder = store
             .create_session(
                 CreateSessionParams::builder()
@@ -374,7 +374,7 @@ mod store_tests {
     async fn record_session_title_persists_title_in_manifest_listing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
-        let session_id = SessionId("session-title".to_string());
+        let session_id = SessionId::from("session-title");
         store
             .create_session(root_params(session_id.clone()))
             .await
@@ -395,7 +395,7 @@ mod store_tests {
     async fn close_session_keeps_session_available_for_resume() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
-        let session_id = SessionId("session-closed".to_string());
+        let session_id = SessionId::from("session-closed");
         let recorder = store
             .create_session(
                 CreateSessionParams::builder()
@@ -426,8 +426,8 @@ mod store_tests {
     async fn agent_graph_store_lists_latest_open_children() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
-        let parent = SessionId("parent".to_string());
-        let child = SessionId("child".to_string());
+        let parent = SessionId::from("parent");
+        let child = SessionId::from("child");
         let path = AgentPath("/root/child".to_string());
 
         store
@@ -458,8 +458,8 @@ mod store_tests {
     async fn agent_graph_store_closed_child_is_not_returned_as_open() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
-        let parent = SessionId("parent".to_string());
-        let child = SessionId("child".to_string());
+        let parent = SessionId::from("parent");
+        let child = SessionId::from("child");
         let path = AgentPath("/root/child".to_string());
 
         store
@@ -492,8 +492,8 @@ mod store_tests {
     async fn agent_graph_store_missing_child_status_update_is_noop() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
-        let parent = SessionId("parent".to_string());
-        let missing = SessionId("missing-child".to_string());
+        let parent = SessionId::from("parent");
+        let missing = SessionId::from("missing-child");
 
         store
             .create_session(root_params(parent.clone()))

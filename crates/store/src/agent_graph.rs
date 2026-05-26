@@ -124,8 +124,8 @@ mod tests {
 
     #[test]
     fn latest_edge_status_wins_when_child_is_closed() {
-        let parent = SessionId("parent".to_string());
-        let child = SessionId("child".to_string());
+        let parent = SessionId::from("parent");
+        let child = SessionId::from("child");
         let path = AgentPath("/root/child".to_string());
         let records = vec![
             edge_record(&parent, &child, &path, "reviewer", AgentEdgeStatus::Open),
@@ -139,8 +139,8 @@ mod tests {
 
     #[test]
     fn folded_edges_preserve_latest_role_and_path() {
-        let parent = SessionId("parent".to_string());
-        let child = SessionId("child".to_string());
+        let parent = SessionId::from("parent");
+        let child = SessionId::from("child");
         let first_path = AgentPath("/root/old".to_string());
         let latest_path = AgentPath("/root/new".to_string());
         let records = vec![

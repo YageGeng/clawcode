@@ -21,9 +21,15 @@ pub enum AppEvent {
     /// ACP permission request that needs an overlay decision.
     PermissionRequested(PendingApproval),
     /// Prompt request finished with an ACP stop reason.
-    PromptFinished(StopReason),
+    PromptFinished {
+        session_id: SessionId,
+        stop_reason: StopReason,
+    },
     /// Prompt request failed before returning a response.
-    PromptFailed(String),
+    PromptFailed {
+        session_id: SessionId,
+        message: String,
+    },
     /// ACP connection or callback error.
     AcpError(String),
 }
