@@ -504,10 +504,29 @@ async fn dispatch_tool(
     let tool_name = &tool_call.function.name;
     let arguments = &tool_call.function.arguments;
 
-    let needs_approval = ctx
-        .tools
-        .get(tool_name)
-        .is_some_and(|tool| tool.needs_approval(arguments, tool_ctx));
+    let Some(tool) = ctx.tools.get(tool_name) else {
+        // Unknown tools can be hallucinated by the model or removed by config.
+        // Emit a failed tool row and return a failed result so the model can choose an available tool.
+        let msg = format!("unknown tool `{tool_name}`");
+        let _ = tx_event.send(Event::tool_call(
+            ctx.session_id.clone(),
+            ctx.agent_path.clone(),
+            call_id,
+            tool_name,
+            arguments.clone(),
+            ToolCallStatus::Failed,
+        ));
+        let _ = tx_event.send(Event::tool_call_update(
+            ctx.session_id.clone(),
+            call_id,
+            Some(msg.clone()),
+            Some(ToolCallStatus::Failed),
+        ));
+
+        return Ok((msg, false));
+    };
+
+    let needs_approval = tool.needs_approval(arguments, tool_ctx);
 
     if needs_approval && ctx.approval.mode() != ApprovalMode::Yolo {
         // Approval-required tools need an explicit pending event first so the
@@ -555,11 +574,6 @@ async fn dispatch_tool(
             ToolCallStatus::InProgress,
         ));
     }
-
-    let tool = ctx
-        .tools
-        .get(tool_name)
-        .ok_or_else(|| KernelError::Internal(anyhow::anyhow!("unknown tool: {tool_name}")))?;
 
     let mut stream = match tool.execute_streaming(arguments.clone(), tool_ctx).await {
         Ok(result) => result,
@@ -972,6 +986,45 @@ mod tests {
                 status: Some(protocol::ToolCallStatus::Failed),
                 ..
             }) if output == "tool failed normally"
+        ));
+    }
+
+    /// Verifies that hallucinated or unavailable tools are returned to the model as failed tool results.
+    #[tokio::test]
+    async fn dispatch_tool_returns_failed_result_when_tool_is_unknown() {
+        let tools = Arc::new(ToolRegistry::new());
+        let ctx = test_turn_context(Arc::clone(&tools));
+        let tool_ctx = ToolContext::builder()
+            .session_id(ctx.session_id.clone())
+            .cwd(ctx.cwd.clone())
+            .agent_path(ctx.agent_path.clone())
+            .approval_mode(ctx.approval.mode())
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tool_call = ToolCall::new(
+            "call-unknown".to_string(),
+            protocol::ToolFunction::new("task".to_string(), serde_json::json!({})),
+        );
+
+        let result = dispatch_tool(&ctx, &tx, "call-unknown", &tool_call, &tool_ctx)
+            .await
+            .expect("unknown tool should not abort the turn");
+
+        assert_eq!(result, ("unknown tool `task`".to_string(), false));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::ToolCall {
+                status: protocol::ToolCallStatus::Failed,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::ToolCallUpdate {
+                output_delta: Some(output),
+                status: Some(protocol::ToolCallStatus::Failed),
+                ..
+            }) if output == "unknown tool `task`"
         ));
     }
 
