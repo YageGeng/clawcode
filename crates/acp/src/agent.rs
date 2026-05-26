@@ -4,10 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use acp::schema::{
-    ModelInfo as AcpModelInfo, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId as AcpSessionId, SessionMode as AcpSessionMode,
-    StopReason as AcpStopReason, ToolCallStatus as AcpToolCallStatus, *,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId,
+    SessionId as AcpSessionId, StopReason as AcpStopReason, ToolCallStatus as AcpToolCallStatus, *,
 };
 use acp::{Agent, Client, ConnectTo, ConnectionTo, Error};
 use agent_client_protocol as acp;
@@ -253,55 +252,6 @@ impl ClawcodeAgent {
             .remove(session_id);
     }
 
-    /// Convert an internal SessionId to an ACP SessionId.
-    fn to_acp_session_id(id: &SessionId) -> AcpSessionId {
-        AcpSessionId::new(id.0.clone())
-    }
-
-    /// Convert kernel session modes into ACP mode state.
-    fn to_acp_mode_state(modes: Vec<protocol::SessionMode>) -> SessionModeState {
-        let acp_modes: Vec<AcpSessionMode> = modes
-            .into_iter()
-            .map(|mode| {
-                let mut acp_mode =
-                    AcpSessionMode::new(acp::schema::SessionModeId::new(mode.id), mode.name);
-                if let Some(description) = mode.description {
-                    acp_mode = acp_mode.description(description);
-                }
-                acp_mode
-            })
-            .collect();
-
-        let first_mode_id = acp_modes
-            .first()
-            .map(|mode| mode.id.clone())
-            .unwrap_or_else(|| acp::schema::SessionModeId::new("auto".to_string()));
-
-        SessionModeState::new(first_mode_id, acp_modes)
-    }
-
-    /// Convert kernel model metadata into ACP model state.
-    fn to_acp_model_state(models: Vec<protocol::ModelInfo>) -> SessionModelState {
-        let acp_models: Vec<AcpModelInfo> = models
-            .into_iter()
-            .map(|model| {
-                let mut info =
-                    AcpModelInfo::new(acp::schema::ModelId::new(model.id), model.display_name);
-                if let Some(description) = model.description {
-                    info = info.description(description);
-                }
-                info
-            })
-            .collect();
-
-        let first_model_id = acp_models
-            .first()
-            .map(|model| model.model_id.clone())
-            .unwrap_or_else(|| acp::schema::ModelId::new("".to_string()));
-
-        SessionModelState::new(first_model_id, acp_models)
-    }
-
     /// Resolve an ACP request cwd against the current process directory when needed.
     fn resolve_request_cwd(cwd: std::path::PathBuf) -> Result<std::path::PathBuf, Error> {
         if cwd.is_absolute() {
@@ -533,7 +483,7 @@ impl ClawcodeAgent {
         }
 
         let footer = ContentChunk::new(ContentBlock::Text(TextContent::new(
-            "--- end restored history ---\n",
+            "\n--- end restored history ---\n",
         )));
         cx.send_notification(SessionNotification::new(
             session_id.clone(),
@@ -752,9 +702,10 @@ impl ClawcodeAgent {
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
 
-        let acp_session_id = Self::to_acp_session_id(&created.session_id);
-        let mode_state = Self::to_acp_mode_state(created.modes.clone());
-        let model_state = Self::to_acp_model_state(created.models.clone());
+        let acp_session_id = created.acp_session_id();
+        let mode_state = created.acp_mode_state();
+        let model_state = created.acp_model_state();
+
         let config_options = self.set_session_config_defaults(
             created.session_id.clone(),
             &created.modes,
@@ -767,10 +718,18 @@ impl ClawcodeAgent {
         );
         self.terminal_router.register_session(
             created.session_id,
-            cx,
+            cx.clone(),
             self.client_capabilities_snapshot(),
         );
-
+        // Send available slash commands after the response is delivered so the
+        // client has had time to register the session (Zed discard notifications
+        // for unknown sessions).
+        let cx_for_cmds = cx.clone();
+        let sid = acp_session_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = Self::send_available_commands(&sid, &cx_for_cmds);
+        });
         Ok(NewSessionResponse::new(acp_session_id)
             .modes(mode_state)
             .models(model_state)
@@ -798,7 +757,7 @@ impl ClawcodeAgent {
             .await
             .map_err(|error| Error::internal_error().data(error.to_string()))?;
 
-        let acp_session_id = Self::to_acp_session_id(&created.session_id);
+        let acp_session_id = created.acp_session_id();
         let config_options = self.set_session_config_defaults(
             created.session_id.clone(),
             &created.modes,
@@ -806,8 +765,9 @@ impl ClawcodeAgent {
         );
         Self::replay_history(&acp_session_id, &created.history, &cx).await?;
 
-        let mode_state = Self::to_acp_mode_state(created.modes.clone());
-        let model_state = Self::to_acp_model_state(created.models.clone());
+        let model_state = created.acp_model_state();
+        let mode_state = created.acp_mode_state();
+
         self.fs_router.register_session(
             created.session_id.clone(),
             cx.clone(),
@@ -815,9 +775,20 @@ impl ClawcodeAgent {
         );
         self.terminal_router.register_session(
             created.session_id,
-            cx,
+            cx.clone(),
             self.client_capabilities_snapshot(),
         );
+
+        // Send available slash commands after the response is delivered so the
+        // client has had time to register the session (Zed discard notifications
+        // for unknown sessions).
+        let cx_for_cmds = cx.clone();
+        let sid = acp_session_id.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = Self::send_available_commands(&sid, &cx_for_cmds);
+        });
 
         Ok(LoadSessionResponse::new()
             .modes(mode_state)
@@ -840,7 +811,7 @@ impl ClawcodeAgent {
             .sessions
             .into_iter()
             .map(|session| {
-                SessionInfo::new(Self::to_acp_session_id(&session.session_id), session.cwd)
+                SessionInfo::new(AcpSessionId::new(session.session_id.0), session.cwd)
                     .title(session.title)
                     .updated_at(session.updated_at)
             })
@@ -1087,6 +1058,17 @@ impl ClawcodeAgent {
             .cancel(&session_id)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))
+    }
+
+    /// Send the `AvailableCommandsUpdate` notification for the given ACP session.
+    fn send_available_commands(
+        session_id: &AcpSessionId,
+        cx: &ConnectionTo<Client>,
+    ) -> Result<(), Error> {
+        let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(vec![
+            AvailableCommand::new("sessions", "list recent sessions"),
+        ]));
+        cx.send_notification(SessionNotification::new(session_id.clone(), update))
     }
 
     async fn handle_set_mode(
@@ -1382,6 +1364,12 @@ mod tests {
     fn session_created(modes: Vec<SessionMode>, models: Vec<ModelInfo>) -> SessionCreated {
         SessionCreated::builder()
             .session_id(protocol::SessionId("session-1".to_string()))
+            .current_model(
+                models
+                    .first()
+                    .map(|model| model.id.clone())
+                    .unwrap_or_default(),
+            )
             .modes(modes)
             .models(models)
             .build()

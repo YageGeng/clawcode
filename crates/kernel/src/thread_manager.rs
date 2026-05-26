@@ -5,7 +5,7 @@ use std::sync::Arc;
 use config::AppConfig;
 use protocol::message::Message;
 use protocol::{AgentPath, Event, KernelError, Op, SessionId};
-use provider::factory::ArcLlm;
+use provider::factory::{ArcLlm, LlmFactory};
 use store::SessionRecorder;
 use tokio::sync::{Mutex, mpsc, watch};
 use tools::ToolRegistry;
@@ -24,6 +24,8 @@ pub(crate) struct SpawnThreadParams {
     pub(crate) cwd: PathBuf,
     /// LLM handle used by the thread.
     pub(crate) llm: ArcLlm,
+    /// Factory used by the thread to resolve model-switch requests.
+    pub(crate) llm_factory: Arc<LlmFactory>,
     /// Tool registry available to the thread.
     pub(crate) tools: Arc<ToolRegistry>,
     /// Initial conversation context for the thread.
@@ -51,6 +53,8 @@ pub(crate) struct LoadThreadParams {
     pub(crate) history: Vec<Message>,
     /// LLM handle used by the thread.
     pub(crate) llm: ArcLlm,
+    /// Factory used by the thread to resolve model-switch requests.
+    pub(crate) llm_factory: Arc<LlmFactory>,
     /// Tool registry available to the thread.
     pub(crate) tools: Arc<ToolRegistry>,
     /// Agent path associated with the thread.
@@ -132,6 +136,33 @@ impl ThreadManager {
         })
     }
 
+    /// Request a runtime model switch and wait until the session applies it.
+    pub(crate) async fn set_model(
+        &self,
+        session_id: &SessionId,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<(), KernelError> {
+        let Some(thread) = self.get_thread(session_id).await else {
+            return Err(KernelError::SessionNotFound(session_id.clone()));
+        };
+        if !thread.agent_path.is_root() {
+            return Ok(());
+        }
+        thread
+            .tx_op
+            .send(Op::SetModel {
+                session_id: session_id.clone(),
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+            })
+            .map_err(|error| {
+                KernelError::Internal(anyhow::anyhow!(
+                    "failed to send model switch to session {session_id}: {error}"
+                ))
+            })
+    }
+
     /// Signal cancellation for a live thread while keeping it registered.
     pub(crate) async fn cancel_thread(&self, session_id: &SessionId) -> Result<(), KernelError> {
         let thread = self
@@ -165,6 +196,7 @@ impl ThreadManager {
             params.session_id,
             params.cwd,
             params.llm,
+            params.llm_factory,
             params.tools,
             params.context,
             params.agent_path,
@@ -188,6 +220,7 @@ impl ThreadManager {
             .session_id(params.session_id)
             .cwd(params.cwd)
             .llm(params.llm)
+            .llm_factory(params.llm_factory)
             .tools(params.tools)
             .context(context)
             .agent_path(params.agent_path)
@@ -261,12 +294,74 @@ mod tests {
         assert!(matches!(op, Op::Prompt { .. }));
     }
 
+    #[tokio::test]
+    async fn set_model_noops_for_non_root_agent_threads() {
+        let manager = ThreadManager::new();
+        let session_id = SessionId("child".to_string());
+        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
+        let thread =
+            test_thread_with_path(session_id.clone(), AgentPath::root().join("child"), tx_op);
+        manager.insert_thread(thread).await;
+
+        manager
+            .set_model(&session_id, "openai", "gpt-5.4")
+            .await
+            .expect("subagent model switch should be ignored");
+
+        let error = rx_op
+            .try_recv()
+            .expect_err("subagent model switch should not enqueue an operation");
+        assert!(matches!(error, mpsc::error::TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn set_model_enqueues_root_agent_switch_without_runtime_ack() {
+        let manager = ThreadManager::new();
+        let session_id = SessionId("root".to_string());
+        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
+        let thread = test_thread(session_id.clone(), tx_op);
+        manager.insert_thread(thread).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.set_model(&session_id, "openai", "gpt-5.4"),
+        )
+        .await
+        .expect("set_model should not wait for runtime acknowledgement")
+        .expect("set_model should enqueue successfully");
+
+        let op = rx_op.recv().await.expect("model switch op");
+        let Op::SetModel {
+            provider_id,
+            model_id,
+            ..
+        } = op
+        else {
+            panic!("expected model switch op");
+        };
+        assert_eq!(provider_id, "openai");
+        assert_eq!(model_id, "gpt-5.4");
+    }
+
     /// Build a minimal thread handle for ThreadManager routing tests.
     fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
+        test_thread_with_path(session_id, AgentPath::root(), tx_op)
+    }
+
+    /// Build a minimal thread handle with a specific agent path for routing tests.
+    fn test_thread_with_path(
+        session_id: SessionId,
+        agent_path: AgentPath,
+        tx_op: mpsc::UnboundedSender<Op>,
+    ) -> Thread {
         let (tx_event, _rx_event) = mpsc::unbounded_channel();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         Thread::builder()
             .session_id(session_id)
+            .agent_path(agent_path)
+            .current_model(Arc::new(tokio::sync::RwLock::new(
+                "test/provider-model".to_string(),
+            )))
             .cwd(PathBuf::from("/tmp/project"))
             .tx_op(tx_op)
             .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))

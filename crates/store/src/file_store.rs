@@ -7,6 +7,7 @@ use super::agent_graph::{AgentEdgeStatus, AgentGraphStore, fold_agent_edges};
 use super::manifest::{
     SessionManifestStatus, active_manifest_record, append_manifest_record,
     archived_manifest_record, closed_manifest_record, read_latest_manifest, resolve_manifest_path,
+    titled_manifest_record,
 };
 use super::record::{
     AgentEdgeRecord, CreateSessionParams, PersistedPayload, SessionMetaRecord, timestamp_now,
@@ -163,6 +164,21 @@ impl super::traits::SessionStore for FileSessionStore {
         Ok(())
     }
 
+    fn record_session_title(&self, session_id: &SessionId, title: &str) -> io::Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(());
+        }
+        let manifest = read_latest_manifest(&self.data_home)?;
+        let Some(record) = manifest.get(session_id) else {
+            return Ok(());
+        };
+        if record.title.is_some() {
+            return Ok(());
+        }
+        append_manifest_record(&self.data_home, &titled_manifest_record(record, title))
+    }
+
     fn list_sessions(&self, cwd: Option<&Path>) -> io::Result<Vec<SessionInfo>> {
         let manifest = read_latest_manifest(&self.data_home)?;
         let mut sessions = Vec::new();
@@ -188,6 +204,7 @@ impl super::traits::SessionStore for FileSessionStore {
                 SessionInfo::builder()
                     .session_id(record.session_id.clone())
                     .cwd(session_cwd)
+                    .title(record.title.clone())
                     .updated_at(Some(record.updated_at.clone()))
                     .build(),
             );
@@ -351,6 +368,27 @@ mod store_tests {
 
         let listed = store.list_sessions(None).expect("list sessions");
         assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn record_session_title_persists_title_in_manifest_listing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let session_id = SessionId("session-title".to_string());
+        store
+            .create_session(root_params(session_id.clone()))
+            .await
+            .expect("create session");
+
+        store
+            .record_session_title(&session_id, "Implement /sessions table")
+            .expect("record title");
+
+        let listed = store.list_sessions(None).expect("list sessions");
+        assert_eq!(
+            listed[0].title.as_deref(),
+            Some("Implement /sessions table")
+        );
     }
 
     #[tokio::test]

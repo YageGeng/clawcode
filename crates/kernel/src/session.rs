@@ -12,7 +12,7 @@ use protocol::{
     AgentPath, AgentStatus, Event, InterAgentMessage, KernelError, Op, ReviewDecision, SessionId,
     StopReason, TurnId,
 };
-use provider::factory::ArcLlm;
+use provider::factory::{ArcLlm, LlmFactory};
 use skills::SkillRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -33,6 +33,10 @@ pub struct Thread {
     pub session_id: SessionId,
     /// Working directory associated with this live session.
     pub cwd: PathBuf,
+    /// Agent path associated with this live session.
+    pub agent_path: AgentPath,
+    /// Current model id in `provider_id/model_id` form for frontend state.
+    pub(crate) current_model: Arc<tokio::sync::RwLock<String>>,
     /// Send operations to the background task.
     pub(crate) tx_op: mpsc::UnboundedSender<Op>,
     /// Shared sender for per-turn events.
@@ -62,6 +66,11 @@ impl Thread {
         *guard = tx;
         rx
     }
+
+    /// Return the current runtime model id for this live session.
+    pub(crate) async fn current_model(&self) -> String {
+        self.current_model.read().await.clone()
+    }
 }
 
 /// Runtime state owned by the background task of a single session.
@@ -79,6 +88,10 @@ pub(crate) struct Session {
     pub context: Box<dyn ContextManager>,
     /// LLM used for turn execution.
     pub llm: ArcLlm,
+    /// Current model id in `provider_id/model_id` form for session-state responses.
+    pub current_model: Arc<tokio::sync::RwLock<String>>,
+    /// Factory used by internal model-switch operations.
+    pub llm_factory: Arc<LlmFactory>,
     /// Tool registry available to this session.
     pub tools: Arc<ToolRegistry>,
     /// Shared map of pending approval channels. execute_turn inserts a
@@ -113,6 +126,7 @@ pub(crate) fn spawn_thread(
     session_id: SessionId,
     cwd: PathBuf,
     llm: ArcLlm,
+    llm_factory: Arc<LlmFactory>,
     tools: Arc<ToolRegistry>,
     context: Box<dyn ContextManager>,
     agent_path: AgentPath,
@@ -124,6 +138,11 @@ pub(crate) fn spawn_thread(
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
     let (cancel_tx, _cancel_rx) = watch::channel(false);
+    let current_model = Arc::new(tokio::sync::RwLock::new(format!(
+        "{}/{}",
+        llm.provider_id(),
+        llm.model_id()
+    )));
 
     let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
     tools.register_skill_tools(Arc::clone(&skill_registry));
@@ -175,9 +194,11 @@ pub(crate) fn spawn_thread(
         .tx_event(Arc::clone(&tx_event))
         .context(context)
         .llm(llm)
+        .current_model(Arc::clone(&current_model))
+        .llm_factory(llm_factory)
         .tools(Arc::clone(&tools))
         .pending_approvals(Arc::clone(&pending_approvals))
-        .agent_path(agent_path)
+        .agent_path(agent_path.clone())
         .approval(approval)
         .agent_control(Arc::clone(&agent_control))
         .app_config(app_config)
@@ -191,6 +212,8 @@ pub(crate) fn spawn_thread(
     Thread::builder()
         .session_id(session_id)
         .cwd(thread_cwd)
+        .agent_path(agent_path)
+        .current_model(current_model)
         .tx_op(tx_op)
         .tx_event(tx_event)
         .pending_approvals(pending_approvals)
@@ -272,7 +295,24 @@ async fn run_loop(mut rt: Session) {
                     let _ = tx.send(decision);
                 }
             }
-            Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => break,
+            Some(Op::SetModel {
+                provider_id,
+                model_id,
+                ..
+            }) => match rt.llm_factory.get(&provider_id, &model_id) {
+                Some(llm) => {
+                    rt.llm = llm;
+                    *rt.current_model.write().await = format!("{provider_id}/{model_id}");
+                }
+                None => {
+                    tracing::warn!(
+                        provider_id = %provider_id,
+                        model_id = %model_id,
+                        "failed to apply protocol model switch operation"
+                    );
+                }
+            },
+            Some(Op::Cancel { .. } | Op::CloseSession { .. }) | None => break,
             _ => {}
         }
     }
@@ -340,7 +380,10 @@ async fn run_turn_select_loop(
                         let _ = sender.send(decision);
                     }
                 }
-                Some(Op::Cancel { .. }) | Some(Op::CloseSession { .. }) | None => {
+                Some(Op::SetModel { .. }) => {
+                    tracing::warn!("Ignoring model switch while a turn is running");
+                }
+                Some(Op::Cancel { .. } | Op::CloseSession { .. }) | None => {
                     return TurnStepOutcome::Shutdown;
                 }
                 Some(Op::InterAgentMessage { message }) => {
@@ -349,8 +392,8 @@ async fn run_turn_select_loop(
                         .await
                         .enqueue_mailbox_communication(message);
                 }
-                Some(other) => {
-                    tracing::debug!(?other, "Ignoring operation while turn is running");
+                Some(_other) => {
+                    tracing::debug!("Ignoring operation while turn is running");
                 }
             }
         }

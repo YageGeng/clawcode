@@ -29,6 +29,8 @@ use provider::factory::LlmFactory;
 use crate::agent::adapter::AgentControlAdapter;
 use crate::agent::control::AgentControl;
 use crate::approval::ApprovalPolicy;
+use crate::command::prompt_args::parse_slash_name;
+use crate::command::slash_command::SlashCommand;
 use crate::context::InMemoryContext;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
@@ -41,6 +43,7 @@ use store::{
 use tools::ToolRegistry;
 
 const SESSION_LIST_PAGE_SIZE: usize = 10;
+const SESSION_TITLE_MAX_CHARS: usize = 80;
 
 /// Central kernel struct implementing [`AgentKernel`].
 ///
@@ -177,6 +180,7 @@ impl Kernel {
             .session_id(session_id)
             .cwd(cwd)
             .llm(llm)
+            .llm_factory(Arc::clone(&self.llm_factory))
             .tools(Arc::clone(&self.tools))
             .context(context)
             .agent_path(AgentPath::root())
@@ -217,21 +221,24 @@ impl Kernel {
             .providers
             .iter()
             .flat_map(|p| {
-                p.models.iter().map(|m| {
-                    ModelInfo::builder()
-                        .id(format!("{}/{}", p.id.as_str(), m.id))
-                        .display_name(m.display_name.clone().unwrap_or_else(|| m.id.clone()))
-                        .description(None)
-                        .context_tokens(m.context_tokens)
-                        .max_output_tokens(m.max_output_tokens)
-                        .build()
+                p.models.iter().filter_map(|m| {
+                    // Only advertise models that the runtime factory can actually resolve.
+                    self.llm_factory.get(p.id.as_str(), &m.id).map(|_| {
+                        ModelInfo::builder()
+                            .id(format!("{}/{}", p.id.as_str(), m.id))
+                            .display_name(m.display_name.clone().unwrap_or_else(|| m.id.clone()))
+                            .description(None)
+                            .context_tokens(m.context_tokens)
+                            .max_output_tokens(m.max_output_tokens)
+                            .build()
+                    })
                 })
             })
             .collect::<Vec<_>>();
 
         if let Some(active_index) = models.iter().position(|model| model.id == active_model) {
-            // ACP marks the first model as current, so keep config.active_model first
-            // while preserving the configured order of all other models.
+            // Keep the configured active model prominent while preserving the
+            // configured order of all other models.
             let active = models.remove(active_index);
             models.insert(0, active);
         }
@@ -310,6 +317,7 @@ impl Kernel {
                         .cwd(child_replayed.meta.cwd.clone())
                         .history(child_replayed.messages.clone())
                         .llm(llm)
+                        .llm_factory(Arc::clone(&self.llm_factory))
                         .tools(Arc::clone(&self.tools))
                         .agent_path(edge.child_agent_path.clone())
                         .agent_control(Arc::clone(agent_control))
@@ -360,6 +368,7 @@ impl AgentKernel for Kernel {
                  check your config file or CLAW_PROVIDERS_* env vars"
             ))
         })?;
+        let current_model = format!("{provider_id}/{model_id}");
 
         // Use the kernel-wide AgentControl shared across all sessions.
         let agent_ctrl = Arc::clone(&self.agent_control);
@@ -373,8 +382,8 @@ impl AgentKernel for Kernel {
                     .session_id(session_id.clone())
                     .agent_path(AgentPath::root())
                     .cwd(cwd.clone())
-                    .provider_id(provider_id)
-                    .model_id(model_id)
+                    .provider_id(provider_id.clone())
+                    .model_id(model_id.clone())
                     .base_system_prompt(base_system_prompt)
                     .build(),
             )
@@ -406,6 +415,7 @@ impl AgentKernel for Kernel {
 
         Ok(SessionCreated::builder()
             .session_id(session_id)
+            .current_model(current_model)
             .modes(modes)
             .models(models)
             .build())
@@ -422,6 +432,7 @@ impl AgentKernel for Kernel {
                 .await?;
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
+                .current_model(handle.current_model().await)
                 .modes(self.build_modes())
                 .models(self.build_models())
                 .build());
@@ -451,6 +462,7 @@ impl AgentKernel for Kernel {
                     .cwd(replayed.meta.cwd.clone())
                     .history(history.clone())
                     .llm(llm)
+                    .llm_factory(Arc::clone(&self.llm_factory))
                     .tools(Arc::clone(&self.tools))
                     .agent_path(AgentPath::root())
                     .agent_control(Arc::clone(&self.agent_control))
@@ -471,6 +483,7 @@ impl AgentKernel for Kernel {
             .await;
         Ok(SessionCreated::builder()
             .session_id(session_id.clone())
+            .current_model(handle.current_model().await)
             .modes(self.build_modes())
             .models(self.build_models())
             .history(history)
@@ -483,6 +496,15 @@ impl AgentKernel for Kernel {
         cursor: Option<&str>,
     ) -> Result<SessionListPage, KernelError> {
         let offset = session_list_offset(cursor)?;
+        let persisted_sessions = self
+            .session_store
+            .list_sessions(cwd)
+            .map_err(|error| KernelError::Internal(error.into()))?;
+        let persisted_titles: std::collections::HashMap<SessionId, Option<String>> =
+            persisted_sessions
+                .iter()
+                .map(|session| (session.session_id.clone(), session.title.clone()))
+                .collect();
         let mut sessions: Vec<SessionInfo> = self
             .thread_manager
             .live_sessions()
@@ -493,6 +515,7 @@ impl AgentKernel for Kernel {
                 SessionInfo::builder()
                     .session_id(thread.session_id.clone())
                     .cwd(thread.cwd.clone())
+                    .title(persisted_titles.get(&thread.session_id).cloned().flatten())
                     .build()
             })
             .collect();
@@ -500,11 +523,7 @@ impl AgentKernel for Kernel {
             .iter()
             .map(|session| session.session_id.clone())
             .collect();
-        for session in self
-            .session_store
-            .list_sessions(cwd)
-            .map_err(|error| KernelError::Internal(error.into()))?
-        {
+        for session in persisted_sessions {
             if !live_ids.contains(&session.session_id) {
                 sessions.push(session);
             }
@@ -519,6 +538,16 @@ impl AgentKernel for Kernel {
         text: String,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
     {
+        if let Some(SlashCommand::Sessions) = SlashCommand::parse_from_text(&text) {
+            return self.prompt_sessions_command(session_id, &text).await;
+        }
+
+        if let Some(title) = Self::session_title_from_prompt_text(&text)
+            && let Err(error) = self.session_store.record_session_title(session_id, &title)
+        {
+            tracing::warn!(%error, %session_id, "failed to persist session title");
+        }
+
         let rx_event = self.thread_manager.take_rx(session_id).await?;
         let cancel_rx = self.thread_manager.cancel_rx(session_id).await?;
         self.thread_manager
@@ -549,13 +578,12 @@ impl AgentKernel for Kernel {
     async fn set_model(
         &self,
         session_id: &SessionId,
-        _provider_id: &str,
-        _model_id: &str,
+        provider_id: &str,
+        model_id: &str,
     ) -> Result<(), KernelError> {
-        if self.thread_manager.get_thread(session_id).await.is_none() {
-            return Err(KernelError::SessionNotFound(session_id.clone()));
-        }
-        Ok(())
+        self.thread_manager
+            .set_model(session_id, provider_id, model_id)
+            .await
     }
 
     async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError> {
@@ -651,6 +679,121 @@ impl AgentKernel for Kernel {
     }
 }
 
+impl Kernel {
+    /// Handle `/sessions [offset]` before a prompt reaches the provider turn loop.
+    async fn prompt_sessions_command(
+        &self,
+        session_id: &SessionId,
+        text: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
+    {
+        let cursor = Self::sessions_cursor_from_prompt_text(text)?;
+        let thread = self
+            .thread_manager
+            .get_thread(session_id)
+            .await
+            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
+        let page = self
+            .list_sessions(Some(&thread.cwd), cursor.as_deref())
+            .await?;
+        let message = Self::format_sessions_prompt_response(&page);
+        let events = vec![
+            Ok(Event::message_chunk(session_id.clone(), message)),
+            Ok(Event::turn_complete(
+                session_id.clone(),
+                protocol::StopReason::EndTurn,
+            )),
+        ];
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+
+    /// Parse the optional offset cursor from `/sessions` prompt text.
+    fn sessions_cursor_from_prompt_text(text: &str) -> Result<Option<String>, KernelError> {
+        let Some((name, rest, _rest_offset)) = parse_slash_name(text) else {
+            return Err(KernelError::Internal(anyhow::anyhow!(
+                "Usage: /sessions [offset]"
+            )));
+        };
+        if name != SlashCommand::Sessions.command() {
+            return Err(KernelError::Internal(anyhow::anyhow!(
+                "Usage: /sessions [offset]"
+            )));
+        }
+        let Some(offset) = rest.split_whitespace().next() else {
+            return Ok(None);
+        };
+        offset
+            .parse::<usize>()
+            .map(|parsed| Some(parsed.to_string()))
+            .map_err(|error| {
+                KernelError::Internal(anyhow::anyhow!(
+                    "invalid /sessions offset `{offset}`: {error}"
+                ))
+            })
+    }
+
+    /// Format a session-list page as text suitable for frontend transcript rendering.
+    fn format_sessions_prompt_response(response: &SessionListPage) -> String {
+        if response.sessions.is_empty() {
+            return "No sessions found for this working directory.".into();
+        }
+        let lines: Vec<String> = response
+            .sessions
+            .iter()
+            .map(|session| {
+                let title = session
+                    .title
+                    .as_deref()
+                    .map(Self::truncate_session_title)
+                    .unwrap_or_else(|| "-".into());
+                let time = session.updated_at.as_deref().unwrap_or("-");
+                format!(
+                    "| {} | {} | {} | {} |",
+                    Self::escape_markdown_table_cell(&session.session_id.0),
+                    Self::escape_markdown_table_cell(&session.cwd.display().to_string()),
+                    Self::escape_markdown_table_cell(&title),
+                    Self::escape_markdown_table_cell(time)
+                )
+            })
+            .collect();
+        let mut output = format!(
+            "Recent sessions:\n\n| Session | Cwd | Title | Updated |\n| --- | --- | --- | --- |\n{}",
+            lines.join("\n")
+        );
+        if let Some(next_cursor) = &response.next_cursor {
+            output.push_str(&format!("\n\nNext: /sessions {next_cursor}"));
+        }
+        output
+    }
+
+    /// Escape content for one Markdown table cell.
+    fn escape_markdown_table_cell(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace(['\r', '\n'], " ")
+    }
+
+    /// Build the manifest title from a user prompt by compacting whitespace.
+    fn session_title_from_prompt_text(text: &str) -> Option<String> {
+        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if compact.is_empty() {
+            return None;
+        }
+        Some(compact.chars().take(SESSION_TITLE_MAX_CHARS).collect())
+    }
+
+    /// Return a quoted title capped for compact session-list rendering.
+    fn truncate_session_title(title: &str) -> String {
+        let chars: String = title.chars().take(10).collect();
+        if title.chars().count() > 10 {
+            format!("\"{chars}...\"")
+        } else {
+            format!("\"{chars}\"")
+        }
+    }
+}
+
 /// Parses the ACP session/list cursor as a zero-based offset.
 fn session_list_offset(cursor: Option<&str>) -> Result<usize, KernelError> {
     let Some(cursor) = cursor else {
@@ -682,11 +825,13 @@ fn paginate_session_list(sessions: Vec<SessionInfo>, offset: usize) -> SessionLi
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use super::*;
     use config::{AppConfig, ConfigHandle};
+    use futures::StreamExt;
     use protocol::mcp::{McpServerConfig, McpTransportConfig};
-    use store::{AgentEdgeStatus, AgentGraphStore};
+    use store::{AgentEdgeStatus, AgentGraphStore, TurnContextRecord};
 
     /// Builds a kernel with config-driven providers for metadata-only tests.
     fn kernel_with_config(app_config: AppConfig) -> Kernel {
@@ -711,6 +856,66 @@ mod tests {
             ],
         }))
         .expect("valid app config")
+    }
+
+    /// Builds an app config with two selectable provider/model pairs.
+    fn app_config_with_two_models() -> AppConfig {
+        serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "test-key",
+                    "models": [{ "id": "deepseek-chat" }]
+                },
+                {
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "provider_type": "openai-completions",
+                    "base_url": "http://127.0.0.1:9",
+                    "api_key": "test-key",
+                    "models": [{ "id": "gpt-5.4" }]
+                }
+            ],
+        }))
+        .expect("valid app config")
+    }
+
+    /// Read the latest persisted turn context from a test data-home directory.
+    fn latest_turn_context_record(data_home: &std::path::Path) -> TurnContextRecord {
+        let mut session_files = Vec::new();
+        collect_jsonl_files(data_home, &mut session_files);
+        session_files.sort();
+
+        session_files
+            .iter()
+            .rev()
+            .find_map(|path| {
+                let text = std::fs::read_to_string(path).expect("read session file");
+                text.lines().rev().find_map(|line| {
+                    let record = serde_json::from_str::<store::PersistedRecord>(line).ok()?;
+                    match record.payload {
+                        store::PersistedPayload::TurnContext(turn_context) => Some(turn_context),
+                        _ => None,
+                    }
+                })
+            })
+            .expect("persisted turn context")
+    }
+
+    /// Recursively collect persisted session JSONL files.
+    fn collect_jsonl_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read data home") {
+            let path = entry.expect("read data home entry").path();
+            if path.is_dir() {
+                collect_jsonl_files(&path, files);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                files.push(path);
+            }
+        }
     }
 
     /// Builds a runtime MCP config whose command cannot start.
@@ -769,6 +974,69 @@ mod tests {
         assert_eq!(models[0].id, "deepseek/deepseek-chat");
         assert_eq!(models[1].id, "openai/gpt-5.4");
         assert_eq!(models[2].id, "deepseek/deepseek-v4-flash");
+    }
+
+    /// Verifies unavailable provider/model pairs are not exposed to ACP clients.
+    #[test]
+    fn build_models_filters_unavailable_provider_models() {
+        let app_config: AppConfig = serde_json::from_value(serde_json::json!({
+            "active_model": "chatgpt/gpt-5.4",
+            "providers": [
+                {
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "provider_type": "responses",
+                    "base_url": "https://example.invalid",
+                    "api_key": { "env": "CLAWCODE_TEST_MISSING_OPENAI_API_KEY_DO_NOT_SET" },
+                    "models": [{ "id": "gpt-5.4" }]
+                },
+                {
+                    "id": "chatgpt",
+                    "display_name": "ChatGPT",
+                    "provider_type": "responses",
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "auth": { "type": "codex" },
+                    "models": [{ "id": "gpt-5.4" }]
+                }
+            ],
+        }))
+        .expect("valid app config");
+        let kernel = kernel_with_config(app_config);
+
+        let models = kernel.build_models();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "chatgpt/gpt-5.4");
+    }
+
+    #[tokio::test]
+    async fn set_model_changes_model_used_by_next_prompt_turn() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_two_models();
+        app_config.session_persistence.data_home = Some(data_home);
+        let kernel = kernel_with_config(app_config);
+        let created = kernel
+            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .await
+            .expect("session should start");
+
+        kernel
+            .set_model(&created.session_id, "openai", "gpt-5.4")
+            .await
+            .expect("model switch should succeed");
+        let mut events = kernel
+            .prompt(&created.session_id, "hello".to_string())
+            .await
+            .expect("prompt should start");
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("prompt should produce a terminal event");
+        let turn_context = latest_turn_context_record(temp.path());
+
+        assert_eq!(turn_context.provider_id, "openai");
+        assert_eq!(turn_context.model_id, "gpt-5.4");
     }
 
     /// Verifies new-session launch options register external MCP servers asynchronously.
@@ -886,6 +1154,108 @@ mod tests {
             vec!["session-10", "session-11"]
         );
         assert_eq!(second_page.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_merges_manifest_title_for_live_session() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home.clone());
+        let kernel = kernel_with_config(app_config);
+        let created = kernel
+            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .await
+            .expect("session should start");
+
+        kernel
+            .session_store
+            .record_session_title(&created.session_id, "Implement persisted titles")
+            .expect("record title");
+
+        let page = kernel
+            .list_sessions(Some(temp.path()), None)
+            .await
+            .expect("list sessions");
+
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(
+            page.sessions[0].title.as_deref(),
+            Some("Implement persisted titles")
+        );
+    }
+
+    #[test]
+    fn session_title_from_prompt_text_compacts_whitespace_and_truncates() {
+        let long_prompt = format!(
+            "  Implement\n\n  manifest   titles  {}",
+            "x".repeat(SESSION_TITLE_MAX_CHARS)
+        );
+
+        let title = Kernel::session_title_from_prompt_text(&long_prompt).expect("title");
+
+        assert!(!title.contains('\n'));
+        assert!(!title.contains("  "));
+        assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+    }
+
+    #[tokio::test]
+    async fn prompt_sessions_command_lists_sessions_without_provider_turn() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home.clone());
+        let store = FileSessionStore::new(Some(&data_home));
+        for index in 0..12 {
+            store
+                .create_session(persisted_session_params(
+                    SessionId(format!("session-{index:02}")),
+                    AgentPath::root(),
+                    temp.path().to_path_buf(),
+                    None,
+                ))
+                .await
+                .expect("create persisted session");
+        }
+        let kernel = kernel_with_config(app_config);
+        let created = kernel
+            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .await
+            .expect("session should start before slash command");
+
+        let mut events = kernel
+            .prompt(&created.session_id, "/sessions 10".to_string())
+            .await
+            .expect("slash command should create an event stream");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("slash command should not wait for provider output")
+            .expect("slash command should emit a message")
+            .expect("slash command message should be valid");
+        let Event::AgentMessageChunk { text, .. } = first else {
+            panic!("expected /sessions to emit an agent message");
+        };
+        assert!(text.contains("Recent sessions:"));
+        assert!(text.contains("| Session | Cwd | Title | Updated |"));
+        assert!(text.contains("| --- | --- | --- | --- |"));
+        assert!(text.contains(&format!("| session-09 | {} | - |", temp.path().display())));
+        assert!(text.contains("session-09"));
+        assert!(text.contains("session-11"));
+        assert!(!text.contains("session-08"));
+
+        let second = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("slash command should finish promptly")
+            .expect("slash command should emit completion")
+            .expect("slash command completion should be valid");
+        assert!(matches!(
+            second,
+            Event::TurnComplete {
+                stop_reason: protocol::StopReason::EndTurn,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

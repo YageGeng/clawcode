@@ -32,6 +32,8 @@ pub struct SessionInfo {
 pub struct SessionCreated {
     /// Session id that was created or restored.
     pub session_id: SessionId,
+    /// Current model id in `provider_id/model_id` form.
+    pub current_model: String,
     /// Available session mode presets.
     pub modes: Vec<super::config::SessionMode>,
     /// Available model selections.

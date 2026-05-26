@@ -13,6 +13,7 @@ use crate::item::{FileChange, FileChangeStatus, TurnItem};
 use crate::mcp::{McpServerConfig, McpTransportConfig};
 use crate::permission::PermissionOptionKind;
 use crate::plan::{PlanPriority, PlanStatus};
+use crate::session::SessionCreated;
 use crate::tool::ToolCallStatus;
 
 // ── StopReason ──
@@ -164,6 +165,60 @@ impl From<schema::McpServerHttp> for McpServerConfig {
     }
 }
 
+// ── SessionCreated ──
+
+impl SessionCreated {
+    /// Convert the created internal session id into an ACP session id.
+    pub fn acp_session_id(&self) -> schema::SessionId {
+        schema::SessionId::new(self.session_id.0.clone())
+    }
+
+    /// Convert the available kernel session modes into ACP mode state.
+    pub fn acp_mode_state(&self) -> schema::SessionModeState {
+        let acp_modes: Vec<schema::SessionMode> = self
+            .modes
+            .iter()
+            .map(|mode| {
+                let mut acp_mode = schema::SessionMode::new(
+                    schema::SessionModeId::new(mode.id.clone()),
+                    mode.name.clone(),
+                );
+                if let Some(description) = &mode.description {
+                    acp_mode = acp_mode.description(description.clone());
+                }
+                acp_mode
+            })
+            .collect();
+
+        let first_mode_id = acp_modes
+            .first()
+            .map(|mode| mode.id.clone())
+            .unwrap_or_else(|| schema::SessionModeId::new("auto".to_string()));
+
+        schema::SessionModeState::new(first_mode_id, acp_modes)
+    }
+
+    /// Convert the available kernel model metadata into ACP model state.
+    pub fn acp_model_state(&self) -> schema::SessionModelState {
+        let acp_models: Vec<schema::ModelInfo> = self
+            .models
+            .iter()
+            .map(|model| {
+                let mut info = schema::ModelInfo::new(
+                    schema::ModelId::new(model.id.clone()),
+                    model.display_name.clone(),
+                );
+                if let Some(description) = &model.description {
+                    info = info.description(description.clone());
+                }
+                info
+            })
+            .collect();
+
+        schema::SessionModelState::new(schema::ModelId::new(self.current_model.clone()), acp_models)
+    }
+}
+
 /// Converts structured turn-item lifecycle stages into ACP session updates.
 pub trait TurnItemAcpExt {
     /// Convert an item-start event into an optional ACP session update.
@@ -253,8 +308,34 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::config::ModelInfo;
     use crate::item::{FileChange, FileChangeItem};
     use crate::mcp::McpTransportConfig;
+    use crate::session::{SessionCreated, SessionId};
+
+    /// Verifies that ACP model state uses SessionCreated.current_model explicitly.
+    #[test]
+    fn session_created_model_state_uses_current_model_not_first_available_model() {
+        let created = SessionCreated::builder()
+            .session_id(SessionId("session".to_string()))
+            .current_model("chatgpt/gpt-5.4".to_string())
+            .modes(Vec::new())
+            .models(vec![
+                ModelInfo::builder()
+                    .id("openai/gpt-5.4".to_string())
+                    .display_name("OpenAI GPT-5.4".to_string())
+                    .build(),
+                ModelInfo::builder()
+                    .id("chatgpt/gpt-5.4".to_string())
+                    .display_name("ChatGPT GPT-5.4".to_string())
+                    .build(),
+            ])
+            .build();
+
+        let state = created.acp_model_state();
+
+        assert_eq!(state.current_model_id.0.as_ref(), "chatgpt/gpt-5.4");
+    }
 
     /// Verifies that file-change start events update the ACP tool cell as an edit.
     #[test]

@@ -26,8 +26,6 @@ pub enum AppEvent {
     PromptFailed(String),
     /// ACP connection or callback error.
     AcpError(String),
-    /// `/sessions` command response, displayed as a system message.
-    SessionsListed(String),
 }
 
 /// Builds the TUI initialize request with the client capabilities it implements.

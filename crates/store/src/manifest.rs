@@ -24,6 +24,10 @@ pub struct SessionManifestRecord {
     /// Working directory used for fast session listing.
     #[serde(default)]
     pub cwd: PathBuf,
+    /// Human-readable title shown in session listings.
+    #[serde(default)]
+    #[builder(default, setter(strip_option))]
+    pub title: Option<String>,
     /// Current lifecycle status.
     pub status: SessionManifestStatus,
     /// Last update time in UTC-ish process timestamp format.
@@ -85,19 +89,21 @@ pub fn active_manifest_record(
 
 /// Build a closed manifest record for an existing manifest entry.
 pub fn closed_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
-    SessionManifestRecord::builder()
+    let mut next = SessionManifestRecord::builder()
         .session_id(record.session_id.clone())
         .path(record.path.clone())
         .agent_path(record.agent_path.clone())
         .cwd(record.cwd.clone())
         .status(SessionManifestStatus::Closed)
         .updated_at(timestamp_now())
-        .build()
+        .build();
+    next.title.clone_from(&record.title);
+    next
 }
 
 /// Build an archived manifest record for an existing manifest entry.
 pub fn archived_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
-    SessionManifestRecord::builder()
+    let mut next = SessionManifestRecord::builder()
         .session_id(record.session_id.clone())
         .path(record.path.clone())
         .agent_path(record.agent_path.clone())
@@ -105,7 +111,19 @@ pub fn archived_manifest_record(record: &SessionManifestRecord) -> SessionManife
         .status(SessionManifestStatus::Archived)
         .updated_at(timestamp_now())
         .parent_session_id(record.parent_session_id.clone())
-        .build()
+        .build();
+    next.title.clone_from(&record.title);
+    next
+}
+
+/// Build a manifest record that adds a title while preserving lifecycle metadata.
+pub fn titled_manifest_record(
+    record: &SessionManifestRecord,
+    title: impl Into<String>,
+) -> SessionManifestRecord {
+    let mut next = record.clone();
+    next.title = Some(title.into());
+    next
 }
 
 /// Read the manifest and return the latest record per session id.

@@ -218,6 +218,7 @@ impl AgentControl {
             .session_id(session_id.clone())
             .cwd(cwd)
             .llm(llm)
+            .llm_factory(Arc::clone(&self.llm_factory))
             .tools(Arc::clone(&self.tools))
             .context(context)
             .agent_path(child_path.clone())
@@ -689,6 +690,10 @@ mod tests {
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         Thread::builder()
             .session_id(session_id)
+            .agent_path(AgentPath::root())
+            .current_model(Arc::new(tokio::sync::RwLock::new(
+                "test/provider-model".to_string(),
+            )))
             .cwd(PathBuf::from("/tmp/project"))
             .tx_op(tx_op)
             .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))
