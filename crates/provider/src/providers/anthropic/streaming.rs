@@ -432,32 +432,34 @@ fn handle_event(
                 None
             }
         },
-        StreamingEvent::ContentBlockStart { content_block, .. } => match content_block {
-            Content::ToolUse { id, name, .. } => {
-                let internal_call_id = nanoid::nanoid!();
-                *current_tool_call = Some(ToolCallState {
-                    name: name.clone(),
-                    id: id.clone(),
-                    internal_call_id: internal_call_id.clone(),
-                    input_json: String::new(),
-                });
-                Some(Ok(RawStreamingChoice::ToolCallDelta {
-                    id: id.clone(),
-                    internal_call_id,
-                    content: ToolCallDeltaContent::Name(name.clone()),
-                }))
+        StreamingEvent::ContentBlockStart { content_block, .. } => {
+            match content_block {
+                Content::ToolUse { id, name, .. } => {
+                    let internal_call_id = nanoid::nanoid!();
+                    *current_tool_call = Some(ToolCallState {
+                        name: name.clone(),
+                        id: id.clone(),
+                        internal_call_id: internal_call_id.clone(),
+                        input_json: String::new(),
+                    });
+                    Some(Ok(RawStreamingChoice::ToolCallDelta {
+                        id: id.clone(),
+                        internal_call_id,
+                        content: ToolCallDeltaContent::Name(name.clone()),
+                    }))
+                }
+                Content::Thinking { .. } => {
+                    *current_thinking = Some(ThinkingState::default());
+                    None
+                }
+                Content::RedactedThinking { data } => Some(Ok(RawStreamingChoice::Reasoning {
+                    id: None,
+                    content: ReasoningContent::Redacted { data: data.clone() },
+                })),
+                // Handle other content types - they don't need special handling
+                _ => None,
             }
-            Content::Thinking { .. } => {
-                *current_thinking = Some(ThinkingState::default());
-                None
-            }
-            Content::RedactedThinking { data } => Some(Ok(RawStreamingChoice::Reasoning {
-                id: None,
-                content: ReasoningContent::Redacted { data: data.clone() },
-            })),
-            // Handle other content types - they don't need special handling
-            _ => None,
-        },
+        }
         StreamingEvent::ContentBlockStop { .. } => {
             if let Some(thinking_state) = Option::take(current_thinking)
                 && !thinking_state.thinking.is_empty()
@@ -752,7 +754,9 @@ mod tests {
             } => {
                 assert_eq!(id, "tool_123");
                 match content {
-                    ToolCallDeltaContent::Delta(delta) => assert_eq!(delta, "{\"arg\":\"value"),
+                    ToolCallDeltaContent::Delta(delta) => {
+                        assert_eq!(delta, "{\"arg\":\"value")
+                    }
                     _ => panic!("Expected Delta content"),
                 }
             }

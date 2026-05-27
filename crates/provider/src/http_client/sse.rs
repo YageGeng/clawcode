@@ -334,12 +334,14 @@ where
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(()) => {
                             // Transition: WaitingToRetry -> Reconnecting
-                            let response_future =
-                                GenericEventSource::<HttpClient, RequestBody>::create_response_future(
-                                    this.client,
-                                    this.req,
-                                    this.last_event_id.as_deref(),
-                                );
+                            let response_future = GenericEventSource::<
+                                HttpClient,
+                                RequestBody,
+                            >::create_response_future(
+                                this.client,
+                                this.req,
+                                this.last_event_id.as_deref(),
+                            );
                             this.state.set(SourceState::Reconnecting {
                                 response_future,
                                 last_retry: retry_info,

@@ -455,12 +455,24 @@ impl fmt::Display for ModelListingError {
                 status_code,
                 message,
             } => write!(f, "API error (status {}): {}", status_code, message),
-            Self::RequestError { message } => write!(f, "Request error: {}", message),
-            Self::ParseError { message } => write!(f, "Parse error: {}", message),
-            Self::AuthError { message } => write!(f, "Authentication error: {}", message),
-            Self::RateLimitError { message } => write!(f, "Rate limit error: {}", message),
-            Self::ServiceUnavailable { message } => write!(f, "Service unavailable: {}", message),
-            Self::UnknownError { message } => write!(f, "Unknown error: {}", message),
+            Self::RequestError { message } => {
+                write!(f, "Request error: {}", message)
+            }
+            Self::ParseError { message } => {
+                write!(f, "Parse error: {}", message)
+            }
+            Self::AuthError { message } => {
+                write!(f, "Authentication error: {}", message)
+            }
+            Self::RateLimitError { message } => {
+                write!(f, "Rate limit error: {}", message)
+            }
+            Self::ServiceUnavailable { message } => {
+                write!(f, "Service unavailable: {}", message)
+            }
+            Self::UnknownError { message } => {
+                write!(f, "Unknown error: {}", message)
+            }
         }
     }
 }

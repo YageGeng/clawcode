@@ -133,7 +133,9 @@ pub fn read_latest_manifest(
     let path = manifest_path(data_home);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
         Err(err) => return Err(err),
     };
     let mut records = HashMap::new();

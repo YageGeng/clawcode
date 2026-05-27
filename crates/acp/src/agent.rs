@@ -37,6 +37,8 @@ pub struct ClawcodeAgent {
     session_configs: Arc<Mutex<HashMap<protocol::SessionId, Vec<SessionConfigOption>>>>,
     /// Child sessions whose live event streams are already being forwarded.
     event_subscriptions: Arc<Mutex<HashSet<protocol::SessionId>>>,
+    /// Accumulated usage totals keyed by kernel session id for ACP usage snapshots.
+    usage_totals: Arc<Mutex<HashMap<protocol::SessionId, Usage>>>,
 }
 
 impl ClawcodeAgent {
@@ -74,6 +76,7 @@ impl ClawcodeAgent {
             terminal_router,
             session_configs: Arc::default(),
             event_subscriptions: Arc::default(),
+            usage_totals: Arc::default(),
         }
     }
 
@@ -112,6 +115,66 @@ impl ClawcodeAgent {
             )
             .meta(meta),
         )
+    }
+
+    /// Build ACP extension metadata with cumulative and delta token usage details.
+    fn usage_metadata(total: Usage, delta: Option<Usage>) -> acp::schema::Meta {
+        serde_json::json!({
+            "clawcode": {
+                "usage": {
+                    "input_tokens": total.input_tokens,
+                    "output_tokens": total.output_tokens,
+                    "total_tokens": total.display_tokens(),
+                    "delta_input_tokens": delta.map(|usage| usage.input_tokens).unwrap_or(0),
+                    "delta_output_tokens": delta.map(|usage| usage.output_tokens).unwrap_or(0),
+                    "delta_total_tokens": delta.map(Usage::display_tokens).unwrap_or(0),
+                }
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("usage metadata root must be an object")
+    }
+
+    /// Convert an accumulated protocol usage snapshot into an ACP usage update.
+    fn usage_update_from_total(total: Usage, delta: Option<Usage>) -> UsageUpdate {
+        UsageUpdate::new(total.display_tokens(), 0).meta(Self::usage_metadata(total, delta))
+    }
+
+    /// Add a provider-reported usage increment and return the cumulative ACP update.
+    fn record_usage_delta(
+        &self,
+        session_id: &protocol::SessionId,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> UsageUpdate {
+        let delta = Usage {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens + output_tokens,
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
+        let mut totals = self
+            .usage_totals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let total = totals.entry(session_id.clone()).or_default();
+        *total += delta;
+        Self::usage_update_from_total(*total, Some(delta))
+    }
+
+    /// Seed the ACP usage accumulator from replayed kernel history.
+    fn set_usage_total(&self, session_id: protocol::SessionId, usage: Option<Usage>) {
+        let mut totals = self
+            .usage_totals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(usage) = usage {
+            totals.insert(session_id, usage);
+        } else {
+            totals.remove(&session_id);
+        }
     }
 
     /// Build and store the default session configuration options for a session.
@@ -511,10 +574,9 @@ impl ClawcodeAgent {
         }
 
         if let Some(usage) = usage {
-            // ACP status follows the live event path and displays input + output tokens.
             cx.send_notification(SessionNotification::new(
                 session_id.clone(),
-                SessionUpdate::UsageUpdate(UsageUpdate::new(usage.display_tokens(), 0)),
+                SessionUpdate::UsageUpdate(Self::usage_update_from_total(usage, None)),
             ))?;
         }
 
@@ -762,7 +824,7 @@ impl ClawcodeAgent {
                 input_tokens,
                 output_tokens,
             } => {
-                let usage = UsageUpdate::new(input_tokens + output_tokens, 0);
+                let usage = self.record_usage_delta(&session_id, input_tokens, output_tokens);
                 let update = SessionUpdate::UsageUpdate(usage);
                 let _ = cx.send_notification(SessionNotification::new(&session_id, update));
             }
@@ -1098,6 +1160,7 @@ impl ClawcodeAgent {
             .new_session(cwd, options)
             .await
             .map_err(|e| Error::internal_error().data(e.to_string()))?;
+        self.set_usage_total(created.session_id.clone(), None);
 
         let acp_session_id = created.acp_session_id();
         let mode_state = created.acp_mode_state();
@@ -1170,13 +1233,9 @@ impl ClawcodeAgent {
             &created.modes,
             &created.models,
         );
-        Self::replay_history(
-            &acp_session_id,
-            &created.history,
-            created.history_usage,
-            &cx,
-        )
-        .await?;
+        let history_usage = created.history_usage;
+        self.set_usage_total(created.session_id.clone(), history_usage);
+        Self::replay_history(&acp_session_id, &created.history, history_usage, &cx).await?;
 
         let model_state = created.acp_model_state();
         let mode_state = created.acp_mode_state();
@@ -1461,6 +1520,7 @@ impl ClawcodeAgent {
         self.clear_session_configs(&session_id);
         self.fs_router.unregister_session(&session_id);
         self.terminal_router.unregister_session(&session_id);
+        self.set_usage_total(session_id, None);
         Ok(CloseSessionResponse::new())
     }
 }
@@ -2090,6 +2150,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_prompt_accumulates_usage_updates_with_breakdown_metadata() {
+        let session_id = SessionId::from("session-usage");
+        let kernel = kernel_with_prompt_events(vec![
+            Event::usage_update(session_id.clone(), 12, 3),
+            Event::usage_update(session_id.clone(), 5, 7),
+            Event::TurnComplete {
+                session_id: session_id.clone(),
+                stop_reason: protocol::StopReason::EndTurn,
+            },
+        ]);
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new("session-usage"),
+            vec![ContentBlock::Text(TextContent::new("hello".to_string()))],
+        );
+        let (client, mut notifications) = test_connection_to_client_recording_notifications().await;
+
+        agent
+            .handle_prompt(request, client)
+            .await
+            .expect("prompt should finish");
+
+        let first = notifications.recv().await.expect("first usage update");
+        let SessionUpdate::UsageUpdate(first_usage) = first.update else {
+            panic!("expected first usage update");
+        };
+        assert_eq!(first_usage.used, 15);
+
+        let second = notifications.recv().await.expect("second usage update");
+        let SessionUpdate::UsageUpdate(second_usage) = second.update else {
+            panic!("expected second usage update");
+        };
+        assert_eq!(second_usage.used, 27);
+        let meta = second_usage.meta.expect("usage metadata");
+        let usage_meta = &meta["clawcode"]["usage"];
+        assert_eq!(usage_meta["input_tokens"], 17);
+        assert_eq!(usage_meta["output_tokens"], 10);
+        assert_eq!(usage_meta["total_tokens"], 27);
+    }
+
+    #[tokio::test]
     async fn handle_prompt_forwards_spawned_agent_initial_stream() {
         let root_session = SessionId::from("root-session");
         let child_session = SessionId::from("child-session");
@@ -2413,7 +2514,9 @@ mod tests {
         assert_eq!(update.used, 20);
         match notifications.try_recv() {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-            other => panic!("expected no extra replay notifications, got {other:?}"),
+            other => {
+                panic!("expected no extra replay notifications, got {other:?}")
+            }
         }
     }
 

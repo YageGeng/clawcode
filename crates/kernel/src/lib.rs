@@ -260,7 +260,9 @@ impl Kernel {
             tokio::spawn(async move {
                 match manager.register_external_mcp_server(config).await {
                     Ok(()) => tools.register_mcp_tools(Arc::clone(&manager)),
-                    Err(error) => tracing::warn!(%error, "external MCP server registration failed"),
+                    Err(error) => {
+                        tracing::warn!(%error, "external MCP server registration failed")
+                    }
                 }
             });
         });
@@ -441,7 +443,12 @@ impl AgentKernel for Kernel {
                 .as_ref()
                 .map(|replayed| replayed.messages.clone())
                 .unwrap_or_default();
-            let history_usage = replayed.and_then(|replayed| replayed.usage);
+            let runtime_usage = handle.current_usage().await;
+            let history_usage = if runtime_usage.display_tokens() > 0 {
+                Some(runtime_usage)
+            } else {
+                replayed.and_then(|replayed| replayed.usage)
+            };
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
                 .current_model(handle.current_model().await)
@@ -485,6 +492,7 @@ impl AgentKernel for Kernel {
                     .approval(Arc::new(ApprovalPolicy::new(app_cfg.approval)))
                     .app_config(Arc::clone(&app_cfg))
                     .recorder(Arc::clone(&recorder))
+                    .initial_usage(history_usage.unwrap_or_default())
                     .build(),
             )
             .await?;

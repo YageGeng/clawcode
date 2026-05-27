@@ -45,6 +45,43 @@ impl UsageView {
         }
     }
 
+    /// Builds a usage view from ACP metadata when Clawcode provides split totals.
+    pub fn from_acp_update(update: &UsageUpdate) -> Self {
+        if let Some(meta) = &update.meta
+            && let Some(usage) = meta.get("clawcode").and_then(|value| value.get("usage"))
+        {
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let output_tokens = usage
+                .get("output_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let total_tokens = usage
+                .get("total_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(input_tokens + output_tokens);
+            return Self {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+            };
+        }
+        Self::from_total(update.used)
+    }
+
+    /// Returns the compact status text for token usage.
+    pub fn status_text(&self) -> String {
+        if self.input_tokens == 0 && self.output_tokens == 0 {
+            return format!("tokens: {}", self.total_tokens);
+        }
+        format!(
+            "tokens: {} (in {} / out {})",
+            self.total_tokens, self.input_tokens, self.output_tokens
+        )
+    }
+
     /// Returns prompt/input tokens.
     pub fn input_tokens(&self) -> u64 {
         self.input_tokens
@@ -243,7 +280,7 @@ impl AppState {
 
     /// Builds the bottom status line with model, cwd, and token usage.
     pub fn bottom_status_line(&self, width: usize) -> String {
-        let token_status = format!("tokens: {}", self.usage.total_tokens());
+        let token_status = self.usage.status_text();
         let token_width = UnicodeWidthStr::width(token_status.as_str());
         if width <= token_width {
             return Self::truncate_to_display_width(&token_status, width);
@@ -352,7 +389,11 @@ impl AppState {
 
     /// Applies an ACP token usage update.
     fn apply_usage_update(&mut self, update: UsageUpdate) {
-        self.usage = UsageView::from_total(update.used);
+        if update.meta.is_some() {
+            self.usage = UsageView::from_acp_update(&update);
+        } else {
+            self.usage = UsageView::from_total(update.used);
+        }
     }
 
     /// Allocates the next stable transcript entry id.
@@ -836,18 +877,52 @@ mod tests {
         assert!(state.transcript().is_empty());
     }
 
-    /// Verifies ACP usage updates set the status token total.
+    /// Verifies ACP usage updates accumulate and preserve input/output breakdowns.
     #[test]
-    fn state_acp_usage_update_sets_total_tokens() {
+    fn state_acp_usage_update_accumulates_input_and_output_tokens() {
+        let session_id = sid("s1");
+        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+
+        let usage_update = UsageUpdate::new(15, 0).meta(
+            serde_json::json!({
+                "clawcode": {
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 3,
+                        "total_tokens": 15
+                    }
+                }
+            })
+            .as_object()
+            .cloned()
+            .expect("usage metadata object"),
+        );
+        state.apply_session_update(notification(
+            session_id,
+            SessionUpdate::UsageUpdate(usage_update),
+        ));
+
+        assert_eq!(state.usage().input_tokens(), 12);
+        assert_eq!(state.usage().output_tokens(), 3);
+        assert_eq!(state.usage().total_tokens(), 15);
+    }
+
+    /// Verifies ACP usage updates without metadata are treated as cumulative totals.
+    #[test]
+    fn state_acp_usage_update_without_metadata_sets_total_tokens() {
         let session_id = sid("s1");
         let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
 
         state.apply_session_update(notification(
+            session_id.clone(),
+            SessionUpdate::UsageUpdate(UsageUpdate::new(10, 0)),
+        ));
+        state.apply_session_update(notification(
             session_id,
-            SessionUpdate::UsageUpdate(UsageUpdate::new(30, 0)),
+            SessionUpdate::UsageUpdate(UsageUpdate::new(20, 0)),
         ));
 
-        assert_eq!(state.usage().total_tokens(), 30);
+        assert_eq!(state.usage().total_tokens(), 20);
     }
 
     /// Verifies the bottom status line includes runtime identity and total usage.
@@ -864,7 +939,9 @@ mod tests {
 
         assert!(status.contains("deepseek/model"));
         assert!(status.contains("/tmp/project"));
-        assert!(status.contains("30"));
+        assert!(status.contains("tokens: 30"));
+        assert!(status.contains("in 10"));
+        assert!(status.contains("out 20"));
     }
 
     /// Verifies the bottom status line never exceeds narrow terminal display width.

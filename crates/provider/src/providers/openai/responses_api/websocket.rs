@@ -392,7 +392,9 @@ where
 
             let message = match message {
                 Ok(message) => message,
-                Err(error) => return Err(self.fail_session(websocket_provider_error(error))),
+                Err(error) => {
+                    return Err(self.fail_session(websocket_provider_error(error)));
+                }
             };
             let payload = match websocket_message_to_text(message) {
                 Ok(Some(payload)) => payload,

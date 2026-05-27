@@ -272,7 +272,9 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
     fn edit_dedup_key(parsed: &ParsedEdit) -> String {
         let line_key = match &parsed.spec {
             ParsedSpec::Single { reference } => format!("s:{}", reference.line),
-            ParsedSpec::Range { start, end } => format!("r:{}:{}", start.line, end.line),
+            ParsedSpec::Range { start, end } => {
+                format!("r:{}:{}", start.line, end.line)
+            }
             ParsedSpec::InsertAfter { after } => format!("i:{}", after.line),
         };
         format!("{line_key}|{}", parsed.dst_lines.join("\n"))

@@ -1220,7 +1220,9 @@ mod tests {
         let message = Message::system("You are concise.");
 
         match &message {
-            Message::System { content } => assert_eq!(content, "You are concise."),
+            Message::System { content } => {
+                assert_eq!(content, "You are concise.")
+            }
             _ => panic!("Expected system message"),
         }
 

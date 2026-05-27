@@ -2124,7 +2124,9 @@ mod tests {
                         assert_eq!(data, DocumentSourceKind::FileId("file_abc".to_string()));
                         assert_eq!(media_type, None);
                     }
-                    other => panic!("Expected Document content, got: {other:?}"),
+                    other => {
+                        panic!("Expected Document content, got: {other:?}")
+                    }
                 }
             }
             _ => panic!("Expected User message"),
@@ -2189,7 +2191,9 @@ mod tests {
                         );
                         assert_eq!(media_type, Some(msg::DocumentMediaType::TXT));
                     }
-                    other => panic!("Expected Document content, got: {other:?}"),
+                    other => {
+                        panic!("Expected Document content, got: {other:?}")
+                    }
                 }
             }
             _ => panic!("Expected User message"),

@@ -323,7 +323,9 @@ impl TryFrom<(&str, CompletionRequest)> for MoonshotCompletionRequest {
         partial_history.extend(req.chat_history);
 
         let mut full_history: Vec<Value> = match &req.preamble {
-            Some(preamble) => vec![serde_json::to_value(openai::Message::system(preamble))?],
+            Some(preamble) => {
+                vec![serde_json::to_value(openai::Message::system(preamble))?]
+            }
             None => vec![],
         };
 

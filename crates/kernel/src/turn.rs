@@ -157,7 +157,7 @@ pub(crate) async fn execute_turn(
     user_text: String,
     context: &mut Box<dyn ContextManager>,
     tx_event: &mpsc::UnboundedSender<Event>,
-) -> Result<(), KernelError> {
+) -> Result<Usage, KernelError> {
     // Build the system prompt preamble once per turn.
     // The preamble is injected into every LLM request via CompletionRequest::preamble
     // and converted to a leading Message::System at build() time.
@@ -191,6 +191,7 @@ pub(crate) async fn execute_turn(
 
     let tool_defs = ctx.tools.definitions();
     let sid = &ctx.session_id;
+    let mut turn_usage = Usage::default();
 
     let tool_ctx = ToolContext::builder()
         .session_id(ctx.session_id.clone())
@@ -319,6 +320,7 @@ pub(crate) async fn execute_turn(
                     usage: Some(usage), ..
                 } => {
                     response_usage = Some(usage);
+                    turn_usage += usage;
                     let _ = tx_event.send(Event::usage_update(
                         sid.clone(),
                         usage.input_tokens,
@@ -342,7 +344,7 @@ pub(crate) async fn execute_turn(
 
         // If no tool calls were made, the turn is done
         if tool_outputs.is_empty() {
-            return Ok(());
+            return Ok(turn_usage);
         }
 
         // Feed tool outputs back as user messages for the next LLM iteration
@@ -952,9 +954,20 @@ mod tests {
         let mut context: Box<dyn ContextManager> = Box::new(crate::context::InMemoryContext::new());
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
+        let usage = execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
             .await
             .expect("turn should complete");
+
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 11,
+                output_tokens: 4,
+                total_tokens: 15,
+                cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            }
+        );
 
         let text = std::fs::read_to_string(path).expect("read persisted turn");
         let usage_records: Vec<serde_json::Value> = text

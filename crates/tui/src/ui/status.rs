@@ -70,7 +70,7 @@ fn bottom_status_line_with_optional_agent(
     active_agent_label: Option<&str>,
     width: usize,
 ) -> Line<'static> {
-    let token_status = format!("tokens: {}", state.usage().total_tokens());
+    let token_status = state.usage().status_text();
     let token_width = UnicodeWidthStr::width(token_status.as_str());
     if width <= token_width {
         return Line::from(truncate_to_display_width(&token_status, width));

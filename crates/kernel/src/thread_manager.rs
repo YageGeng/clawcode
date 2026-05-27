@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use config::AppConfig;
 use protocol::message::Message;
-use protocol::{AgentPath, Event, KernelError, Op, SessionId};
+use protocol::{AgentPath, Event, KernelError, Op, SessionId, Usage};
 use provider::factory::{ArcLlm, LlmFactory};
 use store::SessionRecorder;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -43,6 +43,9 @@ pub(crate) struct SpawnThreadParams {
     pub(crate) app_config: Arc<AppConfig>,
     /// Recorder attached before the first turn starts.
     pub(crate) recorder: Arc<dyn SessionRecorder>,
+    /// Accumulated usage that should seed the live session.
+    #[builder(default)]
+    pub(crate) initial_usage: Usage,
 }
 
 /// Parameters required to load a persisted thread runtime.
@@ -73,6 +76,9 @@ pub(crate) struct LoadThreadParams {
     pub(crate) app_config: Arc<AppConfig>,
     /// Recorder attached before the restored thread runs again.
     pub(crate) recorder: Arc<dyn SessionRecorder>,
+    /// Accumulated replayed usage that should seed the live session.
+    #[builder(default)]
+    pub(crate) initial_usage: Usage,
 }
 
 /// Owns live thread handles and routes operations to them.
@@ -211,6 +217,7 @@ impl ThreadManager {
             params.approval,
             params.app_config,
             params.recorder,
+            params.initial_usage,
         );
         self.insert_thread(thread.clone()).await;
         Ok(thread)
@@ -236,6 +243,7 @@ impl ThreadManager {
             .approval(params.approval)
             .app_config(params.app_config)
             .recorder(params.recorder)
+            .initial_usage(params.initial_usage)
             .build();
         spawn_params.agent_prompt = agent_prompt;
         self.spawn_thread(spawn_params).await
@@ -393,6 +401,7 @@ mod tests {
             .current_model(Arc::new(tokio::sync::RwLock::new(
                 "test/provider-model".to_string(),
             )))
+            .current_usage(Arc::new(tokio::sync::RwLock::new(Usage::default())))
             .cwd(PathBuf::from("/tmp/project"))
             .tx_op(tx_op)
             .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))

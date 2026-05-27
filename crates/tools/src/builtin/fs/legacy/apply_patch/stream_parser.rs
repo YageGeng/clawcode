@@ -261,7 +261,9 @@ fn process_patch_text_char(
             'n' => output.push('\n'),
             'r' => output.push('\r'),
             't' => output.push('\t'),
-            other => return Err(format!("unsupported JSON escape in patchText: \\{other}")),
+            other => {
+                return Err(format!("unsupported JSON escape in patchText: \\{other}"));
+            }
         }
         *escape = false;
         return Ok(false);

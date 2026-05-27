@@ -214,7 +214,9 @@ impl McpConnectionManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (name, mcp_status) in status.iter() {
                 match mcp_status {
-                    McpStartupStatus::Ready => tracing::info!(server = %name, "MCP connected"),
+                    McpStartupStatus::Ready => {
+                        tracing::info!(server = %name, "MCP connected")
+                    }
                     McpStartupStatus::Failed { reason } => {
                         tracing::warn!(server = %name, %reason, "MCP failed to start")
                     }

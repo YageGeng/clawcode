@@ -52,7 +52,9 @@ impl CredentialStore for FileCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
         let data = match std::fs::read_to_string(&self.path) {
             Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
             Err(e) => {
                 return Err(AuthError::OAuthError(format!(
                     "failed to read {}: {e}",
