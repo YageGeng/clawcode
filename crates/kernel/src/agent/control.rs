@@ -376,18 +376,22 @@ impl AgentControl {
     ) -> Result<(), String> {
         self.registry
             .update_agent_status(child_session_id, status.clone());
+
         if let Some(status_tx) = self.status_watchers.lock().await.get(child_session_id) {
             let _ = status_tx.send(status.clone());
         }
+
         let Some(metadata) = self
             .registry
             .agent_metadata_for_thread(child_session_id.clone())
         else {
             return Ok(());
         };
+
         let Some(parent_session_id) = metadata.parent_session_id.clone() else {
             return Ok(());
         };
+
         let child_path = metadata.agent_path.unwrap_or_else(AgentPath::root);
         let child_name = metadata
             .agent_nickname
@@ -744,7 +748,7 @@ mod tests {
 
     /// Build a minimal thread handle for AgentControl routing tests.
     fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
-        let (tx_event, _rx_event) = mpsc::unbounded_channel();
+        let (tx_event, rx_event) = mpsc::unbounded_channel();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         Thread::builder()
             .session_id(session_id)
@@ -755,6 +759,7 @@ mod tests {
             .cwd(PathBuf::from("/tmp/project"))
             .tx_op(tx_op)
             .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))
+            .initial_rx_event(Arc::new(tokio::sync::Mutex::new(Some(rx_event))))
             .pending_approvals(Arc::new(tokio::sync::Mutex::new(HashMap::<
                 String,
                 oneshot::Sender<protocol::ReviewDecision>,

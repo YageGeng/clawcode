@@ -582,6 +582,17 @@ impl AgentKernel for Kernel {
         Ok(event_stream(rx_event, cancel_rx))
     }
 
+    /// Subscribe to an existing live session's event channel without starting a turn.
+    async fn subscribe_session_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
+    {
+        let rx_event = self.thread_manager.take_rx(session_id).await?;
+        let cancel_rx = self.thread_manager.cancel_rx(session_id).await?;
+        Ok(event_stream(rx_event, cancel_rx))
+    }
+
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError> {
         self.thread_manager.cancel_thread(session_id).await
     }

@@ -1,6 +1,6 @@
 //! ACP Agent bridging the clawcode kernel to the ACP protocol.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use acp::schema::{
@@ -23,6 +23,7 @@ use crate::backend::terminal::AcpClientTerminalRouter;
 const SUBAGENT_METADATA_TOOL_CALL_ID: &str = "clawcode-subagents";
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
+#[derive(Clone)]
 pub struct ClawcodeAgent {
     /// Reference to the kernel for session operations.
     kernel: Arc<dyn AgentKernel>,
@@ -34,6 +35,8 @@ pub struct ClawcodeAgent {
     terminal_router: Arc<AcpClientTerminalRouter>,
     /// Session-scoped configuration options tracked for supported `set_session_config_option` calls.
     session_configs: Arc<Mutex<HashMap<protocol::SessionId, Vec<SessionConfigOption>>>>,
+    /// Child sessions whose live event streams are already being forwarded.
+    event_subscriptions: Arc<Mutex<HashSet<protocol::SessionId>>>,
 }
 
 impl ClawcodeAgent {
@@ -70,6 +73,7 @@ impl ClawcodeAgent {
             fs_router,
             terminal_router,
             session_configs: Arc::default(),
+            event_subscriptions: Arc::default(),
         }
     }
 
@@ -517,6 +521,374 @@ impl ClawcodeAgent {
         Ok(())
     }
 
+    /// Start forwarding live events for a spawned child session.
+    fn spawn_child_event_forwarder(
+        &self,
+        child_session_id: SessionId,
+        root_acp_session_id: AcpSessionId,
+        parent_session_id: SessionId,
+        cx: ConnectionTo<Client>,
+    ) {
+        if !self.mark_event_subscription(&child_session_id) {
+            return;
+        }
+
+        let agent = self.clone();
+        tokio::spawn(async move {
+            let mut events = match agent
+                .kernel
+                .subscribe_session_events(&child_session_id)
+                .await
+            {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        child_session_id = %child_session_id,
+                        error = %error,
+                        "failed to subscribe to spawned child session events"
+                    );
+                    return;
+                }
+            };
+            let mut tool_names = HashMap::<String, String>::new();
+            while let Some(event) = events.next().await {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) => {
+                        tracing::warn!(
+                            child_session_id = %child_session_id,
+                            error = %error,
+                            "child session event stream failed"
+                        );
+                        break;
+                    }
+                };
+                match agent
+                    .forward_kernel_event(
+                        event,
+                        &cx,
+                        &root_acp_session_id,
+                        &parent_session_id,
+                        &mut tool_names,
+                    )
+                    .await
+                {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            child_session_id = %child_session_id,
+                            error = %error,
+                            "failed to forward child session event"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Return true when a child session should start a new event forwarding task.
+    fn mark_event_subscription(&self, session_id: &SessionId) -> bool {
+        self.event_subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone())
+    }
+
+    /// Register client routes and live-event forwarding for every non-root snapshot agent.
+    fn subscribe_snapshot_agent_events(
+        &self,
+        agents: &[protocol::AgentUiMetadata],
+        root_acp_session_id: &AcpSessionId,
+        cx: &ConnectionTo<Client>,
+    ) {
+        for metadata in agents.iter().filter(|metadata| !metadata.is_root) {
+            self.fs_router.register_session(
+                metadata.session_id.clone(),
+                cx.clone(),
+                self.client_capabilities_snapshot(),
+            );
+            self.terminal_router.register_session(
+                metadata.session_id.clone(),
+                cx.clone(),
+                self.client_capabilities_snapshot(),
+            );
+            self.spawn_child_event_forwarder(
+                metadata.session_id.clone(),
+                root_acp_session_id.clone(),
+                metadata.session_id.clone(),
+                cx.clone(),
+            );
+        }
+    }
+
+    /// Translate one kernel event into ACP notifications and return a terminal stop reason.
+    async fn forward_kernel_event(
+        &self,
+        event: Event,
+        cx: &ConnectionTo<Client>,
+        metadata_session_id: &AcpSessionId,
+        parent_session_id: &SessionId,
+        tool_names: &mut HashMap<String, String>,
+    ) -> Result<Option<AcpStopReason>, Error> {
+        match event {
+            Event::AgentMessageChunk { session_id, text } => {
+                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                let update = SessionUpdate::AgentMessageChunk(chunk);
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+            }
+            Event::AgentThoughtChunk { session_id, text } => {
+                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                let update = SessionUpdate::AgentThoughtChunk(chunk);
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+            }
+            Event::ToolCall {
+                session_id,
+                call_id,
+                name,
+                arguments,
+                status,
+                ..
+            } => {
+                tool_names.insert(call_id.clone(), name.clone());
+                let acp_status: AcpToolCallStatus = status.into();
+                let tool_call = ToolCall::new(ToolCallId::new(call_id), name)
+                    .status(acp_status)
+                    .raw_input(arguments);
+                let update = SessionUpdate::ToolCall(tool_call);
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+            }
+            Event::ToolCallUpdate {
+                session_id,
+                call_id,
+                output_delta,
+                status,
+            } => {
+                let completed = status == Some(protocol::ToolCallStatus::Completed);
+                let completed_tool_name = if completed {
+                    tool_names.get(&call_id).cloned()
+                } else {
+                    None
+                };
+                let mut fields = ToolCallUpdateFields::default();
+                if let Some(delta) = output_delta {
+                    fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                        ContentBlock::Text(TextContent::new(delta)),
+                    ))]);
+                }
+                if let Some(s) = status {
+                    let acp_status: AcpToolCallStatus = s.into();
+                    fields.status = Some(acp_status);
+                }
+                let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
+                let update = SessionUpdate::ToolCallUpdate(update_val);
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+                if matches!(
+                    completed_tool_name.as_deref(),
+                    Some("spawn_agent" | "close_agent")
+                ) {
+                    // Agent tools mutate the registry, so refresh the UI list from the
+                    // authoritative kernel state instead of parsing model-visible tool output.
+                    let root_session_id = SessionId::from(metadata_session_id.clone());
+                    if let Ok(snapshot) = self.kernel.agent_ui_snapshot(&root_session_id).await {
+                        self.subscribe_snapshot_agent_events(&snapshot, metadata_session_id, cx);
+                        let update = Self::subagent_metadata_update(
+                            protocol::AgentUiEventKind::Snapshot,
+                            snapshot,
+                        );
+                        let _ = cx.send_notification(SessionNotification::new(
+                            metadata_session_id.clone(),
+                            update,
+                        ));
+                    }
+                }
+            }
+            Event::PatchApplyUpdated {
+                session_id,
+                call_id,
+                changes,
+            } => {
+                let update = Self::patch_apply_updated_to_acp(call_id, changes);
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+            }
+            Event::ExecCommandOutputDelta {
+                session_id,
+                call_id,
+                chunk,
+                ..
+            } => {
+                // Forward shell output chunks verbatim; the kernel event
+                // already carries stdout/stderr metadata for non-text clients.
+                let decoded = String::from_utf8_lossy(&chunk);
+                if !decoded.is_empty() {
+                    let mut fields = ToolCallUpdateFields::default();
+                    fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                        ContentBlock::Text(TextContent::new(decoded.into_owned())),
+                    ))]);
+                    fields.status = Some(AcpToolCallStatus::InProgress);
+                    let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
+                    let update = SessionUpdate::ToolCallUpdate(update_val);
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+                }
+            }
+            Event::ItemStarted {
+                session_id, item, ..
+            } => {
+                if let Some(update) = item.start() {
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+                }
+            }
+            Event::ItemCompleted {
+                session_id, item, ..
+            } => {
+                if let Some(update) = item.end() {
+                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+                }
+            }
+            Event::PlanUpdate {
+                session_id,
+                entries,
+            } => {
+                let plan_entries: Vec<PlanEntry> = entries
+                    .into_iter()
+                    .map(|e| PlanEntry::new(e.name, e.priority.into(), e.status.into()))
+                    .collect();
+                let update = SessionUpdate::Plan(Plan::new(plan_entries));
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+            }
+            Event::UsageUpdate {
+                session_id,
+                input_tokens,
+                output_tokens,
+            } => {
+                let usage = UsageUpdate::new(input_tokens + output_tokens, 0);
+                let update = SessionUpdate::UsageUpdate(usage);
+                let _ = cx.send_notification(SessionNotification::new(&session_id, update));
+            }
+            Event::ExecApprovalRequested {
+                session_id,
+                call_id,
+                tool_name,
+                arguments,
+                ..
+            } => {
+                // Build a minimal ToolCallUpdate to describe the permission request
+                let mut tc_fields = ToolCallUpdateFields::default();
+                tc_fields.status = Some(ToolCallStatus::Pending);
+                tc_fields.title = Some(tool_name.clone());
+                tc_fields.content = Some(vec![ToolCallContent::Content(Content::new(
+                    ContentBlock::Text(TextContent::new(format!("{tool_name}: {arguments}"))),
+                ))]);
+
+                let tc_update = ToolCallUpdate::new(ToolCallId::new(call_id.clone()), tc_fields);
+
+                let perm_req = RequestPermissionRequest::new(
+                    &session_id,
+                    tc_update,
+                    vec![
+                        PermissionOption::new(
+                            "allow_once",
+                            "Allow Once",
+                            PermissionOptionKind::AllowOnce,
+                        ),
+                        PermissionOption::new(
+                            "reject_once",
+                            "Reject",
+                            PermissionOptionKind::RejectOnce,
+                        ),
+                    ],
+                );
+
+                let resp: RequestPermissionResponse =
+                    cx.send_request(perm_req).block_task().await?;
+
+                let decision = match &resp.outcome {
+                    RequestPermissionOutcome::Selected(sel) => match sel.option_id.0.as_ref() {
+                        "allow_once" | "allow_always" => protocol::ReviewDecision::AllowOnce,
+                        _ => protocol::ReviewDecision::RejectOnce,
+                    },
+                    _ => protocol::ReviewDecision::RejectOnce,
+                };
+
+                let _ = self
+                    .kernel
+                    .resolve_approval(&session_id, &call_id, decision)
+                    .await;
+            }
+            Event::AgentSpawned {
+                session_id,
+                agent_path,
+                agent_nickname,
+                agent_role,
+            } => {
+                // Spawned agents run inside kernel-created sessions, so they never pass through
+                // ACP new/load session handlers before their tools execute. Register the current
+                // client route immediately so child-session fs/terminal tools can delegate to it.
+                self.fs_router.register_session(
+                    session_id.clone(),
+                    cx.clone(),
+                    self.client_capabilities_snapshot(),
+                );
+                self.terminal_router.register_session(
+                    session_id.clone(),
+                    cx.clone(),
+                    self.client_capabilities_snapshot(),
+                );
+                self.spawn_child_event_forwarder(
+                    session_id.clone(),
+                    metadata_session_id.clone(),
+                    session_id.clone(),
+                    cx.clone(),
+                );
+                let metadata = protocol::AgentUiMetadata::builder()
+                    .session_id(session_id)
+                    .parent_session_id(parent_session_id.clone())
+                    .agent_path(agent_path)
+                    .nickname(agent_nickname)
+                    .role(agent_role)
+                    .status(protocol::AgentStatus::Running)
+                    .is_root(false)
+                    .build();
+                let update = Self::subagent_metadata_update(
+                    protocol::AgentUiEventKind::Upsert,
+                    vec![metadata],
+                );
+                let _ = cx.send_notification(SessionNotification::new(
+                    metadata_session_id.clone(),
+                    update,
+                ));
+            }
+            Event::AgentStatusChange {
+                session_id,
+                agent_path,
+                status,
+            } => {
+                let metadata = protocol::AgentUiMetadata::builder()
+                    .session_id(session_id)
+                    .agent_path(agent_path)
+                    .status(status)
+                    .is_root(false)
+                    .build();
+                let update = Self::subagent_metadata_update(
+                    protocol::AgentUiEventKind::Status,
+                    vec![metadata],
+                );
+                let _ = cx.send_notification(SessionNotification::new(
+                    metadata_session_id.clone(),
+                    update,
+                ));
+            }
+            Event::TurnComplete { stop_reason, .. } => {
+                let reason: AcpStopReason = stop_reason.into();
+                return Ok(Some(reason));
+            }
+            _ => {}
+        }
+
+        Ok(None)
+    }
+
     /// Build and serve the ACP agent over the given transport.
     pub async fn serve(
         self: Arc<Self>,
@@ -901,247 +1273,11 @@ impl ClawcodeAgent {
         // Translate events to ACP notifications
         while let Some(event) = events.next().await {
             let event = event.map_err(|e| Error::internal_error().data(e.to_string()))?;
-            match event {
-                Event::AgentMessageChunk { session_id, text } => {
-                    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-                    let update = SessionUpdate::AgentMessageChunk(chunk);
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                }
-                Event::AgentThoughtChunk { session_id, text } => {
-                    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-                    let update = SessionUpdate::AgentThoughtChunk(chunk);
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                }
-                Event::ToolCall {
-                    session_id,
-                    call_id,
-                    name,
-                    arguments,
-                    status,
-                    ..
-                } => {
-                    tool_names.insert(call_id.clone(), name.clone());
-                    let acp_status: AcpToolCallStatus = status.into();
-                    let tool_call = ToolCall::new(ToolCallId::new(call_id), name)
-                        .status(acp_status)
-                        .raw_input(arguments);
-                    let update = SessionUpdate::ToolCall(tool_call);
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                }
-                Event::ToolCallUpdate {
-                    session_id,
-                    call_id,
-                    output_delta,
-                    status,
-                } => {
-                    let completed = status == Some(protocol::ToolCallStatus::Completed);
-                    let completed_tool_name = if completed {
-                        tool_names.get(&call_id).cloned()
-                    } else {
-                        None
-                    };
-                    let mut fields = ToolCallUpdateFields::default();
-                    if let Some(delta) = output_delta {
-                        fields.content = Some(vec![ToolCallContent::Content(Content::new(
-                            ContentBlock::Text(TextContent::new(delta)),
-                        ))]);
-                    }
-                    if let Some(s) = status {
-                        let acp_status: AcpToolCallStatus = s.into();
-                        fields.status = Some(acp_status);
-                    }
-                    let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
-                    let update = SessionUpdate::ToolCallUpdate(update_val);
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                    if matches!(
-                        completed_tool_name.as_deref(),
-                        Some("spawn_agent" | "close_agent")
-                    ) {
-                        // Agent tools mutate the registry, so refresh the UI list from the
-                        // authoritative kernel state instead of parsing model-visible tool output.
-                        if let Ok(snapshot) =
-                            self.kernel.agent_ui_snapshot(&prompt_session_id).await
-                        {
-                            let update = Self::subagent_metadata_update(
-                                protocol::AgentUiEventKind::Snapshot,
-                                snapshot,
-                            );
-                            let _ = cx.send_notification(SessionNotification::new(
-                                acp_sid.clone(),
-                                update,
-                            ));
-                        }
-                    }
-                }
-                Event::PatchApplyUpdated {
-                    session_id,
-                    call_id,
-                    changes,
-                } => {
-                    let update = Self::patch_apply_updated_to_acp(call_id, changes);
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                }
-                Event::ExecCommandOutputDelta {
-                    session_id,
-                    call_id,
-                    chunk,
-                    ..
-                } => {
-                    // Forward shell output chunks verbatim; the kernel event
-                    // already carries stdout/stderr metadata for non-text clients.
-                    let decoded = String::from_utf8_lossy(&chunk);
-                    if !decoded.is_empty() {
-                        let mut fields = ToolCallUpdateFields::default();
-                        fields.content = Some(vec![ToolCallContent::Content(Content::new(
-                            ContentBlock::Text(TextContent::new(decoded.into_owned())),
-                        ))]);
-                        fields.status = Some(AcpToolCallStatus::InProgress);
-                        let update_val = ToolCallUpdate::new(ToolCallId::new(call_id), fields);
-                        let update = SessionUpdate::ToolCallUpdate(update_val);
-                        let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                    }
-                }
-                Event::ItemStarted {
-                    session_id, item, ..
-                } => {
-                    if let Some(update) = item.start() {
-                        let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                    }
-                }
-                Event::ItemCompleted {
-                    session_id, item, ..
-                } => {
-                    if let Some(update) = item.end() {
-                        let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                    }
-                }
-                Event::PlanUpdate {
-                    session_id,
-                    entries,
-                } => {
-                    let plan_entries: Vec<PlanEntry> = entries
-                        .into_iter()
-                        .map(|e| PlanEntry::new(e.name, e.priority.into(), e.status.into()))
-                        .collect();
-                    let update = SessionUpdate::Plan(Plan::new(plan_entries));
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                }
-                Event::UsageUpdate {
-                    session_id,
-                    input_tokens,
-                    output_tokens,
-                } => {
-                    let usage = UsageUpdate::new(input_tokens + output_tokens, 0);
-                    let update = SessionUpdate::UsageUpdate(usage);
-                    let _ = cx.send_notification(SessionNotification::new(&session_id, update));
-                }
-                Event::ExecApprovalRequested {
-                    session_id,
-                    call_id,
-                    tool_name,
-                    arguments,
-                    ..
-                } => {
-                    // Build a minimal ToolCallUpdate to describe the permission request
-                    let mut tc_fields = ToolCallUpdateFields::default();
-                    tc_fields.status = Some(ToolCallStatus::Pending);
-                    tc_fields.title = Some(tool_name.clone());
-                    tc_fields.content = Some(vec![ToolCallContent::Content(Content::new(
-                        ContentBlock::Text(TextContent::new(format!("{tool_name}: {arguments}"))),
-                    ))]);
-
-                    let tc_update =
-                        ToolCallUpdate::new(ToolCallId::new(call_id.clone()), tc_fields);
-
-                    let perm_req = RequestPermissionRequest::new(
-                        &session_id,
-                        tc_update,
-                        vec![
-                            PermissionOption::new(
-                                "allow_once",
-                                "Allow Once",
-                                PermissionOptionKind::AllowOnce,
-                            ),
-                            PermissionOption::new(
-                                "reject_once",
-                                "Reject",
-                                PermissionOptionKind::RejectOnce,
-                            ),
-                        ],
-                    );
-
-                    let resp: RequestPermissionResponse =
-                        cx.send_request(perm_req).block_task().await?;
-
-                    let decision = match &resp.outcome {
-                        RequestPermissionOutcome::Selected(sel) => match sel.option_id.0.as_ref() {
-                            "allow_once" | "allow_always" => protocol::ReviewDecision::AllowOnce,
-                            _ => protocol::ReviewDecision::RejectOnce,
-                        },
-                        _ => protocol::ReviewDecision::RejectOnce,
-                    };
-
-                    let _ = self
-                        .kernel
-                        .resolve_approval(&session_id, &call_id, decision)
-                        .await;
-                }
-                Event::AgentSpawned {
-                    session_id,
-                    agent_path,
-                    agent_nickname,
-                    agent_role,
-                } => {
-                    // Spawned agents run inside kernel-created sessions, so they never pass through
-                    // ACP new/load session handlers before their tools execute. Register the current
-                    // client route immediately so child-session fs/terminal tools can delegate to it.
-                    self.fs_router.register_session(
-                        session_id.clone(),
-                        cx.clone(),
-                        self.client_capabilities_snapshot(),
-                    );
-                    self.terminal_router.register_session(
-                        session_id.clone(),
-                        cx.clone(),
-                        self.client_capabilities_snapshot(),
-                    );
-                    let metadata = protocol::AgentUiMetadata::builder()
-                        .session_id(session_id)
-                        .parent_session_id(prompt_session_id.clone())
-                        .agent_path(agent_path)
-                        .nickname(agent_nickname)
-                        .role(agent_role)
-                        .status(protocol::AgentStatus::Running)
-                        .is_root(false)
-                        .build();
-                    let update = Self::subagent_metadata_update(
-                        protocol::AgentUiEventKind::Upsert,
-                        vec![metadata],
-                    );
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
-                }
-                Event::AgentStatusChange {
-                    session_id,
-                    agent_path,
-                    status,
-                } => {
-                    let metadata = protocol::AgentUiMetadata::builder()
-                        .session_id(session_id)
-                        .agent_path(agent_path)
-                        .status(status)
-                        .is_root(false)
-                        .build();
-                    let update = Self::subagent_metadata_update(
-                        protocol::AgentUiEventKind::Status,
-                        vec![metadata],
-                    );
-                    let _ = cx.send_notification(SessionNotification::new(acp_sid.clone(), update));
-                }
-                Event::TurnComplete { stop_reason, .. } => {
-                    let reason: AcpStopReason = stop_reason.into();
-                    return Ok(PromptResponse::new(reason));
-                }
-                _ => {}
+            if let Some(reason) = self
+                .forward_kernel_event(event, &cx, &acp_sid, &prompt_session_id, &mut tool_names)
+                .await?
+            {
+                return Ok(PromptResponse::new(reason));
             }
         }
 
@@ -1355,6 +1491,12 @@ mod tests {
         /// Events returned by the fake prompt stream in ACP routing tests.
         #[builder(default)]
         prompt_events: std::sync::Mutex<Vec<Event>>,
+        /// Events returned by fake live-session subscriptions in ACP routing tests.
+        #[builder(default)]
+        subscription_events: std::sync::Mutex<std::collections::HashMap<SessionId, Vec<Event>>>,
+        /// Agent UI snapshot returned by fake kernel calls in ACP routing tests.
+        #[builder(default)]
+        agent_ui_snapshot: Vec<protocol::AgentUiMetadata>,
         /// Mode changes captured by ACP config tests.
         #[builder(default)]
         set_mode_calls: std::sync::Mutex<Vec<String>>,
@@ -1430,6 +1572,20 @@ mod tests {
             Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
         }
 
+        /// Return the configured event stream for ACP live-session subscription tests.
+        async fn subscribe_session_events(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<EventStream, KernelError> {
+            let events = self
+                .subscription_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(session_id)
+                .unwrap_or_default();
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        }
+
         /// Accept cancellation in the fake kernel.
         async fn cancel(&self, _session_id: &SessionId) -> Result<(), KernelError> {
             Ok(())
@@ -1468,6 +1624,9 @@ mod tests {
             &self,
             root_session_id: &SessionId,
         ) -> Result<Vec<protocol::AgentUiMetadata>, KernelError> {
+            if !self.agent_ui_snapshot.is_empty() {
+                return Ok(self.agent_ui_snapshot.clone());
+            }
             Ok(vec![
                 protocol::AgentUiMetadata::builder()
                     .session_id(root_session_id.clone())
@@ -1529,6 +1688,48 @@ mod tests {
                 .prompt_events(std::sync::Mutex::new(events))
                 .build(),
         )
+    }
+
+    /// Create a fake kernel that returns prompt events and child subscription events.
+    fn kernel_with_prompt_and_subscription_events(
+        prompt_events: Vec<Event>,
+        session_id: SessionId,
+        subscription_events: Vec<Event>,
+        agent_ui_snapshot: Vec<protocol::AgentUiMetadata>,
+    ) -> Arc<RecordingKernel> {
+        let mut subscriptions = std::collections::HashMap::new();
+        subscriptions.insert(session_id, subscription_events);
+        Arc::new(
+            RecordingKernel::builder()
+                .prompt_events(std::sync::Mutex::new(prompt_events))
+                .subscription_events(std::sync::Mutex::new(subscriptions))
+                .agent_ui_snapshot(agent_ui_snapshot)
+                .build(),
+        )
+    }
+
+    /// Build root and child metadata for fake agent UI snapshots.
+    fn snapshot_with_child(
+        root_session: &SessionId,
+        child_session: &SessionId,
+    ) -> Vec<protocol::AgentUiMetadata> {
+        vec![
+            protocol::AgentUiMetadata::builder()
+                .session_id(root_session.clone())
+                .agent_path(protocol::AgentPath::root())
+                .status(protocol::AgentStatus::Running)
+                .is_root(true)
+                .build(),
+            protocol::AgentUiMetadata::builder()
+                .session_id(child_session.clone())
+                .parent_session_id(root_session.clone())
+                .agent_path(protocol::AgentPath::root().join("inspect"))
+                .nickname("A1".to_string())
+                .role("default".to_string())
+                .status(protocol::AgentStatus::Running)
+                .is_root(false)
+                .build(),
+        ]
     }
 
     fn default_config_modes() -> Vec<SessionMode> {
@@ -1885,6 +2086,139 @@ mod tests {
             panic!("expected text chunk");
         };
         assert_eq!(text.text, "child context");
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_forwards_spawned_agent_initial_stream() {
+        let root_session = SessionId::from("root-session");
+        let child_session = SessionId::from("child-session");
+        let kernel = kernel_with_prompt_and_subscription_events(
+            vec![
+                Event::agent_spawned(
+                    child_session.clone(),
+                    AgentPath::root().join("inspect"),
+                    "A1",
+                    "default",
+                ),
+                Event::TurnComplete {
+                    session_id: root_session.clone(),
+                    stop_reason: protocol::StopReason::EndTurn,
+                },
+            ],
+            child_session.clone(),
+            vec![
+                Event::message_chunk(child_session.clone(), "child streamed output"),
+                Event::TurnComplete {
+                    session_id: child_session.clone(),
+                    stop_reason: protocol::StopReason::EndTurn,
+                },
+            ],
+            Vec::new(),
+        );
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new(root_session.0.as_ref()),
+            vec![ContentBlock::Text(TextContent::new("spawn".to_string()))],
+        );
+        let (client, mut notifications) = test_connection_to_client_recording_notifications().await;
+
+        agent
+            .handle_prompt(request, client)
+            .await
+            .expect("prompt should finish");
+
+        let mut child_text = None;
+        for _ in 0..4 {
+            let Some(notification) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), notifications.recv())
+                    .await
+                    .expect("notification should arrive")
+            else {
+                break;
+            };
+            if notification.session_id.0.as_ref() != child_session.0.as_ref() {
+                continue;
+            }
+            if let SessionUpdate::AgentMessageChunk(chunk) = notification.update
+                && let ContentBlock::Text(text) = chunk.content
+            {
+                child_text = Some(text.text);
+                break;
+            }
+        }
+
+        assert_eq!(child_text.as_deref(), Some("child streamed output"));
+    }
+
+    #[tokio::test]
+    async fn handle_prompt_subscribes_spawned_agent_from_snapshot() {
+        let root_session = SessionId::from("root-session");
+        let child_session = SessionId::from("child-session");
+        let call_id = "spawn-call";
+        let kernel = kernel_with_prompt_and_subscription_events(
+            vec![
+                Event::tool_call(
+                    root_session.clone(),
+                    AgentPath::root(),
+                    call_id,
+                    "spawn_agent",
+                    serde_json::json!({"task_name": "inspect", "message": "go"}),
+                    protocol::ToolCallStatus::InProgress,
+                ),
+                Event::tool_call_update(
+                    root_session.clone(),
+                    call_id,
+                    None,
+                    Some(protocol::ToolCallStatus::Completed),
+                ),
+                Event::TurnComplete {
+                    session_id: root_session.clone(),
+                    stop_reason: protocol::StopReason::EndTurn,
+                },
+            ],
+            child_session.clone(),
+            vec![
+                Event::message_chunk(child_session.clone(), "snapshot child stream"),
+                Event::TurnComplete {
+                    session_id: child_session.clone(),
+                    stop_reason: protocol::StopReason::EndTurn,
+                },
+            ],
+            snapshot_with_child(&root_session, &child_session),
+        );
+        let agent = ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = PromptRequest::new(
+            AcpSessionId::new(root_session.0.as_ref()),
+            vec![ContentBlock::Text(TextContent::new("spawn".to_string()))],
+        );
+        let (client, mut notifications) = test_connection_to_client_recording_notifications().await;
+
+        agent
+            .handle_prompt(request, client)
+            .await
+            .expect("prompt should finish");
+
+        let mut child_text = None;
+        for _ in 0..6 {
+            let Some(notification) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), notifications.recv())
+                    .await
+                    .expect("notification should arrive")
+            else {
+                break;
+            };
+            if notification.session_id.0.as_ref() != child_session.0.as_ref() {
+                continue;
+            }
+            if let SessionUpdate::AgentMessageChunk(chunk) = notification.update
+                && let ContentBlock::Text(text) = chunk.content
+            {
+                child_text = Some(text.text);
+                break;
+            }
+        }
+
+        assert_eq!(child_text.as_deref(), Some("snapshot child stream"));
     }
 
     #[tokio::test]

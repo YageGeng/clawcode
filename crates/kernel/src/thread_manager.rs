@@ -267,6 +267,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_take_rx_replays_initial_buffered_events() {
+        let (tx_op, _rx_op) = mpsc::unbounded_channel();
+        let thread = test_thread(SessionId::from("child"), tx_op);
+        {
+            let tx = thread.tx_event.lock().await.clone();
+            tx.send(Event::message_chunk(
+                SessionId::from("child"),
+                "buffered child output",
+            ))
+            .expect("initial event sender should stay open");
+        }
+
+        let mut rx = thread.take_rx().await;
+        let event = rx.recv().await.expect("buffered event should be replayed");
+
+        let Event::AgentMessageChunk { text, .. } = event else {
+            panic!("expected buffered message chunk");
+        };
+        assert_eq!(text, "buffered child output");
+    }
+
+    #[tokio::test]
     async fn cancel_thread_keeps_operation_channel_open_for_future_prompts() {
         let manager = ThreadManager::new();
         let session_id = SessionId::from("session");
@@ -354,7 +376,7 @@ mod tests {
         agent_path: AgentPath,
         tx_op: mpsc::UnboundedSender<Op>,
     ) -> Thread {
-        let (tx_event, _rx_event) = mpsc::unbounded_channel();
+        let (tx_event, rx_event) = mpsc::unbounded_channel();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         Thread::builder()
             .session_id(session_id)
@@ -365,6 +387,7 @@ mod tests {
             .cwd(PathBuf::from("/tmp/project"))
             .tx_op(tx_op)
             .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))
+            .initial_rx_event(Arc::new(tokio::sync::Mutex::new(Some(rx_event))))
             .pending_approvals(Arc::new(tokio::sync::Mutex::new(HashMap::<
                 String,
                 oneshot::Sender<protocol::ReviewDecision>,

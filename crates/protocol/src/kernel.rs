@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, stream};
 
 use crate::agent::AgentPath;
 use crate::agent_ui::AgentUiMetadata;
@@ -64,6 +64,17 @@ pub trait AgentKernel: Send + Sync {
         session_id: &SessionId,
         text: String,
     ) -> Result<EventStream, KernelError>;
+
+    /// Subscribe to live events for a session without submitting a new prompt.
+    ///
+    /// Frontends use this for turns started by internal operations, such as
+    /// sub-agent initial tasks, that still need real-time transcript updates.
+    async fn subscribe_session_events(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<EventStream, KernelError> {
+        Ok(Box::pin(stream::empty()))
+    }
 
     /// Cancel the currently running turn in a session.
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError>;

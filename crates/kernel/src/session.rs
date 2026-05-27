@@ -41,6 +41,8 @@ pub struct Thread {
     pub(crate) tx_op: mpsc::UnboundedSender<Op>,
     /// Shared sender for per-turn events.
     pub(crate) tx_event: Arc<tokio::sync::Mutex<mpsc::UnboundedSender<Event>>>,
+    /// Initial receiver kept alive until the first frontend subscription.
+    pub(crate) initial_rx_event: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<Event>>>>,
     /// Shared pending approval channels. The handle stores the primary copy
     /// so callers outside the background task (e.g. ACP agent) can resolve
     /// approval requests without blocking on the session loop.
@@ -61,6 +63,11 @@ pub struct Thread {
 impl Thread {
     /// Create a new event receiver for this prompt and wire it up.
     pub(crate) async fn take_rx(&self) -> mpsc::UnboundedReceiver<Event> {
+        // The first subscriber must receive events emitted before the frontend
+        // attached, which happens for sub-agent turns started internally.
+        if let Some(rx) = self.initial_rx_event.lock().await.take() {
+            return rx;
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let mut guard = self.tx_event.lock().await;
         *guard = tx;
@@ -136,7 +143,7 @@ pub(crate) fn spawn_thread(
     recorder: Arc<dyn SessionRecorder>,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
-    let (initial_tx, _initial_rx) = mpsc::unbounded_channel();
+    let (initial_tx, initial_rx) = mpsc::unbounded_channel();
     let (cancel_tx, _cancel_rx) = watch::channel(false);
     let current_model = Arc::new(tokio::sync::RwLock::new(format!(
         "{}/{}",
@@ -181,6 +188,7 @@ pub(crate) fn spawn_thread(
     };
 
     let tx_event = Arc::new(tokio::sync::Mutex::new(initial_tx));
+    let initial_rx_event = Arc::new(tokio::sync::Mutex::new(Some(initial_rx)));
     let pending_approvals: Arc<
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
     > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -216,6 +224,7 @@ pub(crate) fn spawn_thread(
         .current_model(current_model)
         .tx_op(tx_op)
         .tx_event(tx_event)
+        .initial_rx_event(initial_rx_event)
         .pending_approvals(pending_approvals)
         .cancel_tx(cancel_tx)
         .tools(tools)
