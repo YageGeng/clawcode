@@ -105,6 +105,7 @@ pub trait AgentKernel: Send + Sync {
         parent_session: &SessionId,
         agent_path: AgentPath,
         role: &str,
+        model: Option<&str>,
         prompt: &str,
     ) -> Result<(), KernelError>;
 

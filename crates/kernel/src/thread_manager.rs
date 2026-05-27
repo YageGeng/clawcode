@@ -24,6 +24,9 @@ pub(crate) struct SpawnThreadParams {
     pub(crate) cwd: PathBuf,
     /// LLM handle used by the thread.
     pub(crate) llm: ArcLlm,
+    /// Agent-specific system prompt selected by the role.
+    #[builder(default, setter(strip_option))]
+    pub(crate) agent_prompt: Option<String>,
     /// Factory used by the thread to resolve model-switch requests.
     pub(crate) llm_factory: Arc<LlmFactory>,
     /// Tool registry available to the thread.
@@ -53,6 +56,9 @@ pub(crate) struct LoadThreadParams {
     pub(crate) history: Vec<Message>,
     /// LLM handle used by the thread.
     pub(crate) llm: ArcLlm,
+    /// Agent-specific system prompt selected by the role.
+    #[builder(default, setter(strip_option))]
+    pub(crate) agent_prompt: Option<String>,
     /// Factory used by the thread to resolve model-switch requests.
     pub(crate) llm_factory: Arc<LlmFactory>,
     /// Tool registry available to the thread.
@@ -196,6 +202,7 @@ impl ThreadManager {
             params.session_id,
             params.cwd,
             params.llm,
+            params.agent_prompt,
             params.llm_factory,
             params.tools,
             params.context,
@@ -214,9 +221,10 @@ impl ThreadManager {
         &self,
         params: LoadThreadParams,
     ) -> Result<Thread, KernelError> {
+        let agent_prompt = params.agent_prompt;
         let context: Box<dyn ContextManager> =
             Box::new(InMemoryContext::from_messages(params.history));
-        let params = SpawnThreadParams::builder()
+        let mut spawn_params = SpawnThreadParams::builder()
             .session_id(params.session_id)
             .cwd(params.cwd)
             .llm(params.llm)
@@ -229,7 +237,8 @@ impl ThreadManager {
             .app_config(params.app_config)
             .recorder(params.recorder)
             .build();
-        self.spawn_thread(params).await
+        spawn_params.agent_prompt = agent_prompt;
+        self.spawn_thread(spawn_params).await
     }
 }
 

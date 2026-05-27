@@ -42,24 +42,15 @@ impl AgentRoleSet {
         set.insert(
             AgentRole::builder()
                 .name("explorer".to_string())
-                .description("Lightweight agent for fast codebase exploration".to_string())
-                .config_overrides({
-                    let mut m = HashMap::new();
-                    m.insert("reasoning_effort".to_string(), "low".to_string());
-                    m
-                })
+                .description("Agent for specific, well-scoped codebase exploration".to_string())
                 .prompt(include_str!("../prompts/explorer.txt").to_string())
                 .build(),
         );
         set.insert(
             AgentRole::builder()
                 .name("worker".to_string())
-                .description("Full-capability agent for implementation work".to_string())
-                .config_overrides({
-                    let mut m = HashMap::new();
-                    m.insert("reasoning_effort".to_string(), "high".to_string());
-                    m
-                })
+                .description("Agent for implementation, bug fixing, and tests".to_string())
+                .prompt(include_str!("../prompts/worker.txt").to_string())
                 .build(),
         );
         set
@@ -91,6 +82,11 @@ impl AgentRole {
             .get("reasoning_effort")
             .map(|s| s.as_str())
     }
+
+    /// Resolve the system prompt override for this role.
+    pub(crate) fn prompt_override(&self) -> Option<&str> {
+        self.prompt.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -106,17 +102,17 @@ mod tests {
     }
 
     #[test]
-    fn explorer_overrides_reasoning() {
+    fn explorer_inherits_reasoning() {
         let set = AgentRoleSet::with_builtins();
         let role = set.get("explorer").unwrap();
-        assert_eq!(role.reasoning_override(), Some("low"));
+        assert!(role.reasoning_override().is_none());
     }
 
     #[test]
-    fn worker_overrides_reasoning() {
+    fn worker_inherits_reasoning() {
         let set = AgentRoleSet::with_builtins();
         let role = set.get("worker").unwrap();
-        assert_eq!(role.reasoning_override(), Some("high"));
+        assert!(role.reasoning_override().is_none());
     }
 
     #[test]
@@ -125,5 +121,13 @@ mod tests {
         let role = set.get("default").unwrap();
         assert!(role.model_override().is_none());
         assert!(role.reasoning_override().is_none());
+    }
+
+    #[test]
+    fn explorer_and_worker_have_prompt_overrides() {
+        let set = AgentRoleSet::with_builtins();
+
+        assert!(set.get("explorer").unwrap().prompt_override().is_some());
+        assert!(set.get("worker").unwrap().prompt_override().is_some());
     }
 }

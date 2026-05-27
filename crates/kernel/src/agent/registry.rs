@@ -236,6 +236,25 @@ impl AgentRegistry {
             .cloned()
     }
 
+    /// Update the last model-visible task message for a registered agent thread.
+    pub(crate) fn update_last_task_message(
+        &self,
+        thread_id: &SessionId,
+        last_task_message: String,
+    ) {
+        let mut agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(metadata) = agents
+            .agent_tree
+            .values_mut()
+            .find(|metadata| metadata.agent_id.as_ref() == Some(thread_id))
+        {
+            metadata.last_task_message = Some(last_task_message);
+        }
+    }
+
     /// Return metadata for all live non-root agents.
     ///
     /// Filters out the root agent and entries that have only a path

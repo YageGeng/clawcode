@@ -1643,6 +1643,7 @@ mod tests {
             _parent_session: &SessionId,
             _agent_path: AgentPath,
             _role: &str,
+            _model: Option<&str>,
             _prompt: &str,
         ) -> Result<(), KernelError> {
             Ok(())

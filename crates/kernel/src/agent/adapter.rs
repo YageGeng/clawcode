@@ -2,15 +2,14 @@
 //! using our [`AgentControl`]. This bridges the kernel and tools crates
 //! without creating a circular dependency.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use protocol::{AgentPath, AgentStatus};
 use tokio::sync::watch;
-use tools::builtin::agents::{AgentControlRef, AgentToolSummary};
+use tools::builtin::agents::{AgentControlRef, AgentToolSummary, SpawnAgentRequest};
 
-use super::control::AgentControl;
+use super::control::{AgentControl, AgentSpawnRequest};
 
 /// Adapter wrapping `AgentControl` to implement `tools::AgentControlRef`.
 /// Public so binary crates can construct it and pass it to `ToolRegistry`.
@@ -27,25 +26,21 @@ impl AgentControlAdapter {
 
 #[async_trait]
 impl AgentControlRef for AgentControlAdapter {
-    /// Delegates to [`AgentControl::spawn`] and returns a JSON summary
-    /// with the new agent's path and nickname.
-    /// Delegates to [`AgentControl::spawn`] and returns a JSON summary
-    /// with the new agent's path and nickname.
-    ///
-    /// Note: `task_name` is currently hardcoded to `"task"` because the
-    /// tools crate does not yet receive the task name from the LLM's
-    /// tool call arguments. See the plan's Known Limitations.
-    async fn spawn_agent(
-        &self,
-        parent_path: &AgentPath,
-        task_name: &str,
-        role: &str,
-        prompt: &str,
-        cwd: PathBuf,
-    ) -> Result<String, String> {
+    /// Delegates to [`AgentControl::spawn`] and returns the Codex V2 JSON summary.
+    async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<String, String> {
         let live = self
             .inner
-            .spawn(parent_path, task_name, role, prompt, cwd)
+            .spawn({
+                let mut spawn_request = AgentSpawnRequest::builder()
+                    .parent_path(request.parent_path)
+                    .task_name(request.task_name)
+                    .role_name(request.role)
+                    .prompt(request.prompt)
+                    .cwd(request.cwd)
+                    .build();
+                spawn_request.model = request.model;
+                spawn_request
+            })
             .await?;
 
         let path = live

@@ -95,6 +95,9 @@ pub(crate) struct Session {
     pub context: Box<dyn ContextManager>,
     /// LLM used for turn execution.
     pub llm: ArcLlm,
+    /// Agent-specific system prompt selected by the thread role.
+    #[builder(default, setter(strip_option))]
+    pub agent_prompt: Option<String>,
     /// Current model id in `provider_id/model_id` form for session-state responses.
     pub current_model: Arc<tokio::sync::RwLock<String>>,
     /// Factory used by internal model-switch operations.
@@ -133,6 +136,7 @@ pub(crate) fn spawn_thread(
     session_id: SessionId,
     cwd: PathBuf,
     llm: ArcLlm,
+    agent_prompt: Option<String>,
     llm_factory: Arc<LlmFactory>,
     tools: Arc<ToolRegistry>,
     context: Box<dyn ContextManager>,
@@ -195,7 +199,7 @@ pub(crate) fn spawn_thread(
     let input_queue = Arc::new(tokio::sync::Mutex::new(InputQueue::default()));
 
     let thread_cwd = cwd.clone();
-    let runtime = Session::builder()
+    let mut runtime = Session::builder()
         .session_id(session_id.clone())
         .cwd(cwd)
         .rx_op(rx_op)
@@ -214,6 +218,7 @@ pub(crate) fn spawn_thread(
         .recorder(Arc::clone(&recorder))
         .input_queue(Arc::clone(&input_queue))
         .build();
+    runtime.agent_prompt = agent_prompt;
 
     tokio::spawn(run_loop(runtime));
 

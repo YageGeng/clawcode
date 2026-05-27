@@ -27,7 +27,7 @@ use protocol::{
 use provider::factory::LlmFactory;
 
 use crate::agent::adapter::AgentControlAdapter;
-use crate::agent::control::AgentControl;
+use crate::agent::control::{AgentControl, AgentSpawnRequest};
 use crate::approval::ApprovalPolicy;
 use crate::command::prompt_args::parse_slash_name;
 use crate::command::slash_command::SlashCommand;
@@ -644,6 +644,7 @@ impl AgentKernel for Kernel {
         parent_session: &SessionId,
         agent_path: AgentPath,
         role: &str,
+        model: Option<&str>,
         prompt: &str,
     ) -> Result<(), KernelError> {
         let parent_thread = self
@@ -669,13 +670,17 @@ impl AgentKernel for Kernel {
             })?;
 
         self.agent_control
-            .spawn(
-                &parent_path,
-                child_name,
-                role,
-                prompt,
-                parent_thread.cwd.clone(),
-            )
+            .spawn({
+                let mut request = AgentSpawnRequest::builder()
+                    .parent_path(parent_path)
+                    .task_name(child_name.to_string())
+                    .role_name(role.to_string())
+                    .prompt(prompt.to_string())
+                    .cwd(parent_thread.cwd.clone())
+                    .build();
+                request.model = model.map(ToString::to_string);
+                request
+            })
             .await
             .map(|_| ())
             .map_err(|error| KernelError::Internal(anyhow::anyhow!(error)))
@@ -1456,6 +1461,7 @@ mod tests {
                 &created.session_id,
                 child_path.clone(),
                 "default",
+                None,
                 "do the work",
             )
             .await
@@ -1486,6 +1492,7 @@ mod tests {
                 &created.session_id,
                 AgentPath::root().join("team/worker"),
                 "default",
+                None,
                 "do the work",
             )
             .await

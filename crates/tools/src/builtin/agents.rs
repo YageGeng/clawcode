@@ -32,19 +32,30 @@ pub struct AgentToolSummary {
     pub last_task_message: Option<String>,
 }
 
+/// Request payload used by the tool layer to spawn a sub-agent.
+#[derive(Clone, Debug, typed_builder::TypedBuilder)]
+pub struct SpawnAgentRequest {
+    /// Parent task path that owns the new child agent.
+    pub parent_path: protocol::AgentPath,
+    /// Direct child task name requested by the model.
+    pub task_name: String,
+    /// Role profile requested through `agent_type`.
+    pub role: String,
+    /// Optional `provider/model` override for the child agent.
+    #[builder(default, setter(strip_option))]
+    pub model: Option<String>,
+    /// Initial task prompt for the spawned agent.
+    pub prompt: String,
+    /// Working directory inherited by the child agent.
+    pub cwd: std::path::PathBuf,
+}
+
 /// Object-safe reference to AgentControl operations used by tools.
 /// Implemented by the kernel crate's adapter to avoid circular deps.
 #[async_trait]
 pub trait AgentControlRef: Send + Sync {
     /// Spawn a new sub-agent. Returns JSON with agent_path and nickname.
-    async fn spawn_agent(
-        &self,
-        parent_path: &protocol::AgentPath,
-        task_name: &str,
-        role: &str,
-        prompt: &str,
-        cwd: std::path::PathBuf,
-    ) -> Result<String, String>;
+    async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<String, String>;
 
     /// Resolve a target string (nickname or path) to an AgentPath.
     async fn resolve_target(&self, target: &str) -> Result<protocol::AgentPath, String>;
@@ -96,6 +107,8 @@ struct SpawnAgentArgs {
     task_name: String,
     #[serde(default)]
     agent_type: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     message: String,
 }
 
@@ -107,6 +120,22 @@ impl SpawnAgentArgs {
 }
 
 impl SpawnAgent {
+    /// Return model-facing guidance for the built-in sub-agent roles.
+    fn agent_type_description() -> &'static str {
+        "Optional type name for the new agent. If omitted, `default` is used.\nAvailable roles:\ndefault: No role-specific behavior; inherit the parent model and system prompt.\nexplorer: Use for specific, well-scoped codebase exploration questions. Explorer agents should inspect and report; they should not modify files.\nworker: Use for implementation, bug fixing, tests, and production code changes."
+    }
+
+    /// Return the Codex V2 spawn-agent tool description.
+    fn tool_description() -> &'static str {
+        r#"
+        Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
+You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
+The spawned agent will have the same tools as you and the ability to spawn its own subagents.
+Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.
+It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
+The new agent's canonical task name will be provided to it along with the message."#
+    }
+
     pub fn new(ctrl: Arc<dyn AgentControlRef>) -> Self {
         Self {
             agent_control: ctrl,
@@ -121,7 +150,7 @@ impl Tool for SpawnAgent {
     }
 
     fn description(&self) -> &str {
-        "Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name \"task_3\" the agent will have canonical task name `/root/task1/task_3`."
+        Self::tool_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -130,20 +159,23 @@ impl Tool for SpawnAgent {
             "properties": {
                 "task_name": {
                     "type": "string",
-                    "description": "Task name for the spawned agent"
+                    "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
                 },
                 "agent_type": {
                     "type": "string",
-                    "enum": ["default", "explorer", "worker"],
-                    "default": "default",
-                    "description": "Optional role profile for the sub-agent."
+                    "description": Self::agent_type_description()
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override for the new agent. Leave unset to inherit the same model as the parent, which is the preferred default. Only set this when the user explicitly asks for a different model or the task clearly requires one."
                 },
                 "message": {
                     "type": "string",
-                    "description": "Initial task description for the sub-agent"
+                    "description": "Initial plain-text task for the new agent."
                 }
             },
-            "required": ["task_name", "message"]
+            "required": ["task_name", "message"],
+            "additionalProperties": false
         })
     }
 
@@ -158,16 +190,19 @@ impl Tool for SpawnAgent {
     ) -> Result<String, String> {
         let args: SpawnAgentArgs =
             serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let role = args.role_name().to_string();
+        let model = args.model;
 
-        self.agent_control
-            .spawn_agent(
-                &ctx.agent_path,
-                &args.task_name,
-                args.role_name(),
-                &args.message,
-                ctx.cwd.clone(),
-            )
-            .await
+        let mut request = SpawnAgentRequest::builder()
+            .parent_path(ctx.agent_path.clone())
+            .task_name(args.task_name)
+            .role(role)
+            .prompt(args.message)
+            .cwd(ctx.cwd.clone())
+            .build();
+        request.model = model;
+
+        self.agent_control.spawn_agent(request).await
     }
 }
 
@@ -209,7 +244,8 @@ impl Tool for SendMessage {
                 "target": { "type": "string", "description": "Relative or canonical task name to message (from spawn_agent)." },
                 "message": { "type": "string", "description": "Message text to queue on the target agent." }
             },
-            "required": ["target", "message"]
+            "required": ["target", "message"],
+            "additionalProperties": false
         })
     }
 
@@ -265,7 +301,8 @@ impl Tool for FollowupTask {
                 "target": { "type": "string", "description": "Agent id or canonical task name to message (from spawn_agent)." },
                 "message": { "type": "string", "description": "Message text to send to the target agent." }
             },
-            "required": ["target", "message"]
+            "required": ["target", "message"],
+            "additionalProperties": false
         })
     }
 
@@ -354,12 +391,13 @@ impl Tool for WaitAgent {
             "type": "object",
             "properties": {
                 "timeout_ms": {
-                    "type": ["integer", "null"],
+                    "type": "integer",
                     "minimum": MIN_WAIT_TIMEOUT_MS,
                     "maximum": MAX_WAIT_TIMEOUT_MS,
-                    "description": "Optional timeout in milliseconds."
+                    "description": "Optional timeout in milliseconds. Defaults to 300000, min 20000, max 1800000."
                 }
-            }
+            },
+            "additionalProperties": false
         })
     }
 
@@ -457,7 +495,7 @@ impl Tool for ListAgents {
         "list_agents"
     }
     fn description(&self) -> &str {
-        "List all active sub-agents and their statuses."
+        "List live agents in the current root thread tree. Optionally filter by task-path prefix."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -465,11 +503,11 @@ impl Tool for ListAgents {
             "type": "object",
             "properties": {
                 "path_prefix": {
-                    "type": ["string", "null"],
-                    "description": "Filter by agent path prefix"
+                    "type": "string",
+                    "description": "Optional task-path prefix (not ending with trailing slash). Accepts the same relative or absolute task-path syntax."
                 }
             },
-            "required": []
+            "additionalProperties": false
         })
     }
 
@@ -528,7 +566,8 @@ impl Tool for CloseAgent {
             "properties": {
                 "target": { "type": "string", "description": "Agent id or canonical task name to close (from spawn_agent)." }
             },
-            "required": ["target"]
+            "required": ["target"],
+            "additionalProperties": false
         })
     }
 
@@ -548,7 +587,7 @@ impl Tool for CloseAgent {
             return Err("The root agent can't be closed with close_agent".to_string());
         }
         let status = self.agent_control.close_agent(&path).await?;
-        serde_json::to_string(&serde_json::json!({ "status": status }))
+        serde_json::to_string(&serde_json::json!({ "previous_status": status }))
             .map_err(|error| error.to_string())
     }
 }
@@ -584,6 +623,7 @@ mod tests {
         mailbox_activity: Mutex<HashMap<String, watch::Sender<()>>>,
         session_mailbox_activity: watch::Sender<()>,
         last_list_prefix: Mutex<Option<AgentPath>>,
+        last_spawn_model: Mutex<Option<String>>,
         _status_rx: watch::Receiver<AgentStatus>,
     }
 
@@ -606,6 +646,7 @@ mod tests {
                     mailbox_activity: Mutex::new(mailbox_activity),
                     session_mailbox_activity,
                     last_list_prefix: Mutex::new(None),
+                    last_spawn_model: Mutex::new(None),
                     _status_rx: status_rx,
                 }),
                 tx,
@@ -624,21 +665,26 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        /// Return the last model override passed to spawn_agent.
+        fn last_spawn_model(&self) -> Option<String> {
+            self.last_spawn_model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
     }
 
     #[async_trait]
     impl AgentControlRef for FakeAgentControl {
         /// Test stub: spawning is not used by wait-agent tests.
-        async fn spawn_agent(
-            &self,
-            parent_path: &AgentPath,
-            task_name: &str,
-            _role: &str,
-            _prompt: &str,
-            _cwd: std::path::PathBuf,
-        ) -> Result<String, String> {
+        async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<String, String> {
+            *self
+                .last_spawn_model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = request.model.clone();
             Ok(serde_json::json!({
-                "task_name": parent_path.join(task_name).to_string(),
+                "task_name": request.parent_path.join(&request.task_name).to_string(),
                 "nickname": "child"
             })
             .to_string())
@@ -830,6 +876,10 @@ mod tests {
             parameters.get("required"),
             Some(&serde_json::json!(["target", "message"]))
         );
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[test]
@@ -850,6 +900,10 @@ mod tests {
             parameters.get("required"),
             Some(&serde_json::json!(["target", "message"]))
         );
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[test]
@@ -864,7 +918,15 @@ mod tests {
 
         assert_eq!(properties.len(), 1);
         assert!(properties.contains_key("timeout_ms"));
+        assert_eq!(
+            properties["timeout_ms"].get("type"),
+            Some(&serde_json::json!("integer"))
+        );
         assert!(parameters.get("required").is_none());
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[tokio::test]
@@ -917,6 +979,107 @@ mod tests {
         assert_eq!(
             payload.get("task_name"),
             Some(&serde_json::json!("/root/child"))
+        );
+    }
+
+    #[test]
+    fn spawn_agent_schema_describes_builtin_roles() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool = SpawnAgent::new(control);
+
+        let params = tool.parameters();
+        let description = params["properties"]["agent_type"]["description"]
+            .as_str()
+            .expect("agent_type description should be a string");
+
+        assert!(description.contains("default:"));
+        assert!(description.contains("explorer:"));
+        assert!(description.contains("worker:"));
+    }
+
+    #[test]
+    fn agent_tool_parameters_match_codex_v2_descriptions() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let spawn = SpawnAgent::new(control.clone());
+        let wait = WaitAgent::new(control.clone());
+        let list = ListAgents::new(control);
+
+        let spawn_params = spawn.parameters();
+        assert_eq!(
+            spawn_params["properties"]["message"]["description"],
+            serde_json::json!("Initial plain-text task for the new agent.")
+        );
+        assert_eq!(
+            spawn_params["properties"]["task_name"]["description"],
+            serde_json::json!(
+                "Task name for the new agent. Use lowercase letters, digits, and underscores."
+            )
+        );
+        assert!(spawn_params["properties"].get("model").is_some());
+        assert!(spawn_params["properties"].get("fork_turns").is_none());
+        assert!(spawn_params["properties"].get("reasoning_effort").is_none());
+        assert!(spawn_params["properties"].get("service_tier").is_none());
+        assert!(
+            spawn
+                .description()
+                .contains("The spawned agent will have the same tools as you")
+        );
+        assert!(
+            spawn
+                .description()
+                .contains("final answer will be provided to you")
+        );
+
+        let wait_params = wait.parameters();
+        assert_eq!(
+            wait_params["properties"]["timeout_ms"]["type"],
+            serde_json::json!("integer")
+        );
+        assert_eq!(
+            wait_params["properties"]["timeout_ms"]["description"],
+            serde_json::json!(
+                "Optional timeout in milliseconds. Defaults to 300000, min 20000, max 1800000."
+            )
+        );
+
+        let list_params = list.parameters();
+        assert_eq!(
+            list.description(),
+            "List live agents in the current root thread tree. Optionally filter by task-path prefix."
+        );
+        assert_eq!(
+            list_params.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            list_params["properties"]["path_prefix"]["description"],
+            serde_json::json!(
+                "Optional task-path prefix (not ending with trailing slash). Accepts the same relative or absolute task-path syntax."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_forwards_model_override() {
+        let (control, _status_tx) = FakeAgentControl::with_running_child();
+        let tool_control: Arc<dyn AgentControlRef> = control.clone();
+        let tool = SpawnAgent::new(tool_control);
+        let ctx = test_context(Path::new("."));
+
+        tool.execute(
+            serde_json::json!({
+                "task_name": "child",
+                "model": "openai/gpt-5.4",
+                "message": "do work"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("spawn should accept model override");
+
+        assert_eq!(
+            control.last_spawn_model().as_deref(),
+            Some("openai/gpt-5.4")
         );
     }
 
@@ -1130,6 +1293,10 @@ mod tests {
             parameters.get("required"),
             Some(&serde_json::json!(["target"]))
         );
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[tokio::test]
@@ -1150,7 +1317,11 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&output).expect("close output should be json");
 
-        assert_eq!(payload.get("status"), Some(&serde_json::json!("running")));
+        assert_eq!(
+            payload.get("previous_status"),
+            Some(&serde_json::json!("running"))
+        );
+        assert!(payload.get("status").is_none(), "{output}");
     }
 
     #[tokio::test]

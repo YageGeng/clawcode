@@ -135,6 +135,7 @@ impl TurnContext {
             .tools(Arc::clone(&rt.tools))
             .cwd(rt.cwd.clone())
             .provider_id(rt.llm.provider_id().to_string())
+            .agent_prompt(rt.agent_prompt.clone())
             .pending_approvals(Arc::clone(&rt.pending_approvals))
             .agent_path(rt.agent_path.clone())
             .approval(Arc::clone(&rt.approval))

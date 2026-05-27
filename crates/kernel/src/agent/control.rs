@@ -44,6 +44,24 @@ pub struct ListedAgent {
     pub last_task_message: Option<String>,
 }
 
+/// Internal request payload for spawning a sub-agent thread.
+#[derive(Clone, Debug, typed_builder::TypedBuilder)]
+pub(crate) struct AgentSpawnRequest {
+    /// Parent agent path that owns the new child path.
+    pub parent_path: AgentPath,
+    /// Direct child task name requested by the model.
+    pub task_name: String,
+    /// Agent role selected by the `agent_type` field.
+    pub role_name: String,
+    /// Optional `provider/model` override for the child agent.
+    #[builder(default, setter(strip_option))]
+    pub model: Option<String>,
+    /// Initial task prompt sent to the child agent.
+    pub prompt: String,
+    /// Working directory inherited by the child agent.
+    pub cwd: PathBuf,
+}
+
 /// Central control plane for multi-agent operations.
 #[derive(typed_builder::TypedBuilder)]
 pub struct AgentControl {
@@ -172,12 +190,19 @@ impl AgentControl {
     /// automatically releases the slot, path, and nickname.
     pub(crate) async fn spawn(
         self: &Arc<Self>,
-        parent_path: &AgentPath,
-        task_name: &str,
-        role_name: &str,
-        prompt: &str,
-        cwd: PathBuf,
+        request: AgentSpawnRequest,
     ) -> Result<LiveAgent, String> {
+        let parent_path = &request.parent_path;
+        let task_name = request.task_name.as_str();
+        let role_name = request.role_name.as_str();
+        let model_override = request.model.as_deref();
+        let prompt = request.prompt.as_str();
+        let role = self
+            .roles
+            .get(role_name)
+            .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
+        let agent_prompt = role.prompt_override().map(ToString::to_string);
+
         // Step 1: depth check
         let depth = AgentRegistry::next_thread_spawn_depth(parent_path);
         if depth > self.config.max_spawn_depth {
@@ -198,12 +223,19 @@ impl AgentControl {
 
         let session_id = SessionId::from(uuid::Uuid::new_v4().to_string());
 
-        // Resolve parent session id before commit so it can be stored in metadata.
+        // Resolve parent session id before commit so it can be stored in metadata
+        // and used to inherit the parent's runtime model when no override is set.
         let parent_sid = self.registry.agent_id_for_path(parent_path);
-        // Step 4: resolve LLM (role override or fallback to active model)
-        let llm = self
-            .resolve_llm_for_role(role_name)
-            .ok_or_else(|| "no LLM configured for agent spawn".to_string())?;
+        let inherited_model = if let Some(parent_sid) = &parent_sid
+            && let Some(parent_thread) = self.thread_manager.get_thread(parent_sid).await
+        {
+            Some(parent_thread.current_model().await)
+        } else {
+            None
+        };
+        // Step 4: resolve LLM (request override, role override, parent model, or active model)
+        let llm =
+            self.resolve_llm_for_role(role_name, model_override, inherited_model.as_deref())?;
 
         let context: Box<dyn crate::context::ContextManager> = Box::new(InMemoryContext::new());
 
@@ -214,28 +246,21 @@ impl AgentControl {
             .await
             .insert(session_id.clone(), status_tx);
 
-        let child_cwd = cwd.clone();
+        let child_cwd = request.cwd.clone();
         let app_config = self.config_handle.current();
         let approval = Arc::new(ApprovalPolicy::new(app_config.approval));
         let store = self
             .session_store
             .as_ref()
             .ok_or_else(|| "cannot spawn subagent without session store".to_string())?;
-        let (provider_id, model_id) = self
-            .config_handle
-            .current()
-            .active_model
-            .split_once('/')
-            .map(|(provider_id, model_id)| (provider_id.to_string(), model_id.to_string()))
-            .unwrap_or_default();
         let child_recorder: Arc<dyn SessionRecorder> = store
             .create_session(
                 CreateSessionParams::builder()
                     .session_id(session_id.clone())
                     .agent_path(child_path.clone())
                     .cwd(child_cwd.clone())
-                    .provider_id(provider_id)
-                    .model_id(model_id)
+                    .provider_id(llm.provider_id().to_string())
+                    .model_id(llm.model_id().to_string())
                     .base_system_prompt(String::new())
                     .parent_session_id(parent_sid.clone().ok_or_else(|| {
                         "cannot persist subagent without parent session id".to_string()
@@ -251,7 +276,7 @@ impl AgentControl {
         // Step 5: create the child session thread after its recorder exists.
         let params = SpawnThreadParams::builder()
             .session_id(session_id.clone())
-            .cwd(cwd)
+            .cwd(request.cwd)
             .llm(llm)
             .llm_factory(Arc::clone(&self.llm_factory))
             .tools(Arc::clone(&self.tools))
@@ -262,6 +287,8 @@ impl AgentControl {
             .app_config(app_config)
             .recorder(Arc::clone(&child_recorder))
             .build();
+        let mut params = params;
+        params.agent_prompt = agent_prompt;
 
         self.thread_manager
             .spawn_thread(params)
@@ -269,7 +296,7 @@ impl AgentControl {
             .map_err(|error| error.to_string())?;
 
         // Step 7: commit — publishes agent metadata to registry
-        let metadata = {
+        let mut metadata = {
             let builder = AgentMetadata::builder()
                 .agent_id(session_id.clone())
                 .agent_path(child_path.clone())
@@ -326,6 +353,9 @@ impl AgentControl {
             )
             .await
             .map_err(|error| error.to_string())?;
+        self.registry
+            .update_last_task_message(&session_id, prompt.to_string());
+        metadata.last_task_message = Some(prompt.to_string());
 
         Ok(LiveAgent {
             thread_id: session_id,
@@ -358,13 +388,14 @@ impl AgentControl {
         let message = InterAgentMessage::builder()
             .from(from)
             .to(to.clone())
-            .content(content)
+            .content(content.clone())
             .trigger_turn(trigger_turn)
             .build();
         self.thread_manager
             .send_op(&target_id, Op::InterAgentMessage { message })
             .await
             .map_err(|error| error.to_string())?;
+        self.registry.update_last_task_message(&target_id, content);
         Ok(())
     }
 
@@ -614,28 +645,54 @@ impl AgentControl {
         Ok(thread.input_queue.lock().await.subscribe_mailbox())
     }
 
-    /// Resolve the LLM for a role: try the role's model override first,
-    /// then fall back to the globally configured active model.
+    /// Resolve the LLM for a role and optional model override.
     ///
-    /// Panics if no LLM can be resolved — callers should ensure at
-    /// least one provider is configured before calling spawn.
-    fn resolve_llm_for_role(&self, role_name: &str) -> Option<ArcLlm> {
+    /// Request-level overrides use `provider/model` syntax and take precedence
+    /// over role-specific model overrides, the parent runtime model, and config.
+    fn resolve_llm_for_role(
+        &self,
+        role_name: &str,
+        model_override: Option<&str>,
+        inherited_model: Option<&str>,
+    ) -> Result<ArcLlm, String> {
+        if let Some(model_spec) = model_override {
+            let Some((provider_id, model_id)) = model_spec.split_once('/') else {
+                return Err(format!(
+                    "model override must use provider/model: {model_spec}"
+                ));
+            };
+            return self
+                .llm_factory
+                .get(provider_id, model_id)
+                .ok_or_else(|| format!("model override is not available: {model_spec}"));
+        }
         // Try role-specific model override (e.g. "deepseek/deepseek-v4-flash")
         if let Some(role) = self.roles.get(role_name)
             && let Some(model_spec) = role.model_override()
             && let Some((provider_id, model_id)) = model_spec.split_once('/')
             && let Some(llm) = self.llm_factory.get(provider_id, model_id)
         {
-            return Some(llm);
+            return Ok(llm);
         }
-        // Fall back to active_model from config
+        if let Some(model_spec) = inherited_model {
+            let Some((provider_id, model_id)) = model_spec.split_once('/') else {
+                return Err(format!(
+                    "parent model must use provider/model: {model_spec}"
+                ));
+            };
+            return self
+                .llm_factory
+                .get(provider_id, model_id)
+                .ok_or_else(|| format!("parent model is not available: {model_spec}"));
+        }
+        // Fall back to active_model from config when no live parent model is available.
         let cfg = self.config_handle.current();
         if let Some((provider_id, model_id)) = cfg.active_model.split_once('/')
             && let Some(llm) = self.llm_factory.get(provider_id, model_id)
         {
-            return Some(llm);
+            return Ok(llm);
         }
-        None
+        Err("no LLM configured for agent spawn".to_string())
     }
 }
 
@@ -746,6 +803,32 @@ mod tests {
         .expect("valid app config")
     }
 
+    /// Build an app config with two resolvable provider/model pairs.
+    fn app_config_with_two_models() -> AppConfig {
+        serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "deepseek-chat" }]
+                },
+                {
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "gpt-5.4" }]
+                }
+            ]
+        }))
+        .expect("valid app config")
+    }
+
     /// Build a minimal thread handle for AgentControl routing tests.
     fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
         let (tx_event, rx_event) = mpsc::unbounded_channel();
@@ -826,11 +909,13 @@ mod tests {
 
         let child = control
             .spawn(
-                &AgentPath::root(),
-                "child",
-                "default",
-                "do the work",
-                temp.path().to_path_buf(),
+                AgentSpawnRequest::builder()
+                    .parent_path(AgentPath::root())
+                    .task_name("child".to_string())
+                    .role_name("default".to_string())
+                    .prompt("do the work".to_string())
+                    .cwd(temp.path().to_path_buf())
+                    .build(),
             )
             .await
             .expect("spawn child");
@@ -841,6 +926,15 @@ mod tests {
         assert_eq!(open_children.len(), 1);
         assert_eq!(open_children[0].child_session_id, child.thread_id);
         assert_eq!(open_children[0].child_role.as_deref(), Some("default"));
+        let listed = control.list_agents(None);
+        let listed_child = listed
+            .iter()
+            .find(|agent| agent.agent_name == "/root/child")
+            .expect("spawned child should be listed");
+        assert_eq!(
+            listed_child.last_task_message.as_deref(),
+            Some("do the work")
+        );
         assert!(
             store
                 .load_session(&child.thread_id)
@@ -890,11 +984,13 @@ mod tests {
 
         let error = control
             .spawn(
-                &AgentPath::root(),
-                "child",
-                "default",
-                "do work",
-                temp.path().to_path_buf(),
+                AgentSpawnRequest::builder()
+                    .parent_path(AgentPath::root())
+                    .task_name("child".to_string())
+                    .role_name("default".to_string())
+                    .prompt("do work".to_string())
+                    .cwd(temp.path().to_path_buf())
+                    .build(),
             )
             .await
             .expect_err("graph write should fail");
@@ -902,6 +998,155 @@ mod tests {
         assert!(error.contains("forced graph failure"));
         let sessions = store.list_sessions(None).expect("list sessions");
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn spawn_uses_requested_model_override() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let store = Arc::new(FileSessionStore::new(Some(&data_home)));
+        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let app_config = app_config_with_two_models();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            Arc::clone(&tools),
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            Some(session_store),
+            Some(Arc::clone(&store) as Arc<dyn AgentGraphStore>),
+        );
+        let parent_id = SessionId::from("parent");
+        let parent_recorder = store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(parent_id.clone())
+                    .agent_path(AgentPath::root())
+                    .cwd(temp.path().to_path_buf())
+                    .provider_id("deepseek".to_string())
+                    .model_id("deepseek-chat".to_string())
+                    .base_system_prompt(String::new())
+                    .build(),
+            )
+            .await
+            .expect("create parent session");
+        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        control.registry.register_root_thread(parent_id.clone());
+        control.register_recorder(parent_id, parent_recorder).await;
+
+        let child = control
+            .spawn(
+                AgentSpawnRequest::builder()
+                    .parent_path(AgentPath::root())
+                    .task_name("child".to_string())
+                    .role_name("default".to_string())
+                    .model("openai/gpt-5.4".to_string())
+                    .prompt("do the work".to_string())
+                    .cwd(temp.path().to_path_buf())
+                    .build(),
+            )
+            .await
+            .expect("spawn child with model override");
+
+        let thread = thread_manager
+            .get_thread(&child.thread_id)
+            .await
+            .expect("child thread should be live");
+        assert_eq!(thread.current_model().await, "openai/gpt-5.4");
+    }
+
+    /// Verifies subagents inherit the parent's live model when no model override is provided.
+    #[tokio::test]
+    async fn spawn_inherits_parent_runtime_model_without_model_override() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let store = Arc::new(FileSessionStore::new(Some(&data_home)));
+        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let app_config = app_config_with_two_models();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            Arc::clone(&tools),
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            Some(session_store),
+            Some(Arc::clone(&store) as Arc<dyn AgentGraphStore>),
+        );
+        let parent_id = SessionId::from("parent");
+        let parent_recorder = store
+            .create_session(
+                CreateSessionParams::builder()
+                    .session_id(parent_id.clone())
+                    .agent_path(AgentPath::root())
+                    .cwd(temp.path().to_path_buf())
+                    .provider_id("deepseek".to_string())
+                    .model_id("deepseek-chat".to_string())
+                    .base_system_prompt(String::new())
+                    .build(),
+            )
+            .await
+            .expect("create parent session");
+        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .register_recorder(parent_id.clone(), parent_recorder)
+            .await;
+
+        let (tx_op, _rx_op) = mpsc::unbounded_channel();
+        let parent_thread = test_thread(parent_id, tx_op);
+        *parent_thread.current_model.write().await = "openai/gpt-5.4".to_string();
+        thread_manager.insert_thread(parent_thread).await;
+
+        let child = control
+            .spawn(
+                AgentSpawnRequest::builder()
+                    .parent_path(AgentPath::root())
+                    .task_name("child".to_string())
+                    .role_name("default".to_string())
+                    .prompt("do the work".to_string())
+                    .cwd(temp.path().to_path_buf())
+                    .build(),
+            )
+            .await
+            .expect("spawn child without model override");
+
+        let thread = thread_manager
+            .get_thread(&child.thread_id)
+            .await
+            .expect("child thread should be live");
+        assert_eq!(thread.current_model().await, "openai/gpt-5.4");
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_unknown_model_override() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId::from("root-session"));
+
+        let error = control
+            .spawn(
+                AgentSpawnRequest::builder()
+                    .parent_path(AgentPath::root())
+                    .task_name("child".to_string())
+                    .role_name("default".to_string())
+                    .model("missing/model".to_string())
+                    .prompt("do work".to_string())
+                    .cwd(PathBuf::from("/tmp/project"))
+                    .build(),
+            )
+            .await
+            .expect_err("unknown model override should fail");
+
+        assert_eq!(error, "model override is not available: missing/model");
     }
 
     struct FailingAgentGraphStore;
@@ -982,7 +1227,12 @@ mod tests {
             .await
             .expect("send message");
         control
-            .send_message(AgentPath::root(), child_path, "follow up".to_string(), true)
+            .send_message(
+                AgentPath::root(),
+                child_path.clone(),
+                "follow up".to_string(),
+                true,
+            )
             .await
             .expect("followup message");
 
@@ -996,6 +1246,34 @@ mod tests {
             panic!("expected inter-agent message");
         };
         assert!(message.trigger_turn);
+
+        let listed = control.list_agents(Some(&child_path));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].agent_name, "/root/child");
+        assert_eq!(listed[0].last_task_message.as_deref(), Some("follow up"));
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_unknown_agent_type_before_starting_child() {
+        let control = agent_control_no_persistence();
+        control
+            .registry
+            .register_root_thread(SessionId::from("root-session"));
+
+        let error = control
+            .spawn(
+                AgentSpawnRequest::builder()
+                    .parent_path(AgentPath::root())
+                    .task_name("child".to_string())
+                    .role_name("missing-role".to_string())
+                    .prompt("inspect".to_string())
+                    .cwd(PathBuf::from("/tmp/project"))
+                    .build(),
+            )
+            .await
+            .expect_err("unknown role should fail before spawn");
+
+        assert_eq!(error, "unknown agent_type 'missing-role'");
     }
 
     #[tokio::test]
@@ -1596,11 +1874,13 @@ mod tests {
 
         let error = control
             .spawn(
-                &deep_parent,
-                "too_deep",
-                "default",
-                "do work",
-                PathBuf::from("/tmp"),
+                AgentSpawnRequest::builder()
+                    .parent_path(deep_parent)
+                    .task_name("too_deep".to_string())
+                    .role_name("default".to_string())
+                    .prompt("do work".to_string())
+                    .cwd(PathBuf::from("/tmp"))
+                    .build(),
             )
             .await
             .expect_err("should reject deep spawn");
