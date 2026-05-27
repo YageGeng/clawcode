@@ -108,8 +108,9 @@ impl SkillRegistry {
     pub fn discover(cwd: &std::path::Path, config: &SkillsConfig) -> Arc<Self> {
         use std::sync::OnceLock;
 
-        static CACHE: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<SkillRegistry>>>> =
-            OnceLock::new();
+        static CACHE: OnceLock<
+            std::sync::Mutex<HashMap<PathBuf, Arc<SkillRegistry>>>,
+        > = OnceLock::new();
         let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
 
         let key = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());

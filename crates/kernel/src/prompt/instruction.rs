@@ -32,8 +32,9 @@ impl Instructions {
             use std::collections::HashMap;
             use std::sync::Mutex;
 
-            static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, Option<Instructions>>>> =
-                std::sync::OnceLock::new();
+            static CACHE: std::sync::OnceLock<
+                Mutex<HashMap<PathBuf, Option<Instructions>>>,
+            > = std::sync::OnceLock::new();
             let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
             {

@@ -111,7 +111,10 @@ impl SessionRouterState {
 
     /// Return a session state by id.
     #[cfg(test)]
-    pub(crate) fn state_for(&self, session_id: &SessionId) -> Option<&AppState> {
+    pub(crate) fn state_for(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<&AppState> {
         self.states.get(session_id)
     }
 
@@ -184,11 +187,16 @@ impl SessionRouterState {
     }
 
     /// Route one ACP session notification to metadata state or the matching AppState.
-    pub(crate) fn apply_session_notification(&mut self, notification: SessionNotification) {
-        if let Some(patch) = Self::subagent_metadata_patch(&notification.update) {
+    pub(crate) fn apply_session_notification(
+        &mut self,
+        notification: SessionNotification,
+    ) {
+        if let Some(patch) = Self::subagent_metadata_patch(&notification.update)
+        {
             // Snapshots describe the root session tree. Lazy-loading a child session can also
             // emit a child-rooted snapshot, which must not replace the global picker metadata.
-            let is_child_snapshot = patch.event == protocol::AgentUiEventKind::Snapshot
+            let is_child_snapshot = patch.event
+                == protocol::AgentUiEventKind::Snapshot
                 && !self
                     .agent_navigation
                     .is_root_session(&notification.session_id);
@@ -221,7 +229,9 @@ impl SessionRouterState {
             .into_iter()
             .any(|entry| entry.session_id() == &target_session_id);
         if !selectable {
-            return Err(SelectAgentSessionError::NotSelectable(target_session_id));
+            return Err(SelectAgentSessionError::NotSelectable(
+                target_session_id,
+            ));
         }
 
         self.view_snapshots
@@ -254,7 +264,11 @@ impl SessionRouterState {
     }
 
     /// Record an error for its owning session.
-    pub(crate) fn set_error_for_session(&mut self, session_id: &SessionId, message: String) {
+    pub(crate) fn set_error_for_session(
+        &mut self,
+        session_id: &SessionId,
+        message: String,
+    ) {
         self.ensure_state(session_id.clone());
         if let Some(state) = self.states.get_mut(session_id) {
             state.set_error(message);
@@ -263,7 +277,10 @@ impl SessionRouterState {
 
     /// Return a saved composer draft for tests and future session restoration.
     #[cfg(test)]
-    pub(crate) fn composer_snapshot_text(&self, session_id: &SessionId) -> Option<&str> {
+    pub(crate) fn composer_snapshot_text(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<&str> {
         self.composer_snapshots.get(session_id).map(Composer::text)
     }
 
@@ -280,9 +297,12 @@ impl SessionRouterState {
     }
 
     /// Extract clawcode subagent metadata from a metadata-only ToolCallUpdate.
-    fn subagent_metadata_patch(update: &SessionUpdate) -> Option<protocol::AgentUiMetadataPatch> {
+    fn subagent_metadata_patch(
+        update: &SessionUpdate,
+    ) -> Option<protocol::AgentUiMetadataPatch> {
         let SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-            meta: Some(meta), ..
+            meta: Some(meta),
+            ..
         }) = update
         else {
             return None;
@@ -296,11 +316,16 @@ impl SessionRouterState {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        ContentBlock, ContentChunk, TextContent, ToolCallId, ToolCallUpdateFields,
+        ContentBlock, ContentChunk, TextContent, ToolCallId,
+        ToolCallUpdateFields,
     };
 
     /// Build a metadata update for one child agent.
-    fn metadata_update_for_child(session_id: &str, nickname: &str, role: &str) -> SessionUpdate {
+    fn metadata_update_for_child(
+        session_id: &str,
+        nickname: &str,
+        role: &str,
+    ) -> SessionUpdate {
         let metadata = protocol::AgentUiMetadata::builder()
             .session_id(protocol::SessionId::from(session_id.to_string()))
             .parent_session_id(protocol::SessionId::from("root-session"))
@@ -346,24 +371,19 @@ mod tests {
 
         router.apply_session_notification(SessionNotification::new(
             child.clone(),
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                TextContent::new("child output"),
-            ))),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::Text(TextContent::new("child output")),
+            )),
         ));
 
         assert_eq!(router.active_session_id(), &root);
-        assert!(
-            router
-                .state_for(&child)
-                .unwrap()
-                .transcript()
-                .iter()
-                .any(|entry| {
-                    entry
-                        .text_cell()
-                        .is_some_and(|cell| cell.text().contains("child output"))
-                })
-        );
+        assert!(router.state_for(&child).unwrap().transcript().iter().any(
+            |entry| {
+                entry
+                    .text_cell()
+                    .is_some_and(|cell| cell.text().contains("child output"))
+            }
+        ));
     }
 
     /// Verifies metadata-only updates do not create visible tool cells.
@@ -377,8 +397,10 @@ mod tests {
             Theme::dark(),
         );
 
-        let update = metadata_update_for_child("child-session", "finder", "worker");
-        router.apply_session_notification(SessionNotification::new(root, update));
+        let update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router
+            .apply_session_notification(SessionNotification::new(root, update));
 
         assert_eq!(router.active_state().transcript().len(), 0);
         assert_eq!(router.agent_navigation().ordered_entries().len(), 2);
@@ -395,8 +417,12 @@ mod tests {
             "provider/model".to_string(),
             Theme::dark(),
         );
-        let update = metadata_update_for_child("child-session", "finder", "worker");
-        router.apply_session_notification(SessionNotification::new(root.clone(), update));
+        let update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router.apply_session_notification(SessionNotification::new(
+            root.clone(),
+            update,
+        ));
         let mut view = ViewState::default();
         let mut composer = Composer::default();
         composer.insert_str("root draft");
@@ -421,8 +447,10 @@ mod tests {
             "provider/model".to_string(),
             Theme::dark(),
         );
-        let update = metadata_update_for_child("child-session", "finder", "worker");
-        router.apply_session_notification(SessionNotification::new(root, update));
+        let update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router
+            .apply_session_notification(SessionNotification::new(root, update));
         let mut view = ViewState::default();
         let mut composer = Composer::default();
         router.open_agent_picker();
@@ -456,8 +484,12 @@ mod tests {
             "provider/model".to_string(),
             Theme::dark(),
         );
-        let child_update = metadata_update_for_child("child-session", "finder", "worker");
-        router.apply_session_notification(SessionNotification::new(root.clone(), child_update));
+        let child_update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router.apply_session_notification(SessionNotification::new(
+            root.clone(),
+            child_update,
+        ));
         router
             .select_agent_session(
                 child.clone(),

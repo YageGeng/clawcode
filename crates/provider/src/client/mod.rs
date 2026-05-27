@@ -16,7 +16,8 @@ pub use verify::{VerifyClient, VerifyError};
 use crate::{
     completion::CompletionModel,
     http_client::{
-        self, Builder, HttpClientExt, LazyBody, MultipartForm, Request, Response, make_auth_header,
+        self, Builder, HttpClientExt, LazyBody, MultipartForm, Request,
+        Response, make_auth_header,
     },
     markers::Missing,
     wasm_compat::{WasmCompatSend, WasmCompatSync},
@@ -72,18 +73,24 @@ pub type ProviderClientResult<T> = std::result::Result<T, ProviderClientError>;
 /// Returns [`ProviderClientError::EnvironmentVariable`] when the variable is missing or contains
 /// invalid Unicode.
 pub fn required_env_var(name: &'static str) -> ProviderClientResult<String> {
-    std::env::var(name).map_err(|source| ProviderClientError::EnvironmentVariable { name, source })
+    std::env::var(name).map_err(|source| {
+        ProviderClientError::EnvironmentVariable { name, source }
+    })
 }
 
 /// Read an optional environment variable for provider client construction.
 ///
 /// Missing variables return `Ok(None)`. Variables containing invalid Unicode return
 /// [`ProviderClientError::EnvironmentVariable`].
-pub fn optional_env_var(name: &'static str) -> ProviderClientResult<Option<String>> {
+pub fn optional_env_var(
+    name: &'static str,
+) -> ProviderClientResult<Option<String>> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(VarError::NotPresent) => Ok(None),
-        Err(source) => Err(ProviderClientError::EnvironmentVariable { name, source }),
+        Err(source) => {
+            Err(ProviderClientError::EnvironmentVariable { name, source })
+        }
     }
 }
 
@@ -113,7 +120,9 @@ pub trait ProviderClient {
 pub trait ApiKey: Sized {
     /// Convert this key into a default request header, if the generic client
     /// should own that authentication header.
-    fn into_header(self) -> Option<http_client::Result<(HeaderName, HeaderValue)>> {
+    fn into_header(
+        self,
+    ) -> Option<http_client::Result<(HeaderName, HeaderValue)>> {
         None
     }
 }
@@ -122,7 +131,9 @@ pub trait ApiKey: Sized {
 pub struct BearerAuth(String);
 
 impl ApiKey for BearerAuth {
-    fn into_header(self) -> Option<http_client::Result<(HeaderName, HeaderValue)>> {
+    fn into_header(
+        self,
+    ) -> Option<http_client::Result<(HeaderName, HeaderValue)>> {
         Some(make_auth_header(self.0))
     }
 }
@@ -190,7 +201,9 @@ where
                     .headers
                     .iter()
                     .filter_map(|(k, v)| {
-                        if k == http::header::AUTHORIZATION || k.as_str().contains("api-key") {
+                        if k == http::header::AUTHORIZATION
+                            || k.as_str().contains("api-key")
+                        {
                             None
                         } else {
                             Some((k, v))
@@ -228,7 +241,12 @@ pub trait Provider: Sized {
     const VERIFY_PATH: &'static str;
 
     /// Build a complete request URI for the given base URL, provider path, and transport.
-    fn build_uri(&self, base_url: &str, path: &str, _transport: Transport) -> String {
+    fn build_uri(
+        &self,
+        base_url: &str,
+        path: &str,
+        _transport: Transport,
+    ) -> String {
         // Some providers (like Azure) have a blank base URL to allow users to input their own endpoints.
         let base_url = if base_url.is_empty() {
             base_url.to_string()
@@ -240,7 +258,10 @@ pub trait Provider: Sized {
     }
 
     /// Apply provider-specific request customization before sending.
-    fn with_custom(&self, req: http_client::Builder) -> http_client::Result<http_client::Builder> {
+    fn with_custom(
+        &self,
+        req: http_client::Builder,
+    ) -> http_client::Result<http_client::Builder> {
         Ok(req)
     }
 }
@@ -353,7 +374,9 @@ where
     fn send<T, U>(
         &self,
         mut req: Request<T>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+    + WasmCompatSend
+    + 'static
     where
         T: Into<Bytes> + WasmCompatSend,
         U: From<Bytes>,
@@ -370,7 +393,9 @@ where
     fn send_multipart<U>(
         &self,
         req: Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+    + WasmCompatSend
+    + 'static
     where
         U: From<Bytes>,
         U: WasmCompatSend + 'static,
@@ -381,7 +406,9 @@ where
     fn send_streaming<T>(
         &self,
         mut req: Request<T>,
-    ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>> + WasmCompatSend
+    ) -> impl Future<
+        Output = http_client::Result<http_client::StreamingResponse>,
+    > + WasmCompatSend
     where
         T: Into<Bytes> + WasmCompatSend,
     {
@@ -419,9 +446,9 @@ where
     where
         S: AsRef<str>,
     {
-        let uri = self
-            .ext
-            .build_uri(&self.base_url, path.as_ref(), Transport::Http);
+        let uri =
+            self.ext
+                .build_uri(&self.base_url, path.as_ref(), Transport::Http);
 
         let mut req = Request::post(uri);
 
@@ -437,9 +464,9 @@ where
     where
         S: AsRef<str>,
     {
-        let uri = self
-            .ext
-            .build_uri(&self.base_url, path.as_ref(), Transport::Sse);
+        let uri =
+            self.ext
+                .build_uri(&self.base_url, path.as_ref(), Transport::Sse);
 
         let mut req = Request::post(uri);
 
@@ -455,9 +482,9 @@ where
     where
         S: AsRef<str>,
     {
-        let uri = self
-            .ext
-            .build_uri(&self.base_url, path.as_ref(), Transport::Sse);
+        let uri =
+            self.ext
+                .build_uri(&self.base_url, path.as_ref(), Transport::Sse);
 
         let mut req = Request::get(uri);
 
@@ -473,9 +500,9 @@ where
     where
         S: AsRef<str>,
     {
-        let uri = self
-            .ext
-            .build_uri(&self.base_url, path.as_ref(), Transport::Http);
+        let uri =
+            self.ext
+                .build_uri(&self.base_url, path.as_ref(), Transport::Http);
 
         let mut req = Request::get(uri);
 
@@ -521,7 +548,9 @@ where
                 if status.is_success() {
                     Ok(())
                 } else {
-                    let text: String = String::from_utf8_lossy(&response.into_body().await?).into();
+                    let text: String =
+                        String::from_utf8_lossy(&response.into_body().await?)
+                            .into();
                     Err(VerifyError::HttpError(http_client::Error::Instance(
                         format!("Failed with '{status}': {text}").into(),
                     )))
@@ -573,7 +602,10 @@ where
 impl<Ext, H> ClientBuilder<Ext, Missing, H> {
     /// Set the API key for this client. This *must* be done before the `build` method can be
     /// called
-    pub fn api_key<ApiKey>(self, api_key: impl Into<ApiKey>) -> ClientBuilder<Ext, ApiKey, H> {
+    pub fn api_key<ApiKey>(
+        self,
+        api_key: impl Into<ApiKey>,
+    ) -> ClientBuilder<Ext, ApiKey, H> {
         ClientBuilder {
             api_key: api_key.into(),
             base_url: self.base_url,
@@ -589,7 +621,10 @@ where
     Ext: Clone,
 {
     /// Owned map over the ext field
-    pub(crate) fn over_ext<F, NewExt>(self, f: F) -> ClientBuilder<NewExt, ApiKey, H>
+    pub(crate) fn over_ext<F, NewExt>(
+        self,
+        f: F,
+    ) -> ClientBuilder<NewExt, ApiKey, H>
     where
         F: FnOnce(Ext) -> NewExt,
     {
@@ -627,7 +662,10 @@ where
     ///
     /// Calling this advances the builder's `H` slot from whatever it was (typically `Missing`)
     /// to the supplied client's type, which selects the H-generic [`Self::build`] impl below.
-    pub fn http_client<U>(self, http_client: U) -> ClientBuilder<Ext, ApiKey, U> {
+    pub fn http_client<U>(
+        self,
+        http_client: U,
+    ) -> ClientBuilder<Ext, ApiKey, U> {
         ClientBuilder {
             http_client,
             base_url: self.base_url,
@@ -682,7 +720,9 @@ where
     /// Build a client using the default `reqwest::Client` backend.
     pub fn build(
         self,
-    ) -> http_client::Result<Client<ExtBuilder::Extension<reqwest::Client>, reqwest::Client>> {
+    ) -> http_client::Result<
+        Client<ExtBuilder::Extension<reqwest::Client>, reqwest::Client>,
+    > {
         self.http_client(reqwest::Client::default()).build()
     }
 }
@@ -696,7 +736,9 @@ where
     H: HttpClientExt,
 {
     /// Build a client using the HTTP backend supplied with [`ClientBuilder::http_client`].
-    pub fn build(mut self) -> http_client::Result<Client<ExtBuilder::Extension<H>, H>> {
+    pub fn build(
+        mut self,
+    ) -> http_client::Result<Client<ExtBuilder::Extension<H>, H>> {
         let ext_builder = self.ext.clone();
 
         self = ext_builder.finish(self)?;
@@ -732,7 +774,10 @@ where
 {
     type CompletionModel = M;
 
-    fn completion_model(&self, model: impl Into<String>) -> Self::CompletionModel {
+    fn completion_model(
+        &self,
+        model: impl Into<String>,
+    ) -> Self::CompletionModel {
         M::make(self, model)
     }
 }
@@ -740,13 +785,20 @@ where
 impl<M, Ext, H> ModelListingClient for Client<Ext, H>
 where
     Ext: Capabilities<H, ModelListing = Capable<M>> + Clone,
-    M: ModelLister<H, Client = Self> + WasmCompatSend + WasmCompatSync + Clone + 'static,
+    M: ModelLister<H, Client = Self>
+        + WasmCompatSend
+        + WasmCompatSync
+        + Clone
+        + 'static,
     H: WasmCompatSend + WasmCompatSync + Clone,
 {
     fn list_models(
         &self,
     ) -> impl std::future::Future<
-        Output = Result<crate::model::ModelList, crate::model::ModelListingError>,
+        Output = Result<
+            crate::model::ModelList,
+            crate::model::ModelListingError,
+        >,
     > + WasmCompatSend {
         let lister = M::new(self.clone());
         async move { lister.list_all().await }
@@ -757,7 +809,9 @@ where
 mod wasm_model_listing_compile_checks {
     use super::ModelListingClient;
     use crate::{
-        http_client::{self, HttpClientExt, LazyBody, MultipartForm, Request, Response},
+        http_client::{
+            self, HttpClientExt, LazyBody, MultipartForm, Request, Response,
+        },
         providers::{anthropic, deepseek, openai},
         wasm_compat::WasmCompatSend,
     };
@@ -777,7 +831,9 @@ mod wasm_model_listing_compile_checks {
         fn send<T, U>(
             &self,
             _req: Request<T>,
-        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+        + WasmCompatSend
+        + 'static
         where
             T: Into<Bytes> + WasmCompatSend,
             U: From<Bytes> + WasmCompatSend + 'static,
@@ -788,7 +844,9 @@ mod wasm_model_listing_compile_checks {
         fn send_multipart<U>(
             &self,
             _req: Request<MultipartForm>,
-        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+        + WasmCompatSend
+        + 'static
         where
             U: From<Bytes> + WasmCompatSend + 'static,
         {
@@ -798,7 +856,9 @@ mod wasm_model_listing_compile_checks {
         fn send_streaming<T>(
             &self,
             _req: Request<T>,
-        ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>> + WasmCompatSend
+        ) -> impl Future<
+            Output = http_client::Result<http_client::StreamingResponse>,
+        > + WasmCompatSend
         where
             T: Into<Bytes> + WasmCompatSend,
         {

@@ -17,8 +17,9 @@ pub fn init_logging() -> std::io::Result<()> {
 
 /// Build the default log file path for a local calendar date.
 fn default_log_file_path(date: NaiveDate) -> std::io::Result<PathBuf> {
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::other("failed to resolve home directory"))?;
+    let home_dir = dirs::home_dir().ok_or_else(|| {
+        std::io::Error::other("failed to resolve home directory")
+    })?;
     let file_name = format!(
         "{:04}-{:02}-{:02}.log",
         date.year(),
@@ -35,9 +36,9 @@ fn default_log_file_path(date: NaiveDate) -> std::io::Result<PathBuf> {
 
 /// Initialize tracing to append logs to the provided file path.
 fn init_file_logging(path: PathBuf) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("log path has no parent directory"))?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::other("log path has no parent directory")
+    })?;
     std::fs::create_dir_all(parent)?;
     let file = OpenOptions::new().create(true).append(true).open(path)?;
 
@@ -64,7 +65,8 @@ mod tests {
     #[test]
     fn default_log_file_path_uses_daily_file_name() {
         let path = default_log_file_path(
-            NaiveDate::from_ymd_opt(2026, 5, 17).expect("test date should be valid"),
+            NaiveDate::from_ymd_opt(2026, 5, 17)
+                .expect("test date should be valid"),
         )
         .expect("log path should resolve");
 

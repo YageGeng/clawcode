@@ -145,7 +145,9 @@ impl SkillLoader {
             }
         }
 
-        skills.sort_by(|a, b| a.scope.cmp(&b.scope).then_with(|| a.name.cmp(&b.name)));
+        skills.sort_by(|a, b| {
+            a.scope.cmp(&b.scope).then_with(|| a.name.cmp(&b.name))
+        });
         skills
     }
 
@@ -200,18 +202,21 @@ impl SkillLoader {
     /// Scope is set to a placeholder (`Repo`); the caller (`load`)
     /// overwrites it with the correct scope from the root walker.
     fn parse_skill_file(path: &Path) -> Result<SkillMetadata, SkillError> {
-        let contents = std::fs::read_to_string(path).map_err(|e| SkillError::Read {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-
-        let frontmatter =
-            Self::extract_frontmatter(&contents).ok_or_else(|| SkillError::MissingFrontmatter {
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| SkillError::Read {
                 path: path.to_path_buf(),
+                source: e,
             })?;
 
-        let parsed: SkillFrontmatter =
-            serde_yaml::from_str(&frontmatter).map_err(|e| SkillError::InvalidYaml {
+        let frontmatter =
+            Self::extract_frontmatter(&contents).ok_or_else(|| {
+                SkillError::MissingFrontmatter {
+                    path: path.to_path_buf(),
+                }
+            })?;
+
+        let parsed: SkillFrontmatter = serde_yaml::from_str(&frontmatter)
+            .map_err(|e| SkillError::InvalidYaml {
                 path: path.to_path_buf(),
                 source: e,
             })?;
@@ -230,7 +235,8 @@ impl SkillLoader {
             .unwrap_or_default()
             .to_string();
 
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical =
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
         Ok(SkillMetadata {
             name: name.to_string(),
@@ -303,7 +309,9 @@ mod tests {
 
     #[test]
     fn default_name_from_parent_dir() {
-        let name = SkillLoader::default_skill_name(Path::new("/some/path/my-skill/SKILL.md"));
+        let name = SkillLoader::default_skill_name(Path::new(
+            "/some/path/my-skill/SKILL.md",
+        ));
         assert_eq!(name, "my-skill");
     }
 
@@ -361,10 +369,15 @@ mod tests {
     #[test]
     fn parse_error_collected_in_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let skills_dir = dir.path().join(".agents").join("skills").join("broken");
+        let skills_dir =
+            dir.path().join(".agents").join("skills").join("broken");
         std::fs::create_dir_all(&skills_dir).unwrap();
         // Write a SKILL.md with missing frontmatter.
-        std::fs::write(skills_dir.join("SKILL.md"), "Just body, no frontmatter\n").unwrap();
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "Just body, no frontmatter\n",
+        )
+        .unwrap();
 
         let mut loader = SkillLoader {
             roots: vec![SkillRoot {

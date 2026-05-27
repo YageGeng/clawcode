@@ -20,8 +20,8 @@ use crate::http_client;
 use crate::http_client::HttpClientExt;
 use crate::json_utils;
 use crate::message::{
-    Document, DocumentMediaType, DocumentSourceKind, ImageDetail, MessageError, MimeType, Text,
-    TryIntoMany,
+    Document, DocumentMediaType, DocumentSourceKind, ImageDetail, MessageError,
+    MimeType, Text, TryIntoMany,
 };
 use crate::one_or_many::string_or_one_or_many;
 
@@ -73,11 +73,16 @@ pub struct CompletionRequest {
 }
 
 impl CompletionRequest {
-    pub fn with_structured_outputs<S>(mut self, schema_name: S, schema: serde_json::Value) -> Self
+    pub fn with_structured_outputs<S>(
+        mut self,
+        schema_name: S,
+        schema: serde_json::Value,
+    ) -> Self
     where
         S: Into<String>,
     {
-        self.additional_parameters.text = Some(TextConfig::structured_output(schema_name, schema));
+        self.additional_parameters.text =
+            Some(TextConfig::structured_output(schema_name, schema));
 
         self
     }
@@ -91,7 +96,10 @@ impl CompletionRequest {
     /// Adds a provider-native hosted tool (e.g. `web_search`, `file_search`, `computer_use`)
     /// to the request. These tools are executed by OpenAI's infrastructure, not by Rig's
     /// agent loop.
-    pub fn with_tool(mut self, tool: impl Into<ResponsesToolDefinition>) -> Self {
+    pub fn with_tool(
+        mut self,
+        tool: impl Into<ResponsesToolDefinition>,
+    ) -> Self {
         self.tools.push(tool.into());
         self
     }
@@ -126,9 +134,12 @@ impl Serialize for InputItem {
     where
         S: serde::Serializer,
     {
-        let mut value = serde_json::to_value(&self.input).map_err(serde::ser::Error::custom)?;
+        let mut value = serde_json::to_value(&self.input)
+            .map_err(serde::ser::Error::custom)?;
         let map = value.as_object_mut().ok_or_else(|| {
-            serde::ser::Error::custom("Input content must serialize to an object")
+            serde::ser::Error::custom(
+                "Input content must serialize to an object",
+            )
         })?;
 
         if let Some(role) = &self.role
@@ -136,7 +147,8 @@ impl Serialize for InputItem {
         {
             map.insert(
                 "role".to_string(),
-                serde_json::to_value(role).map_err(serde::ser::Error::custom)?,
+                serde_json::to_value(role)
+                    .map_err(serde::ser::Error::custom)?,
             );
         }
 
@@ -277,13 +289,15 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
 
     fn try_into_many(self) -> Result<Vec<InputItem>, Self::Error> {
         match self {
-            crate::completion::Message::System { content } => Ok(vec![InputItem {
-                role: Some(Role::System),
-                input: InputContent::Message(Message::System {
-                    content: OneOrMany::one(content.into()),
-                    name: None,
-                }),
-            }]),
+            crate::completion::Message::System { content } => {
+                Ok(vec![InputItem {
+                    role: Some(Role::System),
+                    input: InputContent::Message(Message::System {
+                        content: OneOrMany::one(content.into()),
+                        name: None,
+                    }),
+                }])
+            }
             crate::completion::Message::User { content } => {
                 let mut items = Vec::new();
 
@@ -293,7 +307,9 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                             items.push(InputItem {
                                 role: Some(Role::User),
                                 input: InputContent::Message(Message::User {
-                                    content: OneOrMany::one(UserContent::InputText { text }),
+                                    content: OneOrMany::one(
+                                        UserContent::InputText { text },
+                                    ),
                                     name: None,
                                 }),
                             });
@@ -306,9 +322,9 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                             },
                         ) => {
                             for tool_result_content in tool_content {
-                                let crate::completion::message::ToolResultContent::Text(Text {
-                                    text,
-                                }) = tool_result_content
+                                let crate::completion::message::ToolResultContent::Text(
+                                    Text { text },
+                                ) = tool_result_content
                                 else {
                                     return Err(CompletionError::ProviderError(
                                         "This thing only supports text!".to_string(),
@@ -317,11 +333,16 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                                 // let output = serde_json::from_str(&text)?;
                                 items.push(InputItem {
                                     role: None,
-                                    input: InputContent::FunctionCallOutput(ToolResult {
-                                        call_id: require_call_id(call_id.clone(), "Tool result")?,
-                                        output: text,
-                                        status: ToolStatus::Completed,
-                                    }),
+                                    input: InputContent::FunctionCallOutput(
+                                        ToolResult {
+                                            call_id: require_call_id(
+                                                call_id.clone(),
+                                                "Tool result",
+                                            )?,
+                                            output: text,
+                                            status: ToolStatus::Completed,
+                                        },
+                                    ),
                                 });
                             }
                         }
@@ -331,12 +352,14 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                         }) => items.push(InputItem {
                             role: Some(Role::User),
                             input: InputContent::Message(Message::User {
-                                content: OneOrMany::one(UserContent::InputFile {
-                                    file_id: Some(file_id),
-                                    file_data: None,
-                                    file_url: None,
-                                    filename: None,
-                                }),
+                                content: OneOrMany::one(
+                                    UserContent::InputFile {
+                                        file_id: Some(file_id),
+                                        file_data: None,
+                                        file_url: None,
+                                        filename: None,
+                                    },
+                                ),
                                 name: None,
                             }),
                         }),
@@ -346,10 +369,15 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                             ..
                         }) => {
                             let (file_data, file_url) = match data {
-                                DocumentSourceKind::Base64(data) => {
-                                    (Some(format!("data:application/pdf;base64,{data}")), None)
+                                DocumentSourceKind::Base64(data) => (
+                                    Some(format!(
+                                        "data:application/pdf;base64,{data}"
+                                    )),
+                                    None,
+                                ),
+                                DocumentSourceKind::Url(url) => {
+                                    (None, Some(url))
                                 }
-                                DocumentSourceKind::Url(url) => (None, Some(url)),
                                 DocumentSourceKind::Raw(_) => {
                                     return Err(CompletionError::RequestError(
                                         "Raw file data not supported, encode as base64 first"
@@ -358,7 +386,10 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                                 }
                                 doc => {
                                     return Err(CompletionError::RequestError(
-                                        format!("Unsupported document type: {doc}").into(),
+                                        format!(
+                                            "Unsupported document type: {doc}"
+                                        )
+                                        .into(),
                                     ));
                                 }
                             };
@@ -366,36 +397,47 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                             items.push(InputItem {
                                 role: Some(Role::User),
                                 input: InputContent::Message(Message::User {
-                                    content: OneOrMany::one(UserContent::InputFile {
-                                        file_id: None,
-                                        file_data,
-                                        file_url,
-                                        filename: Some("document.pdf".to_string()),
-                                    }),
+                                    content: OneOrMany::one(
+                                        UserContent::InputFile {
+                                            file_id: None,
+                                            file_data,
+                                            file_url,
+                                            filename: Some(
+                                                "document.pdf".to_string(),
+                                            ),
+                                        },
+                                    ),
                                     name: None,
                                 }),
                             })
                         }
                         crate::message::UserContent::Document(Document {
                             data:
-                                DocumentSourceKind::Base64(text) | DocumentSourceKind::String(text),
+                                DocumentSourceKind::Base64(text)
+                                | DocumentSourceKind::String(text),
                             ..
                         }) => items.push(InputItem {
                             role: Some(Role::User),
                             input: InputContent::Message(Message::User {
-                                content: OneOrMany::one(UserContent::InputText { text }),
+                                content: OneOrMany::one(
+                                    UserContent::InputText { text },
+                                ),
                                 name: None,
                             }),
                         }),
-                        crate::message::UserContent::Image(crate::message::Image {
-                            data,
-                            media_type,
-                            detail,
-                            ..
-                        }) => {
+                        crate::message::UserContent::Image(
+                            crate::message::Image {
+                                data,
+                                media_type,
+                                detail,
+                                ..
+                            },
+                        ) => {
                             let url = match data {
                                 DocumentSourceKind::Base64(data) => {
-                                    let media_type = if let Some(media_type) = media_type {
+                                    let media_type = if let Some(media_type) =
+                                        media_type
+                                    {
                                         media_type.to_mime_type().to_string()
                                     } else {
                                         String::new()
@@ -411,25 +453,30 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
                                 }
                                 doc => {
                                     return Err(CompletionError::RequestError(
-                                        format!("Unsupported document type: {doc}").into(),
+                                        format!(
+                                            "Unsupported document type: {doc}"
+                                        )
+                                        .into(),
                                     ));
                                 }
                             };
                             items.push(InputItem {
                                 role: Some(Role::User),
                                 input: InputContent::Message(Message::User {
-                                    content: OneOrMany::one(UserContent::InputImage {
-                                        image_url: url,
-                                        detail: detail.unwrap_or_default(),
-                                    }),
+                                    content: OneOrMany::one(
+                                        UserContent::InputImage {
+                                            image_url: url,
+                                            detail: detail.unwrap_or_default(),
+                                        },
+                                    ),
                                     name: None,
                                 }),
                             });
                         }
                         message => {
-                            return Err(CompletionError::ProviderError(format!(
-                                "Unsupported message: {message:?}"
-                            )));
+                            return Err(CompletionError::ProviderError(
+                                format!("Unsupported message: {message:?}"),
+                            ));
                         }
                     }
                 }
@@ -442,48 +489,75 @@ impl message::TryIntoMany<InputItem> for crate::completion::Message {
 
                 for assistant_content in content {
                     match assistant_content {
-                        crate::message::AssistantContent::Text(Text { text }) => {
-                            let id = id.as_ref().unwrap_or(&String::default()).clone();
+                        crate::message::AssistantContent::Text(Text {
+                            text,
+                        }) => {
+                            let id = id
+                                .as_ref()
+                                .unwrap_or(&String::default())
+                                .clone();
                             other_items.push(InputItem {
                                 role: Some(Role::Assistant),
-                                input: InputContent::Message(Message::Assistant {
-                                    content: OneOrMany::one(AssistantContentType::Text(
-                                        AssistantContent::OutputText(Text { text }),
-                                    )),
-                                    id,
-                                    name: None,
-                                    status: ToolStatus::Completed,
-                                }),
+                                input: InputContent::Message(
+                                    Message::Assistant {
+                                        content: OneOrMany::one(
+                                            AssistantContentType::Text(
+                                                AssistantContent::OutputText(
+                                                    Text { text },
+                                                ),
+                                            ),
+                                        ),
+                                        id,
+                                        name: None,
+                                        status: ToolStatus::Completed,
+                                    },
+                                ),
                             });
                         }
-                        crate::message::AssistantContent::ToolCall(crate::message::ToolCall {
-                            id: tool_id,
-                            call_id,
-                            function,
-                            ..
-                        }) => {
+                        crate::message::AssistantContent::ToolCall(
+                            crate::message::ToolCall {
+                                id: tool_id,
+                                call_id,
+                                function,
+                                ..
+                            },
+                        ) => {
                             other_items.push(InputItem {
                                 role: None,
-                                input: InputContent::FunctionCall(OutputFunctionCall {
-                                    arguments: function.arguments,
-                                    call_id: require_call_id(call_id, "Assistant tool call")?,
-                                    id: tool_id,
-                                    name: function.name,
-                                    status: ToolStatus::Completed,
-                                }),
+                                input: InputContent::FunctionCall(
+                                    OutputFunctionCall {
+                                        arguments: function.arguments,
+                                        call_id: require_call_id(
+                                            call_id,
+                                            "Assistant tool call",
+                                        )?,
+                                        id: tool_id,
+                                        name: function.name,
+                                        status: ToolStatus::Completed,
+                                    },
+                                ),
                             });
                         }
-                        crate::message::AssistantContent::Reasoning(reasoning) => {
+                        crate::message::AssistantContent::Reasoning(
+                            reasoning,
+                        ) => {
                             if reasoning.id.is_none() {
                                 // Reasoning without an OpenAI-generated id came from another
                                 // provider and cannot be replayed as an OpenAI reasoning item.
                                 continue;
                             }
-                            let openai_reasoning = openai_reasoning_from_core(&reasoning)
-                                .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
+                            let openai_reasoning =
+                                openai_reasoning_from_core(&reasoning)
+                                    .map_err(|err| {
+                                        CompletionError::ProviderError(
+                                            err.to_string(),
+                                        )
+                                    })?;
                             reasoning_items.push(InputItem {
                                 role: None,
-                                input: InputContent::Reasoning(openai_reasoning),
+                                input: InputContent::Reasoning(
+                                    openai_reasoning,
+                                ),
                             });
                         }
                         crate::message::AssistantContent::Image(_) => {
@@ -509,10 +583,14 @@ impl message::IntoMany<ReasoningSummary> for OneOrMany<String> {
     }
 }
 
-fn require_call_id(call_id: Option<String>, context: &str) -> Result<String, CompletionError> {
+fn require_call_id(
+    call_id: Option<String>,
+    context: &str,
+) -> Result<String, CompletionError> {
     call_id.ok_or_else(|| {
         CompletionError::RequestError(
-            format!("{context} `call_id` is required for OpenAI Responses API").into(),
+            format!("{context} `call_id` is required for OpenAI Responses API")
+                .into(),
         )
     })
 }
@@ -522,7 +600,8 @@ fn openai_reasoning_from_core(
 ) -> Result<OpenAIReasoning, MessageError> {
     let id = reasoning.id.clone().ok_or_else(|| {
         MessageError::ConversionError(
-            "An OpenAI-generated ID is required when using OpenAI reasoning items".to_string(),
+            "An OpenAI-generated ID is required when using OpenAI reasoning items"
+                .to_string(),
         )
     })?;
     let mut summary = Vec::new();
@@ -711,7 +790,8 @@ impl Add for ResponsesUsage {
             }
         });
         let output_tokens = self.output_tokens + rhs.output_tokens;
-        let output_tokens_details = self.output_tokens_details + rhs.output_tokens_details;
+        let output_tokens_details =
+            self.output_tokens_details + rhs.output_tokens_details;
         let total_tokens = self.total_tokens + rhs.total_tokens;
         Self {
             input_tokens,
@@ -805,7 +885,9 @@ pub enum ResponseStatus {
 }
 
 /// Attempt to try and create a `NewCompletionRequest` from a model name and [`crate::completion::CompletionRequest`]
-impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionRequest {
+impl TryFrom<(String, crate::completion::CompletionRequest)>
+    for CompletionRequest
+{
     type Error = CompletionError;
     fn try_from(
         (model, mut req): (String, crate::completion::CompletionRequest),
@@ -818,11 +900,12 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
             // Initialize full history with preamble (or empty if non-existent)
             // Some "Responses API compatible" providers don't support `instructions` field
             // so we need to add a system message until further notice
-            let mut full_history: Vec<InputItem> = if let Some(content) = req.preamble {
-                vec![InputItem::system_message(content)]
-            } else {
-                Vec::new()
-            };
+            let mut full_history: Vec<InputItem> =
+                if let Some(content) = req.preamble {
+                    vec![InputItem::system_message(content)]
+                } else {
+                    Vec::new()
+                };
 
             for history_item in partial_history {
                 full_history.extend(history_item.try_into_many()?);
@@ -833,11 +916,13 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
 
         let input = OneOrMany::many(input).map_err(|_e| {
             CompletionError::RequestError(
-                "OpenAI Responses request input must contain at least one item".into(),
+                "OpenAI Responses request input must contain at least one item"
+                    .into(),
             )
         })?;
 
-        let mut additional_params_payload = req.additional_params.take().unwrap_or(Value::Null);
+        let mut additional_params_payload =
+            req.additional_params.take().unwrap_or(Value::Null);
         let stream = match &additional_params_payload {
             Value::Bool(stream) => Some(*stream),
             Value::Object(map) => map.get("stream").and_then(Value::as_bool),
@@ -845,7 +930,9 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
         };
 
         let mut additional_tools = Vec::new();
-        if let Some(additional_params_map) = additional_params_payload.as_object_mut() {
+        if let Some(additional_params_map) =
+            additional_params_payload.as_object_mut()
+        {
             if let Some(raw_tools) = additional_params_map.remove("tools") {
                 additional_tools = serde_json::from_value::<Vec<ResponsesToolDefinition>>(
                     raw_tools,
@@ -875,16 +962,19 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
             // If there's no additional parameters, initialise an empty object
             AdditionalParameters::default()
         } else {
-            serde_json::from_value::<AdditionalParameters>(additional_params_payload).map_err(
-                |err| {
+            serde_json::from_value::<AdditionalParameters>(additional_params_payload)
+                .map_err(|err| {
                     CompletionError::RequestError(
-                        format!("Invalid OpenAI Responses additional_params payload: {err}").into(),
+                        format!(
+                            "Invalid OpenAI Responses additional_params payload: {err}"
+                        )
+                        .into(),
                     )
-                },
-            )?
+                })?
         };
         if additional_parameters.reasoning.is_some() {
-            let include = additional_parameters.include.get_or_insert_with(Vec::new);
+            let include =
+                additional_parameters.include.get_or_insert_with(Vec::new);
             if !include
                 .iter()
                 .any(|item| matches!(item, Include::ReasoningEncryptedContent))
@@ -905,10 +995,12 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
                 .to_string();
             let mut schema_value = schema.to_value();
             super::sanitize_schema(&mut schema_value);
-            additional_parameters.text = Some(TextConfig::structured_output(name, schema_value));
+            additional_parameters.text =
+                Some(TextConfig::structured_output(name, schema_value));
         }
 
-        let tool_choice = req.tool_choice.map(ToolChoice::try_from).transpose()?;
+        let tool_choice =
+            req.tool_choice.map(ToolChoice::try_from).transpose()?;
         let mut tools: Vec<ResponsesToolDefinition> = req
             .tools
             .into_iter()
@@ -933,7 +1025,10 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
 /// The completion model struct for OpenAI's response API.
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct GenericResponsesCompletionModel<Ext = super::OpenAIResponsesExt, H = reqwest::Client> {
+pub struct GenericResponsesCompletionModel<
+    Ext = super::OpenAIResponsesExt,
+    H = reqwest::Client,
+> {
     /// The OpenAI client
     pub(crate) client: crate::client::Client<Ext, H>,
     /// Name of the model (e.g.: gpt-3.5-turbo-1106)
@@ -951,12 +1046,16 @@ pub type ResponsesCompletionModel<H = reqwest::Client> =
 
 impl<Ext, H> GenericResponsesCompletionModel<Ext, H>
 where
-    crate::client::Client<Ext, H>: HttpClientExt + Clone + std::fmt::Debug + 'static,
+    crate::client::Client<Ext, H>:
+        HttpClientExt + Clone + std::fmt::Debug + 'static,
     Ext: crate::client::Provider + Clone + 'static,
     H: Clone + Default + std::fmt::Debug + 'static,
 {
     /// Creates a new [`ResponsesCompletionModel`].
-    pub fn new(client: crate::client::Client<Ext, H>, model: impl Into<String>) -> Self {
+    pub fn new(
+        client: crate::client::Client<Ext, H>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             client,
             model: model.into(),
@@ -964,7 +1063,10 @@ where
         }
     }
 
-    pub fn with_model(client: crate::client::Client<Ext, H>, model: &str) -> Self {
+    pub fn with_model(
+        client: crate::client::Client<Ext, H>,
+        model: &str,
+    ) -> Self {
         Self {
             client,
             model: model.to_string(),
@@ -973,7 +1075,10 @@ where
     }
 
     /// Adds a default tool to all requests from this model.
-    pub fn with_tool(mut self, tool: impl Into<ResponsesToolDefinition>) -> Self {
+    pub fn with_tool(
+        mut self,
+        tool: impl Into<ResponsesToolDefinition>,
+    ) -> Self {
         self.tools.push(tool.into());
         self
     }
@@ -993,7 +1098,10 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<CompletionRequest, CompletionError> {
-        let mut req = CompletionRequest::try_from((self.model.clone(), completion_request))?;
+        let mut req = CompletionRequest::try_from((
+            self.model.clone(),
+            completion_request,
+        ))?;
         req.tools.extend(self.tools.clone());
 
         Ok(req)
@@ -1005,8 +1113,13 @@ where
     T: HttpClientExt + Clone + Default + std::fmt::Debug + 'static,
 {
     /// Use the Completions API instead of Responses.
-    pub fn completions_api(self) -> crate::providers::openai::completion::CompletionModel<T> {
-        super::completion::CompletionModel::with_model(self.client.completions_api(), &self.model)
+    pub fn completions_api(
+        self,
+    ) -> crate::providers::openai::completion::CompletionModel<T> {
+        super::completion::CompletionModel::with_model(
+            self.client.completions_api(),
+            &self.model,
+        )
     }
 }
 
@@ -1087,7 +1200,8 @@ pub struct AdditionalParameters {
 
 impl AdditionalParameters {
     pub fn to_json(self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::Value::Object(Map::new()))
+        serde_json::to_value(self)
+            .unwrap_or_else(|_| serde_json::Value::Object(Map::new()))
     }
 }
 
@@ -1110,7 +1224,10 @@ pub struct TextConfig {
 }
 
 impl TextConfig {
-    pub(crate) fn structured_output<S>(name: S, schema: serde_json::Value) -> Self
+    pub(crate) fn structured_output<S>(
+        name: S,
+        schema: serde_json::Value,
+    ) -> Self
     where
         S: Into<String>,
     {
@@ -1174,7 +1291,10 @@ impl Reasoning {
     }
 
     /// Adds summary level (how detailed the reasoning summary will be).
-    pub fn with_summary_level(mut self, reasoning_summary_level: ReasoningSummaryLevel) -> Self {
+    pub fn with_summary_level(
+        mut self,
+        reasoning_summary_level: ReasoningSummaryLevel,
+    ) -> Self {
         self.summary = Some(reasoning_summary_level);
 
         self
@@ -1326,7 +1446,9 @@ impl From<Output> for Vec<completion::AssistantContent> {
                     })
                     .collect::<Vec<_>>();
                 if let Some(encrypted_content) = encrypted_content {
-                    content.push(message::ReasoningContent::Encrypted(encrypted_content));
+                    content.push(message::ReasoningContent::Encrypted(
+                        encrypted_content,
+                    ));
                 }
                 vec![completion::AssistantContent::Reasoning(
                     message::Reasoning {
@@ -1389,7 +1511,8 @@ pub enum OutputRole {
     Assistant,
 }
 
-impl<Ext, H> completion::CompletionModel for GenericResponsesCompletionModel<Ext, H>
+impl<Ext, H> completion::CompletionModel
+    for GenericResponsesCompletionModel<Ext, H>
 where
     crate::client::Client<Ext, H>:
         HttpClientExt + Clone + WasmCompatSend + WasmCompatSync + 'static,
@@ -1399,7 +1522,12 @@ where
         + WasmCompatSend
         + WasmCompatSync
         + 'static,
-    H: Clone + Default + std::fmt::Debug + WasmCompatSend + WasmCompatSync + 'static,
+    H: Clone
+        + Default
+        + std::fmt::Debug
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
 {
     type Response = CompletionResponse;
     type StreamingResponse = StreamingCompletionResponse;
@@ -1413,7 +1541,8 @@ where
     async fn completion(
         &self,
         completion_request: crate::completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
+    ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError>
+    {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: "clawcode::completions",
@@ -1462,14 +1591,23 @@ where
                 span.record("gen_ai.response.id", &response.id);
                 span.record("gen_ai.response.model", &response.model);
                 if let Some(ref usage) = response.usage {
-                    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
-                    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+                    span.record(
+                        "gen_ai.usage.output_tokens",
+                        usage.output_tokens,
+                    );
+                    span.record(
+                        "gen_ai.usage.input_tokens",
+                        usage.input_tokens,
+                    );
                     let cached_tokens = usage
                         .input_tokens_details
                         .as_ref()
                         .map(|d| d.cached_tokens)
                         .unwrap_or(0);
-                    span.record("gen_ai.usage.cache_read.input_tokens", cached_tokens);
+                    span.record(
+                        "gen_ai.usage.cache_read.input_tokens",
+                        cached_tokens,
+                    );
                 }
                 if enabled!(Level::TRACE) {
                     tracing::trace!(
@@ -1499,7 +1637,9 @@ where
     }
 }
 
-impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionResponse> {
+impl TryFrom<CompletionResponse>
+    for completion::CompletionResponse<CompletionResponse>
+{
     type Error = CompletionError;
 
     fn try_from(response: CompletionResponse) -> Result<Self, Self::Error> {
@@ -1696,9 +1836,10 @@ impl message::TryIntoMany<Message> for message::Message {
                 name: None,
             }]),
             message::Message::User { content } => {
-                let (tool_results, other_content): (Vec<_>, Vec<_>) = content
-                    .into_iter()
-                    .partition(|content| matches!(content, message::UserContent::ToolResult(_)));
+                let (tool_results, other_content): (Vec<_>, Vec<_>) =
+                    content.into_iter().partition(|content| {
+                        matches!(content, message::UserContent::ToolResult(_))
+                    });
 
                 // If there are messages with both tool results and user content, openai will only
                 //  handle tool results. It's unlikely that there will be both.
@@ -1841,7 +1982,8 @@ impl message::TryIntoMany<Message> for message::Message {
             message::Message::Assistant { content, id } => {
                 let assistant_message_id = id.ok_or_else(|| {
                     MessageError::ConversionError(
-                        "Assistant message ID is required for OpenAI Responses API".into(),
+                        "Assistant message ID is required for OpenAI Responses API"
+                            .into(),
                     )
                 })?;
 
@@ -1957,9 +2099,10 @@ mod tests {
 
     #[test]
     fn completion_response_preserves_unknown_service_tier() {
-        let response: CompletionResponse =
-            serde_json::from_value(response_with_service_tier("provider_experimental"))
-                .expect("response should deserialize");
+        let response: CompletionResponse = serde_json::from_value(
+            response_with_service_tier("provider_experimental"),
+        )
+        .expect("response should deserialize");
 
         let Some(OpenAIServiceTier::Other(service_tier)) =
             response.additional_parameters.service_tier
@@ -1977,7 +2120,9 @@ mod tests {
                 crate::completion::Message::Assistant {
                     id: None,
                     content: crate::OneOrMany::many(vec![
-                        message::AssistantContent::reasoning("deepseek thinking"),
+                        message::AssistantContent::reasoning(
+                            "deepseek thinking",
+                        ),
                         message::AssistantContent::text("visible answer"),
                     ])
                     .expect("assistant content should be non-empty"),
@@ -1985,12 +2130,16 @@ mod tests {
             ))
             .build();
 
-        let openai_request = CompletionRequest::try_from(("gpt-5.5".to_string(), request))
-            .expect("provider-specific reasoning should not block OpenAI request conversion");
+        let openai_request =
+            CompletionRequest::try_from(("gpt-5.5".to_string(), request)).expect(
+                "provider-specific reasoning should not block OpenAI request conversion",
+            );
 
         let input = openai_request.input.iter().collect::<Vec<_>>();
         assert_eq!(input.len(), 1);
-        let InputContent::Message(Message::Assistant { content, .. }) = &input[0].input else {
+        let InputContent::Message(Message::Assistant { content, .. }) =
+            &input[0].input
+        else {
             panic!("expected visible assistant message to remain");
         };
         assert!(matches!(
@@ -2012,7 +2161,8 @@ mod tests {
 
         for (service_tier, expected) in cases {
             assert_eq!(
-                serde_json::to_value(service_tier).expect("service tier should serialize"),
+                serde_json::to_value(service_tier)
+                    .expect("service tier should serialize"),
                 json!(expected)
             );
         }
@@ -2029,19 +2179,23 @@ mod tests {
     #[test]
     fn file_id_document_serializes_as_input_file_content() {
         let message = message::Message::User {
-            content: OneOrMany::one(message::UserContent::Document(message::Document {
-                data: DocumentSourceKind::FileId("file_abc".to_string()),
-                media_type: None,
-                additional_params: None,
-            })),
+            content: OneOrMany::one(message::UserContent::Document(
+                message::Document {
+                    data: DocumentSourceKind::FileId("file_abc".to_string()),
+                    media_type: None,
+                    additional_params: None,
+                },
+            )),
         };
 
-        let converted: Vec<Message> = message.try_into_many().expect("conversion should succeed");
+        let converted: Vec<Message> =
+            message.try_into_many().expect("conversion should succeed");
         let Message::User { content, .. } = &converted[0] else {
             panic!("expected user message");
         };
 
-        let json = serde_json::to_value(content.first_ref()).expect("serialize content");
+        let json = serde_json::to_value(content.first_ref())
+            .expect("serialize content");
 
         assert_eq!(json["type"], "input_file");
         assert_eq!(json["file_id"], "file_abc");
@@ -2052,15 +2206,19 @@ mod tests {
     #[test]
     fn file_id_document_serializes_as_input_item_content() {
         let message = completion::Message::User {
-            content: OneOrMany::one(message::UserContent::Document(message::Document {
-                data: DocumentSourceKind::FileId("file_abc".to_string()),
-                media_type: None,
-                additional_params: None,
-            })),
+            content: OneOrMany::one(message::UserContent::Document(
+                message::Document {
+                    data: DocumentSourceKind::FileId("file_abc".to_string()),
+                    media_type: None,
+                    additional_params: None,
+                },
+            )),
         };
 
-        let converted: Vec<InputItem> = message.try_into_many().expect("conversion should succeed");
-        let json = serde_json::to_value(&converted[0]).expect("serialize input item");
+        let converted: Vec<InputItem> =
+            message.try_into_many().expect("conversion should succeed");
+        let json =
+            serde_json::to_value(&converted[0]).expect("serialize input item");
 
         assert_eq!(json["type"], "message");
         assert_eq!(json["role"], "user");

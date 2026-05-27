@@ -79,7 +79,8 @@ mod tests {
         };
 
         let encoded = serde_json::to_string(&op).expect("serialize op");
-        let decoded: Op = serde_json::from_str(&encoded).expect("deserialize op");
+        let decoded: Op =
+            serde_json::from_str(&encoded).expect("deserialize op");
 
         let Op::InterAgentMessage { message } = decoded else {
             panic!("expected inter-agent message op");

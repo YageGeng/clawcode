@@ -8,14 +8,17 @@ pub fn parse_slash_name(line: &str) -> Option<(&str, &str, usize)> {
     let stripped = line.strip_prefix('/')?;
     let (name, rest_untrimmed) = stripped
         .char_indices()
-        .find_map(|(idx, ch)| ch.is_whitespace().then(|| stripped.split_at(idx)))
+        .find_map(|(idx, ch)| {
+            ch.is_whitespace().then(|| stripped.split_at(idx))
+        })
         .unwrap_or((stripped, ""));
     if name.is_empty() {
         return None;
     }
     let rest = rest_untrimmed.trim_start();
     let name_end_in_stripped = name.len();
-    let rest_start_in_stripped = name_end_in_stripped + (rest_untrimmed.len() - rest.len());
+    let rest_start_in_stripped =
+        name_end_in_stripped + (rest_untrimmed.len() - rest.len());
     let rest_offset = rest_start_in_stripped + 1;
     Some((name, rest, rest_offset))
 }

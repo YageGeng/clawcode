@@ -7,7 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::{AgentPath, AgentStatus};
 use tokio::sync::watch;
-use tools::builtin::agents::{AgentControlRef, AgentToolSummary, SpawnAgentRequest};
+use tools::builtin::agents::{
+    AgentControlRef, AgentToolSummary, SpawnAgentRequest,
+};
 
 use super::control::{AgentControl, AgentSpawnRequest};
 
@@ -27,7 +29,10 @@ impl AgentControlAdapter {
 #[async_trait]
 impl AgentControlRef for AgentControlAdapter {
     /// Delegates to [`AgentControl::spawn`] and returns the Codex V2 JSON summary.
-    async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<String, String> {
+    async fn spawn_agent(
+        &self,
+        request: SpawnAgentRequest,
+    ) -> Result<String, String> {
         let live = self
             .inner
             .spawn({
@@ -118,7 +123,10 @@ impl AgentControlRef for AgentControlAdapter {
             .await
     }
 
-    async fn close_agent(&self, agent_path: &AgentPath) -> Result<AgentStatus, String> {
+    async fn close_agent(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Result<AgentStatus, String> {
         self.inner.close_agent(agent_path).await
     }
 }

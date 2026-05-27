@@ -113,14 +113,23 @@ impl FsBackend for LocalFsBackend {
         let resolved = Self::resolve_path(&request.cwd, request.path);
         // Canonicalize to preserve the existing read tool's symlink-escape detection.
         let resolved = fs::canonicalize(&resolved).await.map_err(|e| {
-            FsBackendError::Io(format!("failed to resolve {}: {e}", resolved.display()))
+            FsBackendError::Io(format!(
+                "failed to resolve {}: {e}",
+                resolved.display()
+            ))
         })?;
 
         let content = fs::read_to_string(&resolved).await.map_err(|e| {
-            FsBackendError::Io(format!("failed to read {}: {e}", resolved.display()))
+            FsBackendError::Io(format!(
+                "failed to read {}: {e}",
+                resolved.display()
+            ))
         })?;
 
-        if request.preserve_full && request.offset == 0 && request.limit.is_none() {
+        if request.preserve_full
+            && request.offset == 0
+            && request.limit.is_none()
+        {
             return Ok(FsReadResponse { content });
         }
 
@@ -146,13 +155,16 @@ impl FsBackend for LocalFsBackend {
         let resolved = Self::resolve_path(&request.cwd, request.path);
 
         if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| FsBackendError::Io(format!("failed to create parent dir: {e}")))?;
+            fs::create_dir_all(parent).await.map_err(|e| {
+                FsBackendError::Io(format!("failed to create parent dir: {e}"))
+            })?;
         }
 
         fs::write(&resolved, &request.content).await.map_err(|e| {
-            FsBackendError::Io(format!("failed to write {}: {e}", resolved.display()))
+            FsBackendError::Io(format!(
+                "failed to write {}: {e}",
+                resolved.display()
+            ))
         })?;
 
         Ok(FsWriteResponse {

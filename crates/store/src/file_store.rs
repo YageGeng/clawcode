@@ -6,11 +6,12 @@ use protocol::{SessionId, SessionInfo};
 use super::agent_graph::{AgentEdgeStatus, AgentGraphStore, fold_agent_edges};
 use super::manifest::{
     SessionManifestStatus, active_manifest_record, append_manifest_record,
-    archived_manifest_record, closed_manifest_record, read_latest_manifest, resolve_manifest_path,
-    titled_manifest_record,
+    archived_manifest_record, closed_manifest_record, read_latest_manifest,
+    resolve_manifest_path, titled_manifest_record,
 };
 use super::record::{
-    AgentEdgeRecord, CreateSessionParams, PersistedPayload, SessionMetaRecord, timestamp_now,
+    AgentEdgeRecord, CreateSessionParams, PersistedPayload, SessionMetaRecord,
+    timestamp_now,
 };
 use super::recorder::{FileSessionRecorder, SessionRecorder};
 use super::replay::{ReplayedSession, replay_session_file};
@@ -39,7 +40,8 @@ impl FileSessionStore {
     /// Build the date-partitioned session JSONL path for a new session.
     fn session_file_path(&self, session_id: &SessionId) -> PathBuf {
         let (year, month, day) = current_date_parts();
-        let filename = format!("session-{}-{session_id}.jsonl", timestamp_now());
+        let filename =
+            format!("session-{}-{session_id}.jsonl", timestamp_now());
         self.data_home
             .join("sessions")
             .join(year)
@@ -49,7 +51,10 @@ impl FileSessionStore {
     }
 
     /// Resolve the persisted JSONL path for a live or closed session id.
-    fn session_path_for_id(&self, session_id: &SessionId) -> io::Result<Option<PathBuf>> {
+    fn session_path_for_id(
+        &self,
+        session_id: &SessionId,
+    ) -> io::Result<Option<PathBuf>> {
         let manifest = read_latest_manifest(&self.data_home)?;
         Ok(manifest.get(session_id).and_then(|record| {
             if record.status == SessionManifestStatus::Archived {
@@ -61,7 +66,10 @@ impl FileSessionStore {
     }
 
     /// Return the JSONL path for a session or a not-found IO error.
-    fn require_session_path(&self, session_id: &SessionId) -> io::Result<PathBuf> {
+    fn require_session_path(
+        &self,
+        session_id: &SessionId,
+    ) -> io::Result<PathBuf> {
         self.session_path_for_id(session_id)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -146,7 +154,10 @@ impl super::traits::SessionStore for FileSessionStore {
         recorder.flush().await?;
         let manifest = read_latest_manifest(&self.data_home)?;
         if let Some(record) = manifest.get(session_id) {
-            append_manifest_record(&self.data_home, &closed_manifest_record(record))?;
+            append_manifest_record(
+                &self.data_home,
+                &closed_manifest_record(record),
+            )?;
         }
         Ok(())
     }
@@ -159,12 +170,19 @@ impl super::traits::SessionStore for FileSessionStore {
         recorder.flush().await?;
         let manifest = read_latest_manifest(&self.data_home)?;
         if let Some(record) = manifest.get(session_id) {
-            append_manifest_record(&self.data_home, &archived_manifest_record(record))?;
+            append_manifest_record(
+                &self.data_home,
+                &archived_manifest_record(record),
+            )?;
         }
         Ok(())
     }
 
-    fn record_session_title(&self, session_id: &SessionId, title: &str) -> io::Result<()> {
+    fn record_session_title(
+        &self,
+        session_id: &SessionId,
+        title: &str,
+    ) -> io::Result<()> {
         let title = title.trim();
         if title.is_empty() {
             return Ok(());
@@ -176,10 +194,16 @@ impl super::traits::SessionStore for FileSessionStore {
         if record.title.is_some() {
             return Ok(());
         }
-        append_manifest_record(&self.data_home, &titled_manifest_record(record, title))
+        append_manifest_record(
+            &self.data_home,
+            &titled_manifest_record(record, title),
+        )
     }
 
-    fn list_sessions(&self, cwd: Option<&Path>) -> io::Result<Vec<SessionInfo>> {
+    fn list_sessions(
+        &self,
+        cwd: Option<&Path>,
+    ) -> io::Result<Vec<SessionInfo>> {
         let manifest = read_latest_manifest(&self.data_home)?;
         let mut sessions = Vec::new();
         for record in manifest.values() {
@@ -209,7 +233,8 @@ impl super::traits::SessionStore for FileSessionStore {
                     .build(),
             );
         }
-        sessions.sort_by(|left, right| left.session_id.0.cmp(&right.session_id.0));
+        sessions
+            .sort_by(|left, right| left.session_id.0.cmp(&right.session_id.0));
         Ok(sessions)
     }
 }
@@ -336,7 +361,9 @@ mod store_tests {
     #[tokio::test]
     async fn create_load_and_list_session_roundtrips_messages() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let session_id = SessionId::from("session-1");
         let recorder = store
             .create_session(
@@ -374,7 +401,9 @@ mod store_tests {
     #[tokio::test]
     async fn message_usage_is_written_top_level_and_replayed_as_total() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let session_id = SessionId::from("session-usage");
         let recorder = store
             .create_session(
@@ -426,11 +455,13 @@ mod store_tests {
             .session_path_for_id(&session_id)
             .expect("lookup path")
             .expect("session path");
-        let text = std::fs::read_to_string(session_path).expect("read session jsonl");
+        let text =
+            std::fs::read_to_string(session_path).expect("read session jsonl");
         let message_records: Vec<serde_json::Value> = text
             .lines()
             .filter_map(|line| {
-                let value: serde_json::Value = serde_json::from_str(line).expect("json record");
+                let value: serde_json::Value =
+                    serde_json::from_str(line).expect("json record");
                 (value["payload"]["type"] == "message").then_some(value)
             })
             .collect();
@@ -461,7 +492,9 @@ mod store_tests {
     #[tokio::test]
     async fn record_session_title_persists_title_in_manifest_listing() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let session_id = SessionId::from("session-title");
         store
             .create_session(root_params(session_id.clone()))
@@ -482,7 +515,9 @@ mod store_tests {
     #[tokio::test]
     async fn close_session_keeps_session_available_for_resume() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let session_id = SessionId::from("session-closed");
         let recorder = store
             .create_session(
@@ -513,7 +548,9 @@ mod store_tests {
     #[tokio::test]
     async fn agent_graph_store_lists_latest_open_children() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let parent = SessionId::from("parent");
         let child = SessionId::from("child");
         let path = AgentPath("/root/child".to_string());
@@ -545,7 +582,9 @@ mod store_tests {
     #[tokio::test]
     async fn agent_graph_store_closed_child_is_not_returned_as_open() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let parent = SessionId::from("parent");
         let child = SessionId::from("child");
         let path = AgentPath("/root/child".to_string());
@@ -579,7 +618,9 @@ mod store_tests {
     #[tokio::test]
     async fn agent_graph_store_missing_child_status_update_is_noop() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let store = FileSessionStore::new(Some(temp.path().to_str().expect("temp path")));
+        let store = FileSessionStore::new(Some(
+            temp.path().to_str().expect("temp path"),
+        ));
         let parent = SessionId::from("parent");
         let missing = SessionId::from("missing-child");
 

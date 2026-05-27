@@ -106,7 +106,9 @@ mod tests {
     /// Verifies visible agent picker reserves rows under the composer.
     #[test]
     fn frame_rows_reserves_agent_picker_height_when_visible() {
-        let rows = frame_rows_with_agent_picker(Rect::new(0, 0, 80, 20), "hello", 3).expect("rows");
+        let rows =
+            frame_rows_with_agent_picker(Rect::new(0, 0, 80, 20), "hello", 3)
+                .expect("rows");
 
         assert_eq!(rows.agent_picker.height, 3);
         assert!(rows.agent_picker.y > rows.composer.y);

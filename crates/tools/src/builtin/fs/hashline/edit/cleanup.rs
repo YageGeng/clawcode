@@ -16,14 +16,17 @@ impl ReplacementNormalizer {
         }
         let hash_prefixes = lines
             .iter()
-            .filter(|line| !line.is_empty() && Self::hashline_prefix_len(line).is_some())
+            .filter(|line| {
+                !line.is_empty() && Self::hashline_prefix_len(line).is_some()
+            })
             .count();
         let diff_prefixes = lines
             .iter()
             .filter(|line| line.starts_with('+') && !line.starts_with("++"))
             .count();
         let strip_hash = hash_prefixes > 0 && hash_prefixes * 2 >= non_empty;
-        let strip_plus = !strip_hash && diff_prefixes > 0 && diff_prefixes * 2 >= non_empty;
+        let strip_plus =
+            !strip_hash && diff_prefixes > 0 && diff_prefixes * 2 >= non_empty;
         lines
             .into_iter()
             .map(|line| {
@@ -136,7 +139,8 @@ impl ReplacementNormalizer {
         new_lines: &'a [String],
     ) -> Cow<'a, [String]> {
         // Skip for large replacements where the quadratic scan is not worth it.
-        if old_lines.is_empty() || new_lines.len() < 2 || new_lines.len() > 200 {
+        if old_lines.is_empty() || new_lines.len() < 2 || new_lines.len() > 200
+        {
             return Cow::Borrowed(new_lines);
         }
         let mut canonical_old = HashMap::<String, (String, usize)>::new();
@@ -156,7 +160,8 @@ impl ReplacementNormalizer {
                 };
                 let canon = Self::strip_all_whitespace(&span.join(""));
                 if canon.len() >= 6
-                    && let Some((replacement, count)) = canonical_old.get(&canon)
+                    && let Some((replacement, count)) =
+                        canonical_old.get(&canon)
                     && *count == 1
                 {
                     candidates.push((start, len, replacement.clone(), canon));
@@ -195,7 +200,9 @@ impl ReplacementNormalizer {
         let mut current = value.to_string();
         loop {
             let trimmed = current.trim_end();
-            let Some(token) = tokens.iter().find(|token| trimmed.ends_with(**token)) else {
+            let Some(token) =
+                tokens.iter().find(|token| trimmed.ends_with(**token))
+            else {
                 return current;
             };
             current.truncate(trimmed.len() - token.len());
@@ -222,11 +229,15 @@ impl ReplacementNormalizer {
     /// Return the byte length of a `LINE:HASH|` prefix when present.
     fn hashline_prefix_len(line: &str) -> Option<usize> {
         let (line_number, rest) = line.split_once(':')?;
-        if line_number.is_empty() || !line_number.chars().all(|ch| ch.is_ascii_digit()) {
+        if line_number.is_empty()
+            || !line_number.chars().all(|ch| ch.is_ascii_digit())
+        {
             return None;
         }
         let (hash, _) = rest.split_once('|')?;
-        if hash.is_empty() || hash.len() > 16 || !hash.chars().all(|ch| ch.is_ascii_alphanumeric())
+        if hash.is_empty()
+            || hash.len() > 16
+            || !hash.chars().all(|ch| ch.is_ascii_alphanumeric())
         {
             return None;
         }
@@ -270,7 +281,9 @@ impl ReplacementNormalizer {
 
     /// Compare lines after removing all whitespace.
     fn equal_ignoring_whitespace(left: &str, right: &str) -> bool {
-        left == right || Self::strip_all_whitespace(left) == Self::strip_all_whitespace(right)
+        left == right
+            || Self::strip_all_whitespace(left)
+                == Self::strip_all_whitespace(right)
     }
 
     /// Return whether a line has non-whitespace content.

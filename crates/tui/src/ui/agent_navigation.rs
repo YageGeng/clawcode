@@ -101,7 +101,8 @@ impl From<protocol::AgentUiMetadata> for AgentPickerEntry {
             .build();
         // typed-builder optional setters change the builder type, so copy optional metadata after
         // construction to keep conversion straightforward and stable.
-        entry.parent_session_id = metadata.parent_session_id.map(SessionId::from);
+        entry.parent_session_id =
+            metadata.parent_session_id.map(SessionId::from);
         entry.nickname = metadata.nickname;
         entry.role = metadata.role;
         entry
@@ -116,7 +117,8 @@ impl From<protocol::AgentStatus> for AgentPickerStatus {
             protocol::AgentStatus::Running => Self::Running,
             protocol::AgentStatus::Completed { .. } => Self::Completed,
             protocol::AgentStatus::Errored { .. } => Self::Errored,
-            protocol::AgentStatus::Interrupted | protocol::AgentStatus::Shutdown => Self::Closed,
+            protocol::AgentStatus::Interrupted
+            | protocol::AgentStatus::Shutdown => Self::Closed,
             protocol::AgentStatus::NotFound => Self::Unknown,
         }
     }
@@ -169,10 +171,16 @@ impl AgentNavigationState {
     }
 
     /// Apply a protocol metadata patch to the navigation state.
-    pub(crate) fn apply_patch(&mut self, patch: protocol::AgentUiMetadataPatch) {
+    pub(crate) fn apply_patch(
+        &mut self,
+        patch: protocol::AgentUiMetadataPatch,
+    ) {
         match patch.event {
-            protocol::AgentUiEventKind::Snapshot => self.apply_snapshot(patch.agents),
-            protocol::AgentUiEventKind::Upsert | protocol::AgentUiEventKind::Status => {
+            protocol::AgentUiEventKind::Snapshot => {
+                self.apply_snapshot(patch.agents)
+            }
+            protocol::AgentUiEventKind::Upsert
+            | protocol::AgentUiEventKind::Status => {
                 for metadata in patch.agents {
                     self.upsert(metadata.into());
                 }
@@ -264,7 +272,10 @@ mod tests {
     }
 
     /// Build a status-only entry for snapshot and merge-path tests.
-    fn status_only_entry(session_id: SessionId, status: AgentPickerStatus) -> AgentPickerEntry {
+    fn status_only_entry(
+        session_id: SessionId,
+        status: AgentPickerStatus,
+    ) -> AgentPickerEntry {
         AgentPickerEntry::builder()
             .session_id(session_id)
             .status(status)
@@ -322,7 +333,10 @@ mod tests {
         let root = SessionId::new("root-session");
         let child = SessionId::new("child-session");
         let mut state = AgentNavigationState::new(root.clone());
-        state.upsert(status_only_entry(child.clone(), AgentPickerStatus::Closed));
+        state.upsert(status_only_entry(
+            child.clone(),
+            AgentPickerStatus::Closed,
+        ));
         let patch = protocol::AgentUiMetadataPatch::builder()
             .version(1)
             .event(protocol::AgentUiEventKind::Snapshot)

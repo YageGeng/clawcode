@@ -18,7 +18,8 @@ use crate::session::{SessionCreated, SessionId, SessionListPage};
 ///
 /// Returned by [`AgentKernel::prompt`]; the frontend consumes this
 /// to receive real-time updates during a turn.
-pub type EventStream = Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>;
+pub type EventStream =
+    Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>;
 
 /// Frontend-provided options used when creating or loading a session.
 #[derive(Debug, Clone, Default)]
@@ -80,7 +81,11 @@ pub trait AgentKernel: Send + Sync {
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError>;
 
     /// Set the session's approval/sandboxing mode.
-    async fn set_mode(&self, session_id: &SessionId, mode: &str) -> Result<(), KernelError>;
+    async fn set_mode(
+        &self,
+        session_id: &SessionId,
+        mode: &str,
+    ) -> Result<(), KernelError>;
 
     /// Switch the model for a session.
     async fn set_model(
@@ -91,7 +96,10 @@ pub trait AgentKernel: Send + Sync {
     ) -> Result<(), KernelError>;
 
     /// Close a session and release its resources.
-    async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError>;
+    async fn close_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), KernelError>;
 
     /// Return UI-only agent metadata for a root session tree.
     async fn agent_ui_snapshot(

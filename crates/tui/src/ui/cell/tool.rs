@@ -96,7 +96,12 @@ impl ToolCallCell {
     }
 
     /// Appends a structured file diff received from ACP updates.
-    pub fn push_diff(&mut self, path: PathBuf, old_text: Option<String>, new_text: String) {
+    pub fn push_diff(
+        &mut self,
+        path: PathBuf,
+        old_text: Option<String>,
+        new_text: String,
+    ) {
         self.diffs.push(ToolCallDiff {
             path,
             old_text,
@@ -120,7 +125,11 @@ impl ToolCallCell {
     }
 
     /// Returns styled logical lines using the configured render theme.
-    pub fn display_lines_with_theme(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    pub fn display_lines_with_theme(
+        &self,
+        width: u16,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
         <Self as TranscriptCell>::display_lines(self, width, theme)
     }
 
@@ -226,7 +235,10 @@ fn append_tool_output_preview_lines(
     let display_lines = terminal_display_lines(text);
     if display_lines.is_empty() {
         if show_empty_placeholder
-            && matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+            && matches!(
+                status,
+                ToolCallStatus::Completed | ToolCallStatus::Failed
+            )
         {
             lines.push(dim_line("  └ (no output)"));
         }
@@ -258,7 +270,9 @@ fn append_tool_diff_preview_lines(
         .iter()
         .flat_map(ToolCallDiff::raw_lines)
         .collect::<Vec<_>>();
-    for (index, line) in all_lines.iter().take(TOOL_DIFF_PREVIEW_LINES).enumerate() {
+    for (index, line) in
+        all_lines.iter().take(TOOL_DIFF_PREVIEW_LINES).enumerate()
+    {
         let prefix = if index == 0 { "  └ " } else { "    " };
         lines.push(diff_line(prefix, line.to_string(), line, theme));
     }
@@ -276,7 +290,12 @@ fn append_tool_diff_preview_lines(
 }
 
 /// Builds a styled line for one unified diff row.
-fn diff_line(prefix: &'static str, display: String, raw: &str, theme: &Theme) -> Line<'static> {
+fn diff_line(
+    prefix: &'static str,
+    display: String,
+    raw: &str,
+    theme: &Theme,
+) -> Line<'static> {
     let style = if raw.starts_with('+') && !raw.starts_with("+++") {
         Style::default().fg(theme.diff_added())
     } else if raw.starts_with('-') && !raw.starts_with("---") {
@@ -340,10 +359,12 @@ fn shell_summary(args: &serde_json::Value) -> String {
 /// Builds the read_file summary with optional line range.
 fn read_file_summary(args: &serde_json::Value) -> String {
     let path = string_field(args, "path").unwrap_or("<unknown>");
-    let Some(offset) = args.get("offset").and_then(serde_json::Value::as_u64) else {
+    let Some(offset) = args.get("offset").and_then(serde_json::Value::as_u64)
+    else {
         return format!("Read {path}");
     };
-    let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64) else {
+    let Some(limit) = args.get("limit").and_then(serde_json::Value::as_u64)
+    else {
         return format!("Read {path} · lines {offset}..");
     };
     format!("Read {path} · lines {offset}..{}", offset + limit)
@@ -418,7 +439,10 @@ fn unknown_tool_summary(name: &str, arguments: &str) -> String {
 }
 
 /// Extracts one string field from JSON arguments.
-fn string_field<'a>(args: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+fn string_field<'a>(
+    args: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a str> {
     args.get(field).and_then(serde_json::Value::as_str)
 }
 
@@ -450,7 +474,11 @@ fn hunk_header(old_line_count: usize, new_line_count: usize) -> String {
 }
 
 /// Builds a simple line-based unified diff body from final old/new file states.
-fn unified_diff_body(old_text: &str, new_text: &str, is_new_file: bool) -> Vec<String> {
+fn unified_diff_body(
+    old_text: &str,
+    new_text: &str,
+    is_new_file: bool,
+) -> Vec<String> {
     if is_new_file {
         return split_diff_lines(new_text)
             .into_iter()
@@ -502,7 +530,10 @@ fn collect_diff_lines(
     let mut i = 0usize;
     let mut j = 0usize;
     while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+        if i < old_lines.len()
+            && j < new_lines.len()
+            && old_lines[i] == new_lines[j]
+        {
             output.push(format!(" {}", old_lines[i]));
             i += 1;
             j += 1;
@@ -596,16 +627,21 @@ mod tests {
 
         let removed_spans = &lines[removed].spans;
         let added_spans = &lines[added].spans;
-        let removed_prefix_style = removed_spans.first().expect("removed prefix").style;
-        let removed_diff_style = removed_spans.get(1).expect("removed diff").style;
-        let added_prefix_style = added_spans.first().expect("added prefix").style;
+        let removed_prefix_style =
+            removed_spans.first().expect("removed prefix").style;
+        let removed_diff_style =
+            removed_spans.get(1).expect("removed diff").style;
+        let added_prefix_style =
+            added_spans.first().expect("added prefix").style;
         let added_diff_style = added_spans.get(1).expect("added diff").style;
         let header_line = lines
             .iter()
             .find(|line| line.to_string().contains("--- src/main.rs"))
             .expect("header line");
-        let header_prefix_style = header_line.spans.first().expect("header prefix").style;
-        let header_diff_style = header_line.spans.get(1).expect("header diff").style;
+        let header_prefix_style =
+            header_line.spans.first().expect("header prefix").style;
+        let header_diff_style =
+            header_line.spans.get(1).expect("header diff").style;
         let header_text = lines
             .iter()
             .find(|line| line.to_string().contains("--- src/main.rs"))

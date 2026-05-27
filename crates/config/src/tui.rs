@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Color theme selected for the local terminal UI.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TuiTheme {
     /// Terminal-adaptive dark theme.

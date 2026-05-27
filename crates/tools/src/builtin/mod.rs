@@ -7,7 +7,10 @@ pub mod skill;
 
 use std::sync::Arc;
 
-use crate::{FsBackend, LocalFsBackend, LocalTerminalBackend, TerminalBackend, ToolRegistry};
+use crate::{
+    FsBackend, LocalFsBackend, LocalTerminalBackend, TerminalBackend,
+    ToolRegistry,
+};
 
 use self::fs::FsToolSet;
 
@@ -28,7 +31,8 @@ impl ToolRegistry {
         terminal_backend: Arc<dyn TerminalBackend>,
         fs_tool_set: FsToolSet,
     ) {
-        let shell_runtime = Arc::new(shell::ShellRuntime::new(terminal_backend));
+        let shell_runtime =
+            Arc::new(shell::ShellRuntime::new(terminal_backend));
         self.register(Arc::new(shell::ShellCommand::with_runtime(Arc::clone(
             &shell_runtime,
         ))));
@@ -36,7 +40,11 @@ impl ToolRegistry {
             &shell_runtime,
         ))));
         self.register(Arc::new(shell::WriteStdin::new(shell_runtime)));
-        self.register_fs_tools_with_backend_and_set(false, fs_backend, fs_tool_set);
+        self.register_fs_tools_with_backend_and_set(
+            false,
+            fs_backend,
+            fs_tool_set,
+        );
     }
 
     /// Register the skill tool, backed by the given registry.
@@ -45,13 +53,28 @@ impl ToolRegistry {
     }
 
     /// Register agent management tools.
-    pub fn register_agent_tools(&self, agent_ctrl: Arc<dyn agents::AgentControlRef>) {
-        self.register(Arc::new(agents::SpawnAgent::new(Arc::clone(&agent_ctrl))));
-        self.register(Arc::new(agents::SendMessage::new(Arc::clone(&agent_ctrl))));
-        self.register(Arc::new(agents::FollowupTask::new(Arc::clone(&agent_ctrl))));
-        self.register(Arc::new(agents::WaitAgent::new(Arc::clone(&agent_ctrl))));
-        self.register(Arc::new(agents::ListAgents::new(Arc::clone(&agent_ctrl))));
-        self.register(Arc::new(agents::CloseAgent::new(Arc::clone(&agent_ctrl))));
+    pub fn register_agent_tools(
+        &self,
+        agent_ctrl: Arc<dyn agents::AgentControlRef>,
+    ) {
+        self.register(Arc::new(agents::SpawnAgent::new(Arc::clone(
+            &agent_ctrl,
+        ))));
+        self.register(Arc::new(agents::SendMessage::new(Arc::clone(
+            &agent_ctrl,
+        ))));
+        self.register(Arc::new(agents::FollowupTask::new(Arc::clone(
+            &agent_ctrl,
+        ))));
+        self.register(Arc::new(agents::WaitAgent::new(Arc::clone(
+            &agent_ctrl,
+        ))));
+        self.register(Arc::new(agents::ListAgents::new(Arc::clone(
+            &agent_ctrl,
+        ))));
+        self.register(Arc::new(agents::CloseAgent::new(Arc::clone(
+            &agent_ctrl,
+        ))));
     }
 }
 

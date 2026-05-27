@@ -1,6 +1,8 @@
 //! Terminal and application event types.
 
-use crossterm::event::{Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseEventKind};
+use crossterm::event::{
+    Event as CrosstermEvent, KeyEvent, KeyEventKind, MouseEventKind,
+};
 
 /// A normalized event type used by the local TUI layer.
 #[derive(Debug, PartialEq, Eq)]
@@ -23,17 +25,23 @@ pub enum TuiEvent {
 pub fn map_crossterm_event(event: CrosstermEvent) -> Option<TuiEvent> {
     match event {
         // Ignore key repeat and release events to keep one-shot composer and approval handling.
-        CrosstermEvent::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+        CrosstermEvent::Key(key_event)
+            if key_event.kind == KeyEventKind::Press =>
+        {
             Some(TuiEvent::Key(key_event))
         }
-        CrosstermEvent::Paste(text) => Some(TuiEvent::Paste(text.replace('\r', "\n"))),
+        CrosstermEvent::Paste(text) => {
+            Some(TuiEvent::Paste(text.replace('\r', "\n")))
+        }
         CrosstermEvent::Mouse(mouse_event) => match mouse_event.kind {
             MouseEventKind::ScrollUp => Some(TuiEvent::ScrollUp),
             MouseEventKind::ScrollDown => Some(TuiEvent::ScrollDown),
             _ => None,
         },
         CrosstermEvent::Resize(_, _) => Some(TuiEvent::Resize),
-        CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => Some(TuiEvent::Resize),
+        CrosstermEvent::FocusGained | CrosstermEvent::FocusLost => {
+            Some(TuiEvent::Resize)
+        }
         _ => None,
     }
 }
@@ -42,8 +50,8 @@ pub fn map_crossterm_event(event: CrosstermEvent) -> Option<TuiEvent> {
 mod tests {
     use super::*;
     use crossterm::event::{
-        Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
-        MouseEvent, MouseEventKind,
+        Event as CrosstermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
     };
 
     /// Verifies key events are mapped to [`TuiEvent::Key`].
@@ -57,16 +65,18 @@ mod tests {
     /// Verifies non-press key events are ignored by the event mapper.
     #[test]
     fn maps_non_press_key_events_to_none() {
-        let release = map_crossterm_event(CrosstermEvent::Key(KeyEvent::new_with_kind(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-            KeyEventKind::Release,
-        )));
-        let repeat = map_crossterm_event(CrosstermEvent::Key(KeyEvent::new_with_kind(
-            KeyCode::Char('a'),
-            KeyModifiers::NONE,
-            KeyEventKind::Repeat,
-        )));
+        let release =
+            map_crossterm_event(CrosstermEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )));
+        let repeat =
+            map_crossterm_event(CrosstermEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )));
 
         assert_eq!(release, None);
         assert_eq!(repeat, None);
@@ -102,7 +112,10 @@ mod tests {
         });
 
         assert_eq!(map_crossterm_event(scroll_up), Some(TuiEvent::ScrollUp));
-        assert_eq!(map_crossterm_event(scroll_down), Some(TuiEvent::ScrollDown));
+        assert_eq!(
+            map_crossterm_event(scroll_down),
+            Some(TuiEvent::ScrollDown)
+        );
     }
 
     /// Verifies resize events are mapped to [`TuiEvent::Resize`].
@@ -125,7 +138,9 @@ mod tests {
     /// Verifies paste events are converted and normalize CR to LF.
     #[test]
     fn paste_event_replaces_carriage_returns() {
-        let event = map_crossterm_event(CrosstermEvent::Paste("line1\rline2\r".to_string()));
+        let event = map_crossterm_event(CrosstermEvent::Paste(
+            "line1\rline2\r".to_string(),
+        ));
         assert_eq!(event, Some(TuiEvent::Paste("line1\nline2\n".to_string())));
     }
 }

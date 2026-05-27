@@ -96,7 +96,10 @@ impl TranscriptRenderCache {
     }
 
     /// Retains cache entries that still exist in transcript state.
-    pub(in crate::ui) fn retain_entries(&mut self, ids: impl Iterator<Item = TranscriptEntryId>) {
+    pub(in crate::ui) fn retain_entries(
+        &mut self,
+        ids: impl Iterator<Item = TranscriptEntryId>,
+    ) {
         let live = ids.collect::<HashSet<_>>();
         self.entries.retain(|id, _| live.contains(id));
     }
@@ -114,7 +117,9 @@ mod tests {
 
     use crate::ui::cell::{TextCell, TextRole};
     use crate::ui::theme::Theme;
-    use crate::ui::transcript::entry::{TranscriptEntry, TranscriptEntryId, TranscriptEntryState};
+    use crate::ui::transcript::entry::{
+        TranscriptEntry, TranscriptEntryId, TranscriptEntryState,
+    };
 
     use super::*;
 
@@ -134,16 +139,28 @@ mod tests {
             Arc::new(TextCell::new(TextRole::Assistant, "hel")),
         );
 
-        let _ = cache.entry_lines(80, &theme, &committed, TranscriptRenderMode::Rich);
-        let _ = cache.entry_lines(80, &theme, &active, TranscriptRenderMode::Rich);
+        let _ = cache.entry_lines(
+            80,
+            &theme,
+            &committed,
+            TranscriptRenderMode::Rich,
+        );
+        let _ =
+            cache.entry_lines(80, &theme, &active, TranscriptRenderMode::Rich);
         assert_eq!(cache.rebuild_count(), 2);
 
         let text = active.text_cell().expect("text cell");
         let mut updated = text.clone();
         updated.push_str("lo");
         active.replace_cell(Arc::new(updated));
-        let _ = cache.entry_lines(80, &theme, &committed, TranscriptRenderMode::Rich);
-        let _ = cache.entry_lines(80, &theme, &active, TranscriptRenderMode::Rich);
+        let _ = cache.entry_lines(
+            80,
+            &theme,
+            &committed,
+            TranscriptRenderMode::Rich,
+        );
+        let _ =
+            cache.entry_lines(80, &theme, &active, TranscriptRenderMode::Rich);
 
         assert_eq!(cache.rebuild_count(), 3);
     }
@@ -159,10 +176,12 @@ mod tests {
             Arc::new(TextCell::new(TextRole::User, "copy me")),
         );
 
-        let rich = cache.entry_lines(80, &theme, &entry, TranscriptRenderMode::Rich);
+        let rich =
+            cache.entry_lines(80, &theme, &entry, TranscriptRenderMode::Rich);
         assert_eq!(line_text(rich), vec!["> copy me".to_string()]);
 
-        let raw = cache.entry_lines(80, &theme, &entry, TranscriptRenderMode::Raw);
+        let raw =
+            cache.entry_lines(80, &theme, &entry, TranscriptRenderMode::Raw);
         assert_eq!(line_text(raw), vec!["copy me".to_string()]);
         assert_eq!(cache.rebuild_count(), 2);
     }

@@ -72,8 +72,12 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
             .map(ParsedEdit::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
-        AnchorResolver::validate_and_relocate_refs(&mut parsed, self.file_lines)?;
-        let explicitly_touched_lines = Self::collect_explicitly_touched_lines(&parsed);
+        AnchorResolver::validate_and_relocate_refs(
+            &mut parsed,
+            self.file_lines,
+        )?;
+        let explicitly_touched_lines =
+            Self::collect_explicitly_touched_lines(&parsed);
         Self::deduplicate_edits(&mut parsed);
 
         let mut first_changed_line = None;
@@ -87,7 +91,9 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
                 (sort, index, parsed)
             })
             .collect::<Vec<_>>();
-        annotated.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        annotated.sort_by(|left, right| {
+            right.0.cmp(&left.0).then(left.1.cmp(&right.1))
+        });
 
         for (_, edit_index, parsed) in annotated {
             match parsed.spec {
@@ -99,7 +105,10 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
                         &explicitly_touched_lines,
                         &mut noop_edits,
                     )? {
-                        Self::track_first_changed(&mut first_changed_line, plan.changed_line());
+                        Self::track_first_changed(
+                            &mut first_changed_line,
+                            plan.changed_line(),
+                        );
                         planned_replacements.push(plan);
                     }
                 }
@@ -111,7 +120,10 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
                         &parsed.dst_lines,
                         &mut noop_edits,
                     )? {
-                        Self::track_first_changed(&mut first_changed_line, plan.changed_line());
+                        Self::track_first_changed(
+                            &mut first_changed_line,
+                            plan.changed_line(),
+                        );
                         planned_replacements.push(plan);
                     }
                 }
@@ -122,7 +134,10 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
                         &parsed.dst_lines,
                         &mut noop_edits,
                     )? {
-                        Self::track_first_changed(&mut first_changed_line, plan.changed_line());
+                        Self::track_first_changed(
+                            &mut first_changed_line,
+                            plan.changed_line(),
+                        );
                         planned_replacements.push(plan);
                     }
                 }
@@ -155,12 +170,17 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
         explicitly_touched_lines: &HashSet<usize>,
         noop_edits: &mut Vec<NoopEdit>,
     ) -> Result<Option<PlannedReplacement>, HashlineEditError> {
-        if let Some(merged) =
-            self.maybe_expand_single_line_merge(line, dst_lines, explicitly_touched_lines)
-        {
+        if let Some(merged) = self.maybe_expand_single_line_merge(
+            line,
+            dst_lines,
+            explicitly_touched_lines,
+        ) {
             let orig_lines = self
                 .original_file_lines
-                .get(merged.start_line - 1..merged.start_line - 1 + merged.delete_count)
+                .get(
+                    merged.start_line - 1
+                        ..merged.start_line - 1 + merged.delete_count,
+                )
                 .ok_or_else(|| {
                     HashlineEditError::Invalid(format!(
                         "Line range {}-{} does not exist",
@@ -171,12 +191,15 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
                 .iter()
                 .map(|line| (*line).to_string())
                 .collect::<Vec<_>>();
-            let new_lines = ReplacementNormalizer::restore_indent_for_paired_replacement(
-                &[orig_lines.first().cloned().ok_or_else(|| {
-                    HashlineEditError::Invalid("Merged edit had no original lines".to_string())
-                })?],
-                &merged.new_lines,
-            );
+            let new_lines =
+                ReplacementNormalizer::restore_indent_for_paired_replacement(
+                    &[orig_lines.first().cloned().ok_or_else(|| {
+                        HashlineEditError::Invalid(
+                            "Merged edit had no original lines".to_string(),
+                        )
+                    })?],
+                    &merged.new_lines,
+                );
             if orig_lines.as_slice() == new_lines.as_ref() {
                 noop_edits.push(target.noop(orig_lines.join("\n")));
                 return Ok(None);
@@ -218,12 +241,15 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
             end_line,
             dst_lines,
         );
-        let restored =
-            ReplacementNormalizer::restore_old_wrapped_lines(&orig_lines, stripped.as_ref());
-        let new_lines = ReplacementNormalizer::restore_indent_for_paired_replacement(
+        let restored = ReplacementNormalizer::restore_old_wrapped_lines(
             &orig_lines,
-            restored.as_ref(),
+            stripped.as_ref(),
         );
+        let new_lines =
+            ReplacementNormalizer::restore_indent_for_paired_replacement(
+                &orig_lines,
+                restored.as_ref(),
+            );
         if orig_lines.as_slice() == new_lines.as_ref() {
             noop_edits.push(target.noop(orig_lines.join("\n")));
             return Ok(None);
@@ -247,10 +273,14 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
             .original_file_lines
             .get(after_line - 1)
             .ok_or_else(|| {
-                HashlineEditError::Invalid(format!("Line {after_line} does not exist"))
+                HashlineEditError::Invalid(format!(
+                    "Line {after_line} does not exist"
+                ))
             })?;
-        let inserted =
-            ReplacementNormalizer::strip_insert_anchor_echo_after(anchor_line, dst_lines);
+        let inserted = ReplacementNormalizer::strip_insert_anchor_echo_after(
+            anchor_line,
+            dst_lines,
+        );
         if inserted.is_empty() {
             noop_edits.push(target.noop((*anchor_line).to_string()));
             return Ok(None);
@@ -265,7 +295,9 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
     /// Remove exact duplicate edit operations before applying them.
     fn deduplicate_edits(parsed: &mut Vec<ParsedEdit>) {
         let mut seen = HashSet::new();
-        parsed.retain(|parsed_edit| seen.insert(Self::edit_dedup_key(parsed_edit)));
+        parsed.retain(|parsed_edit| {
+            seen.insert(Self::edit_dedup_key(parsed_edit))
+        });
     }
 
     /// Build a stable deduplication key for one parsed edit.
@@ -290,7 +322,9 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
     }
 
     /// Collect lines explicitly targeted after relocation.
-    fn collect_explicitly_touched_lines(parsed: &[ParsedEdit]) -> HashSet<usize> {
+    fn collect_explicitly_touched_lines(
+        parsed: &[ParsedEdit],
+    ) -> HashSet<usize> {
         let mut touched = HashSet::new();
         for parsed_edit in parsed {
             match &parsed_edit.spec {
@@ -324,22 +358,29 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
         // when the previous line is the continuation and the target line appears
         // after it in the canonical replacement text. If neither direction has
         // ordered canonical matches with a small size delta, the edit stays single-line.
-        if dst_lines.len() != 1 || line < 1 || line > self.original_file_lines.len() {
+        if dst_lines.len() != 1
+            || line < 1
+            || line > self.original_file_lines.len()
+        {
             return None;
         }
         let new_line = dst_lines.first()?;
         let new_canon = ReplacementNormalizer::strip_all_whitespace(new_line);
-        let new_canon_for_merge_ops = ReplacementNormalizer::strip_merge_operator_chars(&new_canon);
+        let new_canon_for_merge_ops =
+            ReplacementNormalizer::strip_merge_operator_chars(&new_canon);
         if new_canon.is_empty() {
             return None;
         }
         let orig = self.original_file_lines.get(line - 1)?;
         let orig_canon = ReplacementNormalizer::strip_all_whitespace(orig);
         let orig_canon_for_match =
-            ReplacementNormalizer::strip_trailing_continuation_tokens(&orig_canon);
+            ReplacementNormalizer::strip_trailing_continuation_tokens(
+                &orig_canon,
+            );
         let orig_canon_for_merge_ops =
             ReplacementNormalizer::strip_merge_operator_chars(&orig_canon);
-        let orig_looks_like_continuation = orig_canon_for_match.len() < orig_canon.len();
+        let orig_looks_like_continuation =
+            orig_canon_for_match.len() < orig_canon.len();
         if orig_canon.is_empty() {
             return None;
         }
@@ -354,7 +395,9 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
             let orig_pos = new_canon.find(&orig_canon_for_match);
             let next_pos = new_canon.find(&next_canon);
             if orig_pos.zip(next_pos).is_some_and(|(orig_pos, next_pos)| {
-                orig_pos < next_pos && new_canon.len() <= orig_canon.len() + next_canon.len() + 32
+                orig_pos < next_pos
+                    && new_canon.len()
+                        <= orig_canon.len() + next_canon.len() + 32
             }) {
                 return Some(ExpandedMerge {
                     start_line: line,
@@ -365,27 +408,35 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
         }
 
         let previous_line = line.checked_sub(1)?;
-        if previous_line >= 1 && !explicitly_touched_lines.contains(&previous_line) {
+        if previous_line >= 1
+            && !explicitly_touched_lines.contains(&previous_line)
+        {
             let previous = self.original_file_lines.get(previous_line - 1)?;
-            let previous_canon = ReplacementNormalizer::strip_all_whitespace(previous);
+            let previous_canon =
+                ReplacementNormalizer::strip_all_whitespace(previous);
             let previous_canon_for_match =
-                ReplacementNormalizer::strip_trailing_continuation_tokens(&previous_canon);
+                ReplacementNormalizer::strip_trailing_continuation_tokens(
+                    &previous_canon,
+                );
             let previous_looks_like_continuation =
                 previous_canon_for_match.len() < previous_canon.len();
             if !previous_looks_like_continuation {
                 return None;
             }
             let previous_pos = new_canon_for_merge_ops.find(
-                &ReplacementNormalizer::strip_merge_operator_chars(&previous_canon_for_match),
+                &ReplacementNormalizer::strip_merge_operator_chars(
+                    &previous_canon_for_match,
+                ),
             );
-            let orig_pos = new_canon_for_merge_ops.find(&orig_canon_for_merge_ops);
-            if previous_pos
-                .zip(orig_pos)
-                .is_some_and(|(previous_pos, orig_pos)| {
+            let orig_pos =
+                new_canon_for_merge_ops.find(&orig_canon_for_merge_ops);
+            if previous_pos.zip(orig_pos).is_some_and(
+                |(previous_pos, orig_pos)| {
                     previous_pos < orig_pos
-                        && new_canon.len() <= previous_canon.len() + orig_canon.len() + 32
-                })
-            {
+                        && new_canon.len()
+                            <= previous_canon.len() + orig_canon.len() + 32
+                },
+            ) {
                 return Some(ExpandedMerge {
                     start_line: previous_line,
                     delete_count: 2,
@@ -397,7 +448,10 @@ impl<'a, 'b> EditPlanner<'a, 'b> {
     }
 
     /// Track the earliest changed line across bottom-up edits.
-    fn track_first_changed(first_changed_line: &mut Option<usize>, line: usize) {
+    fn track_first_changed(
+        first_changed_line: &mut Option<usize>,
+        line: usize,
+    ) {
         if first_changed_line.is_none_or(|current| line < current) {
             *first_changed_line = Some(line);
         }
@@ -492,7 +546,9 @@ impl ReplacementPlanSet {
         let mut cursor = 0;
         let mut previous_start = None;
         for plan in sorted {
-            if previous_start == Some(plan.start_index) || plan.start_index < cursor {
+            if previous_start == Some(plan.start_index)
+                || plan.start_index < cursor
+            {
                 return false;
             }
             previous_start = Some(plan.start_index);
@@ -514,7 +570,9 @@ impl ReplacementPlanSet {
             .iter()
             .map(|plan| plan.delete_count)
             .sum::<usize>();
-        let mut out = Vec::with_capacity(file_lines.len().saturating_sub(deleted) + inserted);
+        let mut out = Vec::with_capacity(
+            file_lines.len().saturating_sub(deleted) + inserted,
+        );
         let old_lines = std::mem::take(file_lines);
         let mut old_iter = old_lines.into_iter().enumerate().peekable();
 

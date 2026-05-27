@@ -22,7 +22,9 @@ use tokio_tungstenite::{
 use tracing::Level;
 use url::Url;
 
-use super::{CompletionResponse, ResponseError, ResponseStatus, ResponsesCompletionModel};
+use super::{
+    CompletionResponse, ResponseError, ResponseStatus, ResponsesCompletionModel,
+};
 
 type OpenAIWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -246,7 +248,9 @@ where
         + 'static,
 {
     /// Opens the websocket session using the configured builder options.
-    pub async fn connect(self) -> Result<ResponsesWebSocketSession<H>, CompletionError> {
+    pub async fn connect(
+        self,
+    ) -> Result<ResponsesWebSocketSession<H>, CompletionError> {
         ResponsesWebSocketSession::connect_with_timeouts(
             self.model,
             self.connect_timeout,
@@ -339,7 +343,8 @@ where
 
         if self.in_flight {
             return Err(CompletionError::ProviderError(
-                "An OpenAI websocket response is already in flight on this session".to_string(),
+                "An OpenAI websocket response is already in flight on this session"
+                    .to_string(),
             ));
         }
 
@@ -368,12 +373,15 @@ where
     }
 
     /// Reads the next server event for the current in-flight turn.
-    pub async fn next_event(&mut self) -> Result<ResponsesWebSocketEvent, CompletionError> {
+    pub async fn next_event(
+        &mut self,
+    ) -> Result<ResponsesWebSocketEvent, CompletionError> {
         self.ensure_open()?;
 
         if !self.in_flight {
             return Err(CompletionError::ProviderError(
-                "No OpenAI websocket response is currently in flight on this session".to_string(),
+                "No OpenAI websocket response is currently in flight on this session"
+                    .to_string(),
             ));
         }
 
@@ -386,14 +394,17 @@ where
             let Some(message) = message else {
                 self.mark_closed();
                 return Err(CompletionError::ProviderError(
-                    "The OpenAI websocket connection closed before the turn finished".to_string(),
+                    "The OpenAI websocket connection closed before the turn finished"
+                        .to_string(),
                 ));
             };
 
             let message = match message {
                 Ok(message) => message,
                 Err(error) => {
-                    return Err(self.fail_session(websocket_provider_error(error)));
+                    return Err(
+                        self.fail_session(websocket_provider_error(error))
+                    );
                 }
             };
             let payload = match websocket_message_to_text(message) {
@@ -409,7 +420,9 @@ where
             if let ResponsesWebSocketEvent::Done(done) = &event {
                 // OpenAI may emit `response.done` after the turn has already ended at
                 // `response.completed`. Ignore that trailing event on the next turn.
-                if self.pending_done_response_id.as_deref() == done.response_id() {
+                if self.pending_done_response_id.as_deref()
+                    == done.response_id()
+                {
                     self.pending_done_response_id = None;
                     continue;
                 }
@@ -437,7 +450,10 @@ where
     pub async fn completion(
         &mut self,
         completion_request: crate::completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+    ) -> Result<
+        completion::CompletionResponse<CompletionResponse>,
+        CompletionError,
+    > {
         self.send(completion_request).await?;
         let response = self.wait_for_completed_response().await?;
         response.try_into()
@@ -465,7 +481,8 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<super::CompletionRequest, CompletionError> {
-        let mut request = self.model.create_completion_request(completion_request)?;
+        let mut request =
+            self.model.create_completion_request(completion_request)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
         // are ignored by the provider and only add noise to the payload.
@@ -473,13 +490,16 @@ where
         request.additional_parameters.background = None;
 
         if request.additional_parameters.previous_response_id.is_none() {
-            request.additional_parameters.previous_response_id = self.previous_response_id.clone();
+            request.additional_parameters.previous_response_id =
+                self.previous_response_id.clone();
         }
 
         Ok(request)
     }
 
-    async fn wait_for_completed_response(&mut self) -> Result<CompletionResponse, CompletionError> {
+    async fn wait_for_completed_response(
+        &mut self,
+    ) -> Result<CompletionResponse, CompletionError> {
         loop {
             match self.next_event().await? {
                 ResponsesWebSocketEvent::Response(chunk) => {
@@ -497,7 +517,8 @@ where
                         return terminal_response_result(response);
                     }
 
-                    let message = if let Some(response_id) = done.response_id() {
+                    let message = if let Some(response_id) = done.response_id()
+                    {
                         format!(
                             "OpenAI websocket turn ended with response.done before a terminal response body was available (response_id={response_id})"
                         )
@@ -509,7 +530,9 @@ where
                     return Err(CompletionError::ProviderError(message));
                 }
                 ResponsesWebSocketEvent::Error(error) => {
-                    return Err(CompletionError::ProviderError(error.to_string()));
+                    return Err(CompletionError::ProviderError(
+                        error.to_string(),
+                    ));
                 }
                 ResponsesWebSocketEvent::Item(_) => {}
             }
@@ -525,18 +548,22 @@ where
                     self.pending_done_response_id = Some(response_id);
                     self.in_flight = false;
                 }
-                ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete => {
-                    self.pending_done_response_id = Some(chunk.response.id.clone());
+                ResponseChunkKind::ResponseFailed
+                | ResponseChunkKind::ResponseIncomplete => {
+                    self.pending_done_response_id =
+                        Some(chunk.response.id.clone());
                     self.previous_response_id = None;
                     self.in_flight = false;
                 }
-                ResponseChunkKind::ResponseCreated | ResponseChunkKind::ResponseInProgress => {}
+                ResponseChunkKind::ResponseCreated
+                | ResponseChunkKind::ResponseInProgress => {}
             },
             ResponsesWebSocketEvent::Done(done) => {
                 match done.status() {
                     Some(ResponseStatus::Completed) => {
                         if let Some(response_id) = done.response_id() {
-                            self.previous_response_id = Some(response_id.to_string());
+                            self.previous_response_id =
+                                Some(response_id.to_string());
                         }
                     }
                     Some(ResponseStatus::Failed)
@@ -544,7 +571,10 @@ where
                     | Some(ResponseStatus::Cancelled) => {
                         self.previous_response_id = None;
                     }
-                    Some(ResponseStatus::InProgress | ResponseStatus::Queued) | None => {}
+                    Some(
+                        ResponseStatus::InProgress | ResponseStatus::Queued,
+                    )
+                    | None => {}
                 }
                 self.pending_done_response_id = None;
                 self.in_flight = false;
@@ -592,11 +622,17 @@ where
 
     async fn read_next_message(
         &mut self,
-    ) -> Result<Option<Result<Message, tungstenite::Error>>, CompletionError> {
+    ) -> Result<Option<Result<Message, tungstenite::Error>>, CompletionError>
+    {
         if let Some(timeout_duration) = self.event_timeout {
-            match tokio::time::timeout(timeout_duration, self.socket.next()).await {
+            match tokio::time::timeout(timeout_duration, self.socket.next())
+                .await
+            {
                 Ok(message) => Ok(message),
-                Err(_) => Err(self.fail_session(event_timeout_error(timeout_duration))),
+                Err(_) => {
+                    Err(self
+                        .fail_session(event_timeout_error(timeout_duration)))
+                }
             }
         } else {
             Ok(self.socket.next().await)
@@ -621,10 +657,9 @@ fn terminal_response_result(
 ) -> Result<CompletionResponse, CompletionError> {
     match response.status {
         ResponseStatus::Completed => Ok(response),
-        ResponseStatus::Failed => Err(CompletionError::ProviderError(response_error_message(
-            response.error.as_ref(),
-            "failed response",
-        ))),
+        ResponseStatus::Failed => Err(CompletionError::ProviderError(
+            response_error_message(response.error.as_ref(), "failed response"),
+        )),
         ResponseStatus::Incomplete => {
             let reason = response
                 .incomplete_details
@@ -642,7 +677,10 @@ fn terminal_response_result(
     }
 }
 
-fn response_error_message(error: Option<&ResponseError>, fallback: &str) -> String {
+fn response_error_message(
+    error: Option<&ResponseError>,
+    fallback: &str,
+) -> String {
     if let Some(error) = error {
         if error.code.is_empty() {
             error.message.clone()
@@ -679,7 +717,9 @@ fn is_known_streaming_event(kind: &str) -> bool {
     )
 }
 
-fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
+fn parse_server_event(
+    payload: &str,
+) -> Result<Option<ResponsesWebSocketEvent>, CompletionError> {
     #[derive(Deserialize)]
     struct EventType {
         #[serde(rename = "type")]
@@ -694,12 +734,16 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
         "response.done" => serde_json::from_str(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .map_err(CompletionError::from),
-        kind if is_known_streaming_event(kind) => match serde_json::from_str(payload)? {
-            StreamingCompletionChunk::Response(response) => {
-                Ok(Some(ResponsesWebSocketEvent::Response(response)))
+        kind if is_known_streaming_event(kind) => {
+            match serde_json::from_str(payload)? {
+                StreamingCompletionChunk::Response(response) => {
+                    Ok(Some(ResponsesWebSocketEvent::Response(response)))
+                }
+                StreamingCompletionChunk::Delta(item) => {
+                    Ok(Some(ResponsesWebSocketEvent::Item(item)))
+                }
             }
-            StreamingCompletionChunk::Delta(item) => Ok(Some(ResponsesWebSocketEvent::Item(item))),
-        },
+        }
         _ => {
             tracing::debug!(
                 target: "clawcode::completions",
@@ -711,7 +755,9 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
     }
 }
 
-fn websocket_message_to_text(message: Message) -> Result<Option<String>, CompletionError> {
+fn websocket_message_to_text(
+    message: Message,
+) -> Result<Option<String>, CompletionError> {
     match message {
         Message::Text(text) => Ok(Some(text.to_string())),
         Message::Binary(bytes) => String::from_utf8(bytes.to_vec())
@@ -764,7 +810,9 @@ fn websocket_request(
     headers: &http::HeaderMap,
 ) -> Result<http::Request<()>, CompletionError> {
     let mut request = url.into_client_request().map_err(|error| {
-        CompletionError::ProviderError(format!("Failed to build OpenAI websocket request: {error}"))
+        CompletionError::ProviderError(format!(
+            "Failed to build OpenAI websocket request: {error}"
+        ))
     })?;
 
     for (name, value) in headers {
@@ -779,7 +827,9 @@ async fn connect_websocket(
     connect_timeout: Option<Duration>,
 ) -> Result<OpenAIWebSocket, CompletionError> {
     if let Some(timeout_duration) = connect_timeout {
-        match tokio::time::timeout(timeout_duration, connect_async(request)).await {
+        match tokio::time::timeout(timeout_duration, connect_async(request))
+            .await
+        {
             Ok(result) => result
                 .map(|(socket, _)| socket)
                 .map_err(websocket_provider_error),
@@ -812,8 +862,9 @@ fn websocket_provider_error(error: tungstenite::Error) -> CompletionError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResponsesWebSocketCreateOptions, ResponsesWebSocketDoneEvent, ResponsesWebSocketEvent,
-        parse_server_event, terminal_response_result, websocket_url,
+        ResponsesWebSocketCreateOptions, ResponsesWebSocketDoneEvent,
+        ResponsesWebSocketEvent, parse_server_event, terminal_response_result,
+        websocket_url,
     };
     use crate::client::CompletionClient;
     use crate::completion::CompletionModel;
@@ -857,14 +908,16 @@ mod tests {
     #[test]
     fn warmup_options_serialize_generate_false() {
         let options = ResponsesWebSocketCreateOptions::warmup();
-        let json = serde_json::to_value(options).expect("options should serialize");
+        let json =
+            serde_json::to_value(options).expect("options should serialize");
 
         assert_eq!(json, json!({ "generate": false }));
     }
 
     #[test]
     fn websocket_url_converts_https_to_wss() {
-        let url = websocket_url("https://api.openai.com/v1").expect("url should convert");
+        let url = websocket_url("https://api.openai.com/v1")
+            .expect("url should convert");
         assert_eq!(url, "wss://api.openai.com/v1/responses");
     }
 
@@ -987,12 +1040,15 @@ mod tests {
 
     #[test]
     fn terminal_response_requires_completed_status() {
-        let completed = terminal_response_result(sample_response(ResponseStatus::Completed))
-            .expect("completed response should succeed");
+        let completed = terminal_response_result(sample_response(
+            ResponseStatus::Completed,
+        ))
+        .expect("completed response should succeed");
         assert_eq!(completed.id, "resp_123");
 
-        let failed = terminal_response_result(sample_response(ResponseStatus::Failed))
-            .expect_err("failed response should error");
+        let failed =
+            terminal_response_result(sample_response(ResponseStatus::Failed))
+                .expect_err("failed response should error");
         assert!(failed.to_string().contains("failed response"));
     }
 
@@ -1001,10 +1057,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1089,10 +1147,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1144,9 +1204,9 @@ mod tests {
             .await
             .expect_err("next_event should time out");
         assert!(
-            error
-                .to_string()
-                .contains("Timed out waiting for the next OpenAI websocket event"),
+            error.to_string().contains(
+                "Timed out waiting for the next OpenAI websocket event"
+            ),
             "expected timeout error, got {error}"
         );
 
@@ -1172,21 +1232,25 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
 
-            for (index, response_id) in ["resp_1", "resp_2"].iter().enumerate() {
+            for (index, response_id) in ["resp_1", "resp_2"].iter().enumerate()
+            {
                 let request = socket
                     .next()
                     .await
                     .expect("request should exist")
                     .expect("request should be valid");
-                let payload = request.into_text().expect("request should be text");
+                let payload =
+                    request.into_text().expect("request should be text");
                 assert!(
                     payload.contains("\"type\":\"response.create\""),
                     "expected response.create payload, got {payload}"
@@ -1268,10 +1332,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1282,7 +1348,8 @@ mod tests {
                     .await
                     .expect("request should exist")
                     .expect("request should be valid");
-                let payload = request.into_text().expect("request should be text");
+                let payload =
+                    request.into_text().expect("request should be text");
                 assert!(
                     payload.contains("\"type\":\"response.create\""),
                     "expected response.create payload, got {payload}"
@@ -1365,10 +1432,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1505,10 +1574,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1519,7 +1590,8 @@ mod tests {
                     .await
                     .expect("request should exist")
                     .expect("request should be valid");
-                let payload = request.into_text().expect("request should be text");
+                let payload =
+                    request.into_text().expect("request should be text");
                 assert!(
                     payload.contains("\"type\":\"response.create\""),
                     "expected response.create payload, got {payload}"
@@ -1593,10 +1665,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1710,7 +1784,8 @@ mod tests {
 
     #[test]
     fn websocket_url_converts_http_to_ws() {
-        let url = websocket_url("http://localhost:8080/v1").expect("url should convert");
+        let url = websocket_url("http://localhost:8080/v1")
+            .expect("url should convert");
         assert_eq!(url, "ws://localhost:8080/v1/responses");
     }
 
@@ -1722,7 +1797,8 @@ mod tests {
 
     #[test]
     fn websocket_url_trims_trailing_slash() {
-        let url = websocket_url("https://api.openai.com/v1/").expect("url should convert");
+        let url = websocket_url("https://api.openai.com/v1/")
+            .expect("url should convert");
         assert_eq!(url, "wss://api.openai.com/v1/responses");
     }
 
@@ -1733,8 +1809,8 @@ mod tests {
             "data": "hello"
         });
 
-        let result =
-            parse_server_event(&payload.to_string()).expect("unknown event should not error");
+        let result = parse_server_event(&payload.to_string())
+            .expect("unknown event should not error");
         assert!(result.is_none(), "unknown event should be skipped");
     }
 
@@ -1757,10 +1833,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1798,10 +1876,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1852,10 +1932,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let _socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1893,10 +1975,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let _socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");
@@ -1919,9 +2003,9 @@ mod tests {
             .await
             .expect_err("next_event without send should error");
         assert!(
-            error
-                .to_string()
-                .contains("No OpenAI websocket response is currently in flight"),
+            error.to_string().contains(
+                "No OpenAI websocket response is currently in flight"
+            ),
             "expected not-in-flight error, got {error}"
         );
 
@@ -1933,10 +2017,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
+        let address =
+            listener.local_addr().expect("listener should have address");
 
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("server should accept");
+            let (stream, _) =
+                listener.accept().await.expect("server should accept");
             let mut socket = accept_async(stream)
                 .await
                 .expect("server should upgrade websocket");

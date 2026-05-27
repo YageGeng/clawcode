@@ -10,7 +10,9 @@ const HASH_MODULO: u32 = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LineRefParseError {
     /// The reference did not match the LINE:HASH shape.
-    #[error("Invalid line reference \"{0}\". Expected format \"LINE:HASH\" (e.g. \"5:aa\").")]
+    #[error(
+        "Invalid line reference \"{0}\". Expected format \"LINE:HASH\" (e.g. \"5:aa\")."
+    )]
     InvalidFormat(String),
     /// The parsed line number was zero.
     #[error("Line number must be >= 1, got {line} in \"{input}\".")]
@@ -62,13 +64,15 @@ impl TryFrom<&str> for LineRef {
         let Some((line, hash)) = compact.split_once(':') else {
             return Err(LineRefParseError::InvalidFormat(source));
         };
-        if hash.is_empty() || hash.len() > 16 || !hash.chars().all(|ch| ch.is_ascii_alphanumeric())
+        if hash.is_empty()
+            || hash.len() > 16
+            || !hash.chars().all(|ch| ch.is_ascii_alphanumeric())
         {
             return Err(LineRefParseError::InvalidFormat(source));
         }
-        let line = line
-            .parse::<usize>()
-            .map_err(|_error| LineRefParseError::InvalidFormat(source.clone()))?;
+        let line = line.parse::<usize>().map_err(|_error| {
+            LineRefParseError::InvalidFormat(source.clone())
+        })?;
         if line == 0 {
             return Err(LineRefParseError::InvalidLine {
                 line,
@@ -87,7 +91,8 @@ pub(super) fn compute_line_hash(line: &str) -> String {
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .collect::<String>();
-    let hash = xxhash_rust::xxh32::xxh32(normalized.as_bytes(), 0) % HASH_MODULO;
+    let hash =
+        xxhash_rust::xxh32::xxh32(normalized.as_bytes(), 0) % HASH_MODULO;
     format!("{hash:02x}")
 }
 
@@ -133,7 +138,8 @@ mod tests {
     /// Verifies that line references can be copied from hashline output.
     #[test]
     fn line_ref_parses_copied_hashline_prefixes() {
-        let parsed = LineRef::try_from("5 : aB|content").expect("line ref should parse");
+        let parsed =
+            LineRef::try_from("5 : aB|content").expect("line ref should parse");
 
         assert_eq!(parsed, LineRef::new(5, "ab"));
     }

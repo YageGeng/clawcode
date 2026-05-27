@@ -22,12 +22,13 @@
 //! ```
 
 use crate::client::{
-    self, BearerAuth, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
-    ProviderClient,
+    self, BearerAuth, Capabilities, Capable, DebugExt, Nothing, Provider,
+    ProviderBuilder, ProviderClient,
 };
 use crate::http_client::{self, HttpClientExt};
 use crate::providers::anthropic::client::{
-    AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey, finish_anthropic_builder,
+    AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey,
+    finish_anthropic_builder,
 };
 
 /// Global OpenAI-compatible base URL.
@@ -35,9 +36,11 @@ pub const GLOBAL_API_BASE_URL: &str = "https://api.minimax.io/v1";
 /// China OpenAI-compatible base URL.
 pub const CHINA_API_BASE_URL: &str = "https://api.minimaxi.com/v1";
 /// Global Anthropic-compatible base URL.
-pub const GLOBAL_ANTHROPIC_API_BASE_URL: &str = "https://api.minimax.io/anthropic";
+pub const GLOBAL_ANTHROPIC_API_BASE_URL: &str =
+    "https://api.minimax.io/anthropic";
 /// China Anthropic-compatible base URL.
-pub const CHINA_ANTHROPIC_API_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
+pub const CHINA_ANTHROPIC_API_BASE_URL: &str =
+    "https://api.minimaxi.com/anthropic";
 
 /// `MiniMax-M2.7`
 pub const MINIMAX_M2_7: &str = "MiniMax-M2.7";
@@ -74,7 +77,8 @@ pub type Client<H = reqwest::Client> = client::Client<MiniMaxExt, H>;
 pub type ClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MiniMaxBuilder, MiniMaxApiKey, H>;
 
-pub type AnthropicClient<H = reqwest::Client> = client::Client<MiniMaxAnthropicExt, H>;
+pub type AnthropicClient<H = reqwest::Client> =
+    client::Client<MiniMaxAnthropicExt, H>;
 pub type AnthropicClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MiniMaxAnthropicBuilder, AnthropicKey, H>;
 
@@ -91,13 +95,19 @@ impl Provider for MiniMaxAnthropicExt {
 }
 
 impl<H> Capabilities<H> for MiniMaxExt {
-    type Completion = Capable<super::openai::completion::GenericCompletionModel<MiniMaxExt, H>>;
+    type Completion = Capable<
+        super::openai::completion::GenericCompletionModel<MiniMaxExt, H>,
+    >;
     type ModelListing = Nothing;
 }
 
 impl<H> Capabilities<H> for MiniMaxAnthropicExt {
-    type Completion =
-        Capable<super::anthropic::completion::GenericCompletionModel<MiniMaxAnthropicExt, H>>;
+    type Completion = Capable<
+        super::anthropic::completion::GenericCompletionModel<
+            MiniMaxAnthropicExt,
+            H,
+        >,
+    >;
     type ModelListing = Nothing;
 }
 
@@ -149,7 +159,9 @@ impl ProviderBuilder for MiniMaxAnthropicBuilder {
     }
 }
 
-impl super::anthropic::completion::AnthropicCompatibleProvider for MiniMaxAnthropicExt {
+impl super::anthropic::completion::AnthropicCompatibleProvider
+    for MiniMaxAnthropicExt
+{
     const PROVIDER_NAME: &'static str = "minimax";
 
     fn default_max_tokens(_model: &str) -> Option<u64> {
@@ -165,7 +177,9 @@ impl ProviderClient for Client {
         let api_key = crate::client::required_env_var("MINIMAX_API_KEY")?;
         let mut builder = Self::builder().api_key(api_key);
 
-        if let Some(base_url) = crate::client::optional_env_var("MINIMAX_API_BASE")? {
+        if let Some(base_url) =
+            crate::client::optional_env_var("MINIMAX_API_BASE")?
+        {
             builder = builder.base_url(base_url);
         }
 
@@ -185,9 +199,10 @@ impl ProviderClient for AnthropicClient {
         let api_key = crate::client::required_env_var("MINIMAX_API_KEY")?;
         let mut builder = Self::builder().api_key(api_key);
 
-        if let Some(base_url) =
-            anthropic_base_override("MINIMAX_ANTHROPIC_API_BASE", "MINIMAX_API_BASE")?
-        {
+        if let Some(base_url) = anthropic_base_override(
+            "MINIMAX_ANTHROPIC_API_BASE",
+            "MINIMAX_API_BASE",
+        )? {
             builder = builder.base_url(base_url);
         }
 
@@ -286,23 +301,27 @@ impl<H> AnthropicClientBuilder<H> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHINA_ANTHROPIC_API_BASE_URL, CHINA_API_BASE_URL, GLOBAL_ANTHROPIC_API_BASE_URL,
-        GLOBAL_API_BASE_URL, normalize_anthropic_base_url, resolve_anthropic_base_override,
+        CHINA_ANTHROPIC_API_BASE_URL, CHINA_API_BASE_URL,
+        GLOBAL_ANTHROPIC_API_BASE_URL, GLOBAL_API_BASE_URL,
+        normalize_anthropic_base_url, resolve_anthropic_base_override,
     };
 
     #[test]
     fn test_client_initialization() {
-        let _client = crate::providers::minimax::Client::new("dummy-key").expect("Client::new()");
+        let _client = crate::providers::minimax::Client::new("dummy-key")
+            .expect("Client::new()");
         let _client_from_builder = crate::providers::minimax::Client::builder()
             .api_key("dummy-key")
             .build()
             .expect("Client::builder()");
-        let _anthropic_client = crate::providers::minimax::AnthropicClient::new("dummy-key")
-            .expect("AnthropicClient::new()");
-        let _anthropic_client_from_builder = crate::providers::minimax::AnthropicClient::builder()
-            .api_key("dummy-key")
-            .build()
-            .expect("AnthropicClient::builder()");
+        let _anthropic_client =
+            crate::providers::minimax::AnthropicClient::new("dummy-key")
+                .expect("AnthropicClient::new()");
+        let _anthropic_client_from_builder =
+            crate::providers::minimax::AnthropicClient::builder()
+                .api_key("dummy-key")
+                .build()
+                .expect("AnthropicClient::builder()");
     }
 
     #[test]
@@ -316,7 +335,8 @@ mod tests {
             Some(CHINA_ANTHROPIC_API_BASE_URL)
         );
         assert_eq!(
-            normalize_anthropic_base_url("https://proxy.example.com/v1").as_deref(),
+            normalize_anthropic_base_url("https://proxy.example.com/v1")
+                .as_deref(),
             Some("https://proxy.example.com/anthropic")
         );
     }
@@ -324,7 +344,8 @@ mod tests {
     #[test]
     fn normalize_preserves_existing_anthropic_base() {
         assert_eq!(
-            normalize_anthropic_base_url(CHINA_ANTHROPIC_API_BASE_URL).as_deref(),
+            normalize_anthropic_base_url(CHINA_ANTHROPIC_API_BASE_URL)
+                .as_deref(),
             Some(CHINA_ANTHROPIC_API_BASE_URL)
         );
     }

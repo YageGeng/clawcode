@@ -13,7 +13,10 @@ use crate::telemetry::{ProviderResponseExt, SpanCombinator};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, completion, json_utils, message};
 use crate::{
-    completion::{CompletionError, CompletionRequest as CoreCompletionRequest, GetTokenUsage},
+    completion::{
+        CompletionError, CompletionRequest as CoreCompletionRequest,
+        GetTokenUsage,
+    },
     message::TryIntoMany,
 };
 use serde::{Deserialize, Serialize, Serializer};
@@ -162,7 +165,10 @@ pub enum Message {
         content: Vec<AssistantContent>,
         // OpenAI-compatible providers expose hidden reasoning on this non-standard
         // field, and some require it to be echoed back on assistant tool-call turns.
-        #[serde(skip_serializing_if = "Option::is_none", rename = "reasoning_content")]
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            rename = "reasoning_content"
+        )]
         reasoning: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         refusal: Option<String>,
@@ -221,8 +227,12 @@ pub enum AssistantContent {
 impl From<AssistantContent> for completion::AssistantContent {
     fn from(value: AssistantContent) -> Self {
         match value {
-            AssistantContent::Text { text } => completion::AssistantContent::text(text),
-            AssistantContent::Refusal { refusal } => completion::AssistantContent::text(refusal),
+            AssistantContent::Text { text } => {
+                completion::AssistantContent::text(text)
+            }
+            AssistantContent::Refusal { refusal } => {
+                completion::AssistantContent::text(refusal)
+            }
         }
     }
 }
@@ -334,9 +344,9 @@ impl ToolResultContentValue {
     pub fn to_array(&self) -> Self {
         match self {
             ToolResultContentValue::Array(_) => self.clone(),
-            ToolResultContentValue::String(s) => {
-                ToolResultContentValue::Array(vec![ToolResultContent::from(s.clone())])
-            }
+            ToolResultContentValue::String(s) => ToolResultContentValue::Array(
+                vec![ToolResultContent::from(s.clone())],
+            ),
         }
     }
 }
@@ -407,11 +417,14 @@ pub enum ToolChoice {
 
 impl TryFrom<crate::message::ToolChoice> for ToolChoice {
     type Error = CompletionError;
-    fn try_from(value: crate::message::ToolChoice) -> Result<Self, Self::Error> {
+    fn try_from(
+        value: crate::message::ToolChoice,
+    ) -> Result<Self, Self::Error> {
         let res = match value {
             message::ToolChoice::Specific { .. } => {
                 return Err(CompletionError::ProviderError(
-                    "Provider doesn't support only using specific tools".to_string(),
+                    "Provider doesn't support only using specific tools"
+                        .to_string(),
                 ));
             }
             message::ToolChoice::Auto => Self::Auto,
@@ -567,9 +580,10 @@ impl message::TryIntoMany<Message> for OneOrMany<message::UserContent> {
     type Error = message::MessageError;
 
     fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
-        let (tool_results, other_content): (Vec<_>, Vec<_>) = self
-            .into_iter()
-            .partition(|content| matches!(content, message::UserContent::ToolResult(_)));
+        let (tool_results, other_content): (Vec<_>, Vec<_>) =
+            self.into_iter().partition(|content| {
+                matches!(content, message::UserContent::ToolResult(_))
+            });
 
         // If there are messages with both tool results and user content, openai will only
         //  handle tool results. It's unlikely that there will be both.
@@ -577,9 +591,12 @@ impl message::TryIntoMany<Message> for OneOrMany<message::UserContent> {
             tool_results
                 .into_iter()
                 .map(|content| match content {
-                    message::UserContent::ToolResult(tool_result) => tool_result.try_into(),
+                    message::UserContent::ToolResult(tool_result) => {
+                        tool_result.try_into()
+                    }
                     _ => Err(message::MessageError::ConversionError(
-                        "expected tool result content while converting OpenAI input".into(),
+                        "expected tool result content while converting OpenAI input"
+                            .into(),
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -613,8 +630,12 @@ impl message::TryIntoMany<Message> for OneOrMany<message::AssistantContent> {
 
         for content in self {
             match content {
-                message::AssistantContent::Text(text) => text_content.push(text),
-                message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call),
+                message::AssistantContent::Text(text) => {
+                    text_content.push(text)
+                }
+                message::AssistantContent::ToolCall(tool_call) => {
+                    tool_calls.push(tool_call)
+                }
                 message::AssistantContent::Reasoning(reasoning) => {
                     reasoning_text.push_str(&reasoning.display_text());
                 }
@@ -656,9 +677,13 @@ impl TryIntoMany<Message> for message::Message {
 
     fn try_into_many(self) -> Result<Vec<Message>, Self::Error> {
         match self {
-            message::Message::System { content } => Ok(vec![Message::system(&content)]),
+            message::Message::System { content } => {
+                Ok(vec![Message::system(&content)])
+            }
             message::Message::User { content } => content.try_into_many(),
-            message::Message::Assistant { content, .. } => content.try_into_many(),
+            message::Message::Assistant { content, .. } => {
+                content.try_into_many()
+            }
         }
     }
 }
@@ -710,20 +735,29 @@ impl TryFrom<Message> for message::Message {
                 if let Some(reasoning) = reasoning
                     && !reasoning.is_empty()
                 {
-                    assistant_content.push(message::AssistantContent::reasoning(reasoning));
+                    assistant_content
+                        .push(message::AssistantContent::reasoning(reasoning));
                 }
 
-                assistant_content.extend(content.into_iter().map(|content| match content {
-                    AssistantContent::Text { text } => message::AssistantContent::text(text),
-                    AssistantContent::Refusal { refusal } => {
-                        message::AssistantContent::text(refusal)
+                assistant_content.extend(content.into_iter().map(|content| {
+                    match content {
+                        AssistantContent::Text { text } => {
+                            message::AssistantContent::text(text)
+                        }
+                        AssistantContent::Refusal { refusal } => {
+                            message::AssistantContent::text(refusal)
+                        }
                     }
                 }));
 
                 assistant_content.extend(
                     tool_calls
                         .into_iter()
-                        .map(|tool_call| Ok(message::AssistantContent::ToolCall(tool_call.into())))
+                        .map(|tool_call| {
+                            Ok(message::AssistantContent::ToolCall(
+                                tool_call.into(),
+                            ))
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                 );
 
@@ -744,14 +778,17 @@ impl TryFrom<Message> for message::Message {
             } => message::Message::User {
                 content: OneOrMany::one(message::UserContent::tool_result(
                     tool_call_id,
-                    OneOrMany::one(message::ToolResultContent::text(content.as_text())),
+                    OneOrMany::one(message::ToolResultContent::text(
+                        content.as_text(),
+                    )),
                 )),
             },
 
             // System messages should get stripped out when converting messages, this is just a
             // stop gap to avoid obnoxious error handling or panic occurring.
             Message::System { content, .. } => message::Message::User {
-                content: content.map(|content| message::UserContent::text(content.text)),
+                content: content
+                    .map(|content| message::UserContent::text(content.text)),
             },
         })
     }
@@ -762,16 +799,25 @@ impl From<UserContent> for message::UserContent {
         match content {
             UserContent::Text { text } => message::UserContent::text(text),
             UserContent::Image { image_url } => {
-                message::UserContent::image_url(image_url.url, None, Some(image_url.detail))
+                message::UserContent::image_url(
+                    image_url.url,
+                    None,
+                    Some(image_url.detail),
+                )
             }
             UserContent::File {
-                file: FileData {
-                    file_data, file_id, ..
-                },
+                file:
+                    FileData {
+                        file_data, file_id, ..
+                    },
             } => match file_data {
                 Some(data_url) => {
-                    let kind = match data_url.strip_prefix("data:application/pdf;base64,") {
-                        Some(b64) => DocumentSourceKind::Base64(b64.to_string()),
+                    let kind = match data_url
+                        .strip_prefix("data:application/pdf;base64,")
+                    {
+                        Some(b64) => {
+                            DocumentSourceKind::Base64(b64.to_string())
+                        }
                         None => DocumentSourceKind::String(data_url),
                     };
                     message::UserContent::Document(message::Document {
@@ -781,11 +827,13 @@ impl From<UserContent> for message::UserContent {
                     })
                 }
                 None => match file_id {
-                    Some(id) => message::UserContent::Document(message::Document {
-                        data: DocumentSourceKind::FileId(id),
-                        media_type: None,
-                        additional_params: None,
-                    }),
+                    Some(id) => {
+                        message::UserContent::Document(message::Document {
+                            data: DocumentSourceKind::FileId(id),
+                            media_type: None,
+                            additional_params: None,
+                        })
+                    }
                     None => message::UserContent::text(String::new()),
                 },
             },
@@ -855,12 +903,16 @@ pub struct CompletionResponse {
     pub usage: Option<Usage>,
 }
 
-impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionResponse> {
+impl TryFrom<CompletionResponse>
+    for completion::CompletionResponse<CompletionResponse>
+{
     type Error = CompletionError;
 
     fn try_from(response: CompletionResponse) -> Result<Self, Self::Error> {
         let choice = response.choices.first().ok_or_else(|| {
-            CompletionError::ResponseError("Response contained no choices".to_owned())
+            CompletionError::ResponseError(
+                "Response contained no choices".to_owned(),
+            )
         })?;
 
         let content = match &choice.message {
@@ -889,7 +941,9 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                     // llama.cpp exposes hidden reasoning on a separate non-standard field.
                     // Keep it structured here so the non-streaming path matches streaming
                     // behavior and does not pollute plain-text response surfaces.
-                    content.push(completion::AssistantContent::reasoning(reasoning));
+                    content.push(completion::AssistantContent::reasoning(
+                        reasoning,
+                    ));
                 }
 
                 content.extend(
@@ -922,7 +976,8 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             .as_ref()
             .map(|usage| completion::Usage {
                 input_tokens: usage.prompt_tokens as u64,
-                output_tokens: (usage.total_tokens - usage.prompt_tokens) as u64,
+                output_tokens: (usage.total_tokens - usage.prompt_tokens)
+                    as u64,
                 total_tokens: usage.total_tokens as u64,
                 cached_input_tokens: usage
                     .prompt_tokens_details
@@ -962,7 +1017,9 @@ impl ProviderResponseExt for CompletionResponse {
         let response = self
             .choices
             .iter()
-            .filter_map(|choice| assistant_message_text_response(&choice.message))
+            .filter_map(|choice| {
+                assistant_message_text_response(&choice.message)
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -989,13 +1046,18 @@ fn assistant_message_text_response(message: &Message) -> Option<String> {
     let mut segments = content
         .iter()
         .filter_map(|content| match content {
-            AssistantContent::Text { text } => (!text.is_empty()).then(|| text.clone()),
-            AssistantContent::Refusal { refusal } => (!refusal.is_empty()).then(|| refusal.clone()),
+            AssistantContent::Text { text } => {
+                (!text.is_empty()).then(|| text.clone())
+            }
+            AssistantContent::Refusal { refusal } => {
+                (!refusal.is_empty()).then(|| refusal.clone())
+            }
         })
         .collect::<Vec<_>>();
 
     if segments.is_empty()
-        && let Some(refusal) = refusal.as_ref().filter(|refusal| !refusal.is_empty())
+        && let Some(refusal) =
+            refusal.as_ref().filter(|refusal| !refusal.is_empty())
     {
         segments.push(refusal.clone());
     }
@@ -1076,7 +1138,10 @@ impl GetTokenUsage for Usage {
 
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct GenericCompletionModel<Ext = super::OpenAICompletionsExt, H = reqwest::Client> {
+pub struct GenericCompletionModel<
+    Ext = super::OpenAICompletionsExt,
+    H = reqwest::Client,
+> {
     pub(crate) client: crate::client::Client<Ext, H>,
     pub model: String,
     pub strict_tools: bool,
@@ -1095,7 +1160,10 @@ where
     crate::client::Client<Ext, H>: std::fmt::Debug + Clone + 'static,
     Ext: crate::client::Provider + Clone + 'static,
 {
-    pub fn new(client: crate::client::Client<Ext, H>, model: impl Into<String>) -> Self {
+    pub fn new(
+        client: crate::client::Client<Ext, H>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             client,
             model: model.into(),
@@ -1104,7 +1172,10 @@ where
         }
     }
 
-    pub fn with_model(client: crate::client::Client<Ext, H>, model: &str) -> Self {
+    pub fn with_model(
+        client: crate::client::Client<Ext, H>,
+        model: &str,
+    ) -> Self {
         Self {
             client,
             model: model.into(),
@@ -1182,8 +1253,8 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
 
         partial_history.extend(chat_history);
 
-        let mut full_history: Vec<Message> =
-            preamble.map_or_else(Vec::new, |preamble| vec![Message::system(&preamble)]);
+        let mut full_history: Vec<Message> = preamble
+            .map_or_else(Vec::new, |preamble| vec![Message::system(&preamble)]);
 
         full_history.extend(
             partial_history
@@ -1213,7 +1284,8 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             }
         }
 
-        let history_has_tool_result = history_contains_tool_result(&full_history);
+        let history_has_tool_result =
+            history_contains_tool_result(&full_history);
 
         let tool_choice = tool_choice.map(ToolChoice::try_from).transpose()?;
 
@@ -1228,8 +1300,8 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
         // Some OpenAI-compatible backends such as llama.cpp will skip tool execution
         // if `response_format` is sent on the first turn alongside tools. Delay the
         // schema until after the conversation contains a tool result.
-        let should_apply_response_format =
-            output_schema.is_some() && (tools.is_empty() || history_has_tool_result);
+        let should_apply_response_format = output_schema.is_some()
+            && (tools.is_empty() || history_has_tool_result);
 
         // Map output_schema to OpenAI's response_format and merge into additional_params
         let additional_params = if let Some(schema) = output_schema
@@ -1278,7 +1350,9 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
 impl TryFrom<(String, CoreCompletionRequest)> for CompletionRequest {
     type Error = CompletionError;
 
-    fn try_from((model, req): (String, CoreCompletionRequest)) -> Result<Self, Self::Error> {
+    fn try_from(
+        (model, req): (String, CoreCompletionRequest),
+    ) -> Result<Self, Self::Error> {
         CompletionRequest::try_from(OpenAIRequestParams {
             model,
             request: req,
@@ -1336,7 +1410,12 @@ where
         + WasmCompatSend
         + WasmCompatSync
         + 'static,
-    H: Clone + Default + std::fmt::Debug + WasmCompatSend + WasmCompatSync + 'static,
+    H: Clone
+        + Default
+        + std::fmt::Debug
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
 {
     type Response = CompletionResponse;
     type StreamingResponse = StreamingCompletionResponse;
@@ -1350,7 +1429,10 @@ where
     async fn completion(
         &self,
         completion_request: CoreCompletionRequest,
-    ) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+    ) -> Result<
+        completion::CompletionResponse<CompletionResponse>,
+        CompletionError,
+    > {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: "clawcode::completions",
@@ -1414,7 +1496,9 @@ where
 
                         response.try_into()
                     }
-                    ApiResponse::Err(err) => Err(CompletionError::ProviderError(err.message)),
+                    ApiResponse::Err(err) => {
+                        Err(CompletionError::ProviderError(err.message))
+                    }
                 }
             } else {
                 let text = http_client::text(response).await?;
@@ -1469,8 +1553,8 @@ mod tests {
             tool_result_array_content: false,
         })
         .expect("request conversion should succeed");
-        let serialized =
-            serde_json::to_value(openai_request).expect("serialization should succeed");
+        let serialized = serde_json::to_value(openai_request)
+            .expect("serialization should succeed");
 
         assert_eq!(serialized["model"], "gpt-4.1");
     }
@@ -1488,15 +1572,16 @@ mod tests {
             tool_result_array_content: false,
         })
         .expect("request conversion should succeed");
-        let serialized =
-            serde_json::to_value(openai_request).expect("serialization should succeed");
+        let serialized = serde_json::to_value(openai_request)
+            .expect("serialization should succeed");
 
         assert_eq!(serialized["model"], "gpt-4o-mini");
     }
 
     #[test]
     fn assistant_reasoning_alone_is_dropped() {
-        let assistant_content = OneOrMany::one(message::AssistantContent::reasoning("hidden"));
+        let assistant_content =
+            OneOrMany::one(message::AssistantContent::reasoning("hidden"));
 
         let converted: Vec<Message> = assistant_content
             .try_into_many()
@@ -1568,7 +1653,8 @@ mod tests {
             tool_calls: vec![],
         };
 
-        let rig_msg: message::Message = assistant.try_into().expect("convert back");
+        let rig_msg: message::Message =
+            assistant.try_into().expect("convert back");
 
         let message::Message::Assistant { content, .. } = rig_msg else {
             panic!("expected assistant");
@@ -1659,8 +1745,8 @@ mod tests {
             tool_result_array_content: false,
         })
         .expect("request conversion should succeed");
-        let serialized =
-            serde_json::to_value(openai_request).expect("serialization should succeed");
+        let serialized = serde_json::to_value(openai_request)
+            .expect("serialization should succeed");
 
         assert_eq!(serialized["max_tokens"], 4096);
     }
@@ -1678,8 +1764,8 @@ mod tests {
             tool_result_array_content: false,
         })
         .expect("request conversion should succeed");
-        let serialized =
-            serde_json::to_value(openai_request).expect("serialization should succeed");
+        let serialized = serde_json::to_value(openai_request)
+            .expect("serialization should succeed");
 
         assert!(serialized.get("max_tokens").is_none());
     }
@@ -1689,7 +1775,9 @@ mod tests {
         let request = CoreCompletionRequest::builder()
             .chat_history(OneOrMany::one(message::Message::Assistant {
                 id: None,
-                content: OneOrMany::one(message::AssistantContent::reasoning("hidden")),
+                content: OneOrMany::one(message::AssistantContent::reasoning(
+                    "hidden",
+                )),
             }))
             .build();
 
@@ -1742,8 +1830,8 @@ mod tests {
         })
         .expect("request conversion should succeed");
 
-        let serialized =
-            serde_json::to_value(openai_request).expect("serialization should succeed");
+        let serialized = serde_json::to_value(openai_request)
+            .expect("serialization should succeed");
 
         assert!(
             serialized.get("response_format").is_none(),
@@ -1756,14 +1844,18 @@ mod tests {
         let request = CoreCompletionRequest::builder()
             .chat_history(
                 OneOrMany::many(vec![
-                    message::Message::user("Hello, whats the weather in London?"),
+                    message::Message::user(
+                        "Hello, whats the weather in London?",
+                    ),
                     message::Message::Assistant {
                         id: None,
-                        content: OneOrMany::one(message::AssistantContent::tool_call(
-                            "call_1",
-                            "weather",
-                            serde_json::json!({ "city": "London" }),
-                        )),
+                        content: OneOrMany::one(
+                            message::AssistantContent::tool_call(
+                                "call_1",
+                                "weather",
+                                serde_json::json!({ "city": "London" }),
+                            ),
+                        ),
                     },
                     message::Message::tool_result(
                         "call_1",
@@ -1805,8 +1897,8 @@ mod tests {
         })
         .expect("request conversion should succeed");
 
-        let serialized =
-            serde_json::to_value(openai_request).expect("serialization should succeed");
+        let serialized = serde_json::to_value(openai_request)
+            .expect("serialization should succeed");
 
         assert!(
             serialized.get("response_format").is_some(),
@@ -1834,14 +1926,18 @@ mod tests {
             "id": "xxx"
         }
         "#;
-        let response = serde_json::from_str::<ApiResponse<CompletionResponse>>(request).unwrap();
+        let response =
+            serde_json::from_str::<ApiResponse<CompletionResponse>>(request)
+                .unwrap();
 
         let ApiResponse::Ok(response) = response else {
             panic!("expected successful completion response");
         };
         assert_eq!(response.choices.len(), 1);
 
-        let Message::Assistant { tool_calls, .. } = &response.choices[0].message else {
+        let Message::Assistant { tool_calls, .. } =
+            &response.choices[0].message
+        else {
             panic!("expected assistant message");
         };
         assert_eq!(tool_calls.len(), 1);
@@ -1873,14 +1969,18 @@ mod tests {
             "id": "xxx"
         }
         "#;
-        let response = serde_json::from_str::<ApiResponse<CompletionResponse>>(request).unwrap();
+        let response =
+            serde_json::from_str::<ApiResponse<CompletionResponse>>(request)
+                .unwrap();
 
         let ApiResponse::Ok(response) = response else {
             panic!("expected successful completion response");
         };
         assert_eq!(response.choices.len(), 1);
 
-        let Message::Assistant { tool_calls, .. } = &response.choices[0].message else {
+        let Message::Assistant { tool_calls, .. } =
+            &response.choices[0].message
+        else {
             panic!("expected assistant message");
         };
         assert_eq!(tool_calls.len(), 1);
@@ -1931,7 +2031,9 @@ mod tests {
             }
         }
         "#;
-        let response = serde_json::from_str::<ApiResponse<CompletionResponse>>(request).unwrap();
+        let response =
+            serde_json::from_str::<ApiResponse<CompletionResponse>>(request)
+                .unwrap();
         let ApiResponse::Ok(response) = response else {
             panic!("expected successful completion response");
         };
@@ -1941,7 +2043,8 @@ mod tests {
 
         assert_eq!(response.choice.len(), 1);
 
-        let completion::message::AssistantContent::Reasoning(reasoning) = response.choice.first()
+        let completion::message::AssistantContent::Reasoning(reasoning) =
+            response.choice.first()
         else {
             panic!("expected assistant content to be reasoning");
         };
@@ -1958,7 +2061,8 @@ mod tests {
             media_type: Some(message::DocumentMediaType::PDF),
             additional_params: None,
         });
-        let converted: UserContent = doc.try_into().expect("conversion should succeed");
+        let converted: UserContent =
+            doc.try_into().expect("conversion should succeed");
         let json = serde_json::to_value(&converted).expect("serialize");
 
         assert_eq!(json["type"], "file");
@@ -1977,7 +2081,8 @@ mod tests {
             media_type: None,
             additional_params: None,
         });
-        let converted: UserContent = doc.try_into().expect("conversion should succeed");
+        let converted: UserContent =
+            doc.try_into().expect("conversion should succeed");
         let json = serde_json::to_value(&converted).expect("serialize");
 
         assert_eq!(json["type"], "file");
@@ -1994,7 +2099,8 @@ mod tests {
             media_type: None,
             additional_params: None,
         });
-        let converted: UserContent = doc.try_into().expect("conversion should succeed");
+        let converted: UserContent =
+            doc.try_into().expect("conversion should succeed");
         let json = serde_json::to_value(&converted).expect("serialize");
 
         assert_eq!(json["type"], "text");
@@ -2032,7 +2138,8 @@ mod tests {
     #[test]
     fn file_user_content_deserializes_from_wire_json() {
         let raw = r#"{"type":"file","file":{"file_data":"data:application/pdf;base64,AAAA","filename":"x.pdf"}}"#;
-        let parsed: UserContent = serde_json::from_str(raw).expect("deserialize");
+        let parsed: UserContent =
+            serde_json::from_str(raw).expect("deserialize");
         let UserContent::File { file } = parsed else {
             panic!("expected File variant");
         };
@@ -2058,7 +2165,9 @@ mod tests {
             panic!("expected Document");
         };
         assert_eq!(doc.media_type, Some(message::DocumentMediaType::PDF));
-        assert!(matches!(doc.data, DocumentSourceKind::Base64(ref b) if b == "QUJD"));
+        assert!(
+            matches!(doc.data, DocumentSourceKind::Base64(ref b) if b == "QUJD")
+        );
     }
 
     #[test]
@@ -2075,7 +2184,9 @@ mod tests {
             panic!("expected Document");
         };
         assert_eq!(doc.media_type, None);
-        assert!(matches!(doc.data, DocumentSourceKind::FileId(ref id) if id == "file_abc"));
+        assert!(
+            matches!(doc.data, DocumentSourceKind::FileId(ref id) if id == "file_abc")
+        );
 
         let converted: UserContent = message::UserContent::Document(doc)
             .try_into()
@@ -2102,7 +2213,8 @@ mod tests {
             ])
             .expect("non-empty content"),
         };
-        let converted: Vec<Message> = user.try_into_many().expect("conversion should succeed");
+        let converted: Vec<Message> =
+            user.try_into_many().expect("conversion should succeed");
         assert_eq!(converted.len(), 1);
         let Message::User { content, .. } = &converted[0] else {
             panic!("expected user message");

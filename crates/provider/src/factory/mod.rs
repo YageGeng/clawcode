@@ -15,7 +15,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::client::CompletionClient;
-use crate::completion::{CompletionError, CompletionModel, CompletionRequest, GetTokenUsage};
+use crate::completion::{
+    CompletionError, CompletionModel, CompletionRequest, GetTokenUsage,
+};
 use crate::streaming::StreamingCompletionResponse;
 use crate::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
@@ -63,7 +65,12 @@ struct ProviderBackedLlm<M> {
 }
 
 impl<M> ProviderBackedLlm<M> {
-    fn new(provider_id: String, model_id: String, model_extra_params: Value, inner: M) -> Self {
+    fn new(
+        provider_id: String,
+        model_id: String,
+        model_extra_params: Value,
+        inner: M,
+    ) -> Self {
         Self {
             provider_id,
             model_id,
@@ -99,14 +106,17 @@ where
     fn completion(
         &self,
         request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<event::LlmCompletion, CompletionError>> {
+    ) -> WasmBoxedFuture<'_, Result<event::LlmCompletion, CompletionError>>
+    {
         Box::pin({
             let m = self.inner.clone();
             let model_extra_params = self.model_extra_params.clone();
             async move {
                 let mut request = request;
-                request.additional_params =
-                    merge_additional_params(&model_extra_params, request.additional_params);
+                request.additional_params = merge_additional_params(
+                    &model_extra_params,
+                    request.additional_params,
+                );
                 let resp = m.completion(request).await?;
                 Ok(event::LlmCompletion {
                     choice: resp.choice,
@@ -128,11 +138,15 @@ where
             let model_extra_params = self.model_extra_params.clone();
             async move {
                 let mut request = request;
-                request.additional_params =
-                    merge_additional_params(&model_extra_params, request.additional_params);
-                let stream_resp: StreamingCompletionResponse<M::StreamingResponse> =
-                    m.stream(request).await?;
-                let mapped = stream_resp.map(|item| item.and_then(event::LlmStreamEvent::try_from));
+                request.additional_params = merge_additional_params(
+                    &model_extra_params,
+                    request.additional_params,
+                );
+                let stream_resp: StreamingCompletionResponse<
+                    M::StreamingResponse,
+                > = m.stream(request).await?;
+                let mapped = stream_resp
+                    .map(|item| item.and_then(event::LlmStreamEvent::try_from));
                 Ok(Box::pin(mapped) as event::DynLlmStream)
             }
         })
@@ -197,7 +211,10 @@ impl LlmFactory {
     }
 
     /// Build a single client for the given provider and model.
-    fn build_one(provider: &LlmProvider, model: &config::LlmModel) -> Result<ArcLlm, BuildError> {
+    fn build_one(
+        provider: &LlmProvider,
+        model: &config::LlmModel,
+    ) -> Result<ArcLlm, BuildError> {
         let model_id = model.id.as_str();
         let pid = provider.id.as_str();
         let api_key = provider
@@ -213,10 +230,11 @@ impl LlmFactory {
             })
             .transpose()?;
 
-        let codex_auth_file = provider
-            .auth
-            .as_ref()
-            .map(|ProviderAuthConfig::Codex { auth_file }| resolve_codex_auth_file(auth_file));
+        let codex_auth_file = provider.auth.as_ref().map(
+            |ProviderAuthConfig::Codex { auth_file }| {
+                resolve_codex_auth_file(auth_file)
+            },
+        );
         let base_url = provider.base_url.clone();
         let missing_api_key = || BuildError::MissingApiKey {
             provider_id: pid.to_string(),
@@ -251,13 +269,19 @@ impl LlmFactory {
                             .auth_file(auth_file)
                             .base_url(base_url.clone())
                             .build()
-                            .map_err(|e| BuildError::ClientBuild(e.to_string()))?
+                            .map_err(|e| {
+                                BuildError::ClientBuild(e.to_string())
+                            })?
                     } else {
                         chatgpt::Client::builder()
-                            .api_key(api_key.clone().ok_or_else(missing_api_key)?)
+                            .api_key(
+                                api_key.clone().ok_or_else(missing_api_key)?,
+                            )
                             .base_url(base_url.clone())
                             .build()
-                            .map_err(|e| BuildError::ClientBuild(e.to_string()))?
+                            .map_err(|e| {
+                                BuildError::ClientBuild(e.to_string())
+                            })?
                     };
                     Ok(wrap(
                         pid,
@@ -491,12 +515,16 @@ enum BuildError {
         #[source]
         source: std::env::VarError,
     },
-    #[error("missing api key for provider `{provider_id}` and provider type `{provider_type:?}`")]
+    #[error(
+        "missing api key for provider `{provider_id}` and provider type `{provider_type:?}`"
+    )]
     MissingApiKey {
         provider_id: String,
         provider_type: ProviderType,
     },
-    #[error("unsupported provider type `{provider_type:?}` for provider `{provider_id}`")]
+    #[error(
+        "unsupported provider type `{provider_type:?}` for provider `{provider_id}`"
+    )]
     UnsupportedProtocol {
         provider_id: String,
         provider_type: ProviderType,
@@ -522,7 +550,12 @@ fn resolve_codex_auth_file(auth_file: &Option<String>) -> PathBuf {
 }
 
 /// Wrap a concrete completion model in an [`ArcLlm`] adapter.
-fn wrap<M>(provider_id: &str, model_id: &str, model_extra_params: Value, model: M) -> ArcLlm
+fn wrap<M>(
+    provider_id: &str,
+    model_id: &str,
+    model_extra_params: Value,
+    model: M,
+) -> ArcLlm
 where
     M: CompletionModel + WasmCompatSend + WasmCompatSync + 'static,
     M::Response: Serialize,
@@ -539,10 +572,16 @@ where
 /// Merge model-level additional parameters with request-level parameters.
 ///
 /// Values in `request` override values in `defaults` when both are objects.
-fn merge_additional_params(defaults: &Value, request: Option<Value>) -> Option<Value> {
+fn merge_additional_params(
+    defaults: &Value,
+    request: Option<Value>,
+) -> Option<Value> {
     match request {
         Some(request) => {
-            if !defaults.is_null() && defaults.is_object() && request.is_object() {
+            if !defaults.is_null()
+                && defaults.is_object()
+                && request.is_object()
+            {
                 Some(crate::json_utils::merge(defaults.clone(), request))
             } else {
                 Some(request)
@@ -567,7 +606,9 @@ mod tests {
     /// get returns None for unknown provider ids.
     #[test]
     fn get_returns_none_for_unknown_provider() {
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(AppConfig::default()));
+        let factory = LlmFactory::new(config::ConfigHandle::from_config(
+            AppConfig::default(),
+        ));
         assert!(factory.get("nonexistent", "gpt-5").is_none());
     }
 
@@ -646,7 +687,8 @@ env = "DEEPSEEK_API_KEY"
 id = "deepseek-v4-flash"
 "#;
             let cfg: AppConfig = toml::from_str(toml).unwrap();
-            let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
+            let factory =
+                LlmFactory::new(config::ConfigHandle::from_config(cfg));
             let llm = factory.get("deepseek", "deepseek-v4-flash").unwrap();
             assert_eq!(llm.provider_id(), "deepseek");
             Ok(())
@@ -756,7 +798,8 @@ id = "gpt-5"
         let request = json!({
             "temperature": 0.2,
         });
-        let merged = merge_additional_params(&defaults, Some(request.clone())).unwrap();
+        let merged =
+            merge_additional_params(&defaults, Some(request.clone())).unwrap();
         assert_eq!(merged, request);
     }
 }

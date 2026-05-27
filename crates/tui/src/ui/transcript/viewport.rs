@@ -19,7 +19,11 @@ pub(super) fn render_transcript_lines(
 }
 
 /// Returns the visible transcript row range.
-pub(super) fn visible_row_range(line_count: usize, area: Rect, view: &ViewState) -> (usize, usize) {
+pub(super) fn visible_row_range(
+    line_count: usize,
+    area: Rect,
+    view: &ViewState,
+) -> (usize, usize) {
     let max_scroll = transcript_scroll_offset(line_count, area);
     let scroll_offset = effective_transcript_scroll(max_scroll, view);
     let start = usize::from(scroll_offset).min(line_count);
@@ -39,7 +43,10 @@ pub(super) fn render_transcript_lines_at_top(
 }
 
 /// Returns the current scroll offset after applying tail-follow/manual view state.
-pub(super) fn effective_transcript_scroll(max_scroll: u16, view: &ViewState) -> u16 {
+pub(super) fn effective_transcript_scroll(
+    max_scroll: u16,
+    view: &ViewState,
+) -> u16 {
     if view.is_following_tail() {
         return max_scroll;
     }

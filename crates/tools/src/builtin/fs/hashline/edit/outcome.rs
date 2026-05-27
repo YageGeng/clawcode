@@ -25,7 +25,11 @@ pub(super) enum HashMismatchReason {
 
 impl HashMismatch {
     /// Create a normal stale-anchor mismatch.
-    pub(super) fn anchor_changed(line: usize, expected: String, actual: String) -> Self {
+    pub(super) fn anchor_changed(
+        line: usize,
+        expected: String,
+        actual: String,
+    ) -> Self {
         Self::builder()
             .line(line)
             .expected(expected)
@@ -60,9 +64,13 @@ pub struct NoopEdit {
 
 impl NoopEdit {
     /// Format a no-op diagnostic that tells the model to re-read current content.
-    pub(super) fn format_batch_error(path: &str, noop_edits: &[Self]) -> String {
-        let mut diagnostic =
-            format!("No changes made to {path}. The edits produced identical content.");
+    pub(super) fn format_batch_error(
+        path: &str,
+        noop_edits: &[Self],
+    ) -> String {
+        let mut diagnostic = format!(
+            "No changes made to {path}. The edits produced identical content."
+        );
         if !noop_edits.is_empty() {
             let details = noop_edits
                 .iter()

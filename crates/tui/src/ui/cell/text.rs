@@ -55,7 +55,11 @@ impl TextCell {
     }
 
     /// Returns styled logical lines using the configured render theme.
-    pub fn display_lines_with_theme(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    pub fn display_lines_with_theme(
+        &self,
+        width: u16,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
         <Self as TranscriptCell>::display_lines(self, width, theme)
     }
 
@@ -76,7 +80,9 @@ impl TranscriptCell for TextCell {
                     .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
             ),
-            TextRole::User => ("> ", Style::default().add_modifier(Modifier::BOLD)),
+            TextRole::User => {
+                ("> ", Style::default().add_modifier(Modifier::BOLD))
+            }
             TextRole::System => ("system: ", Style::default().fg(theme.muted)),
         };
         styled_text_lines(&self.text, first_prefix, style)
@@ -92,7 +98,11 @@ impl TranscriptCell for TextCell {
 }
 
 /// Builds one styled line per newline-delimited segment.
-fn styled_text_lines(text: &str, first_prefix: &str, style: Style) -> Vec<Line<'static>> {
+fn styled_text_lines(
+    text: &str,
+    first_prefix: &str,
+    style: Style,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut added = false;
     for (index, segment) in text.split('\n').enumerate() {

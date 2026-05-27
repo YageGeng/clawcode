@@ -25,7 +25,9 @@ pub trait WasmCompatSendStream:
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 /// Streaming response bound without `Send` on wasm32 with the `wasm` feature.
-pub trait WasmCompatSendStream: Stream<Item = Result<Bytes, crate::http_client::Error>> {
+pub trait WasmCompatSendStream:
+    Stream<Item = Result<Bytes, crate::http_client::Error>>
+{
     type InnerItem;
 }
 

@@ -129,10 +129,14 @@ pub trait RunningTerminal: Send + Sync {
     ///
     /// Returns accumulated stdout/stderr since creation. If the process
     /// has already exited, `exit_status` will be `Some`.
-    async fn output(&self) -> Result<TerminalOutputSnapshot, TerminalBackendError>;
+    async fn output(
+        &self,
+    ) -> Result<TerminalOutputSnapshot, TerminalBackendError>;
 
     /// Block until the command exits, returning the exit result.
-    async fn wait_for_exit(&self) -> Result<TerminalExitResult, TerminalBackendError>;
+    async fn wait_for_exit(
+        &self,
+    ) -> Result<TerminalExitResult, TerminalBackendError>;
 
     /// Kill the running command.
     ///
@@ -141,7 +145,10 @@ pub trait RunningTerminal: Send + Sync {
     async fn kill(&self) -> Result<(), TerminalBackendError>;
 
     /// Write bytes to the command stdin.
-    async fn write_stdin(&self, bytes: &[u8]) -> Result<(), TerminalBackendError>;
+    async fn write_stdin(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(), TerminalBackendError>;
 }
 
 // ── LocalTerminalBackend ──
@@ -167,7 +174,10 @@ struct ProcessGroupTerminator {
 
 impl LocalTerminator for ProcessGroupTerminator {
     fn terminate(&mut self) {
-        let _ = killpg(Pid::from_raw(self.process_group_id as i32), Signal::SIGKILL);
+        let _ = killpg(
+            Pid::from_raw(self.process_group_id as i32),
+            Signal::SIGKILL,
+        );
     }
 }
 
@@ -182,7 +192,8 @@ impl LocalTerminator for PtyTerminator {
         if let Some(process_group_id) = self.process_group_id {
             // Kill the whole process group first so shell-launched descendants
             // do not survive after the PTY child itself is terminated.
-            let _ = killpg(Pid::from_raw(process_group_id as i32), Signal::SIGKILL);
+            let _ =
+                killpg(Pid::from_raw(process_group_id as i32), Signal::SIGKILL);
         }
         let _ = self.killer.kill();
     }
@@ -273,8 +284,11 @@ impl TerminalBackend for LocalTerminalBackend {
                 Arc::clone(&pipe_state),
                 false,
             ));
-            let stderr_handle =
-                tokio::spawn(read_channel(spawned.output.stderr_rx, pipe_state, true));
+            let stderr_handle = tokio::spawn(read_channel(
+                spawned.output.stderr_rx,
+                pipe_state,
+                true,
+            ));
 
             let exit_code = spawned.control.exit_rx.await.unwrap_or(-1);
             // Wait for readers to finish so final output is visible with the exit status.
@@ -340,18 +354,16 @@ async fn spawn_pipe(
     let mut child = cmd
         .spawn()
         .map_err(|e| TerminalBackendError::Io(format!("spawn failed: {e}")))?;
-    let process_group_id = child
-        .id()
-        .ok_or_else(|| TerminalBackendError::Io("spawned process has no pid".to_string()))?;
+    let process_group_id = child.id().ok_or_else(|| {
+        TerminalBackendError::Io("spawned process has no pid".to_string())
+    })?;
 
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| TerminalBackendError::Io("stdout pipe missing".to_string()))?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| TerminalBackendError::Io("stderr pipe missing".to_string()))?;
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
+        TerminalBackendError::Io("stdout pipe missing".to_string())
+    })?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
+        TerminalBackendError::Io("stderr pipe missing".to_string())
+    })?;
 
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
     let stdin = child.stdin.take();
@@ -409,7 +421,9 @@ async fn spawn_pty(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| TerminalBackendError::Io(format!("openpty failed: {e}")))?;
+        .map_err(|e| {
+            TerminalBackendError::Io(format!("openpty failed: {e}"))
+        })?;
 
     let mut builder = CommandBuilder::new(command);
     builder.cwd(cwd);
@@ -420,18 +434,16 @@ async fn spawn_pty(
         builder.env(name, value);
     }
 
-    let mut child = pair
-        .slave
-        .spawn_command(builder)
-        .map_err(|e| TerminalBackendError::Io(format!("pty spawn failed: {e}")))?;
+    let mut child = pair.slave.spawn_command(builder).map_err(|e| {
+        TerminalBackendError::Io(format!("pty spawn failed: {e}"))
+    })?;
     let process_group_id = child.process_id();
     let killer = child.clone_killer();
 
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
-    let mut writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| TerminalBackendError::Io(format!("pty writer failed: {e}")))?;
+    let mut writer = pair.master.take_writer().map_err(|e| {
+        TerminalBackendError::Io(format!("pty writer failed: {e}"))
+    })?;
     tokio::spawn(async move {
         while let Some(bytes) = writer_rx.recv().await {
             let _ = writer.write_all(&bytes);
@@ -441,10 +453,9 @@ async fn spawn_pty(
 
     let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>(128);
     let (_stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>(1);
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| TerminalBackendError::Io(format!("pty reader failed: {e}")))?;
+    let mut reader = pair.master.try_clone_reader().map_err(|e| {
+        TerminalBackendError::Io(format!("pty reader failed: {e}"))
+    })?;
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -466,7 +477,8 @@ async fn spawn_pty(
 
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn_blocking(move || {
-        let exit_code = child.wait().map_or(-1, |status| status.exit_code() as i32);
+        let exit_code =
+            child.wait().map_or(-1, |status| status.exit_code() as i32);
         let _ = exit_tx.send(exit_code);
     });
 
@@ -548,7 +560,9 @@ struct LocalTerminalLifecycle {
 
 #[async_trait]
 impl RunningTerminal for LocalRunningTerminal {
-    async fn output(&self) -> Result<TerminalOutputSnapshot, TerminalBackendError> {
+    async fn output(
+        &self,
+    ) -> Result<TerminalOutputSnapshot, TerminalBackendError> {
         let s = self.state.lock().await;
         Ok(TerminalOutputSnapshot {
             stdout: String::from_utf8_lossy(&s.stdout_bytes).to_string(),
@@ -559,7 +573,9 @@ impl RunningTerminal for LocalRunningTerminal {
         })
     }
 
-    async fn wait_for_exit(&self) -> Result<TerminalExitResult, TerminalBackendError> {
+    async fn wait_for_exit(
+        &self,
+    ) -> Result<TerminalExitResult, TerminalBackendError> {
         loop {
             {
                 let s = self.state.lock().await;
@@ -574,7 +590,9 @@ impl RunningTerminal for LocalRunningTerminal {
     }
 
     async fn kill(&self) -> Result<(), TerminalBackendError> {
-        if let Some(mut terminator) = self.lifecycle.terminator.lock().await.take() {
+        if let Some(mut terminator) =
+            self.lifecycle.terminator.lock().await.take()
+        {
             terminator.terminate();
         }
         let mut s = self.state.lock().await;
@@ -587,7 +605,10 @@ impl RunningTerminal for LocalRunningTerminal {
         Ok(())
     }
 
-    async fn write_stdin(&self, bytes: &[u8]) -> Result<(), TerminalBackendError> {
+    async fn write_stdin(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(), TerminalBackendError> {
         if self.lifecycle.exited.load(Ordering::Acquire) {
             return Err(TerminalBackendError::InvalidRequest(
                 "process has already exited".to_string(),
@@ -597,7 +618,9 @@ impl RunningTerminal for LocalRunningTerminal {
             .writer_tx
             .send(bytes.to_vec())
             .await
-            .map_err(|error| TerminalBackendError::Io(format!("stdin is closed: {error}")))
+            .map_err(|error| {
+                TerminalBackendError::Io(format!("stdin is closed: {error}"))
+            })
     }
 }
 

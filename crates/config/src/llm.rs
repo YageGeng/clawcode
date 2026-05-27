@@ -80,7 +80,9 @@ impl From<ProviderId> for String {
 }
 
 /// Identifies the API protocol used by a provider.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderType {
     /// OpenAI Responses API.

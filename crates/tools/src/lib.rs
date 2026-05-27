@@ -11,12 +11,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 pub use backend::fs::{
-    FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest, FsWriteResponse,
-    LocalFsBackend,
+    FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest,
+    FsWriteResponse, LocalFsBackend,
 };
 pub use backend::terminal::{
-    LocalTerminalBackend, RunningTerminal, TerminalBackend, TerminalBackendError,
-    TerminalCreateParams, TerminalEnvVariable, TerminalExitResult, TerminalOutputSnapshot,
+    LocalTerminalBackend, RunningTerminal, TerminalBackend,
+    TerminalBackendError, TerminalCreateParams, TerminalEnvVariable,
+    TerminalExitResult, TerminalOutputSnapshot,
 };
 pub use protocol::ToolContext;
 
@@ -30,7 +31,10 @@ pub trait ToolArgumentsConsumer: Send {
     ) -> Vec<protocol::ToolArgumentsStreamItem>;
 
     /// Flush pending display state after argument streaming completes.
-    fn finish(&mut self, call_id: &str) -> Result<Vec<protocol::ToolArgumentsStreamItem>, String>;
+    fn finish(
+        &mut self,
+        call_id: &str,
+    ) -> Result<Vec<protocol::ToolArgumentsStreamItem>, String>;
 }
 
 /// A tool that can be invoked by the LLM during a turn.
@@ -58,7 +62,11 @@ pub trait Tool: Send + Sync {
 
     /// Whether this specific invocation requires user approval.
     /// Default: `true` (safe-by-default).
-    fn needs_approval(&self, _arguments: &serde_json::Value, _ctx: &ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> bool {
         true
     }
 
@@ -80,7 +88,10 @@ pub trait Tool: Send + Sync {
         &self,
         arguments: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>, String> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        String,
+    > {
         match self.execute(arguments, ctx).await {
             Ok(text) => {
                 let item = protocol::ToolStreamItem::Final {
@@ -169,7 +180,10 @@ impl ToolRegistry {
         name: &str,
         arguments: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>, String> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        String,
+    > {
         match self.get(name) {
             Some(tool) => tool.execute_streaming(arguments, ctx).await,
             None => Err(format!("unknown tool: {name}")),

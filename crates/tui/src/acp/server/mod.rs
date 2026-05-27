@@ -7,14 +7,17 @@ use kernel::Kernel;
 use provider::factory::LlmFactory;
 use tokio::io::DuplexStream;
 use tokio::task::JoinHandle;
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tokio_util::compat::{
+    Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt,
+};
 use tools::builtin::fs::FsToolSet;
 use tools::{FsBackend, LocalTerminalBackend, ToolRegistry};
 
 pub mod fs;
 
 /// ACP byte transport backed by in-memory duplex streams.
-pub type InProcessTransport = ByteStreams<Compat<DuplexStream>, Compat<DuplexStream>>;
+pub type InProcessTransport =
+    ByteStreams<Compat<DuplexStream>, Compat<DuplexStream>>;
 
 /// Running in-process ACP server task.
 pub struct InProcessAcpServer {
@@ -60,8 +63,14 @@ pub fn start() -> anyhow::Result<(InProcessTransport, InProcessAcpServer)> {
     // built in this process, avoiding stale external binaries during development.
     let (client_outgoing, agent_incoming) = tokio::io::duplex(64 * 1024);
     let (agent_outgoing, client_incoming) = tokio::io::duplex(64 * 1024);
-    let client_io = ByteStreams::new(client_outgoing.compat_write(), client_incoming.compat());
-    let agent_io = ByteStreams::new(agent_outgoing.compat_write(), agent_incoming.compat());
+    let client_io = ByteStreams::new(
+        client_outgoing.compat_write(),
+        client_incoming.compat(),
+    );
+    let agent_io = ByteStreams::new(
+        agent_outgoing.compat_write(),
+        agent_incoming.compat(),
+    );
 
     let task = tokio::spawn(async move {
         if let Err(error) = agent.serve(agent_io).await {

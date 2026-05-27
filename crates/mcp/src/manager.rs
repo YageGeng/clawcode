@@ -50,7 +50,11 @@ impl McpConnectionManager {
                 McpServerConfig,
                 PathBuf,
             ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<ManagedClient, McpError>> + Send>,
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<ManagedClient, McpError>,
+                        > + Send,
+                >,
             > + Send
             + Sync
             + Clone
@@ -86,7 +90,8 @@ impl McpConnectionManager {
         }
 
         // Await all results.
-        let mut results: Vec<(String, Result<ManagedClient, McpError>)> = Vec::new();
+        let mut results: Vec<(String, Result<ManagedClient, McpError>)> =
+            Vec::new();
         for handle in handles {
             let (name, result) = handle.await.unwrap_or_else(|e| {
                 (
@@ -149,7 +154,11 @@ impl McpConnectionManager {
                 McpServerConfig,
                 PathBuf,
             ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<ManagedClient, McpError>> + Send>,
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<ManagedClient, McpError>,
+                        > + Send,
+                >,
             > + Send
             + Sync
             + Clone
@@ -201,7 +210,9 @@ impl McpConnectionManager {
 
     /// Start all servers in a background task, returning a oneshot receiver
     /// that fires once initialization is complete.
-    pub fn spawn_background(self: &Arc<Self>) -> tokio::sync::oneshot::Receiver<()> {
+    pub fn spawn_background(
+        self: &Arc<Self>,
+    ) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mgr = Arc::clone(self);
 
@@ -224,7 +235,9 @@ impl McpConnectionManager {
             }
 
             if tx.send(()).is_err() {
-                tracing::warn!("mcp startup notification receiver dropped before completion");
+                tracing::warn!(
+                    "mcp startup notification receiver dropped before completion"
+                );
             }
         });
         rx
@@ -284,7 +297,9 @@ impl McpConnectionManager {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match status.get(server) {
                     Some(McpStartupStatus::Failed { reason }) => {
-                        format!("MCP server '{server}' failed to start: {reason}")
+                        format!(
+                            "MCP server '{server}' failed to start: {reason}"
+                        )
                     }
                     _ => format!("MCP server '{server}' not found"),
                 }
@@ -292,15 +307,19 @@ impl McpConnectionManager {
             (client.service.clone(), client.tool_timeout_secs)
         };
 
-        let svc = service.ok_or_else(|| format!("MCP server '{server}' is not connected"))?;
+        let svc = service
+            .ok_or_else(|| format!("MCP server '{server}' is not connected"))?;
 
         let obj_args = match arguments {
             serde_json::Value::Object(map) => Some(map),
             serde_json::Value::Null => None,
-            other => Some(serde_json::Map::from_iter([("value".to_string(), other)])),
+            other => {
+                Some(serde_json::Map::from_iter([("value".to_string(), other)]))
+            }
         };
 
-        let mut params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
+        let mut params =
+            rmcp::model::CallToolRequestParams::new(tool_name.to_string());
         if let Some(a) = obj_args {
             params = params.with_arguments(a);
         }
@@ -356,7 +375,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use rmcp::handler::server::wrapper::Parameters;
-    use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+    use rmcp::model::{
+        CallToolResult, Content, ServerCapabilities, ServerInfo,
+    };
     use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
     use serde_json::json;
 
@@ -381,7 +402,9 @@ mod tests {
     #[tool_handler]
     impl ServerHandler for EchoServer {
         fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            ServerInfo::new(
+                ServerCapabilities::builder().enable_tools().build(),
+            )
         }
     }
 
@@ -399,7 +422,9 @@ mod tests {
     #[tool_handler]
     impl ServerHandler for ErrorServer {
         fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            ServerInfo::new(
+                ServerCapabilities::builder().enable_tools().build(),
+            )
         }
     }
 
@@ -410,7 +435,8 @@ mod tests {
     {
         let (server_tx, client_rx) = tokio::io::duplex(8192);
         tokio::spawn(async move {
-            let running = server.serve(server_tx).await.expect("server should start");
+            let running =
+                server.serve(server_tx).await.expect("server should start");
             let _ = running.waiting().await;
         });
         client_rx
@@ -436,13 +462,18 @@ mod tests {
     ) where
         T: rmcp::transport::IntoTransport<rmcp::RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
-        F: Fn(tokio::process::Command) -> Result<T, McpError> + Send + Sync + Clone + 'static,
+        F: Fn(tokio::process::Command) -> Result<T, McpError>
+            + Send
+            + Sync
+            + Clone
+            + 'static,
     {
         manager
             .start_all_with(move |cfg, dir| {
                 let connector = stdio_connector.clone();
                 Box::pin(async move {
-                    ManagedClient::connect_with_connector(&cfg, &dir, connector).await
+                    ManagedClient::connect_with_connector(&cfg, &dir, connector)
+                        .await
                 })
             })
             .await;
@@ -457,13 +488,18 @@ mod tests {
     where
         T: rmcp::transport::IntoTransport<rmcp::RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
-        F: Fn(tokio::process::Command) -> Result<T, McpError> + Send + Sync + Clone + 'static,
+        F: Fn(tokio::process::Command) -> Result<T, McpError>
+            + Send
+            + Sync
+            + Clone
+            + 'static,
     {
         manager
             .register_external_mcp_server_with(config, move |cfg, dir| {
                 let connector = stdio_connector.clone();
                 Box::pin(async move {
-                    ManagedClient::connect_with_connector(&cfg, &dir, connector).await
+                    ManagedClient::connect_with_connector(&cfg, &dir, connector)
+                        .await
                 })
             })
             .await
@@ -476,7 +512,8 @@ mod tests {
             tempfile::tempdir().unwrap().path().to_path_buf(),
         );
 
-        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(EchoServer))).await;
+        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(EchoServer)))
+            .await;
 
         let tools = manager.list_all_tools();
         assert_eq!(tools.len(), 1);
@@ -490,7 +527,10 @@ mod tests {
             tempfile::tempdir().unwrap().path().to_path_buf(),
         );
 
-        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(ErrorServer))).await;
+        start_all_with_connector(&manager, |_cmd| {
+            Ok(spawn_server(ErrorServer))
+        })
+        .await;
 
         let result = manager.call_tool("errors", "fail", json!({})).await;
         assert_eq!(result.expect_err("tool-level error should be Err"), "boom");
@@ -529,9 +569,11 @@ mod tests {
             tempfile::tempdir().unwrap().path().to_path_buf(),
         );
 
-        register_external_mcp_server_with_connector(&manager, stdio_config("dynamic"), |_cmd| {
-            Ok(spawn_server(EchoServer))
-        })
+        register_external_mcp_server_with_connector(
+            &manager,
+            stdio_config("dynamic"),
+            |_cmd| Ok(spawn_server(EchoServer)),
+        )
         .await
         .expect("external server should register");
 
@@ -547,18 +589,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_start_all_still_starts_static_servers_after_external_registration() {
+    async fn manager_start_all_still_starts_static_servers_after_external_registration()
+     {
         let manager = McpConnectionManager::new(
             vec![stdio_config("static")],
             tempfile::tempdir().unwrap().path().to_path_buf(),
         );
 
-        register_external_mcp_server_with_connector(&manager, stdio_config("dynamic"), |_cmd| {
-            Ok(spawn_server(EchoServer))
-        })
+        register_external_mcp_server_with_connector(
+            &manager,
+            stdio_config("dynamic"),
+            |_cmd| Ok(spawn_server(EchoServer)),
+        )
         .await
         .expect("external server should register");
-        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(EchoServer))).await;
+        start_all_with_connector(&manager, |_cmd| Ok(spawn_server(EchoServer)))
+            .await;
 
         let tools = manager.list_all_tools();
         let names = tools

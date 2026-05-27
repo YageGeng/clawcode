@@ -7,8 +7,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
 const CHATGPT_AUTH_BASE: &str = "https://auth.openai.com";
-const CHATGPT_DEVICE_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
-const CHATGPT_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const CHATGPT_DEVICE_CODE_URL: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const CHATGPT_DEVICE_TOKEN_URL: &str =
+    "https://auth.openai.com/api/accounts/deviceauth/token";
 const CHATGPT_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CHATGPT_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -65,14 +67,19 @@ enum RefreshTokensError {
 }
 
 impl PlatformAuthenticator {
-    pub(super) fn new(auth_file: Option<PathBuf>, device_code_handler: DeviceCodeHandler) -> Self {
+    pub(super) fn new(
+        auth_file: Option<PathBuf>,
+        device_code_handler: DeviceCodeHandler,
+    ) -> Self {
         Self {
             auth_file,
             device_code_handler,
         }
     }
 
-    pub(super) async fn auth_context_oauth(&self) -> Result<AuthContext, AuthError> {
+    pub(super) async fn auth_context_oauth(
+        &self,
+    ) -> Result<AuthContext, AuthError> {
         let mut record = self.read_auth_record()?;
 
         if let Some(access_token) = record.access_token.clone()
@@ -98,7 +105,9 @@ impl PlatformAuthenticator {
                 Ok(refreshed) => {
                     self.write_auth_record(&refreshed)?;
                     return Ok(AuthContext {
-                        access_token: refreshed.access_token.unwrap_or_default(),
+                        access_token: refreshed
+                            .access_token
+                            .unwrap_or_default(),
                         account_id: refreshed.account_id,
                     });
                 }
@@ -122,7 +131,9 @@ impl PlatformAuthenticator {
 
         match std::fs::read(path) {
             Ok(bytes) => read_auth_record(&bytes),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AuthRecord::default()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok(AuthRecord::default())
+            }
             Err(err) => Err(err.into()),
         }
     }
@@ -175,7 +186,8 @@ impl PlatformAuthenticator {
             },
         );
 
-        let interval = device.interval.unwrap_or(DEVICE_CODE_POLL_SLEEP_SECONDS);
+        let interval =
+            device.interval.unwrap_or(DEVICE_CODE_POLL_SLEEP_SECONDS);
         let start = std::time::Instant::now();
         let code = loop {
             if start.elapsed().as_secs() as i64 >= DEVICE_CODE_TIMEOUT_SECONDS {
@@ -194,13 +206,15 @@ impl PlatformAuthenticator {
                 .await?;
 
             if response.status().is_success() {
-                let token_response = response.json::<DeviceTokenResponse>().await?;
+                let token_response =
+                    response.json::<DeviceTokenResponse>().await?;
                 break token_response;
             }
 
             let status = response.status();
             if status.as_u16() == 403 || status.as_u16() == 404 {
-                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(interval))
+                    .await;
                 continue;
             }
 
@@ -238,7 +252,10 @@ impl PlatformAuthenticator {
         Ok(build_auth_record(tokens, None))
     }
 
-    async fn refresh_tokens(&self, refresh_token: &str) -> Result<AuthRecord, RefreshTokensError> {
+    async fn refresh_tokens(
+        &self,
+        refresh_token: &str,
+    ) -> Result<AuthRecord, RefreshTokensError> {
         let client = reqwest::Client::new();
         let form = [
             ("client_id", CHATGPT_CLIENT_ID),
@@ -270,11 +287,15 @@ impl PlatformAuthenticator {
                 .await
                 .map_err(AuthError::from)
                 .map_err(RefreshTokensError::Auth)?;
-            return Ok(build_auth_record(tokens, Some(refresh_token.to_owned())));
+            return Ok(build_auth_record(
+                tokens,
+                Some(refresh_token.to_owned()),
+            ));
         }
 
         let body = response.text().await.unwrap_or_default();
-        let oauth_error = serde_json::from_str::<OAuthErrorResponse>(&body).ok();
+        let oauth_error =
+            serde_json::from_str::<OAuthErrorResponse>(&body).ok();
         if should_reauthenticate_after_refresh(
             status,
             oauth_error
@@ -290,7 +311,10 @@ impl PlatformAuthenticator {
     }
 }
 
-fn emit_device_code_prompt(handler: &DeviceCodeHandler, prompt: DeviceCodePrompt) {
+fn emit_device_code_prompt(
+    handler: &DeviceCodeHandler,
+    prompt: DeviceCodePrompt,
+) {
     if let Some(callback) = &handler.0 {
         callback(prompt);
     } else {
@@ -330,9 +354,9 @@ fn build_auth_record(
 }
 
 fn extract_expiration_timestamp(token: &str) -> Option<i64> {
-    decode_jwt_claims(token)
-        .get("exp")
-        .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
+    decode_jwt_claims(token).get("exp").and_then(|value| {
+        value.as_i64().or_else(|| value.as_u64().map(|v| v as i64))
+    })
 }
 
 fn extract_account_id(token: Option<&str>) -> Option<String> {
@@ -350,7 +374,9 @@ fn decode_jwt_claims(token: &str) -> serde_json::Value {
     let decoded = BASE64_URL_SAFE_NO_PAD.decode(payload.as_bytes());
     decoded
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|bytes| {
+            serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+        })
         .unwrap_or(serde_json::Value::Null)
 }
 
@@ -359,7 +385,8 @@ fn read_auth_record(bytes: &[u8]) -> Result<AuthRecord, AuthError> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
     if let Some(tokens) = value.get("tokens") {
         if !tokens.is_null() {
-            if let Ok(record) = serde_json::from_value::<AuthRecord>(tokens.clone())
+            if let Ok(record) =
+                serde_json::from_value::<AuthRecord>(tokens.clone())
                 && auth_record_has_token_material(&record)
             {
                 return Ok(record);
@@ -393,7 +420,8 @@ fn format_refresh_error(
     body: &str,
 ) -> String {
     let error_code = oauth_error.and_then(|error| error.error.as_deref());
-    let description = oauth_error.and_then(|error| error.error_description.as_deref());
+    let description =
+        oauth_error.and_then(|error| error.error_description.as_deref());
 
     if let Some(description) = description
         .map(str::trim)
@@ -428,7 +456,9 @@ fn token_expired(expires_at: Option<i64>) -> bool {
     }
 }
 
-fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+fn deserialize_optional_u64<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -460,8 +490,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthRecord, DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse, build_auth_record,
-        format_refresh_error, read_auth_record, should_reauthenticate_after_refresh,
+        AuthRecord, DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse,
+        build_auth_record, format_refresh_error, read_auth_record,
+        should_reauthenticate_after_refresh,
     };
     use reqwest::StatusCode;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -526,13 +557,18 @@ mod tests {
         };
 
         assert_eq!(
-            format_refresh_error(StatusCode::BAD_GATEWAY, Some(&oauth_error), ""),
+            format_refresh_error(
+                StatusCode::BAD_GATEWAY,
+                Some(&oauth_error),
+                ""
+            ),
             "ChatGPT token refresh failed: 502 Bad Gateway temporarily_unavailable (please retry)"
         );
     }
 
     #[test]
-    fn build_auth_record_preserves_existing_refresh_token_when_refresh_omits_one() {
+    fn build_auth_record_preserves_existing_refresh_token_when_refresh_omits_one()
+     {
         let record = build_auth_record(
             OAuthTokenResponse {
                 access_token: "access-token".into(),
@@ -558,7 +594,8 @@ mod tests {
             },
             "last_refresh": "2026-01-01T00:00:00Z"
         });
-        let record = read_auth_record(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        let record =
+            read_auth_record(&serde_json::to_vec(&payload).unwrap()).unwrap();
 
         assert_eq!(record.account_id.as_deref(), Some("nested-account"));
         assert_eq!(record.access_token.as_deref(), Some("nested-access"));
@@ -571,7 +608,8 @@ mod tests {
             "account_id": "legacy-account",
             "tokens": {},
         });
-        let record = read_auth_record(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        let record =
+            read_auth_record(&serde_json::to_vec(&payload).unwrap()).unwrap();
 
         assert_eq!(record.account_id.as_deref(), Some("legacy-account"));
         assert_eq!(record.access_token.as_deref(), Some("legacy-access"));
@@ -601,7 +639,10 @@ mod tests {
         )
         .unwrap();
 
-        let auth = super::PlatformAuthenticator::new(Some(path.clone()), Default::default());
+        let auth = super::PlatformAuthenticator::new(
+            Some(path.clone()),
+            Default::default(),
+        );
         let record = AuthRecord {
             access_token: Some("new-token".into()),
             refresh_token: Some("refresh-token".into()),
@@ -611,7 +652,8 @@ mod tests {
         };
         auth.write_auth_record(&record).unwrap();
 
-        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(raw["OPENAI_API_KEY"], "legacy-key");
         assert_eq!(raw["extra"]["plan"], "pro");
         assert_eq!(raw["tokens"]["access_token"], "new-token");

@@ -14,8 +14,9 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::{
-    LocalTerminalBackend, RunningTerminal, TerminalBackend, TerminalCreateParams,
-    TerminalEnvVariable, TerminalOutputSnapshot, Tool, ToolContext,
+    LocalTerminalBackend, RunningTerminal, TerminalBackend,
+    TerminalCreateParams, TerminalEnvVariable, TerminalOutputSnapshot, Tool,
+    ToolContext,
 };
 
 const OUTPUT_MAX_LEN: usize = 4096;
@@ -238,7 +239,11 @@ impl Tool for ShellCommand {
         }
     }
 
-    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         true
     }
 
@@ -261,9 +266,13 @@ impl Tool for ShellCommand {
         &self,
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
-    ) -> Result<Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>, String> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        String,
+    > {
         let args = ShellArgs::parse(arguments, ctx)?;
-        let command = vec![args.shell.clone(), "-c".to_string(), args.command.clone()];
+        let command =
+            vec![args.shell.clone(), "-c".to_string(), args.command.clone()];
         let (process_id, handle) = self.runtime.spawn(&args, ctx).await?;
         let runtime = Arc::clone(&self.runtime);
         let stream = stream! {
@@ -444,7 +453,11 @@ impl Tool for WriteStdin {
         }
     }
 
-    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         false
     }
 
@@ -467,10 +480,17 @@ impl Tool for WriteStdin {
         &self,
         arguments: serde_json::Value,
         _ctx: &crate::ToolContext,
-    ) -> Result<Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>, String> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        String,
+    > {
         let args = WriteStdinArgs::parse(arguments)?;
-        let Some(stored) = self.runtime.load_process(args.process_id).await else {
-            return Err(format!("unknown shell process id: {}", args.process_id));
+        let Some(stored) = self.runtime.load_process(args.process_id).await
+        else {
+            return Err(format!(
+                "unknown shell process id: {}",
+                args.process_id
+            ));
         };
 
         if !args.chars.is_empty() {
@@ -583,7 +603,10 @@ struct ShellArgs {
 
 impl ShellArgs {
     /// Parse tool arguments into a typed shell request.
-    fn parse(arguments: serde_json::Value, ctx: &ToolContext) -> Result<Self, String> {
+    fn parse(
+        arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<Self, String> {
         ShellArgsInput::parse(arguments)?.into_shell_args(ctx)
     }
 
@@ -642,8 +665,9 @@ struct ShellArgsInput {
 impl ShellArgsInput {
     /// Deserialize raw JSON into shell input fields.
     fn parse(arguments: serde_json::Value) -> Result<Self, String> {
-        serde_path_to_error::deserialize(arguments)
-            .map_err(|error| format!("invalid shell arguments at {}: {error}", error.path()))
+        serde_path_to_error::deserialize(arguments).map_err(|error| {
+            format!("invalid shell arguments at {}: {error}", error.path())
+        })
     }
 
     /// Convert deserialized input into normalized shell execution arguments.
@@ -693,7 +717,9 @@ impl From<ShellEnvInput> for Vec<TerminalEnvVariable> {
     /// Convert deserialized environment input into backend variables.
     fn from(value: ShellEnvInput) -> Self {
         match value {
-            ShellEnvInput::Entries(entries) => entries.into_iter().map(Into::into).collect(),
+            ShellEnvInput::Entries(entries) => {
+                entries.into_iter().map(Into::into).collect()
+            }
             ShellEnvInput::Object(values) => values
                 .into_iter()
                 .map(|(name, value)| {
@@ -799,8 +825,12 @@ struct WriteStdinArgsInput {
 impl WriteStdinArgsInput {
     /// Deserialize raw JSON into stdin-write input fields.
     fn parse(arguments: serde_json::Value) -> Result<Self, String> {
-        serde_path_to_error::deserialize(arguments)
-            .map_err(|error| format!("invalid write_stdin arguments at {}: {error}", error.path()))
+        serde_path_to_error::deserialize(arguments).map_err(|error| {
+            format!(
+                "invalid write_stdin arguments at {}: {error}",
+                error.path()
+            )
+        })
     }
 
     /// Convert deserialized input into normalized stdin-write arguments.
@@ -809,8 +839,9 @@ impl WriteStdinArgsInput {
             .session_id
             .or(self.process_id)
             .ok_or("missing 'session_id' argument")?;
-        let process_id = i32::try_from(process_id)
-            .map_err(|error| format!("session_id must fit in a 32-bit integer: {error}"))?;
+        let process_id = i32::try_from(process_id).map_err(|error| {
+            format!("session_id must fit in a 32-bit integer: {error}")
+        })?;
 
         Ok(WriteStdinArgs::from_input(
             process_id,
@@ -852,7 +883,8 @@ impl OutputCollector {
     async fn snapshot_with_deltas(
         &mut self,
         handle: &dyn RunningTerminal,
-    ) -> Result<(TerminalOutputSnapshot, Vec<protocol::ToolStreamItem>), String> {
+    ) -> Result<(TerminalOutputSnapshot, Vec<protocol::ToolStreamItem>), String>
+    {
         let snapshot = handle
             .output()
             .await
@@ -868,7 +900,9 @@ impl OutputCollector {
     ) -> Vec<protocol::ToolStreamItem> {
         let mut items = Vec::new();
         if snapshot.stdout.len() > self.stdout_offset {
-            if let Some(chunk) = snapshot.stdout.as_bytes().get(self.stdout_offset..) {
+            if let Some(chunk) =
+                snapshot.stdout.as_bytes().get(self.stdout_offset..)
+            {
                 items.push(protocol::ToolStreamItem::Delta {
                     stream: protocol::ExecOutputStream::Stdout,
                     chunk: chunk.to_vec(),
@@ -877,7 +911,9 @@ impl OutputCollector {
             self.stdout_offset = snapshot.stdout.len();
         }
         if snapshot.stderr.len() > self.stderr_offset {
-            if let Some(chunk) = snapshot.stderr.as_bytes().get(self.stderr_offset..) {
+            if let Some(chunk) =
+                snapshot.stderr.as_bytes().get(self.stderr_offset..)
+            {
                 items.push(protocol::ToolStreamItem::Delta {
                     stream: protocol::ExecOutputStream::Stderr,
                     chunk: chunk.to_vec(),
@@ -932,18 +968,19 @@ fn build_shell_result(
         truncate(&snapshot.stderr, output_limit / 2),
     );
 
-    let end_item = protocol::ToolStreamItem::End(protocol::TurnItem::ExecCommand(
-        protocol::ExecCommandItem::builder()
-            .id(String::new())
-            .command(command.to_vec())
-            .cwd(cwd.to_path_buf())
-            .status(status)
-            .stdout(snapshot.stdout)
-            .stderr(snapshot.stderr)
-            .exit_code(exit_code)
-            .duration_ms(duration_ms)
-            .build(),
-    ));
+    let end_item =
+        protocol::ToolStreamItem::End(protocol::TurnItem::ExecCommand(
+            protocol::ExecCommandItem::builder()
+                .id(String::new())
+                .command(command.to_vec())
+                .cwd(cwd.to_path_buf())
+                .status(status)
+                .stdout(snapshot.stdout)
+                .stderr(snapshot.stderr)
+                .exit_code(exit_code)
+                .duration_ms(duration_ms)
+                .build(),
+        ));
 
     (model_text, end_item)
 }
@@ -978,7 +1015,9 @@ mod tests {
 
     /// Drain a stream and return the last model-facing text item.
     async fn final_text_and_items(
-        mut stream: Pin<Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>>,
+        mut stream: Pin<
+            Box<dyn Stream<Item = protocol::ToolStreamItem> + Send>,
+        >,
     ) -> (String, Vec<protocol::ToolStreamItem>) {
         let mut text = String::new();
         let mut items = Vec::new();
@@ -1048,11 +1087,10 @@ mod tests {
         let (poll_text, _poll_items) = final_text_and_items(poll_stream).await;
         assert!(poll_text.contains("done"));
 
-        assert!(
-            items
-                .iter()
-                .any(|item| matches!(item, protocol::ToolStreamItem::Delta { .. }))
-        );
+        assert!(items.iter().any(|item| matches!(
+            item,
+            protocol::ToolStreamItem::Delta { .. }
+        )));
     }
 
     #[tokio::test]
@@ -1075,10 +1113,11 @@ mod tests {
             Some(protocol::ToolStreamItem::Begin(_))
         ));
 
-        let item = tokio::time::timeout(Duration::from_millis(900), stream.next())
-            .await
-            .expect("first delta should arrive before the yield deadline")
-            .expect("stream item");
+        let item =
+            tokio::time::timeout(Duration::from_millis(900), stream.next())
+                .await
+                .expect("first delta should arrive before the yield deadline")
+                .expect("stream item");
         assert!(started.elapsed() < Duration::from_millis(900));
         assert!(matches!(
             item,
@@ -1202,7 +1241,10 @@ mod tests {
     #[tokio::test]
     async fn shell_needs_approval() {
         let tool = ShellCommand::new();
-        assert!(tool.needs_approval(&serde_json::json!({"command": "ls"}), &test_ctx()));
+        assert!(tool.needs_approval(
+            &serde_json::json!({"command": "ls"}),
+            &test_ctx()
+        ));
     }
 
     #[test]

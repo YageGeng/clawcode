@@ -68,7 +68,11 @@ impl Tool for SkillTool {
         })
     }
 
-    fn needs_approval(&self, _arguments: &serde_json::Value, _ctx: &ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> bool {
         false
     }
 
@@ -219,7 +223,11 @@ mod tests {
     #[test]
     fn list_skill_files_skips_skill_md() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("SKILL.md"), "---\nname: test\n---\nbody\n").unwrap();
+        std::fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: test\n---\nbody\n",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("script.sh"), "echo hi").unwrap();
         std::fs::write(dir.path().join("reference.md"), "# ref").unwrap();
 
@@ -233,7 +241,8 @@ mod tests {
     fn list_skill_files_respects_limit() {
         let dir = tempfile::tempdir().unwrap();
         for i in 0..15 {
-            std::fs::write(dir.path().join(format!("file_{i}.txt")), "").unwrap();
+            std::fs::write(dir.path().join(format!("file_{i}.txt")), "")
+                .unwrap();
         }
         let result = list_skill_files(dir.path());
         let count = result.lines().count();

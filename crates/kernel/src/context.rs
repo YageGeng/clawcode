@@ -34,7 +34,9 @@ pub trait ContextManager: Send + Sync {
                     let text = reasoning.display_text();
                     if text.is_empty() { None } else { Some(text) }
                 }
-                AssistantContent::ToolCall(_) | AssistantContent::Image(_) => None,
+                AssistantContent::ToolCall(_) | AssistantContent::Image(_) => {
+                    None
+                }
             })
         })
     }
@@ -49,7 +51,10 @@ pub trait ContextManager: Send + Sync {
 
     /// Compact the history by summarizing older messages.
     /// Default implementation is a no-op.
-    fn compact(&mut self, _llm: &dyn Llm) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+    fn compact(
+        &mut self,
+        _llm: &dyn Llm,
+    ) -> BoxFuture<'_, Result<(), anyhow::Error>> {
         Box::pin(std::future::ready(Ok(())))
     }
 }
@@ -141,7 +146,8 @@ mod tests {
     }
 
     #[test]
-    fn default_last_assistant_text_returns_latest_displayable_assistant_content() {
+    fn default_last_assistant_text_returns_latest_displayable_assistant_content()
+     {
         let mut ctx = InMemoryContext::new();
         ctx.push(Message::assistant("older answer"));
         ctx.push(Message::user("ignored user message"));

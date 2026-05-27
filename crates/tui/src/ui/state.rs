@@ -5,15 +5,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{
-    ContentBlock, SessionId, SessionNotification, SessionUpdate, StopReason, ToolCall,
-    ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, UsageUpdate,
+    ContentBlock, SessionId, SessionNotification, SessionUpdate, StopReason,
+    ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
+    UsageUpdate,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::approval::PendingApproval;
 use crate::ui::cell::{TextCell, TextRole, ToolCallCell, TranscriptCell};
 use crate::ui::theme::Theme;
-use crate::ui::transcript::entry::{TranscriptEntry, TranscriptEntryId, TranscriptEntryState};
+use crate::ui::transcript::entry::{
+    TranscriptEntry, TranscriptEntryId, TranscriptEntryState,
+};
 
 /// Token usage totals for the current turn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -48,7 +51,8 @@ impl UsageView {
     /// Builds a usage view from ACP metadata when Clawcode provides split totals.
     pub fn from_acp_update(update: &UsageUpdate) -> Self {
         if let Some(meta) = &update.meta
-            && let Some(usage) = meta.get("clawcode").and_then(|value| value.get("usage"))
+            && let Some(usage) =
+                meta.get("clawcode").and_then(|value| value.get("usage"))
         {
             let input_tokens = usage
                 .get("input_tokens")
@@ -138,7 +142,11 @@ pub struct AppState {
 
 impl AppState {
     /// Creates renderable state for a new TUI ACP session.
-    pub fn new(session_id: SessionId, cwd: PathBuf, model_label: String) -> Self {
+    pub fn new(
+        session_id: SessionId,
+        cwd: PathBuf,
+        model_label: String,
+    ) -> Self {
         AppState::builder()
             .session_id(session_id)
             .cwd(cwd)
@@ -205,18 +213,30 @@ impl AppState {
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    self.append_to_active_text_or_push(TextRole::Assistant, text);
+                    self.append_to_active_text_or_push(
+                        TextRole::Assistant,
+                        text,
+                    );
                 }
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 if let Some(text) = content_block_text(&chunk.content) {
-                    self.append_to_active_text_or_push(TextRole::Reasoning, text);
+                    self.append_to_active_text_or_push(
+                        TextRole::Reasoning,
+                        text,
+                    );
                 }
             }
-            SessionUpdate::ToolCall(tool_call) => self.apply_tool_call(tool_call),
-            SessionUpdate::ToolCallUpdate(update) => self.apply_tool_call_update(update),
+            SessionUpdate::ToolCall(tool_call) => {
+                self.apply_tool_call(tool_call)
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                self.apply_tool_call_update(update)
+            }
             SessionUpdate::Plan(_) => {}
-            SessionUpdate::UsageUpdate(update) => self.apply_usage_update(update),
+            SessionUpdate::UsageUpdate(update) => {
+                self.apply_usage_update(update)
+            }
             _ => {}
         }
     }
@@ -233,7 +253,9 @@ impl AppState {
     /// Records a prompt completion returned by ACP.
     pub fn finish_prompt(&mut self, stop_reason: StopReason) {
         for entry in &mut self.transcript {
-            if entry.state() == TranscriptEntryState::Active && entry.text_cell().is_some() {
+            if entry.state() == TranscriptEntryState::Active
+                && entry.text_cell().is_some()
+            {
                 entry.commit();
             }
         }
@@ -399,12 +421,17 @@ impl AppState {
     /// Allocates the next stable transcript entry id.
     fn next_entry_id(&mut self) -> TranscriptEntryId {
         let id = TranscriptEntryId::new(self.next_transcript_entry_id);
-        self.next_transcript_entry_id = self.next_transcript_entry_id.wrapping_add(1);
+        self.next_transcript_entry_id =
+            self.next_transcript_entry_id.wrapping_add(1);
         id
     }
 
     /// Pushes a new transcript entry and returns its index.
-    fn push_entry(&mut self, state: TranscriptEntryState, cell: Arc<dyn TranscriptCell>) -> usize {
+    fn push_entry(
+        &mut self,
+        state: TranscriptEntryState,
+        cell: Arc<dyn TranscriptCell>,
+    ) -> usize {
         let id = self.next_entry_id();
         let index = self.transcript.len();
         self.transcript.push(TranscriptEntry::new(id, state, cell));
@@ -420,7 +447,10 @@ impl AppState {
     }
 
     /// Returns the trailing active text entry index for the requested role.
-    fn trailing_active_text_entry_index(&self, role: TextRole) -> Option<usize> {
+    fn trailing_active_text_entry_index(
+        &self,
+        role: TextRole,
+    ) -> Option<usize> {
         let index = self.transcript.len().checked_sub(1)?;
         let entry = self.transcript.get(index)?;
         if entry.state() != TranscriptEntryState::Active {
@@ -463,13 +493,19 @@ impl AppState {
     }
 
     /// Applies a mutation to a copied tool-call entry and bumps only that entry.
-    fn mutate_tool_call(&mut self, call_id: String, mutate: impl FnOnce(&mut ToolCallCell)) {
+    fn mutate_tool_call(
+        &mut self,
+        call_id: String,
+        mutate: impl FnOnce(&mut ToolCallCell),
+    ) {
         let index = self.pending_tool_call_entry_index(call_id);
         let Some(entry) = self.transcript.get_mut(index) else {
             unreachable!("tool call index must point inside transcript");
         };
         let Some(tool) = entry.tool_call() else {
-            unreachable!("tool call index must point at a tool call transcript cell");
+            unreachable!(
+                "tool call index must point at a tool call transcript cell"
+            );
         };
         let was_committed = entry.state() == TranscriptEntryState::Committed;
         let mut updated = tool.clone();
@@ -545,7 +581,9 @@ fn content_block_text(content: &ContentBlock) -> Option<String> {
         ContentBlock::Text(text) => Some(text.text.clone()),
         ContentBlock::Image(_) => Some("[image]".to_string()),
         ContentBlock::Audio(_) => Some("[audio]".to_string()),
-        ContentBlock::ResourceLink(resource) => Some(format!("[resource] {}", resource.uri)),
+        ContentBlock::ResourceLink(resource) => {
+            Some(format!("[resource] {}", resource.uri))
+        }
         ContentBlock::Resource(_) => Some("[resource]".to_string()),
         _ => None,
     }
@@ -565,8 +603,9 @@ fn json_to_display(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        Content, ContentBlock, ContentChunk, RequestPermissionRequest, TextContent, ToolCall,
-        ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
+        Content, ContentBlock, ContentChunk, RequestPermissionRequest,
+        TextContent, ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, UsageUpdate,
     };
     use unicode_width::UnicodeWidthStr;
 
@@ -581,7 +620,10 @@ mod tests {
     }
 
     /// Builds a session notification for ACP state tests.
-    fn notification(session_id: SessionId, update: SessionUpdate) -> SessionNotification {
+    fn notification(
+        session_id: SessionId,
+        update: SessionUpdate,
+    ) -> SessionNotification {
         SessionNotification::new(session_id, update)
     }
 
@@ -626,7 +668,11 @@ mod tests {
     #[test]
     fn state_acp_thought_chunks_append_to_reasoning_cell() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id.clone(),
@@ -644,7 +690,11 @@ mod tests {
     #[test]
     fn state_acp_tool_call_and_update_tool_state() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id.clone(),
@@ -659,7 +709,9 @@ mod tests {
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
                 ToolCallUpdateFields::new()
-                    .content(vec![ToolCallContent::Content(Content::new(text("/tmp")))])
+                    .content(vec![ToolCallContent::Content(Content::new(
+                        text("/tmp"),
+                    ))])
                     .status(ToolCallStatus::Completed),
             )),
         ));
@@ -675,7 +727,11 @@ mod tests {
     #[test]
     fn state_tool_call_update_mutates_existing_transcript_cell() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id.clone(),
@@ -698,7 +754,9 @@ mod tests {
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
                 ToolCallUpdateFields::new()
-                    .content(vec![ToolCallContent::Content(Content::new(text("done")))])
+                    .content(vec![ToolCallContent::Content(Content::new(
+                        text("done"),
+                    ))])
                     .status(ToolCallStatus::Completed),
             )),
         ));
@@ -715,17 +773,19 @@ mod tests {
     #[test]
     fn state_tool_call_update_first_creates_pending_transcript_cell() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id,
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
-                ToolCallUpdateFields::new()
-                    .title("shell")
-                    .content(vec![ToolCallContent::Content(Content::new(text(
-                        "partial",
-                    )))]),
+                ToolCallUpdateFields::new().title("shell").content(vec![
+                    ToolCallContent::Content(Content::new(text("partial"))),
+                ]),
             )),
         ));
 
@@ -740,7 +800,11 @@ mod tests {
     #[test]
     fn state_tool_call_update_preserves_diff_content() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id,
@@ -749,8 +813,11 @@ mod tests {
                 ToolCallUpdateFields::new()
                     .title("apply_patch")
                     .content(vec![ToolCallContent::Diff(
-                        agent_client_protocol::schema::Diff::new("src/main.rs", "fn new() {}\n")
-                            .old_text("fn old() {}\n"),
+                        agent_client_protocol::schema::Diff::new(
+                            "src/main.rs",
+                            "fn new() {}\n",
+                        )
+                        .old_text("fn old() {}\n"),
                     )])
                     .status(ToolCallStatus::Completed),
             )),
@@ -775,7 +842,11 @@ mod tests {
     #[test]
     fn state_tool_call_diff_updates_replace_previous_diff_content() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id.clone(),
@@ -784,8 +855,11 @@ mod tests {
                 ToolCallUpdateFields::new()
                     .title("apply_patch")
                     .content(vec![ToolCallContent::Diff(
-                        agent_client_protocol::schema::Diff::new("src/main.rs", "fn v1() {}\n")
-                            .old_text("fn old() {}\n"),
+                        agent_client_protocol::schema::Diff::new(
+                            "src/main.rs",
+                            "fn v1() {}\n",
+                        )
+                        .old_text("fn old() {}\n"),
                     )]),
             )),
         ));
@@ -793,10 +867,15 @@ mod tests {
             session_id,
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
-                ToolCallUpdateFields::new().content(vec![ToolCallContent::Diff(
-                    agent_client_protocol::schema::Diff::new("src/main.rs", "fn v2() {}\n")
+                ToolCallUpdateFields::new().content(vec![
+                    ToolCallContent::Diff(
+                        agent_client_protocol::schema::Diff::new(
+                            "src/main.rs",
+                            "fn v2() {}\n",
+                        )
                         .old_text("fn old() {}\n"),
-                )]),
+                    ),
+                ]),
             )),
         ));
 
@@ -815,7 +894,11 @@ mod tests {
     #[test]
     fn state_finish_prompt_commits_active_text_entries() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id,
@@ -834,7 +917,11 @@ mod tests {
     fn state_late_tool_update_keeps_committed_tool_entry_committed() {
         let session_id = sid("s1");
         let call_id = "call-1".to_string();
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id.clone(),
@@ -850,9 +937,9 @@ mod tests {
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new(call_id.as_str()),
                 ToolCallUpdateFields::new()
-                    .content(vec![ToolCallContent::Content(Content::new(text(
-                        "late output",
-                    )))])
+                    .content(vec![ToolCallContent::Content(Content::new(
+                        text("late output"),
+                    ))])
                     .status(ToolCallStatus::InProgress),
             )),
         ));
@@ -867,7 +954,11 @@ mod tests {
     /// Verifies ACP updates from another session do not mutate renderable state.
     #[test]
     fn state_ignores_acp_updates_for_other_sessions() {
-        let mut state = AppState::new(sid("s1"), "/tmp/project".into(), "model".to_string());
+        let mut state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             sid("s2"),
@@ -881,7 +972,11 @@ mod tests {
     #[test]
     fn state_acp_usage_update_accumulates_input_and_output_tokens() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         let usage_update = UsageUpdate::new(15, 0).meta(
             serde_json::json!({
@@ -911,7 +1006,11 @@ mod tests {
     #[test]
     fn state_acp_usage_update_without_metadata_sets_total_tokens() {
         let session_id = sid("s1");
-        let mut state = AppState::new(session_id.clone(), "/tmp".into(), "model".to_string());
+        let mut state = AppState::new(
+            session_id.clone(),
+            "/tmp".into(),
+            "model".to_string(),
+        );
 
         state.apply_session_update(notification(
             session_id.clone(),
@@ -994,7 +1093,8 @@ mod tests {
     /// Verifies completed prompts clear the running marker and remember the stop reason.
     #[test]
     fn state_finish_prompt_clears_running_status_and_records_stop_reason() {
-        let mut state = AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
+        let mut state =
+            AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
         state.append_user_message("hello");
 
         state.finish_prompt(StopReason::EndTurn);
@@ -1006,7 +1106,8 @@ mod tests {
     /// Verifies ACP permission overlays are stored until the UI consumes them.
     #[test]
     fn state_pending_approval_can_be_set_and_taken() {
-        let mut state = AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
+        let mut state =
+            AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
         let request = RequestPermissionRequest::new(
             sid("s1"),
             ToolCallUpdate::new(
@@ -1018,7 +1119,10 @@ mod tests {
 
         state.set_pending_approval(PendingApproval::from_request(11, &request));
 
-        assert_eq!(state.pending_approval().expect("approval").request_id(), 11);
+        assert_eq!(
+            state.pending_approval().expect("approval").request_id(),
+            11
+        );
         assert_eq!(
             state
                 .take_pending_approval()
@@ -1032,7 +1136,8 @@ mod tests {
     /// Verifies runtime errors clear stale approval prompts and become the top status.
     #[test]
     fn state_error_clears_pending_approval() {
-        let mut state = AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
+        let mut state =
+            AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
         let request = RequestPermissionRequest::new(
             sid("s1"),
             ToolCallUpdate::new(
@@ -1052,7 +1157,8 @@ mod tests {
     /// Verifies a new user prompt clears stale approval prompts and starts running.
     #[test]
     fn state_append_user_message_clears_pending_approval() {
-        let mut state = AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
+        let mut state =
+            AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
         let request = RequestPermissionRequest::new(
             sid("s1"),
             ToolCallUpdate::new(

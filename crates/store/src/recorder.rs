@@ -5,7 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use super::record::{PersistedPayload, PersistedRecord, SCHEMA_VERSION, timestamp_now};
+use super::record::{
+    PersistedPayload, PersistedRecord, SCHEMA_VERSION, timestamp_now,
+};
 
 /// Trait for appending typed payloads to a session's persistent storage.
 #[async_trait]
@@ -65,7 +67,8 @@ impl SessionRecorder for FileSessionRecorder {
                     .payload(payload.clone())
                     .build()
             };
-            let mut line = serde_json::to_string(&record).map_err(io::Error::other)?;
+            let mut line =
+                serde_json::to_string(&record).map_err(io::Error::other)?;
             line.push('\n');
             file.write_all(line.as_bytes())?;
         }
@@ -76,7 +79,8 @@ impl SessionRecorder for FileSessionRecorder {
 
     async fn flush(&self) -> io::Result<()> {
         let _guard = self.lock.lock().await;
-        let file = match std::fs::OpenOptions::new().read(true).open(&self.path) {
+        let file = match std::fs::OpenOptions::new().read(true).open(&self.path)
+        {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err),

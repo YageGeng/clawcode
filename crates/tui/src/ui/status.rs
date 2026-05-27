@@ -21,12 +21,20 @@ fn cwd_style_with_theme(theme: &Theme) -> Style {
 }
 
 /// Renders the top status row.
-pub(super) fn render_top_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+pub(super) fn render_top_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+) {
     frame.render_widget(Paragraph::new(state.top_status_line()), area);
 }
 
 /// Renders the bottom status row constrained to the available terminal width.
-pub(super) fn render_bottom_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+pub(super) fn render_bottom_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+) {
     frame.render_widget(
         Paragraph::new(bottom_status_line(state, area.width as usize)),
         area,
@@ -61,7 +69,11 @@ fn bottom_status_line_with_agent(
     active_agent_label: &str,
     width: usize,
 ) -> Line<'static> {
-    bottom_status_line_with_optional_agent(state, Some(active_agent_label), width)
+    bottom_status_line_with_optional_agent(
+        state,
+        Some(active_agent_label),
+        width,
+    )
 }
 
 /// Builds the styled bottom status line with model, cwd, agent, and token usage.
@@ -90,7 +102,8 @@ fn bottom_status_line_with_optional_agent(
     let suffix_width = UnicodeWidthStr::width(separator) + token_width;
     if width > suffix_width {
         let prefix_width = width - suffix_width;
-        let mut spans = styled_prefix_spans(model, &context, prefix_width, state.theme());
+        let mut spans =
+            styled_prefix_spans(model, &context, prefix_width, state.theme());
         spans.push(Span::raw(separator));
         spans.push(Span::raw(token_status));
         return Line::from(spans);
@@ -109,7 +122,8 @@ fn styled_prefix_spans(
     max_width: usize,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
-    let prefix = truncate_to_display_width(&format!("{model} | {cwd}"), max_width);
+    let prefix =
+        truncate_to_display_width(&format!("{model} | {cwd}"), max_width);
     if let Some((model_part, cwd_part)) = prefix.split_once(" | ") {
         vec![
             Span::styled(model_part.to_string(), model_style_with_theme(theme)),

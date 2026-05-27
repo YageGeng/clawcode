@@ -35,7 +35,11 @@ impl Composer {
     }
 
     /// Returns the cursor cell offset from the start of the composer area.
-    pub fn cursor_cell_offset(&self, available_width: u16, prompt_prefix_width: u16) -> (u16, u16) {
+    pub fn cursor_cell_offset(
+        &self,
+        available_width: u16,
+        prompt_prefix_width: u16,
+    ) -> (u16, u16) {
         let width = usize::from(available_width.max(1));
         let mut row = 0usize;
         let mut column = usize::from(prompt_prefix_width);
@@ -275,11 +279,17 @@ mod tests {
         let mut composer = Composer::default();
 
         assert_eq!(
-            composer.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            composer.handle_key(KeyEvent::new(
+                KeyCode::Char('h'),
+                KeyModifiers::NONE
+            )),
             ComposerAction::Redraw
         );
         assert_eq!(
-            composer.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+            composer.handle_key(KeyEvent::new(
+                KeyCode::Char('i'),
+                KeyModifiers::NONE
+            )),
             ComposerAction::Redraw
         );
 
@@ -292,7 +302,8 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("hello");
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let action = composer
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(action, ComposerAction::Submit("hello".to_string()));
         assert!(composer.is_empty());
@@ -304,7 +315,10 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("a");
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "a\n");
@@ -316,7 +330,10 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("hello");
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.cursor(), 0);
@@ -329,7 +346,10 @@ mod tests {
         composer.insert_str("hello");
         composer.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.cursor(), composer.text().len());
@@ -341,7 +361,10 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("hello   world");
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "hello   ");
@@ -354,7 +377,10 @@ mod tests {
         let mut composer = Composer::default();
         composer.insert_str("hello world   ");
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "hello ");
@@ -368,13 +394,19 @@ mod tests {
         composer.insert_str("a你b");
 
         assert_eq!(
-            composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            composer.handle_key(KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL
+            )),
             ComposerAction::Redraw
         );
         assert_eq!(composer.cursor(), "a你".len());
 
         assert_eq!(
-            composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            composer.handle_key(KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL
+            )),
             ComposerAction::Redraw
         );
         assert_eq!(composer.cursor(), "a你b".len());
@@ -385,10 +417,19 @@ mod tests {
     fn composer_ctrl_d_deletes_character_at_cursor() {
         let mut composer = Composer::default();
         composer.insert_str("a你b");
-        composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        ));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "ab");
@@ -400,10 +441,19 @@ mod tests {
     fn composer_ctrl_u_deletes_before_cursor() {
         let mut composer = Composer::default();
         composer.insert_str("hello world");
-        composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
-        composer.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        ));
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "ld");
@@ -415,11 +465,23 @@ mod tests {
     fn composer_ctrl_k_deletes_after_cursor() {
         let mut composer = Composer::default();
         composer.insert_str("hello world");
-        composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
-        composer.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        ));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
+        composer.handle_key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        ));
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        let action = composer.handle_key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        ));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "he");
@@ -433,7 +495,10 @@ mod tests {
         composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
 
         assert_eq!(
-            composer.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            composer.handle_key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE
+            )),
             ComposerAction::Redraw
         );
         assert_eq!(composer.text(), "ac");
@@ -464,7 +529,8 @@ mod tests {
         composer.insert_str("a你b");
         composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        let action = composer
+            .handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "ab");
@@ -479,7 +545,8 @@ mod tests {
         composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
 
-        let action = composer.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        let action = composer
+            .handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "ab");

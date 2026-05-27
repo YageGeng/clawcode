@@ -17,7 +17,10 @@ use crate::context::InMemoryContext;
 use crate::thread_manager::{SpawnThreadParams, ThreadManager};
 use config::MultiAgentConfig;
 use provider::factory::ArcLlm;
-use store::{AgentEdgeStatus, AgentGraphStore, CreateSessionParams, SessionRecorder, SessionStore};
+use store::{
+    AgentEdgeStatus, AgentGraphStore, CreateSessionParams, SessionRecorder,
+    SessionStore,
+};
 use tools::ToolRegistry;
 
 /// Fork mode for sub-agent history (reserved for future).
@@ -148,7 +151,9 @@ impl AgentControl {
             .registry
             .registered_agent_metadata()
             .into_iter()
-            .filter_map(|metadata| protocol::AgentUiMetadata::try_from(metadata).ok())
+            .filter_map(|metadata| {
+                protocol::AgentUiMetadata::try_from(metadata).ok()
+            })
             .collect::<Vec<_>>();
 
         // The picker must always offer the main agent as the first switch target.
@@ -214,7 +219,8 @@ impl AgentControl {
 
         // Step 2–3: reserve slot + path + nickname
         let max_threads = self.config.max_concurrent_threads_per_session;
-        let mut reservation = self.registry.reserve_spawn_slot(Some(max_threads))?;
+        let mut reservation =
+            self.registry.reserve_spawn_slot(Some(max_threads))?;
 
         let child_path = parent_path.join(&sanitize_name(task_name));
         reservation.reserve_path(&child_path)?;
@@ -227,17 +233,22 @@ impl AgentControl {
         // and used to inherit the parent's runtime model when no override is set.
         let parent_sid = self.registry.agent_id_for_path(parent_path);
         let inherited_model = if let Some(parent_sid) = &parent_sid
-            && let Some(parent_thread) = self.thread_manager.get_thread(parent_sid).await
+            && let Some(parent_thread) =
+                self.thread_manager.get_thread(parent_sid).await
         {
             Some(parent_thread.current_model().await)
         } else {
             None
         };
         // Step 4: resolve LLM (request override, role override, parent model, or active model)
-        let llm =
-            self.resolve_llm_for_role(role_name, model_override, inherited_model.as_deref())?;
+        let llm = self.resolve_llm_for_role(
+            role_name,
+            model_override,
+            inherited_model.as_deref(),
+        )?;
 
-        let context: Box<dyn crate::context::ContextManager> = Box::new(InMemoryContext::new());
+        let context: Box<dyn crate::context::ContextManager> =
+            Box::new(InMemoryContext::new());
 
         // Create status watch channel for future status-tracking
         let (status_tx, _status_rx) = watch::channel(AgentStatus::PendingInit);
@@ -249,10 +260,9 @@ impl AgentControl {
         let child_cwd = request.cwd.clone();
         let app_config = self.config_handle.current();
         let approval = Arc::new(ApprovalPolicy::new(app_config.approval));
-        let store = self
-            .session_store
-            .as_ref()
-            .ok_or_else(|| "cannot spawn subagent without session store".to_string())?;
+        let store = self.session_store.as_ref().ok_or_else(|| {
+            "cannot spawn subagent without session store".to_string()
+        })?;
         let child_recorder: Arc<dyn SessionRecorder> = store
             .create_session(
                 CreateSessionParams::builder()
@@ -263,7 +273,8 @@ impl AgentControl {
                     .model_id(llm.model_id().to_string())
                     .base_system_prompt(String::new())
                     .parent_session_id(parent_sid.clone().ok_or_else(|| {
-                        "cannot persist subagent without parent session id".to_string()
+                        "cannot persist subagent without parent session id"
+                            .to_string()
                     })?)
                     .agent_role(role_name.to_string())
                     .agent_nickname(nickname.clone())
@@ -314,7 +325,9 @@ impl AgentControl {
             .await
             .insert(session_id.clone(), Arc::clone(&child_recorder));
 
-        if let (Some(graph_store), Some(parent_sid)) = (&self.agent_graph_store, &parent_sid) {
+        if let (Some(graph_store), Some(parent_sid)) =
+            (&self.agent_graph_store, &parent_sid)
+        {
             let edge_result = graph_store
                 .upsert_agent_edge(
                     parent_sid.clone(),
@@ -327,7 +340,8 @@ impl AgentControl {
             if let Err(error) = edge_result {
                 let _ = self.thread_manager.close_thread(&session_id).await;
                 if let Some(store) = &self.session_store {
-                    let child_recorder = self.unregister_recorder(&session_id).await?;
+                    let child_recorder =
+                        self.unregister_recorder(&session_id).await?;
                     let _ = store
                         .archive_session(&session_id, child_recorder.as_ref())
                         .await;
@@ -365,7 +379,10 @@ impl AgentControl {
     }
 
     /// Resolve a target string (path or nickname) to an AgentPath.
-    pub(crate) fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+    pub(crate) fn resolve_target(
+        &self,
+        target: &str,
+    ) -> Result<AgentPath, String> {
         self.registry.resolve_target(target)
     }
 
@@ -408,7 +425,9 @@ impl AgentControl {
         self.registry
             .update_agent_status(child_session_id, status.clone());
 
-        if let Some(status_tx) = self.status_watchers.lock().await.get(child_session_id) {
+        if let Some(status_tx) =
+            self.status_watchers.lock().await.get(child_session_id)
+        {
             let _ = status_tx.send(status.clone());
         }
 
@@ -434,11 +453,15 @@ impl AgentControl {
             .unwrap_or_else(AgentPath::root);
 
         let final_message = match &status {
-            AgentStatus::Completed { message } => message.as_deref().unwrap_or(""),
+            AgentStatus::Completed { message } => {
+                message.as_deref().unwrap_or("")
+            }
             AgentStatus::Errored { reason } => reason.as_str(),
             AgentStatus::Interrupted => "interrupted",
             AgentStatus::Shutdown => "shutdown",
-            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound => "",
+            AgentStatus::PendingInit
+            | AgentStatus::Running
+            | AgentStatus::NotFound => "",
         };
 
         let content = render_subagent_notification(
@@ -467,12 +490,16 @@ impl AgentControl {
     /// List active sub-agents, optionally filtered by path prefix.
     ///
     /// Uses the canonical agent path string for Codex V2 output.
-    pub(crate) fn list_agents(&self, prefix: Option<&AgentPath>) -> Vec<ListedAgent> {
+    pub(crate) fn list_agents(
+        &self,
+        prefix: Option<&AgentPath>,
+    ) -> Vec<ListedAgent> {
         let root_path = AgentPath::root();
         let mut listed_agents = Vec::new();
 
         if prefix.as_ref().is_none_or(|prefix| {
-            &root_path == *prefix || is_descendant_path(&root_path, prefix.as_str())
+            &root_path == *prefix
+                || is_descendant_path(&root_path, prefix.as_str())
         }) && self.registry.agent_id_for_path(&root_path).is_some()
         {
             listed_agents.push(ListedAgent {
@@ -488,9 +515,10 @@ impl AgentControl {
                 .into_iter()
                 .filter(|m| {
                     if let Some(prefix) = prefix {
-                        m.agent_path
-                            .as_ref()
-                            .is_some_and(|p| p == prefix || is_descendant_path(p, prefix.as_str()))
+                        m.agent_path.as_ref().is_some_and(|p| {
+                            p == prefix
+                                || is_descendant_path(p, prefix.as_str())
+                        })
                     } else {
                         true
                     }
@@ -500,13 +528,16 @@ impl AgentControl {
                         .agent_path
                         .as_ref()
                         .map(|p| p.to_string())
-                        .or_else(|| m.agent_id.as_ref().map(ToString::to_string))
+                        .or_else(|| {
+                            m.agent_id.as_ref().map(ToString::to_string)
+                        })
                         .unwrap_or_default(),
                     agent_status: m.agent_status,
                     last_task_message: m.last_task_message,
                 }),
         );
-        listed_agents.sort_by(|left, right| left.agent_name.cmp(&right.agent_name));
+        listed_agents
+            .sort_by(|left, right| left.agent_name.cmp(&right.agent_name));
         listed_agents
     }
 
@@ -516,14 +547,19 @@ impl AgentControl {
             return;
         };
         let parent_sid = {
-            let metadata = self.registry.agent_metadata_for_thread(thread_id.clone());
+            let metadata =
+                self.registry.agent_metadata_for_thread(thread_id.clone());
             metadata.and_then(|m| m.parent_session_id)
         };
         let Some(parent_sid) = parent_sid else {
             return;
         };
         let _ = graph_store
-            .set_agent_edge_status(&parent_sid, thread_id, AgentEdgeStatus::Closed)
+            .set_agent_edge_status(
+                &parent_sid,
+                thread_id,
+                AgentEdgeStatus::Closed,
+            )
             .await;
     }
 
@@ -534,9 +570,14 @@ impl AgentControl {
     /// but not `/root/explorer-other`). Removes entries from registry,
     /// status watchers. Descendants are cleaned up
     /// before the target agent itself.
-    pub(crate) async fn close_agent(&self, agent_path: &AgentPath) -> Result<AgentStatus, String> {
+    pub(crate) async fn close_agent(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Result<AgentStatus, String> {
         if agent_path.is_root() {
-            return Err("The root agent can't be closed with close_agent".to_string());
+            return Err(
+                "The root agent can't be closed with close_agent".to_string()
+            );
         }
 
         let thread_id = self
@@ -656,15 +697,15 @@ impl AgentControl {
         inherited_model: Option<&str>,
     ) -> Result<ArcLlm, String> {
         if let Some(model_spec) = model_override {
-            let Some((provider_id, model_id)) = model_spec.split_once('/') else {
+            let Some((provider_id, model_id)) = model_spec.split_once('/')
+            else {
                 return Err(format!(
                     "model override must use provider/model: {model_spec}"
                 ));
             };
-            return self
-                .llm_factory
-                .get(provider_id, model_id)
-                .ok_or_else(|| format!("model override is not available: {model_spec}"));
+            return self.llm_factory.get(provider_id, model_id).ok_or_else(
+                || format!("model override is not available: {model_spec}"),
+            );
         }
         // Try role-specific model override (e.g. "deepseek/deepseek-v4-flash")
         if let Some(role) = self.roles.get(role_name)
@@ -675,15 +716,15 @@ impl AgentControl {
             return Ok(llm);
         }
         if let Some(model_spec) = inherited_model {
-            let Some((provider_id, model_id)) = model_spec.split_once('/') else {
+            let Some((provider_id, model_id)) = model_spec.split_once('/')
+            else {
                 return Err(format!(
                     "parent model must use provider/model: {model_spec}"
                 ));
             };
-            return self
-                .llm_factory
-                .get(provider_id, model_id)
-                .ok_or_else(|| format!("parent model is not available: {model_spec}"));
+            return self.llm_factory.get(provider_id, model_id).ok_or_else(
+                || format!("parent model is not available: {model_spec}"),
+            );
         }
         // Fall back to active_model from config when no live parent model is available.
         let cfg = self.config_handle.current();
@@ -775,8 +816,8 @@ mod tests {
     use protocol::Usage;
     use provider::factory::LlmFactory;
     use store::{
-        AgentEdgeStatus, AgentGraphStore, CreateSessionParams, FileSessionStore, SessionRecorder,
-        SessionStore,
+        AgentEdgeStatus, AgentGraphStore, CreateSessionParams,
+        FileSessionStore, SessionRecorder, SessionStore,
     };
     use tokio::sync::{mpsc, oneshot, watch};
 
@@ -831,7 +872,10 @@ mod tests {
     }
 
     /// Build a minimal thread handle for AgentControl routing tests.
-    fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
+    fn test_thread(
+        session_id: SessionId,
+        tx_op: mpsc::UnboundedSender<Op>,
+    ) -> Thread {
         let (tx_event, rx_event) = mpsc::unbounded_channel();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         Thread::builder()
@@ -848,7 +892,8 @@ mod tests {
             .pending_approvals(Arc::new(tokio::sync::Mutex::new(HashMap::<
                 String,
                 oneshot::Sender<protocol::ReviewDecision>,
-            >::new())))
+            >::new(
+            ))))
             .cancel_tx(cancel_tx)
             .tools(Arc::new(ToolRegistry::new()))
             .mcp_manager(Arc::new(mcp::McpConnectionManager::new(
@@ -865,16 +910,19 @@ mod tests {
     /// Build a real recorder for agent-control routing tests.
     fn test_recorder() -> Arc<dyn SessionRecorder> {
         Arc::new(store::FileSessionRecorder::new(
-            std::env::temp_dir().join(format!("clawcode-agent-{}.jsonl", uuid::Uuid::new_v4())),
+            std::env::temp_dir()
+                .join(format!("clawcode-agent-{}.jsonl", uuid::Uuid::new_v4())),
         ))
     }
 
     #[tokio::test]
-    async fn spawn_creates_child_session_and_open_graph_edge_before_returning() {
+    async fn spawn_creates_child_session_and_open_graph_edge_before_returning()
+    {
         let temp = tempfile::tempdir().expect("temp data home");
         let data_home = temp.path().to_string_lossy().to_string();
         let store = Arc::new(FileSessionStore::new(Some(&data_home)));
-        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let session_store: Arc<dyn SessionStore> =
+            Arc::clone(&store) as Arc<dyn SessionStore>;
         let app_config = app_config_with_provider();
         let config_handle = ConfigHandle::from_config(app_config.clone());
         let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
@@ -903,7 +951,8 @@ mod tests {
             )
             .await
             .expect("create parent session");
-        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        let parent_recorder: Arc<dyn SessionRecorder> =
+            Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id.clone());
         control
             .register_recorder(parent_id.clone(), parent_recorder)
@@ -950,7 +999,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp data home");
         let data_home = temp.path().to_string_lossy().to_string();
         let store = Arc::new(FileSessionStore::new(Some(&data_home)));
-        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let session_store: Arc<dyn SessionStore> =
+            Arc::clone(&store) as Arc<dyn SessionStore>;
         let app_config = app_config_with_provider();
         let config_handle = ConfigHandle::from_config(app_config.clone());
         let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
@@ -978,7 +1028,8 @@ mod tests {
             )
             .await
             .expect("create parent");
-        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        let parent_recorder: Arc<dyn SessionRecorder> =
+            Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id);
         control
             .register_recorder(SessionId::from("parent"), parent_recorder)
@@ -1007,7 +1058,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp data home");
         let data_home = temp.path().to_string_lossy().to_string();
         let store = Arc::new(FileSessionStore::new(Some(&data_home)));
-        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let session_store: Arc<dyn SessionStore> =
+            Arc::clone(&store) as Arc<dyn SessionStore>;
         let app_config = app_config_with_two_models();
         let config_handle = ConfigHandle::from_config(app_config.clone());
         let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
@@ -1036,7 +1088,8 @@ mod tests {
             )
             .await
             .expect("create parent session");
-        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        let parent_recorder: Arc<dyn SessionRecorder> =
+            Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id.clone());
         control.register_recorder(parent_id, parent_recorder).await;
 
@@ -1067,7 +1120,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp data home");
         let data_home = temp.path().to_string_lossy().to_string();
         let store = Arc::new(FileSessionStore::new(Some(&data_home)));
-        let session_store: Arc<dyn SessionStore> = Arc::clone(&store) as Arc<dyn SessionStore>;
+        let session_store: Arc<dyn SessionStore> =
+            Arc::clone(&store) as Arc<dyn SessionStore>;
         let app_config = app_config_with_two_models();
         let config_handle = ConfigHandle::from_config(app_config.clone());
         let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
@@ -1096,7 +1150,8 @@ mod tests {
             )
             .await
             .expect("create parent session");
-        let parent_recorder: Arc<dyn SessionRecorder> = Arc::from(parent_recorder);
+        let parent_recorder: Arc<dyn SessionRecorder> =
+            Arc::from(parent_recorder);
         control.registry.register_root_thread(parent_id.clone());
         control
             .register_recorder(parent_id.clone(), parent_recorder)
@@ -1104,7 +1159,8 @@ mod tests {
 
         let (tx_op, _rx_op) = mpsc::unbounded_channel();
         let parent_thread = test_thread(parent_id, tx_op);
-        *parent_thread.current_model.write().await = "openai/gpt-5.4".to_string();
+        *parent_thread.current_model.write().await =
+            "openai/gpt-5.4".to_string();
         thread_manager.insert_thread(parent_thread).await;
 
         let child = control
@@ -1312,7 +1368,8 @@ mod tests {
                 Some(parent_id.clone()),
             )
             .expect("restore child");
-        let (status_tx, mut status_rx) = watch::channel(AgentStatus::PendingInit);
+        let (status_tx, mut status_rx) =
+            watch::channel(AgentStatus::PendingInit);
         control
             .status_watchers
             .lock()
@@ -1390,7 +1447,8 @@ mod tests {
             .await
             .expect("notify parent");
 
-        let Op::InterAgentMessage { message } = rx_op.recv().await.expect("parent notification")
+        let Op::InterAgentMessage { message } =
+            rx_op.recv().await.expect("parent notification")
         else {
             panic!("expected inter-agent message");
         };
@@ -1565,7 +1623,8 @@ mod tests {
 
         let list = control.list_agents(None);
         assert_eq!(list.len(), 3);
-        let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
+        let names: Vec<&str> =
+            list.iter().map(|a| a.agent_name.as_str()).collect();
         assert_eq!(names[0], "/root");
         assert!(names.contains(&"/root/alice"));
         assert!(names.contains(&"/root/bob"));
@@ -1612,14 +1671,27 @@ mod tests {
         control
             .registry
             .register_root_thread(SessionId::from("root"));
-        seed_agent(&control, "alpha", "team/alpha", Some("Alpha"), Some("root"));
+        seed_agent(
+            &control,
+            "alpha",
+            "team/alpha",
+            Some("Alpha"),
+            Some("root"),
+        );
         seed_agent(&control, "beta", "team/beta", Some("Beta"), Some("root"));
-        seed_agent(&control, "sibling", "team_ab", Some("TeamAB"), Some("root"));
+        seed_agent(
+            &control,
+            "sibling",
+            "team_ab",
+            Some("TeamAB"),
+            Some("root"),
+        );
         seed_agent(&control, "other", "other", Some("Other"), Some("root"));
 
         let list = control.list_agents(Some(&AgentPath::root().join("team")));
         assert_eq!(list.len(), 2);
-        let names: Vec<&str> = list.iter().map(|a| a.agent_name.as_str()).collect();
+        let names: Vec<&str> =
+            list.iter().map(|a| a.agent_name.as_str()).collect();
         assert!(names.contains(&"/root/team/alpha"));
         assert!(names.contains(&"/root/team/beta"));
         assert!(!names.contains(&"/root/team_ab"));
@@ -1696,7 +1768,13 @@ mod tests {
             Some("Deep"),
             Some("sub_1"),
         );
-        seed_agent(&control, "team_ab", "team_ab", Some("TeamAB"), Some("root"));
+        seed_agent(
+            &control,
+            "team_ab",
+            "team_ab",
+            Some("TeamAB"),
+            Some("root"),
+        );
         seed_agent(&control, "team_b", "team_b", Some("TeamB"), Some("root"));
 
         let team_a_path = AgentPath::root().join("team_a");
@@ -1801,7 +1879,8 @@ mod tests {
             .registry
             .register_root_thread(SessionId::from("root"));
 
-        let result = control.close_agent(&AgentPath::root().join("ghost")).await;
+        let result =
+            control.close_agent(&AgentPath::root().join("ghost")).await;
         result.expect_err("closing a missing agent should fail");
     }
 

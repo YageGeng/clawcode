@@ -111,7 +111,10 @@ pub(crate) fn render_agent_picker(
             Line::from(vec![
                 Span::styled(format!("{marker} {status} "), style),
                 Span::styled(entry.label(), style),
-                Span::styled(current.to_string(), Style::default().fg(theme.muted)),
+                Span::styled(
+                    current.to_string(),
+                    Style::default().fg(theme.muted),
+                ),
             ])
         })
         .collect::<Vec<_>>();

@@ -15,7 +15,12 @@ use crate::ui::view::ViewState;
 use crate::ui::{agent_picker, approval, layout, status, transcript};
 
 /// Render the complete TUI frame for the current application state.
-pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, composer: &Composer) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    state: &AppState,
+    view: &ViewState,
+    composer: &Composer,
+) {
     let Some(rows) = layout::frame_rows(frame.area(), composer.text()) else {
         return;
     };
@@ -29,8 +34,11 @@ pub fn render(frame: &mut Frame<'_>, state: &AppState, view: &ViewState, compose
         let overlay = layout::centered_rect(72, 8, frame.area());
         frame.render_widget(Clear, overlay);
         frame.render_widget(
-            Paragraph::new(approval::approval_lines(approval.title(), approval.body()))
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(approval::approval_lines(
+                approval.title(),
+                approval.body(),
+            ))
+            .block(Block::default().borders(Borders::ALL)),
             overlay,
         );
     }
@@ -55,7 +63,12 @@ pub(crate) fn render_router(
     transcript::render_transcript(frame, rows.transcript, state, view);
     status::render_top_status(frame, rows.top_status, state);
     render_composer(frame, rows.composer, composer, state.theme());
-    agent_picker::render_agent_picker(frame, rows.agent_picker, router, state.theme());
+    agent_picker::render_agent_picker(
+        frame,
+        rows.agent_picker,
+        router,
+        state.theme(),
+    );
     status::render_bottom_status_with_agent(
         frame,
         rows.bottom_status,
@@ -67,15 +80,23 @@ pub(crate) fn render_router(
         let overlay = layout::centered_rect(72, 8, frame.area());
         frame.render_widget(Clear, overlay);
         frame.render_widget(
-            Paragraph::new(approval::approval_lines(approval.title(), approval.body()))
-                .block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(approval::approval_lines(
+                approval.title(),
+                approval.body(),
+            ))
+            .block(Block::default().borders(Borders::ALL)),
             overlay,
         );
     }
 }
 
 /// Renders the input composer row.
-fn render_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, theme: &Theme) {
+fn render_composer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    composer: &Composer,
+    theme: &Theme,
+) {
     // No explicit background; lets the terminal background show through.
     let text = composer.text();
     let composer_style = Style::default().bg(theme.composer_bg());
@@ -97,7 +118,8 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, theme
         input_area,
     );
 
-    let (cursor_column, cursor_row) = composer.cursor_cell_offset(input_area.width, 2);
+    let (cursor_column, cursor_row) =
+        composer.cursor_cell_offset(input_area.width, 2);
     let cursor_x = input_area
         .x
         .saturating_add(cursor_column.min(input_area.width.saturating_sub(1)));
@@ -111,8 +133,9 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, composer: &Composer, theme
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        Content, ContentBlock, ContentChunk, SessionId, SessionNotification, SessionUpdate,
-        TextContent, ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        Content, ContentBlock, ContentChunk, SessionId, SessionNotification,
+        SessionUpdate, TextContent, ToolCall, ToolCallId, ToolCallStatus,
+        ToolCallUpdate, ToolCallUpdateFields,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -129,10 +152,16 @@ mod tests {
     }
 
     /// Applies an ACP assistant chunk to render state.
-    fn push_assistant(state: &mut AppState, session_id: &SessionId, text_value: impl Into<String>) {
+    fn push_assistant(
+        state: &mut AppState,
+        session_id: &SessionId,
+        text_value: impl Into<String>,
+    ) {
         state.apply_session_update(SessionNotification::new(
             session_id.clone(),
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(text(text_value))),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(text(
+                text_value,
+            ))),
         ));
     }
 
@@ -156,7 +185,11 @@ mod tests {
     }
 
     /// Applies a shell tool call snapshot to render state.
-    fn push_tool_call(state: &mut AppState, session_id: &SessionId, command: &str) {
+    fn push_tool_call(
+        state: &mut AppState,
+        session_id: &SessionId,
+        command: &str,
+    ) {
         push_tool_call_with_args(
             state,
             session_id,
@@ -168,16 +201,20 @@ mod tests {
     }
 
     /// Applies ACP tool output content to render state.
-    fn push_tool_output(state: &mut AppState, session_id: &SessionId, output: &str) {
+    fn push_tool_output(
+        state: &mut AppState,
+        session_id: &SessionId,
+        output: &str,
+    ) {
         state.apply_session_update(SessionNotification::new(
             session_id.clone(),
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
                 ToolCallUpdateFields::new()
                     .content(vec![
-                        agent_client_protocol::schema::ToolCallContent::Content(Content::new(
-                            text(output),
-                        )),
+                        agent_client_protocol::schema::ToolCallContent::Content(
+                            Content::new(text(output)),
+                        ),
                     ])
                     .status(ToolCallStatus::Completed),
             )),
@@ -196,7 +233,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
     }
 
@@ -212,7 +251,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("hello")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer("hello"))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -231,7 +272,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("hello")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer("hello"))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -269,7 +312,9 @@ mod tests {
         ));
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer)
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -331,7 +376,14 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("spaced")))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &ViewState::default(),
+                    &composer("spaced"),
+                )
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -359,7 +411,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
@@ -381,7 +435,9 @@ mod tests {
         push_assistant(&mut state, &session_id, "assistant body");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -413,7 +469,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -440,7 +498,9 @@ mod tests {
         push_assistant(&mut state, &session_id, " kappa");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -462,7 +522,9 @@ mod tests {
         push_assistant(&mut state, &session_id, "qrstuvwxyz");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -480,15 +542,31 @@ mod tests {
             "/tmp/project".into(),
             "deepseek/model".to_string(),
         );
-        state.append_user_message("a long prompt that should survive terminal resizing");
+        state.append_user_message(
+            "a long prompt that should survive terminal resizing",
+        );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("resize")))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &ViewState::default(),
+                    &composer("resize"),
+                )
+            })
             .expect("draw");
         terminal.backend_mut().resize(36, 8);
         terminal.resize(Rect::new(0, 0, 36, 8)).expect("resize");
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("resize")))
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &ViewState::default(),
+                    &composer("resize"),
+                )
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -509,12 +587,18 @@ mod tests {
 
         let session_id = sid("s1");
         for index in 0..12 {
-            push_assistant(&mut state, &session_id, format!("old output {index}\n"));
+            push_assistant(
+                &mut state,
+                &session_id,
+                format!("old output {index}\n"),
+            );
         }
         push_assistant(&mut state, &session_id, "latest assistant output");
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -539,7 +623,11 @@ mod tests {
 
         let session_id = sid("s1");
         for index in 0..12 {
-            push_assistant(&mut state, &session_id, format!("old output {index}\n"));
+            push_assistant(
+                &mut state,
+                &session_id,
+                format!("old output {index}\n"),
+            );
         }
         push_assistant(&mut state, &session_id, "latest assistant output");
         view.scroll_page_up(16);
@@ -576,7 +664,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -596,10 +686,16 @@ mod tests {
         );
         let session_id = sid("s1");
         push_tool_call(&mut state, &session_id, "printf hello");
-        push_tool_output(&mut state, &session_id, "stdout:\nfull shell output\n");
+        push_tool_output(
+            &mut state,
+            &session_id,
+            "stdout:\nfull shell output\n",
+        );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -636,15 +732,19 @@ mod tests {
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("shell-1"),
                 ToolCallUpdateFields::new().content(vec![
-                    agent_client_protocol::schema::ToolCallContent::Content(Content::new(text(
-                        "line1\nline2\nline3\nline4\nline5\nline6",
-                    ))),
+                    agent_client_protocol::schema::ToolCallContent::Content(
+                        Content::new(text(
+                            "line1\nline2\nline3\nline4\nline5\nline6",
+                        )),
+                    ),
                 ]),
             )),
         ));
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -681,7 +781,9 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -767,7 +869,9 @@ mod tests {
         }
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
@@ -790,7 +894,8 @@ mod tests {
             "deepseek/model".to_string(),
         );
         let session_id = sid("s1");
-        let long_content = "please inspect this very long task description ".repeat(5);
+        let long_content =
+            "please inspect this very long task description ".repeat(5);
         push_tool_call_with_args(
             &mut state,
             &session_id,
@@ -809,14 +914,20 @@ mod tests {
         );
 
         terminal
-            .draw(|frame| render(frame, &state, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer(""))
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
-        assert!(screen.contains("• Ran Send message to Tesla · please inspect this very long"));
+        assert!(screen.contains(
+            "• Ran Send message to Tesla · please inspect this very long"
+        ));
         assert!(screen.contains("..."));
         assert!(screen.contains("• Ran Follow up Galileo · run focused tests"));
-        assert!(!screen.contains("description please inspect this very long task description"));
+        assert!(!screen.contains(
+            "description please inspect this very long task description"
+        ));
     }
 
     /// Verifies `/agent` picker renders Main [default] under the composer.
@@ -833,7 +944,14 @@ mod tests {
         router.open_agent_picker();
 
         terminal
-            .draw(|frame| render_router(frame, &router, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render_router(
+                    frame,
+                    &router,
+                    &ViewState::default(),
+                    &composer(""),
+                )
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal);
@@ -849,7 +967,8 @@ mod tests {
         let child = sid("child-session");
         let mut router = SessionRouterState::new(
             root.clone(),
-            "/tmp/very/long/project/path/that/would/otherwise/hide/the/agent/label".into(),
+            "/tmp/very/long/project/path/that/would/otherwise/hide/the/agent/label"
+                .into(),
             "provider/model".to_string(),
             Theme::dark(),
         );
@@ -886,11 +1005,22 @@ mod tests {
             ),
         ));
         router
-            .select_agent_session(child, &mut ViewState::default(), &mut Composer::default())
+            .select_agent_session(
+                child,
+                &mut ViewState::default(),
+                &mut Composer::default(),
+            )
             .expect("select child");
 
         terminal
-            .draw(|frame| render_router(frame, &router, &ViewState::default(), &composer("")))
+            .draw(|frame| {
+                render_router(
+                    frame,
+                    &router,
+                    &ViewState::default(),
+                    &composer(""),
+                )
+            })
             .expect("draw");
 
         let screen = rendered_screen(&terminal).join("\n");
@@ -910,7 +1040,9 @@ mod tests {
         (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
-                    .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()))
+                    .filter_map(|x| {
+                        buffer.cell((x, y)).map(|cell| cell.symbol())
+                    })
                     .collect::<String>()
             })
             .collect()

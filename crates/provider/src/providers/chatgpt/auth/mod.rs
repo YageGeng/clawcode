@@ -22,7 +22,9 @@ pub struct DeviceCodePrompt {
 }
 
 #[derive(Clone, Default)]
-pub struct DeviceCodeHandler(Option<Arc<dyn Fn(DeviceCodePrompt) + Send + Sync>>);
+pub struct DeviceCodeHandler(
+    Option<Arc<dyn Fn(DeviceCodePrompt) + Send + Sync>>,
+);
 
 impl DeviceCodeHandler {
     pub fn new<F>(handler: F) -> Self
@@ -103,7 +105,10 @@ impl Authenticator {
     ) -> Self {
         Self {
             source,
-            platform: platform::PlatformAuthenticator::new(auth_file, device_code_handler),
+            platform: platform::PlatformAuthenticator::new(
+                auth_file,
+                device_code_handler,
+            ),
             state_lock: Arc::new(Mutex::new(())),
         }
     }

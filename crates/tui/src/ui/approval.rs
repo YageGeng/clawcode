@@ -20,8 +20,12 @@ impl ApprovalDecision {
     /// Returns the ACP permission option id used by the local ACP server.
     pub fn option_id(self) -> PermissionOptionId {
         match self {
-            ApprovalDecision::AllowOnce => PermissionOptionId::new("allow_once"),
-            ApprovalDecision::RejectOnce => PermissionOptionId::new("reject_once"),
+            ApprovalDecision::AllowOnce => {
+                PermissionOptionId::new("allow_once")
+            }
+            ApprovalDecision::RejectOnce => {
+                PermissionOptionId::new("reject_once")
+            }
         }
     }
 }
@@ -39,7 +43,10 @@ pub struct PendingApproval {
 
 impl PendingApproval {
     /// Builds pending approval state from an ACP permission request.
-    pub fn from_request(request_id: u64, request: &RequestPermissionRequest) -> Self {
+    pub fn from_request(
+        request_id: u64,
+        request: &RequestPermissionRequest,
+    ) -> Self {
         let title = request
             .tool_call
             .fields
@@ -106,8 +113,12 @@ pub fn decision_for_key(key: KeyEvent) -> Option<ApprovalDecision> {
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('a' | 'y'), KeyModifiers::NONE) => Some(ApprovalDecision::AllowOnce),
-        (KeyCode::Char('r' | 'n'), KeyModifiers::NONE) => Some(ApprovalDecision::RejectOnce),
+        (KeyCode::Char('a' | 'y'), KeyModifiers::NONE) => {
+            Some(ApprovalDecision::AllowOnce)
+        }
+        (KeyCode::Char('r' | 'n'), KeyModifiers::NONE) => {
+            Some(ApprovalDecision::RejectOnce)
+        }
         (KeyCode::Esc, _) => Some(ApprovalDecision::RejectOnce),
         _ => None,
     }
@@ -134,8 +145,9 @@ pub(crate) fn approval_lines(title: &str, body: &str) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        Content, ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionRequest,
-        TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+        Content, ContentBlock, PermissionOption, PermissionOptionKind,
+        RequestPermissionRequest, TextContent, ToolCallId, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
 
     /// Verifies ACP permission requests preserve the local id and renderable details.
@@ -145,11 +157,11 @@ mod tests {
             agent_client_protocol::schema::SessionId::new("s1".to_string()),
             ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
-                ToolCallUpdateFields::new()
-                    .title("shell")
-                    .content(vec![ToolCallContent::Content(Content::new(
-                        ContentBlock::Text(TextContent::new("pwd")),
-                    ))]),
+                ToolCallUpdateFields::new().title("shell").content(vec![
+                    ToolCallContent::Content(Content::new(ContentBlock::Text(
+                        TextContent::new("pwd"),
+                    ))),
+                ]),
             ),
             vec![PermissionOption::new(
                 "allow_once",
@@ -179,12 +191,18 @@ mod tests {
             decision_for_key(allow_yes),
             Some(ApprovalDecision::AllowOnce)
         );
-        assert_eq!(decision_for_key(reject), Some(ApprovalDecision::RejectOnce));
+        assert_eq!(
+            decision_for_key(reject),
+            Some(ApprovalDecision::RejectOnce)
+        );
         assert_eq!(
             decision_for_key(reject_no),
             Some(ApprovalDecision::RejectOnce)
         );
-        assert_eq!(decision_for_key(escape), Some(ApprovalDecision::RejectOnce));
+        assert_eq!(
+            decision_for_key(escape),
+            Some(ApprovalDecision::RejectOnce)
+        );
     }
 
     /// Verifies modified character keys cannot accidentally resolve an approval decision.
@@ -198,8 +216,11 @@ mod tests {
     /// Verifies held approval keys do not resolve the same approval more than once.
     #[test]
     fn approval_ignores_key_repeat_events() {
-        let repeat =
-            KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        let repeat = KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        );
 
         assert_eq!(decision_for_key(repeat), None);
     }

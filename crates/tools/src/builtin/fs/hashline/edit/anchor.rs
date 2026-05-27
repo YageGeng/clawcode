@@ -57,18 +57,29 @@ impl AnchorResolver {
                         None
                     };
                     if (start_relocated || end_relocated)
-                        && (start.line > end.line || relocated_count != Some(original_count))
+                        && (start.line > end.line
+                            || relocated_count != Some(original_count))
                     {
                         // Range edits must keep their original span length after relocation.
                         start.line = original_start;
                         end.line = original_end;
                         mismatches.push(
-                            Self::build_mismatch(start, file_lines, original_start)
-                                .with_range_span_changed(original_count, relocated_count),
+                            Self::build_mismatch(
+                                start,
+                                file_lines,
+                                original_start,
+                            )
+                            .with_range_span_changed(
+                                original_count,
+                                relocated_count,
+                            ),
                         );
                         mismatches.push(
                             Self::build_mismatch(end, file_lines, original_end)
-                                .with_range_span_changed(original_count, relocated_count),
+                                .with_range_span_changed(
+                                    original_count,
+                                    relocated_count,
+                                ),
                         );
                     }
                 }
@@ -109,9 +120,10 @@ impl AnchorResolver {
         if actual == reference.hash {
             return Ok(false);
         }
-        let unique_line_by_hash =
-            unique_line_by_hash.get_or_insert_with(|| Self::build_unique_line_by_hash(file_lines));
-        if let Some(Some(relocated)) = unique_line_by_hash.get(&reference.hash) {
+        let unique_line_by_hash = unique_line_by_hash
+            .get_or_insert_with(|| Self::build_unique_line_by_hash(file_lines));
+        if let Some(Some(relocated)) = unique_line_by_hash.get(&reference.hash)
+        {
             reference.line = *relocated;
             return Ok(true);
         }
@@ -124,7 +136,9 @@ impl AnchorResolver {
     }
 
     /// Build a map where hashes with duplicate occurrences are excluded.
-    fn build_unique_line_by_hash(file_lines: &[String]) -> HashMap<String, Option<usize>> {
+    fn build_unique_line_by_hash(
+        file_lines: &[String],
+    ) -> HashMap<String, Option<usize>> {
         let mut map = HashMap::new();
         for (index, line) in file_lines.iter().enumerate() {
             let hash = compute_line_hash(line);
@@ -139,7 +153,11 @@ impl AnchorResolver {
     }
 
     /// Build a mismatch entry for a specific line number.
-    fn build_mismatch(reference: &LineRef, file_lines: &[String], line: usize) -> HashMismatch {
+    fn build_mismatch(
+        reference: &LineRef,
+        file_lines: &[String],
+        line: usize,
+    ) -> HashMismatch {
         HashMismatch::anchor_changed(
             line,
             reference.hash.clone(),
@@ -151,7 +169,10 @@ impl AnchorResolver {
     }
 
     /// Format a stale-anchor diagnostic with nearby updated hashline refs.
-    fn format_mismatch_message(mismatches: &[HashMismatch], file_lines: &[String]) -> String {
+    fn format_mismatch_message(
+        mismatches: &[HashMismatch],
+        file_lines: &[String],
+    ) -> String {
         let mismatch_lines = mismatches
             .iter()
             .map(|mismatch| (mismatch.line, mismatch))
@@ -195,7 +216,11 @@ impl AnchorResolver {
                     let prefix = format!("{}:{}", line_number, mismatch.actual);
                     lines.push(format!(">>> {prefix}|{content}"));
                 } else {
-                    let prefix = format!("{}:{}", line_number, compute_line_hash(content));
+                    let prefix = format!(
+                        "{}:{}",
+                        line_number,
+                        compute_line_hash(content)
+                    );
                     lines.push(format!("    {prefix}|{content}"));
                 }
             }
@@ -206,7 +231,10 @@ impl AnchorResolver {
             if file_lines.get(mismatch.line.saturating_sub(1)).is_some() {
                 lines.push(format!(
                     "\t{}:{} -> {}:{}",
-                    mismatch.line, mismatch.expected, mismatch.line, mismatch.actual
+                    mismatch.line,
+                    mismatch.expected,
+                    mismatch.line,
+                    mismatch.actual
                 ));
             }
         }
@@ -214,7 +242,9 @@ impl AnchorResolver {
     }
 
     /// Return a model-facing explanation when range relocation changed the span.
-    fn range_span_changed_reason(mismatches: &[HashMismatch]) -> Option<String> {
+    fn range_span_changed_reason(
+        mismatches: &[HashMismatch],
+    ) -> Option<String> {
         mismatches.iter().find_map(|mismatch| match mismatch.reason {
             HashMismatchReason::AnchorChanged => None,
             HashMismatchReason::RangeSpanChanged {

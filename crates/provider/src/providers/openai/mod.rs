@@ -33,7 +33,8 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value) {
             return;
         }
 
-        let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
+        let is_object_schema = obj.get("type")
+            == Some(&Value::String("object".to_string()))
             || obj.contains_key("properties")
             || obj.contains_key("required");
 
@@ -46,7 +47,8 @@ pub(crate) fn sanitize_schema(schema: &mut serde_json::Value) {
         // This is also required by OpenAI's Responses API
         // Source: https://platform.openai.com/docs/guides/structured-outputs#all-fields-must-be-required
         if let Some(Value::Object(properties)) = obj.get("properties") {
-            let prop_keys = properties.keys().cloned().map(Value::String).collect();
+            let prop_keys =
+                properties.keys().cloned().map(Value::String).collect();
             obj.insert("required".to_string(), Value::Array(prop_keys));
         }
 

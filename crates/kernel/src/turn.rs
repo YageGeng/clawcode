@@ -9,12 +9,14 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use protocol::message::{
-    AssistantContent, Message, Reasoning, ReasoningContent, ToolResult, ToolResultContent,
+    AssistantContent, Message, Reasoning, ReasoningContent, ToolResult,
+    ToolResultContent,
 };
 use protocol::one_or_many::OneOrMany;
 use protocol::{
-    AgentPath, Event, ExecCommandStatus, FileChangeStatus, KernelError, McpToolCallStatus,
-    ReviewDecision, SessionId, ToolStreamItem, TurnId, TurnItem, Usage,
+    AgentPath, Event, ExecCommandStatus, FileChangeStatus, KernelError,
+    McpToolCallStatus, ReviewDecision, SessionId, ToolStreamItem, TurnId,
+    TurnItem, Usage,
 };
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
@@ -29,7 +31,10 @@ use crate::input_queue::InputQueue;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
 use crate::session::Session;
-use store::{MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord, TurnKindRecord};
+use store::{
+    MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord,
+    TurnKindRecord,
+};
 use tools::{ToolArgumentsConsumer, ToolContext, ToolRegistry};
 
 /// Immutable snapshot of all context needed to execute a single turn.
@@ -58,8 +63,9 @@ pub(crate) struct TurnContext {
     /// Pending approval channels. execute_turn inserts a oneshot sender;
     /// the session background task resolves it when the user responds.
     #[builder(default)]
-    pub pending_approvals:
-        Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
+    pub pending_approvals: Arc<
+        tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
+    >,
     /// ① Agent-specific system prompt. `None` means use the default.
     #[builder(default)]
     pub agent_prompt: Option<String>,
@@ -161,7 +167,10 @@ pub(crate) async fn execute_turn(
     // Build the system prompt preamble once per turn.
     // The preamble is injected into every LLM request via CompletionRequest::preamble
     // and converted to a leading Message::System at build() time.
-    let env_info = EnvironmentInfo::capture(ctx.llm.model_id().to_string(), ctx.cwd.clone());
+    let env_info = EnvironmentInfo::capture(
+        ctx.llm.model_id().to_string(),
+        ctx.cwd.clone(),
+    );
     let instructions = Instructions::load(&ctx.cwd);
 
     // Render skill catalog for system prompt injection.
@@ -203,7 +212,8 @@ pub(crate) async fn execute_turn(
     loop {
         drain_inter_agent_inputs_for_turn(ctx, &mut **context).await;
         let history = context.history().to_vec();
-        let history = OneOrMany::many(history).map_err(|e| KernelError::Internal(e.into()))?;
+        let history = OneOrMany::many(history)
+            .map_err(|e| KernelError::Internal(e.into()))?;
 
         let request = CompletionRequest::builder()
             .model(Some(ctx.llm.model_id().to_string()))
@@ -212,11 +222,9 @@ pub(crate) async fn execute_turn(
             .tools(tool_defs.clone())
             .build();
 
-        let mut stream = ctx
-            .llm
-            .stream(request)
-            .await
-            .map_err(|e| KernelError::Internal(anyhow::anyhow!("LLM stream error: {e}")))?;
+        let mut stream = ctx.llm.stream(request).await.map_err(|e| {
+            KernelError::Internal(anyhow::anyhow!("LLM stream error: {e}"))
+        })?;
 
         let mut assistant_content: Vec<AssistantContent> = Vec::new();
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
@@ -225,13 +233,17 @@ pub(crate) async fn execute_turn(
         let mut response_usage = None;
 
         while let Some(event) = stream.next().await {
-            let event = event
-                .map_err(|e| KernelError::Internal(anyhow::anyhow!("Stream event error: {e}")))?;
+            let event = event.map_err(|e| {
+                KernelError::Internal(anyhow::anyhow!(
+                    "Stream event error: {e}"
+                ))
+            })?;
 
             match event {
                 LlmStreamEvent::Text(text) => {
                     assistant_content.push(AssistantContent::text(&text.text));
-                    let _ = tx_event.send(Event::message_chunk(sid.clone(), text.text));
+                    let _ = tx_event
+                        .send(Event::message_chunk(sid.clone(), text.text));
                 }
                 LlmStreamEvent::ToolCall {
                     mut tool_call,
@@ -247,14 +259,23 @@ pub(crate) async fn execute_turn(
                     let event_call_id = tool_call.id.clone();
 
                     // mark streaming arguments consumer is finished
-                    for preview_event in argument_consumers.finish(sid, event_call_id.as_str()) {
+                    for preview_event in
+                        argument_consumers.finish(sid, event_call_id.as_str())
+                    {
                         let _ = tx_event.send(preview_event);
                     }
 
-                    let (text, _succeeded) =
-                        dispatch_tool(ctx, tx_event, &event_call_id, &tool_call, &tool_ctx).await?;
+                    let (text, _succeeded) = dispatch_tool(
+                        ctx,
+                        tx_event,
+                        &event_call_id,
+                        &tool_call,
+                        &tool_ctx,
+                    )
+                    .await?;
 
-                    assistant_content.push(AssistantContent::ToolCall(tool_call.clone()));
+                    assistant_content
+                        .push(AssistantContent::ToolCall(tool_call.clone()));
 
                     tool_outputs.push(ToolOutput {
                         id: tool_call.id,
@@ -264,11 +285,14 @@ pub(crate) async fn execute_turn(
                 }
                 LlmStreamEvent::Reasoning(reasoning) => {
                     let text = reasoning.display_text();
-                    let emit_text =
-                        should_emit_reasoning_block(&mut streamed_reasoning_preview, &text);
+                    let emit_text = should_emit_reasoning_block(
+                        &mut streamed_reasoning_preview,
+                        &text,
+                    );
                     append_reasoning_block(&mut assistant_content, reasoning);
                     if emit_text {
-                        let _ = tx_event.send(Event::thought_chunk(sid.clone(), text));
+                        let _ = tx_event
+                            .send(Event::thought_chunk(sid.clone(), text));
                     }
                 }
                 LlmStreamEvent::ReasoningDelta {
@@ -284,8 +308,14 @@ pub(crate) async fn execute_turn(
                     if !replayable {
                         streamed_reasoning_preview.push_str(&reasoning);
                     }
-                    append_reasoning_delta(&mut assistant_content, id, &reasoning, replayable);
-                    let _ = tx_event.send(Event::thought_chunk(sid.clone(), reasoning));
+                    append_reasoning_delta(
+                        &mut assistant_content,
+                        id,
+                        &reasoning,
+                        replayable,
+                    );
+                    let _ = tx_event
+                        .send(Event::thought_chunk(sid.clone(), reasoning));
                 }
                 LlmStreamEvent::ToolCallDelta {
                     internal_call_id,
@@ -302,19 +332,24 @@ pub(crate) async fn execute_turn(
 
                     match &content {
                         protocol::ToolCallDeltaContent::Name(name) => {
-                            argument_consumers.maybe_create(call_id, name, &ctx.tools);
+                            argument_consumers
+                                .maybe_create(call_id, name, &ctx.tools);
                         }
 
                         protocol::ToolCallDeltaContent::Delta(delta) => {
-                            for preview_event in
-                                argument_consumers.consume_delta(sid, call_id, delta)
+                            for preview_event in argument_consumers
+                                .consume_delta(sid, call_id, delta)
                             {
                                 let _ = tx_event.send(preview_event);
                             }
                         }
                     }
 
-                    let _ = tx_event.send(Event::tool_call_delta(sid.clone(), call_id, content));
+                    let _ = tx_event.send(Event::tool_call_delta(
+                        sid.clone(),
+                        call_id,
+                        content,
+                    ));
                 }
                 LlmStreamEvent::Final {
                     usage: Some(usage), ..
@@ -335,8 +370,9 @@ pub(crate) async fn execute_turn(
         if !assistant_content.is_empty() {
             let assistant_message = Message::Assistant {
                 id: None,
-                content: OneOrMany::many(assistant_content)
-                    .unwrap_or_else(|_| OneOrMany::one(AssistantContent::text(""))),
+                content: OneOrMany::many(assistant_content).unwrap_or_else(
+                    |_| OneOrMany::one(AssistantContent::text("")),
+                ),
             };
             context.push(assistant_message.clone());
             ctx.persist_message(assistant_message, response_usage).await;
@@ -350,13 +386,17 @@ pub(crate) async fn execute_turn(
         // Feed tool outputs back as user messages for the next LLM iteration
         for output in tool_outputs {
             let tool_message = Message::User {
-                content: OneOrMany::one(protocol::message::UserContent::ToolResult(ToolResult {
-                    id: output.id,
-                    call_id: output.call_id,
-                    content: OneOrMany::one(ToolResultContent::Text(protocol::message::Text {
-                        text: output.output,
-                    })),
-                })),
+                content: OneOrMany::one(
+                    protocol::message::UserContent::ToolResult(ToolResult {
+                        id: output.id,
+                        call_id: output.call_id,
+                        content: OneOrMany::one(ToolResultContent::Text(
+                            protocol::message::Text {
+                                text: output.output,
+                            },
+                        )),
+                    }),
+                ),
             };
             context.push(tool_message.clone());
             ctx.persist_message(tool_message, None).await;
@@ -365,7 +405,10 @@ pub(crate) async fn execute_turn(
 }
 
 /// Drain queued inter-agent messages into the active turn before the next LLM request.
-async fn drain_inter_agent_inputs_for_turn(ctx: &TurnContext, context: &mut dyn ContextManager) {
+async fn drain_inter_agent_inputs_for_turn(
+    ctx: &TurnContext,
+    context: &mut dyn ContextManager,
+) {
     let messages = ctx.input_queue.lock().await.drain_mailbox_input_items();
     for message in messages {
         let user_message = Message::user(message.render_model_context());
@@ -389,8 +432,10 @@ fn append_reasoning_delta(
         return;
     }
 
-    if let Some(AssistantContent::Reasoning(existing)) = assistant_content.last_mut()
-        && let Some(ReasoningContent::Text { text, .. }) = existing.content.last_mut()
+    if let Some(AssistantContent::Reasoning(existing)) =
+        assistant_content.last_mut()
+        && let Some(ReasoningContent::Text { text, .. }) =
+            existing.content.last_mut()
     {
         text.push_str(reasoning);
         return;
@@ -402,9 +447,13 @@ fn append_reasoning_delta(
 }
 
 /// Append a complete reasoning block, merging adjacent canonical provider items.
-fn append_reasoning_block(assistant_content: &mut Vec<AssistantContent>, reasoning: Reasoning) {
+fn append_reasoning_block(
+    assistant_content: &mut Vec<AssistantContent>,
+    reasoning: Reasoning,
+) {
     if reasoning.id.is_some()
-        && let Some(AssistantContent::Reasoning(existing)) = assistant_content.last_mut()
+        && let Some(AssistantContent::Reasoning(existing)) =
+            assistant_content.last_mut()
         && existing.id == reasoning.id
     {
         existing.content.extend(reasoning.content);
@@ -415,7 +464,10 @@ fn append_reasoning_block(assistant_content: &mut Vec<AssistantContent>, reasoni
 }
 
 /// Decide whether a canonical reasoning block should be displayed to the UI.
-fn should_emit_reasoning_block(streamed_preview: &mut String, text: &str) -> bool {
+fn should_emit_reasoning_block(
+    streamed_preview: &mut String,
+    text: &str,
+) -> bool {
     if text.is_empty() {
         return false;
     }
@@ -446,7 +498,12 @@ struct ArgumentsConsumers {
 
 impl ArgumentsConsumers {
     /// Create a consumer for a tool call once the provider streams its tool name.
-    fn maybe_create(&mut self, call_id: &str, tool_name: &str, tools: &ToolRegistry) {
+    fn maybe_create(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        tools: &ToolRegistry,
+    ) {
         if self.consumers.contains_key(call_id) {
             return;
         }
@@ -460,7 +517,12 @@ impl ArgumentsConsumers {
     }
 
     /// Route one streamed arguments delta to the matching consumer.
-    fn consume_delta(&mut self, session_id: &SessionId, call_id: &str, delta: &str) -> Vec<Event> {
+    fn consume_delta(
+        &mut self,
+        session_id: &SessionId,
+        call_id: &str,
+        delta: &str,
+    ) -> Vec<Event> {
         let Some(consumer) = self.consumers.get_mut(call_id) else {
             return Vec::with_capacity(0);
         };
@@ -469,9 +531,14 @@ impl ArgumentsConsumers {
             .consume_delta(call_id, delta)
             .into_iter()
             .map(|item| match item {
-                protocol::ToolArgumentsStreamItem::PatchPreview { call_id, changes } => {
-                    Event::patch_apply_updated(session_id.clone(), call_id, changes)
-                }
+                protocol::ToolArgumentsStreamItem::PatchPreview {
+                    call_id,
+                    changes,
+                } => Event::patch_apply_updated(
+                    session_id.clone(),
+                    call_id,
+                    changes,
+                ),
             })
             .collect()
     }
@@ -485,9 +552,14 @@ impl ArgumentsConsumers {
             Ok(items) => items
                 .into_iter()
                 .map(|item| match item {
-                    protocol::ToolArgumentsStreamItem::PatchPreview { call_id, changes } => {
-                        Event::patch_apply_updated(session_id.clone(), call_id, changes)
-                    }
+                    protocol::ToolArgumentsStreamItem::PatchPreview {
+                        call_id,
+                        changes,
+                    } => Event::patch_apply_updated(
+                        session_id.clone(),
+                        call_id,
+                        changes,
+                    ),
                 })
                 .collect(),
             Err(error) => {
@@ -552,7 +624,15 @@ async fn dispatch_tool(
             arguments.clone(),
             ToolCallStatus::Pending,
         ));
-        match request_tool_approval(ctx, tx_event, call_id, tool_name, arguments.clone()).await? {
+        match request_tool_approval(
+            ctx,
+            tx_event,
+            call_id,
+            tool_name,
+            arguments.clone(),
+        )
+        .await?
+        {
             ReviewDecision::Abort => return Err(KernelError::Cancelled),
             ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {}
             _ => {
@@ -588,20 +668,21 @@ async fn dispatch_tool(
         ));
     }
 
-    let mut stream = match tool.execute_streaming(arguments.clone(), tool_ctx).await {
-        Ok(result) => result,
-        Err(err) => {
-            // Tool-level failures are model-visible results, not kernel failures.
-            // This lets the model repair bad tool inputs such as non-matching patches.
-            let _ = tx_event.send(Event::tool_call_update(
-                ctx.session_id.clone(),
-                call_id,
-                Some(err.clone()),
-                Some(ToolCallStatus::Failed),
-            ));
-            return Ok((err, false));
-        }
-    };
+    let mut stream =
+        match tool.execute_streaming(arguments.clone(), tool_ctx).await {
+            Ok(result) => result,
+            Err(err) => {
+                // Tool-level failures are model-visible results, not kernel failures.
+                // This lets the model repair bad tool inputs such as non-matching patches.
+                let _ = tx_event.send(Event::tool_call_update(
+                    ctx.session_id.clone(),
+                    call_id,
+                    Some(err.clone()),
+                    Some(ToolCallStatus::Failed),
+                ));
+                return Ok((err, false));
+            }
+        };
 
     let mut succeeded = true;
     let mut output_text = String::new();
@@ -737,8 +818,10 @@ mod tests {
         fn completion(
             &self,
             _request: CompletionRequest,
-        ) -> WasmBoxedFuture<'_, Result<provider::factory::LlmCompletion, CompletionError>>
-        {
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::LlmCompletion, CompletionError>,
+        > {
             Box::pin(async {
                 Err(CompletionError::ProviderError(
                     "test llm completion is unused".to_string(),
@@ -749,7 +832,10 @@ mod tests {
         fn stream(
             &self,
             _request: CompletionRequest,
-        ) -> WasmBoxedFuture<'_, Result<provider::factory::DynLlmStream, CompletionError>> {
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::DynLlmStream, CompletionError>,
+        > {
             Box::pin(async {
                 Err(CompletionError::ProviderError(
                     "test llm stream is unused".to_string(),
@@ -773,8 +859,10 @@ mod tests {
         fn completion(
             &self,
             _request: CompletionRequest,
-        ) -> WasmBoxedFuture<'_, Result<provider::factory::LlmCompletion, CompletionError>>
-        {
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::LlmCompletion, CompletionError>,
+        > {
             Box::pin(async {
                 Err(CompletionError::ProviderError(
                     "test llm completion is unused".to_string(),
@@ -785,7 +873,10 @@ mod tests {
         fn stream(
             &self,
             _request: CompletionRequest,
-        ) -> WasmBoxedFuture<'_, Result<provider::factory::DynLlmStream, CompletionError>> {
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::DynLlmStream, CompletionError>,
+        > {
             Box::pin(async {
                 let usage = Usage {
                     input_tokens: 11,
@@ -826,7 +917,11 @@ mod tests {
             serde_json::json!({ "type": "object" })
         }
 
-        fn needs_approval(&self, _: &serde_json::Value, _: &ToolContext) -> bool {
+        fn needs_approval(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolContext,
+        ) -> bool {
             false
         }
 
@@ -843,7 +938,12 @@ mod tests {
             _arguments: serde_json::Value,
             _ctx: &ToolContext,
         ) -> Result<
-            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
+            std::pin::Pin<
+                Box<
+                    dyn futures::stream::Stream<Item = protocol::ToolStreamItem>
+                        + Send,
+                >,
+            >,
             String,
         > {
             Err("tool failed normally".to_string())
@@ -866,7 +966,11 @@ mod tests {
             serde_json::json!({ "type": "object" })
         }
 
-        fn needs_approval(&self, _: &serde_json::Value, _: &ToolContext) -> bool {
+        fn needs_approval(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolContext,
+        ) -> bool {
             false
         }
 
@@ -883,7 +987,12 @@ mod tests {
             _arguments: serde_json::Value,
             _ctx: &ToolContext,
         ) -> Result<
-            std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
+            std::pin::Pin<
+                Box<
+                    dyn futures::stream::Stream<Item = protocol::ToolStreamItem>
+                        + Send,
+                >,
+            >,
             String,
         > {
             let items = vec![protocol::ToolStreamItem::Final {
@@ -906,7 +1015,9 @@ mod tests {
             .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
             .skill_registry(Arc::new(SkillRegistry::default()))
             .recorder(test_recorder())
-            .input_queue(Arc::new(tokio::sync::Mutex::new(InputQueue::default())))
+            .input_queue(Arc::new(tokio::sync::Mutex::new(
+                InputQueue::default(),
+            )))
             .build()
     }
 
@@ -927,14 +1038,17 @@ mod tests {
             .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
             .skill_registry(Arc::new(SkillRegistry::default()))
             .recorder(recorder)
-            .input_queue(Arc::new(tokio::sync::Mutex::new(InputQueue::default())))
+            .input_queue(Arc::new(tokio::sync::Mutex::new(
+                InputQueue::default(),
+            )))
             .build()
     }
 
     /// Build a real recorder for turn tests.
     fn test_recorder() -> Arc<dyn SessionRecorder> {
         Arc::new(store::FileSessionRecorder::new(
-            std::env::temp_dir().join(format!("clawcode-turn-{}.jsonl", uuid::Uuid::new_v4())),
+            std::env::temp_dir()
+                .join(format!("clawcode-turn-{}.jsonl", uuid::Uuid::new_v4())),
         ))
     }
 
@@ -951,7 +1065,8 @@ mod tests {
             Arc::new(UsageLlm),
             recorder,
         );
-        let mut context: Box<dyn ContextManager> = Box::new(crate::context::InMemoryContext::new());
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
         let (tx, _rx) = mpsc::unbounded_channel();
 
         let usage = execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
@@ -1011,7 +1126,9 @@ mod tests {
         append_reasoning_delta(&mut assistant_content, None, "more", true);
 
         assert_eq!(assistant_content.len(), 1);
-        let Some(AssistantContent::Reasoning(reasoning)) = assistant_content.first() else {
+        let Some(AssistantContent::Reasoning(reasoning)) =
+            assistant_content.first()
+        else {
             panic!("expected merged reasoning content");
         };
 
@@ -1022,7 +1139,12 @@ mod tests {
     fn non_replayable_reasoning_delta_is_not_stored() {
         let mut assistant_content = Vec::new();
 
-        append_reasoning_delta(&mut assistant_content, None, "display only", false);
+        append_reasoning_delta(
+            &mut assistant_content,
+            None,
+            "display only",
+            false,
+        );
 
         assert!(assistant_content.is_empty());
     }
@@ -1035,7 +1157,9 @@ mod tests {
             &mut assistant_content,
             Reasoning {
                 id: Some("rs_1".to_string()),
-                content: vec![ReasoningContent::Summary("thinking".to_string())],
+                content: vec![ReasoningContent::Summary(
+                    "thinking".to_string(),
+                )],
             },
         );
         append_reasoning_block(
@@ -1046,7 +1170,9 @@ mod tests {
             },
         );
 
-        let Some(AssistantContent::Reasoning(reasoning)) = assistant_content.first() else {
+        let Some(AssistantContent::Reasoning(reasoning)) =
+            assistant_content.first()
+        else {
             panic!("expected reasoning content");
         };
 
@@ -1058,7 +1184,8 @@ mod tests {
     fn canonical_reasoning_text_is_not_redisplayed_after_preview_delta() {
         let mut streamed_preview = String::from("thinking");
 
-        let emit_text = should_emit_reasoning_block(&mut streamed_preview, "thinking");
+        let emit_text =
+            should_emit_reasoning_block(&mut streamed_preview, "thinking");
 
         assert!(!emit_text);
         assert!(streamed_preview.is_empty());
@@ -1100,7 +1227,10 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let tool_call = ToolCall::new(
             "call-1".to_string(),
-            protocol::ToolFunction::new("failing_tool".to_string(), serde_json::json!({})),
+            protocol::ToolFunction::new(
+                "failing_tool".to_string(),
+                serde_json::json!({}),
+            ),
         );
 
         let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
@@ -1133,12 +1263,16 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let tool_call = ToolCall::new(
             "call-unknown".to_string(),
-            protocol::ToolFunction::new("task".to_string(), serde_json::json!({})),
+            protocol::ToolFunction::new(
+                "task".to_string(),
+                serde_json::json!({}),
+            ),
         );
 
-        let result = dispatch_tool(&ctx, &tx, "call-unknown", &tool_call, &tool_ctx)
-            .await
-            .expect("unknown tool should not abort the turn");
+        let result =
+            dispatch_tool(&ctx, &tx, "call-unknown", &tool_call, &tool_ctx)
+                .await
+                .expect("unknown tool should not abort the turn");
 
         assert_eq!(result, ("unknown tool `task`".to_string(), false));
         assert!(matches!(
@@ -1172,7 +1306,10 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let tool_call = ToolCall::new(
             "call-1".to_string(),
-            protocol::ToolFunction::new("streaming_text_tool".to_string(), serde_json::json!({})),
+            protocol::ToolFunction::new(
+                "streaming_text_tool".to_string(),
+                serde_json::json!({}),
+            ),
         );
 
         let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
@@ -1192,7 +1329,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_tool_returns_failed_result_when_apply_patch_context_is_missing() {
+    async fn dispatch_tool_returns_failed_result_when_apply_patch_context_is_missing()
+     {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("test_dup.txt"),
@@ -1221,11 +1359,14 @@ mod tests {
             ),
         );
 
-        let (output, succeeded) = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
-            .await
-            .expect("apply_patch failure should not abort the turn");
+        let (output, succeeded) =
+            dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+                .await
+                .expect("apply_patch failure should not abort the turn");
 
         assert!(!succeeded);
-        assert!(output.contains("Could not find matching lines for update chunk"));
+        assert!(
+            output.contains("Could not find matching lines for update chunk")
+        );
     }
 }

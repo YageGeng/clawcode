@@ -340,7 +340,10 @@ where
         {
             type Value = OneOrMany<T>;
 
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn expecting(
+                &self,
+                formatter: &mut fmt::Formatter<'_>,
+            ) -> fmt::Result {
                 formatter.write_str("a sequence of at least one element")
             }
 
@@ -378,7 +381,9 @@ where
 //     #[serde(deserialize_with = "string_or_one_or_many")]
 //     field: OneOrMany<String>,
 // }
-pub fn string_or_one_or_many<'de, T, D>(deserializer: D) -> Result<OneOrMany<T>, D::Error>
+pub fn string_or_one_or_many<'de, T, D>(
+    deserializer: D,
+) -> Result<OneOrMany<T>, D::Error>
 where
     T: Deserialize<'de> + FromStr<Err = Infallible> + Clone,
     D: Deserializer<'de>,
@@ -414,7 +419,9 @@ where
         where
             M: MapAccess<'de>,
         {
-            let item = Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
+            let item = Deserialize::deserialize(
+                de::value::MapAccessDeserializer::new(map),
+            )?;
             Ok(OneOrMany::one(item))
         }
     }
@@ -463,7 +470,10 @@ where
             Ok(None)
         }
 
-        fn visit_some<D>(self, deserializer: D) -> Result<Option<OneOrMany<T>>, D::Error>
+        fn visit_some<D>(
+            self,
+            deserializer: D,
+        ) -> Result<Option<OneOrMany<T>>, D::Error>
         where
             D: Deserializer<'de>,
         {
@@ -494,7 +504,9 @@ mod test {
 
     #[test]
     fn test() {
-        let one_or_many = OneOrMany::many(vec!["hello".to_string(), "word".to_string()]).unwrap();
+        let one_or_many =
+            OneOrMany::many(vec!["hello".to_string(), "word".to_string()])
+                .unwrap();
 
         assert_eq!(one_or_many.iter().count(), 2);
 
@@ -517,7 +529,8 @@ mod test {
         assert_eq!(size_hint.1, Some(1));
 
         let vec = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
-        let mut one_or_many = OneOrMany::many(vec).expect("this should never fail");
+        let mut one_or_many =
+            OneOrMany::many(vec).expect("this should never fail");
         let size_hint = one_or_many.iter().size_hint();
         assert_eq!(size_hint.0, 1);
         assert_eq!(size_hint.1, Some(3));
@@ -544,7 +557,9 @@ mod test {
 
     #[test]
     fn test_one_or_many_into_iter() {
-        let one_or_many = OneOrMany::many(vec!["hello".to_string(), "word".to_string()]).unwrap();
+        let one_or_many =
+            OneOrMany::many(vec!["hello".to_string(), "word".to_string()])
+                .unwrap();
 
         assert_eq!(one_or_many.clone().into_iter().count(), 2);
 
@@ -560,11 +575,14 @@ mod test {
 
     #[test]
     fn test_one_or_many_merge() {
-        let one_or_many_1 = OneOrMany::many(vec!["hello".to_string(), "word".to_string()]).unwrap();
+        let one_or_many_1 =
+            OneOrMany::many(vec!["hello".to_string(), "word".to_string()])
+                .unwrap();
 
         let one_or_many_2 = OneOrMany::one("sup".to_string());
 
-        let merged = OneOrMany::merge(vec![one_or_many_1, one_or_many_2]).unwrap();
+        let merged =
+            OneOrMany::merge(vec![one_or_many_1, one_or_many_2]).unwrap();
 
         assert_eq!(merged.iter().count(), 3);
 
@@ -595,7 +613,8 @@ mod test {
     #[test]
     fn test_mut() {
         let mut one_or_many =
-            OneOrMany::many(vec!["hello".to_string(), "word".to_string()]).unwrap();
+            OneOrMany::many(vec!["hello".to_string(), "word".to_string()])
+                .unwrap();
 
         assert_eq!(one_or_many.iter_mut().count(), 2);
 
@@ -624,7 +643,9 @@ mod test {
 
     #[test]
     fn test_len_many() {
-        let one_or_many = OneOrMany::many(vec!["hello".to_string(), "word".to_string()]).unwrap();
+        let one_or_many =
+            OneOrMany::many(vec!["hello".to_string(), "word".to_string()])
+                .unwrap();
 
         assert_eq!(one_or_many.len(), 2);
     }
@@ -643,7 +664,8 @@ mod test {
 
     #[test]
     fn test_deserialize_list_of_maps() {
-        let json_data = json!({"field": [{"key": "value1"}, {"key": "value2"}]});
+        let json_data =
+            json!({"field": [{"key": "value1"}, {"key": "value2"}]});
         let one_or_many: OneOrMany<serde_json::Value> =
             serde_json::from_value(json_data["field"].clone()).unwrap();
 
@@ -707,13 +729,17 @@ mod test {
         let dummy: DummyStruct = serde_json::from_value(json_data).unwrap();
 
         assert_eq!(dummy.field.len(), 1);
-        assert_eq!(dummy.field.first(), DummyString::from_str("hello").unwrap());
+        assert_eq!(
+            dummy.field.first(),
+            DummyString::from_str("hello").unwrap()
+        );
     }
 
     #[test]
     fn test_deserialize_string_option() {
         let json_data = json!({"field": "hello"});
-        let dummy: DummyStructOption = serde_json::from_value(json_data).unwrap();
+        let dummy: DummyStructOption =
+            serde_json::from_value(json_data).unwrap();
 
         assert!(dummy.field.is_some());
         let field = dummy.field.unwrap();
@@ -723,8 +749,10 @@ mod test {
 
     #[test]
     fn test_deserialize_list_option() {
-        let json_data = json!({"field": [{"string": "hello"}, {"string": "world"}]});
-        let dummy: DummyStructOption = serde_json::from_value(json_data).unwrap();
+        let json_data =
+            json!({"field": [{"string": "hello"}, {"string": "world"}]});
+        let dummy: DummyStructOption =
+            serde_json::from_value(json_data).unwrap();
 
         assert!(dummy.field.is_some());
         let field = dummy.field.unwrap();
@@ -736,7 +764,8 @@ mod test {
     #[test]
     fn test_deserialize_null_option() {
         let json_data = json!({"field": null});
-        let dummy: DummyStructOption = serde_json::from_value(json_data).unwrap();
+        let dummy: DummyStructOption =
+            serde_json::from_value(json_data).unwrap();
 
         assert!(dummy.field.is_none());
     }

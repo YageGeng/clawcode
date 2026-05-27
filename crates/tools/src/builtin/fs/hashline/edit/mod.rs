@@ -17,7 +17,9 @@ use crate::{FsBackend, FsReadRequest, FsWriteRequest, LocalFsBackend, Tool};
 
 use self::buffer::EditBuffer;
 use self::line_ending::{LineEnding, normalize_to_lf};
-pub use self::operation::{HashlineEdit, InsertAfterEdit, ReplaceLinesEdit, SetLineEdit};
+pub use self::operation::{
+    HashlineEdit, InsertAfterEdit, ReplaceLinesEdit, SetLineEdit,
+};
 pub use self::outcome::{HashlineApplyResult, HashlineEditError, NoopEdit};
 
 /// Edits files using hash-verified line references.
@@ -122,7 +124,11 @@ impl Tool for HashlineEditFile {
         })
     }
 
-    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         true
     }
 
@@ -222,7 +228,10 @@ struct EditArgs {
 mod tests {
     use super::super::format::compute_line_hash;
     use super::*;
-    use crate::{FsBackendError, FsReadResponse, FsWriteRequest, FsWriteResponse, ToolContext};
+    use crate::{
+        FsBackendError, FsReadResponse, FsWriteRequest, FsWriteResponse,
+        ToolContext,
+    };
     use futures::StreamExt;
     use std::sync::Mutex;
 
@@ -257,10 +266,10 @@ mod tests {
     #[test]
     fn hashline_edit_parameters_match_supported_aliases() {
         let parameters = HashlineEditFile::new().parameters();
-        let replace_lines =
-            &parameters["properties"]["edits"]["items"]["oneOf"][1]["properties"]["replace_lines"];
-        let insert_after =
-            &parameters["properties"]["edits"]["items"]["oneOf"][2]["properties"]["insert_after"];
+        let replace_lines = &parameters["properties"]["edits"]["items"]["oneOf"]
+            [1]["properties"]["replace_lines"];
+        let insert_after = &parameters["properties"]["edits"]["items"]["oneOf"]
+            [2]["properties"]["insert_after"];
 
         assert_eq!(
             replace_lines["required"],
@@ -656,8 +665,8 @@ mod tests {
                     start_anchor: anchor(content, 1),
                     end_anchor: Some(anchor(content, 1)),
                     new_text: [
-                        "line01", "line02", "line03", "line04", "line05", "line06", "line07",
-                        "line08", "line09", "line10",
+                        "line01", "line02", "line03", "line04", "line05",
+                        "line06", "line07", "line08", "line09", "line10",
                     ]
                     .join("\n"),
                 },
@@ -682,8 +691,8 @@ mod tests {
     #[test]
     fn replace_lines_massive_contraction_emits_warning() {
         let content = [
-            "line01", "line02", "line03", "line04", "line05", "line06", "line07", "line08",
-            "line09", "line10", "line11",
+            "line01", "line02", "line03", "line04", "line05", "line06",
+            "line07", "line08", "line09", "line10", "line11",
         ]
         .join("\n");
         let result = test_apply(
@@ -710,7 +719,8 @@ mod tests {
 
     /// Verifies insert_after on the same anchor follows the replaced line.
     #[test]
-    fn mixed_set_line_and_insert_after_same_anchor_keeps_insert_after_replacement() {
+    fn mixed_set_line_and_insert_after_same_anchor_keeps_insert_after_replacement()
+     {
         let content = "aaa\nbbb\nccc";
         let result = test_apply(
             content,
@@ -842,7 +852,8 @@ mod tests {
             &[HashlineEdit::SetLine {
                 set_line: SetLineEdit {
                     anchor: anchor(content, 1),
-                    new_text: "const message =\n  formatLongIdentifier(value);".to_string(),
+                    new_text: "const message =\n  formatLongIdentifier(value);"
+                        .to_string(),
                 },
             }],
         )
@@ -904,7 +915,8 @@ mod tests {
             *self
                 .content
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = request.content.clone();
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                request.content.clone();
             self.writes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -932,7 +944,9 @@ mod tests {
     #[tokio::test]
     async fn hashline_edit_tool_writes_changed_content() {
         let backend = memory_backend("aaa\nbbb\nccc");
-        let tool = HashlineEditFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool = HashlineEditFile::with_backend(
+            Arc::clone(&backend) as Arc<dyn FsBackend>
+        );
 
         let result = tool
             .execute(
@@ -959,7 +973,9 @@ mod tests {
     #[tokio::test]
     async fn hashline_edit_tool_rejects_noop_without_writing() {
         let backend = memory_backend("aaa\nbbb\nccc");
-        let tool = HashlineEditFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool = HashlineEditFile::with_backend(
+            Arc::clone(&backend) as Arc<dyn FsBackend>
+        );
 
         let error = tool
             .execute(
@@ -994,7 +1010,9 @@ mod tests {
     #[tokio::test]
     async fn hashline_edit_tool_streaming_returns_plain_text_only() {
         let backend = memory_backend("aaa\nbbb\nccc");
-        let tool = HashlineEditFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool = HashlineEditFile::with_backend(
+            Arc::clone(&backend) as Arc<dyn FsBackend>
+        );
 
         let mut stream = tool
             .execute_streaming(
@@ -1023,7 +1041,9 @@ mod tests {
     async fn hashline_edit_tool_preserves_crlf_line_endings() {
         let original = "one\r\ntwo\r\nthree";
         let backend = memory_backend(original);
-        let tool = HashlineEditFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool = HashlineEditFile::with_backend(
+            Arc::clone(&backend) as Arc<dyn FsBackend>
+        );
 
         let result = tool
             .execute(

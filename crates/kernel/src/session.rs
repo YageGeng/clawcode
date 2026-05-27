@@ -9,8 +9,8 @@ use config::AppConfig;
 use futures::Stream;
 use protocol::message::Message;
 use protocol::{
-    AgentPath, AgentStatus, Event, InterAgentMessage, KernelError, Op, ReviewDecision, SessionId,
-    StopReason, TurnId, Usage,
+    AgentPath, AgentStatus, Event, InterAgentMessage, KernelError, Op,
+    ReviewDecision, SessionId, StopReason, TurnId, Usage,
 };
 use provider::factory::{ArcLlm, LlmFactory};
 use skills::SkillRegistry;
@@ -21,8 +21,8 @@ use crate::context::ContextManager;
 use crate::input_queue::InputQueue;
 use crate::turn::{TurnContext, execute_turn};
 use store::{
-    MessageRecord, PersistedPayload, SessionRecorder, TurnAbortedRecord, TurnCompleteRecord,
-    TurnKindRecord,
+    MessageRecord, PersistedPayload, SessionRecorder, TurnAbortedRecord,
+    TurnCompleteRecord, TurnKindRecord,
 };
 use tools::ToolRegistry;
 
@@ -44,12 +44,14 @@ pub struct Thread {
     /// Shared sender for per-turn events.
     pub(crate) tx_event: Arc<tokio::sync::Mutex<mpsc::UnboundedSender<Event>>>,
     /// Initial receiver kept alive until the first frontend subscription.
-    pub(crate) initial_rx_event: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<Event>>>>,
+    pub(crate) initial_rx_event:
+        Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<Event>>>>,
     /// Shared pending approval channels. The handle stores the primary copy
     /// so callers outside the background task (e.g. ACP agent) can resolve
     /// approval requests without blocking on the session loop.
-    pub(crate) pending_approvals:
-        Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
+    pub(crate) pending_approvals: Arc<
+        tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
+    >,
     /// Signal cancellation.
     pub(crate) cancel_tx: watch::Sender<bool>,
     /// Tool registry available to this live session.
@@ -115,8 +117,9 @@ pub(crate) struct Session {
     pub tools: Arc<ToolRegistry>,
     /// Shared map of pending approval channels. execute_turn inserts a
     /// oneshot::Sender keyed by call_id; run_loop sends the user's decision.
-    pub pending_approvals:
-        Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>>,
+    pub pending_approvals: Arc<
+        tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
+    >,
     /// Agent path for this session.
     pub agent_path: AgentPath,
     /// Approval policy — controls tool confirmation behaviour.
@@ -259,7 +262,9 @@ async fn run_loop(mut rt: Session) {
         match op {
             // Queue mailbox-only messages until a turn boundary can deliver them
             // as model-visible context without starting a new turn.
-            Some(Op::InterAgentMessage { message }) if !message.trigger_turn => {
+            Some(Op::InterAgentMessage { message })
+                if !message.trigger_turn =>
+            {
                 rt.input_queue
                     .lock()
                     .await
@@ -268,11 +273,16 @@ async fn run_loop(mut rt: Session) {
             Some(Op::InterAgentMessage { message }) => {
                 let mut next_message = Some(message);
                 while let Some(message) = next_message {
-                    let keep_running = run_inter_agent_turn(&mut rt, message).await;
+                    let keep_running =
+                        run_inter_agent_turn(&mut rt, message).await;
                     if !keep_running {
                         return;
                     }
-                    next_message = rt.input_queue.lock().await.take_next_triggering_message();
+                    next_message = rt
+                        .input_queue
+                        .lock()
+                        .await
+                        .take_next_triggering_message();
                 }
                 drain_pending_inter_agent_messages(
                     &mut *rt.context,
@@ -283,7 +293,12 @@ async fn run_loop(mut rt: Session) {
             }
             Some(Op::Prompt { text, system, .. }) => {
                 let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
-                let ctx = TurnContext::from_session(&rt, turn_id, TurnKindRecord::Prompt, system);
+                let ctx = TurnContext::from_session(
+                    &rt,
+                    turn_id,
+                    TurnKindRecord::Prompt,
+                    system,
+                );
                 let tx = { rt.tx_event.lock().await.clone() };
 
                 drain_pending_inter_agent_messages(
@@ -297,17 +312,28 @@ async fn run_loop(mut rt: Session) {
                     TurnStepOutcome::Shutdown => return,
                     TurnStepOutcome::Finished(status) => {
                         let status = with_final_message(status, &*rt.context);
-                        notify_terminal_turn(&rt.agent_control, &rt.session_id, status).await;
+                        notify_terminal_turn(
+                            &rt.agent_control,
+                            &rt.session_id,
+                            status,
+                        )
+                        .await;
                     }
                 }
 
-                let mut next_message = rt.input_queue.lock().await.take_next_triggering_message();
+                let mut next_message =
+                    rt.input_queue.lock().await.take_next_triggering_message();
                 while let Some(message) = next_message {
-                    let keep_running = run_inter_agent_turn(&mut rt, message).await;
+                    let keep_running =
+                        run_inter_agent_turn(&mut rt, message).await;
                     if !keep_running {
                         return;
                     }
-                    next_message = rt.input_queue.lock().await.take_next_triggering_message();
+                    next_message = rt
+                        .input_queue
+                        .lock()
+                        .await
+                        .take_next_triggering_message();
                 }
                 drain_pending_inter_agent_messages(
                     &mut *rt.context,
@@ -318,7 +344,9 @@ async fn run_loop(mut rt: Session) {
             }
             Some(Op::ExecApprovalResponse { call_id, decision })
             | Some(Op::PatchApprovalResponse { call_id, decision }) => {
-                if let Some(tx) = rt.pending_approvals.lock().await.remove(&call_id) {
+                if let Some(tx) =
+                    rt.pending_approvals.lock().await.remove(&call_id)
+                {
                     let _ = tx.send(decision);
                 }
             }
@@ -329,7 +357,8 @@ async fn run_loop(mut rt: Session) {
             }) => match rt.llm_factory.get(&provider_id, &model_id) {
                 Some(llm) => {
                     rt.llm = llm;
-                    *rt.current_model.write().await = format!("{provider_id}/{model_id}");
+                    *rt.current_model.write().await =
+                        format!("{provider_id}/{model_id}");
                 }
                 None => {
                     tracing::warn!(
@@ -441,9 +470,17 @@ async fn run_turn_select_loop(
 }
 
 /// Execute one inter-agent turn and return whether the session should keep running.
-async fn run_inter_agent_turn(rt: &mut Session, message: InterAgentMessage) -> bool {
+async fn run_inter_agent_turn(
+    rt: &mut Session,
+    message: InterAgentMessage,
+) -> bool {
     let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
-    let ctx = TurnContext::from_session(rt, turn_id, TurnKindRecord::InterAgentMessage, None);
+    let ctx = TurnContext::from_session(
+        rt,
+        turn_id,
+        TurnKindRecord::InterAgentMessage,
+        None,
+    );
     let tx = { rt.tx_event.lock().await.clone() };
     drain_pending_inter_agent_messages(
         &mut *rt.context,
@@ -452,11 +489,13 @@ async fn run_inter_agent_turn(rt: &mut Session, message: InterAgentMessage) -> b
     )
     .await;
 
-    match run_turn_select_loop(rt, &ctx, message.render_turn_input(), &tx).await {
+    match run_turn_select_loop(rt, &ctx, message.render_turn_input(), &tx).await
+    {
         TurnStepOutcome::Shutdown => false,
         TurnStepOutcome::Finished(status) => {
             let status = with_final_message(status, &*rt.context);
-            notify_terminal_turn(&rt.agent_control, &rt.session_id, status).await;
+            notify_terminal_turn(&rt.agent_control, &rt.session_id, status)
+                .await;
             true
         }
     }
@@ -492,12 +531,18 @@ async fn persist_inter_agent_message(
 }
 
 /// Persist a message accepted into the session context.
-async fn persist_message(recorder: &dyn SessionRecorder, turn_id: &TurnId, message: Message) {
+async fn persist_message(
+    recorder: &dyn SessionRecorder,
+    turn_id: &TurnId,
+    message: Message,
+) {
     let record = MessageRecord::builder()
         .turn_id(String::from(turn_id))
         .message(message)
         .build();
-    if let Err(error) = recorder.append(&[PersistedPayload::Message(record)]).await {
+    if let Err(error) =
+        recorder.append(&[PersistedPayload::Message(record)]).await
+    {
         tracing::warn!(%error, "failed to persist session message");
     }
 }
@@ -517,7 +562,10 @@ async fn notify_terminal_turn(
 }
 
 /// Attach the latest assistant text to completed statuses.
-fn with_final_message(status: AgentStatus, context: &dyn ContextManager) -> AgentStatus {
+fn with_final_message(
+    status: AgentStatus,
+    context: &dyn ContextManager,
+) -> AgentStatus {
     match status {
         AgentStatus::Completed { .. } => AgentStatus::Completed {
             message: context.last_assistant_text(),
@@ -545,7 +593,11 @@ async fn persist_turn_complete(
 }
 
 /// Persist an interrupted turn marker, logging but not failing shutdown/error handling.
-async fn persist_turn_aborted(recorder: &dyn SessionRecorder, turn_id: &TurnId, reason: String) {
+async fn persist_turn_aborted(
+    recorder: &dyn SessionRecorder,
+    turn_id: &TurnId,
+    reason: String,
+) {
     let record = TurnAbortedRecord::builder()
         .turn_id(String::from(turn_id))
         .reason(reason)

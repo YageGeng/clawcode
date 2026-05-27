@@ -17,7 +17,9 @@ use crate::completion::{CompletionError, GetTokenUsage};
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::json_utils;
-use crate::streaming::{self, RawStreamingChoice, RawStreamingToolCall, ToolCallDeltaContent};
+use crate::streaming::{
+    self, RawStreamingChoice, RawStreamingToolCall, ToolCallDeltaContent,
+};
 use crate::wasm_compat::WasmCompatSend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +126,9 @@ where
     }
 }
 
-pub(crate) fn tool_call_chunks<T>(tool_calls: &[T]) -> Vec<CompatibleToolCallChunk>
+pub(crate) fn tool_call_chunks<T>(
+    tool_calls: &[T],
+) -> Vec<CompatibleToolCallChunk>
 where
     for<'a> CompatibleToolCallChunk: From<&'a T>,
 {
@@ -139,7 +143,10 @@ pub(crate) trait CompatibleStreamProfile: WasmCompatSend {
     type Detail: WasmCompatSend + 'static;
     type FinalResponse: Clone + Unpin + GetTokenUsage + WasmCompatSend + 'static;
 
-    fn normalize_chunk(&self, data: &str) -> NormalizedCompatibleChunk<Self::Usage, Self::Detail>;
+    fn normalize_chunk(
+        &self,
+        data: &str,
+    ) -> NormalizedCompatibleChunk<Self::Usage, Self::Detail>;
 
     fn build_final_response(&self, usage: Self::Usage) -> Self::FinalResponse;
 
@@ -172,7 +179,8 @@ pub(crate) trait CompatibleStreamProfile: WasmCompatSend {
         _tool_call: &RawStreamingToolCall,
         incoming: &CompatibleToolCallChunk,
     ) -> bool {
-        self.emits_complete_single_chunk_tool_calls() && incoming.is_complete_single_chunk()
+        self.emits_complete_single_chunk_tool_calls()
+            && incoming.is_complete_single_chunk()
     }
 }
 
@@ -198,7 +206,10 @@ pub(crate) async fn send_compatible_streaming_request<T, P>(
     http_client: T,
     req: Request<Vec<u8>>,
     profile: P,
-) -> Result<streaming::StreamingCompletionResponse<P::FinalResponse>, CompletionError>
+) -> Result<
+    streaming::StreamingCompletionResponse<P::FinalResponse>,
+    CompletionError,
+>
 where
     T: HttpClientExt + Clone + 'static,
     P: CompatibleStreamProfile + 'static,
@@ -413,7 +424,10 @@ fn record_response_metadata(
     }
 }
 
-fn append_tool_call_arguments(tool_call: &mut RawStreamingToolCall, chunk: &str) {
+fn append_tool_call_arguments(
+    tool_call: &mut RawStreamingToolCall,
+    chunk: &str,
+) {
     let current_args = match &tool_call.arguments {
         serde_json::Value::Null => String::new(),
         serde_json::Value::String(existing) => {
@@ -432,7 +446,9 @@ fn append_tool_call_arguments(tool_call: &mut RawStreamingToolCall, chunk: &str)
 
     let combined = format!("{current_args}{chunk}");
 
-    if combined.trim_start().starts_with('{') && combined.trim_end().ends_with('}') {
+    if combined.trim_start().starts_with('{')
+        && combined.trim_end().ends_with('}')
+    {
         match serde_json::from_str(&combined) {
             Ok(parsed) => tool_call.arguments = parsed,
             Err(_) => tool_call.arguments = serde_json::Value::String(combined),
@@ -452,7 +468,9 @@ pub(crate) fn finalize_completed_streaming_tool_call(
     tool_call
 }
 
-fn finalize_pending_tool_call(mut tool_call: RawStreamingToolCall) -> Option<RawStreamingToolCall> {
+fn finalize_pending_tool_call(
+    mut tool_call: RawStreamingToolCall,
+) -> Option<RawStreamingToolCall> {
     // Canonical cleanup for OpenAI Chat Completions-compatible providers:
     // a pending tool call with an established name but no streamed arguments is
     // treated as a valid parameterless invocation and normalized to `{}`.
@@ -462,10 +480,13 @@ fn finalize_pending_tool_call(mut tool_call: RawStreamingToolCall) -> Option<Raw
     }
 
     match &tool_call.arguments {
-        serde_json::Value::Null => Some(finalize_completed_streaming_tool_call(tool_call)),
+        serde_json::Value::Null => {
+            Some(finalize_completed_streaming_tool_call(tool_call))
+        }
         serde_json::Value::String(arguments) => {
             if arguments.trim().is_empty() {
-                tool_call.arguments = serde_json::Value::Object(serde_json::Map::new());
+                tool_call.arguments =
+                    serde_json::Value::Object(serde_json::Map::new());
                 return Some(tool_call);
             }
 
@@ -504,7 +525,8 @@ fn take_finalized_tool_calls(
     tool_calls: &mut HashMap<usize, RawStreamingToolCall>,
     context: DroppedToolCallContext,
 ) -> Vec<RawStreamingToolCall> {
-    let (completed_tool_calls, dropped_tool_calls) = drain_finalized_tool_calls(tool_calls);
+    let (completed_tool_calls, dropped_tool_calls) =
+        drain_finalized_tool_calls(tool_calls);
 
     if dropped_tool_calls > 0 {
         match context {
@@ -531,7 +553,9 @@ pub(crate) mod test_support {
     use bytes::Bytes;
     use futures::StreamExt;
 
-    pub(crate) fn sse_bytes_from_data_lines<T>(events: impl IntoIterator<Item = T>) -> Bytes
+    pub(crate) fn sse_bytes_from_data_lines<T>(
+        events: impl IntoIterator<Item = T>,
+    ) -> Bytes
     where
         T: AsRef<str>,
     {
@@ -543,14 +567,17 @@ pub(crate) mod test_support {
         )
     }
 
-    pub(crate) fn sse_bytes_from_json_events(events: &[serde_json::Value]) -> Bytes {
+    pub(crate) fn sse_bytes_from_json_events(
+        events: &[serde_json::Value],
+    ) -> Bytes {
         Bytes::from(
             events
                 .iter()
                 .map(|event| {
                     format!(
                         "data: {}\n\n",
-                        serde_json::to_string(event).expect("event should serialize")
+                        serde_json::to_string(event)
+                            .expect("event should serialize")
                     )
                 })
                 .collect::<String>(),
@@ -575,7 +602,9 @@ pub(crate) mod test_support {
                 StreamedAssistantContent::ToolCall { tool_call, .. } => {
                     collected_tool_calls.push(tool_call);
                 }
-                _ => panic!("unexpected stream item while asserting zero-arg tool call"),
+                _ => panic!(
+                    "unexpected stream item while asserting zero-arg tool call"
+                ),
             }
         }
 

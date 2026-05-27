@@ -5,13 +5,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    ClientCapabilities, ReadTextFileRequest, SessionId as AcpSessionId, WriteTextFileRequest,
+    ClientCapabilities, ReadTextFileRequest, SessionId as AcpSessionId,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use async_trait::async_trait;
 use protocol::SessionId;
 use tools::{
-    FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest, FsWriteResponse,
+    FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteRequest,
+    FsWriteResponse,
 };
 
 /// ACP client route used by filesystem backend requests.
@@ -59,7 +61,10 @@ impl AcpClientFsRouter {
     }
 
     /// Return the registered route for a session.
-    fn route_for(&self, session_id: &SessionId) -> Result<AcpClientFsRoute, FsBackendError> {
+    fn route_for(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<AcpClientFsRoute, FsBackendError> {
         self.routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -115,15 +120,22 @@ impl FsBackend for AcpFsBackend {
             .checked_add(1)
             .and_then(|line| u32::try_from(line).ok())
             .ok_or_else(|| {
-                FsBackendError::InvalidRequest("read offset is too large".to_string())
+                FsBackendError::InvalidRequest(
+                    "read offset is too large".to_string(),
+                )
             })?;
         let path = Self::resolve_absolute(request.cwd, request.path);
-        let mut acp_request =
-            ReadTextFileRequest::new(AcpSessionId::from(&request.session_id), path).line(line);
+        let mut acp_request = ReadTextFileRequest::new(
+            AcpSessionId::from(&request.session_id),
+            path,
+        )
+        .line(line);
 
         if let Some(limit) = request.limit {
             let limit = u32::try_from(limit).map_err(|error| {
-                FsBackendError::InvalidRequest(format!("read limit is too large: {error}"))
+                FsBackendError::InvalidRequest(format!(
+                    "read limit is too large: {error}"
+                ))
             })?;
 
             acp_request = acp_request.limit(limit);
@@ -134,7 +146,11 @@ impl FsBackend for AcpFsBackend {
             .send_request(acp_request)
             .block_task()
             .await
-            .map_err(|error| FsBackendError::Io(format!("ACP read_text_file failed: {error}")))?;
+            .map_err(|error| {
+                FsBackendError::Io(format!(
+                    "ACP read_text_file failed: {error}"
+                ))
+            })?;
 
         Ok(FsReadResponse {
             content: response.content,
@@ -164,7 +180,11 @@ impl FsBackend for AcpFsBackend {
             ))
             .block_task()
             .await
-            .map_err(|error| FsBackendError::Io(format!("ACP write_text_file failed: {error}")))?;
+            .map_err(|error| {
+                FsBackendError::Io(format!(
+                    "ACP write_text_file failed: {error}"
+                ))
+            })?;
 
         Ok(FsWriteResponse {
             bytes_written,
@@ -176,7 +196,9 @@ impl FsBackend for AcpFsBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{ReadTextFileResponse, WriteTextFileResponse};
+    use agent_client_protocol::schema::{
+        ReadTextFileResponse, WriteTextFileResponse,
+    };
     use agent_client_protocol::{Agent, Channel, Client, Responder};
     use tokio::sync::{mpsc, oneshot};
 
@@ -191,10 +213,16 @@ mod tests {
         tokio::spawn(async move {
             let _ = Agent
                 .builder()
-                .connect_with(agent_channel, async move |cx: ConnectionTo<Client>| {
-                    let _ = connection_tx.send(cx);
-                    std::future::pending::<Result<(), agent_client_protocol::Error>>().await
-                })
+                .connect_with(
+                    agent_channel,
+                    async move |cx: ConnectionTo<Client>| {
+                        let _ = connection_tx.send(cx);
+                        std::future::pending::<
+                            Result<(), agent_client_protocol::Error>,
+                        >()
+                        .await
+                    },
+                )
                 .await;
         });
 
@@ -208,7 +236,9 @@ mod tests {
                         let tx = read_tx.clone();
                         async move {
                             let _ = tx.send(request);
-                            responder.respond(ReadTextFileResponse::new("from client"))
+                            responder.respond(ReadTextFileResponse::new(
+                                "from client",
+                            ))
                         }
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -226,7 +256,10 @@ mod tests {
                     agent_client_protocol::on_receive_request!(),
                 )
                 .connect_with(client_channel, async move |_cx| {
-                    std::future::pending::<Result<(), agent_client_protocol::Error>>().await
+                    std::future::pending::<
+                        Result<(), agent_client_protocol::Error>,
+                    >()
+                    .await
                 })
                 .await;
         });
@@ -277,7 +310,8 @@ mod tests {
             .expect("ACP read should succeed");
 
         assert_eq!(response.content, "from client");
-        let request = read_rx.recv().await.expect("read request should be sent");
+        let request =
+            read_rx.recv().await.expect("read request should be sent");
         assert_eq!(request.path, PathBuf::from("/workspace/sample.txt"));
         assert_eq!(request.line, Some(2));
         assert_eq!(request.limit, Some(2));
@@ -304,7 +338,8 @@ mod tests {
 
         assert_eq!(response.bytes_written, 5);
         assert_eq!(response.display_path, PathBuf::from("/workspace/out.txt"));
-        let request = write_rx.recv().await.expect("write request should be sent");
+        let request =
+            write_rx.recv().await.expect("write request should be sent");
         assert_eq!(request.path, PathBuf::from("/workspace/out.txt"));
         assert_eq!(request.content, "hello");
     }

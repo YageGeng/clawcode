@@ -62,20 +62,33 @@ impl CredentialStore for FileCredentialStore {
                 )));
             }
         };
-        let creds: StoredCredentials = serde_json::from_str(&data).map_err(|e| {
-            AuthError::OAuthError(format!("failed to parse {}: {e}", self.path.display()))
-        })?;
+        let creds: StoredCredentials =
+            serde_json::from_str(&data).map_err(|e| {
+                AuthError::OAuthError(format!(
+                    "failed to parse {}: {e}",
+                    self.path.display()
+                ))
+            })?;
         Ok(Some(creds))
     }
 
-    async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+    async fn save(
+        &self,
+        credentials: StoredCredentials,
+    ) -> Result<(), AuthError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                AuthError::OAuthError(format!("failed to create dir {}: {e}", parent.display()))
+                AuthError::OAuthError(format!(
+                    "failed to create dir {}: {e}",
+                    parent.display()
+                ))
             })?;
         }
-        let data = serde_json::to_string_pretty(&credentials)
-            .map_err(|e| AuthError::OAuthError(format!("failed to serialize credentials: {e}")))?;
+        let data = serde_json::to_string_pretty(&credentials).map_err(|e| {
+            AuthError::OAuthError(format!(
+                "failed to serialize credentials: {e}"
+            ))
+        })?;
 
         // Open the credential file directly while keeping Unix permissions restrictive.
         let mut options = std::fs::OpenOptions::new();
@@ -88,27 +101,38 @@ impl CredentialStore for FileCredentialStore {
         }
 
         let mut file = options.open(&self.path).map_err(|e| {
-            AuthError::OAuthError(format!("failed to open {}: {e}", self.path.display()))
+            AuthError::OAuthError(format!(
+                "failed to open {}: {e}",
+                self.path.display()
+            ))
         })?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600)).map_err(
-                |e| {
-                    AuthError::OAuthError(format!(
-                        "failed to set permissions on {}: {e}",
-                        self.path.display()
-                    ))
-                },
-            )?;
+            std::fs::set_permissions(
+                &self.path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .map_err(|e| {
+                AuthError::OAuthError(format!(
+                    "failed to set permissions on {}: {e}",
+                    self.path.display()
+                ))
+            })?;
         }
 
         file.write_all(data.as_bytes()).map_err(|e| {
-            AuthError::OAuthError(format!("failed to write {}: {e}", self.path.display()))
+            AuthError::OAuthError(format!(
+                "failed to write {}: {e}",
+                self.path.display()
+            ))
         })?;
         file.sync_all().map_err(|e| {
-            AuthError::OAuthError(format!("failed to sync {}: {e}", self.path.display()))
+            AuthError::OAuthError(format!(
+                "failed to sync {}: {e}",
+                self.path.display()
+            ))
         })?;
 
         Ok(())

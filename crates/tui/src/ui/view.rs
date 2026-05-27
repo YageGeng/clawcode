@@ -97,13 +97,15 @@ impl ViewState {
 
     /// Scrolls transcript history up by one page and disables tail following.
     pub fn scroll_page_up(&mut self, page_height: u16) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(page_height.max(1));
+        self.transcript_scroll =
+            self.transcript_scroll.saturating_add(page_height.max(1));
         self.follow_tail = false;
     }
 
     /// Scrolls transcript history down by one page while staying in manual mode.
     pub fn scroll_page_down(&mut self, page_height: u16) {
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(page_height.max(1));
+        self.transcript_scroll =
+            self.transcript_scroll.saturating_sub(page_height.max(1));
         self.follow_tail = false;
     }
 

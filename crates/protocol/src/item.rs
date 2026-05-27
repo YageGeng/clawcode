@@ -71,7 +71,15 @@ pub enum FileChangeStatus {
 }
 
 /// Final before/after state for one changed file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
 pub struct FileChange {
     /// Path displayed to the frontend.
     pub path: PathBuf,
@@ -113,7 +121,9 @@ pub enum PatchPreviewChange {
 }
 
 /// Turn item describing the lifecycle and result of a file-changing tool.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
 pub struct FileChangeItem {
     /// Tool call id shared with existing tool-call events.
     pub id: String,
@@ -141,7 +151,9 @@ pub enum McpToolCallStatus {
 }
 
 /// Turn item describing an MCP tool-call lifecycle.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
 pub struct McpToolCallItem {
     /// Tool call id shared with existing tool-call events.
     pub id: String,
@@ -165,7 +177,9 @@ pub struct McpToolCallItem {
 }
 
 /// shell/exec command lifecycle item emitted via ItemStarted/ItemCompleted.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
 pub struct ExecCommandItem {
     /// Tool call id shared with existing tool-call events.
     pub id: String,
@@ -212,8 +226,10 @@ mod tests {
     fn turn_id_serializes_as_string_newtype() {
         let turn_id = TurnId("turn-1".to_string());
 
-        let encoded = serde_json::to_string(&turn_id).expect("serialize turn id");
-        let decoded: TurnId = serde_json::from_str(&encoded).expect("deserialize turn id");
+        let encoded =
+            serde_json::to_string(&turn_id).expect("serialize turn id");
+        let decoded: TurnId =
+            serde_json::from_str(&encoded).expect("deserialize turn id");
 
         assert_eq!(encoded, "\"turn-1\"");
         assert_eq!(decoded, turn_id);
@@ -243,12 +259,16 @@ mod tests {
                         .build(),
                 ])
                 .status(FileChangeStatus::Completed)
-                .model_output("A added.txt\nM updated.txt\nD deleted.txt".to_string())
+                .model_output(
+                    "A added.txt\nM updated.txt\nD deleted.txt".to_string(),
+                )
                 .build(),
         );
 
-        let encoded = serde_json::to_string(&item).expect("serialize file change item");
-        let decoded: TurnItem = serde_json::from_str(&encoded).expect("deserialize item");
+        let encoded =
+            serde_json::to_string(&item).expect("serialize file change item");
+        let decoded: TurnItem =
+            serde_json::from_str(&encoded).expect("deserialize item");
 
         assert_eq!(decoded, item);
     }
@@ -263,9 +283,10 @@ mod tests {
             new_text: "fn new() {}\n".to_string(),
         };
 
-        let encoded = serde_json::to_string(&change).expect("serialize patch preview change");
-        let decoded: PatchPreviewChange =
-            serde_json::from_str(&encoded).expect("deserialize patch preview change");
+        let encoded = serde_json::to_string(&change)
+            .expect("serialize patch preview change");
+        let decoded: PatchPreviewChange = serde_json::from_str(&encoded)
+            .expect("deserialize patch preview change");
 
         assert_eq!(decoded, change);
     }
@@ -286,7 +307,8 @@ mod tests {
         );
 
         let encoded = serde_json::to_string(&item).expect("serialize mcp item");
-        let decoded: TurnItem = serde_json::from_str(&encoded).expect("deserialize mcp item");
+        let decoded: TurnItem =
+            serde_json::from_str(&encoded).expect("deserialize mcp item");
 
         assert_eq!(decoded, item);
     }

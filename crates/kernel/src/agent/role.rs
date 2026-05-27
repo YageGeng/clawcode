@@ -36,20 +36,28 @@ impl AgentRoleSet {
         set.insert(
             AgentRole::builder()
                 .name("default".to_string())
-                .description("No overrides, full parent config inheritance".to_string())
+                .description(
+                    "No overrides, full parent config inheritance".to_string(),
+                )
                 .build(),
         );
         set.insert(
             AgentRole::builder()
                 .name("explorer".to_string())
-                .description("Agent for specific, well-scoped codebase exploration".to_string())
+                .description(
+                    "Agent for specific, well-scoped codebase exploration"
+                        .to_string(),
+                )
                 .prompt(include_str!("../prompts/explorer.txt").to_string())
                 .build(),
         );
         set.insert(
             AgentRole::builder()
                 .name("worker".to_string())
-                .description("Agent for implementation, bug fixing, and tests".to_string())
+                .description(
+                    "Agent for implementation, bug fixing, and tests"
+                        .to_string(),
+                )
                 .prompt(include_str!("../prompts/worker.txt").to_string())
                 .build(),
         );

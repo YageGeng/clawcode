@@ -40,9 +40,13 @@ pub(crate) fn build_http_headers(
 
     for (k, v) in http_headers {
         let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-            .map_err(|_e| McpError::Transport(format!("bad header name '{k}'")))?;
-        let value = reqwest::header::HeaderValue::from_str(v)
-            .map_err(|_e| McpError::Transport(format!("bad header value '{v}'")))?;
+            .map_err(|_e| {
+                McpError::Transport(format!("bad header name '{k}'"))
+            })?;
+        let value =
+            reqwest::header::HeaderValue::from_str(v).map_err(|_e| {
+                McpError::Transport(format!("bad header value '{v}'"))
+            })?;
         headers.insert(name, value);
     }
 
@@ -56,7 +60,12 @@ mod tests {
     #[test]
     fn build_stdio_command_sets_current_dir_when_provided() {
         let cwd = Some(std::path::PathBuf::from("/tmp"));
-        let command = build_stdio_command("server", &[], &std::collections::HashMap::new(), &cwd);
+        let command = build_stdio_command(
+            "server",
+            &[],
+            &std::collections::HashMap::new(),
+            &cwd,
+        );
 
         assert_eq!(
             command.as_std().get_current_dir(),

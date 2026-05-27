@@ -53,7 +53,11 @@ impl Tool for HashlineWriteFile {
         })
     }
 
-    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         true
     }
 
@@ -96,7 +100,10 @@ impl Tool for HashlineWriteFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsBackendError, FsReadRequest, FsReadResponse, FsWriteResponse, ToolContext};
+    use crate::{
+        FsBackendError, FsReadRequest, FsReadResponse, FsWriteResponse,
+        ToolContext,
+    };
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -132,7 +139,8 @@ mod tests {
             *self
                 .request
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(request);
             Ok(FsWriteResponse {
                 bytes_written: 12,
                 display_path: std::path::PathBuf::from("/workspace/out.txt"),
@@ -146,7 +154,9 @@ mod tests {
         let backend = Arc::new(RecordingWriteBackend {
             request: Mutex::new(None),
         });
-        let tool = HashlineWriteFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool = HashlineWriteFile::with_backend(
+            Arc::clone(&backend) as Arc<dyn FsBackend>
+        );
 
         let result = tool
             .execute(

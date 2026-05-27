@@ -108,7 +108,9 @@ pub trait ModelListingClient {
 ///     }
 /// }
 /// ```
-pub trait ModelLister<H = reqwest::Client>: WasmCompatSend + WasmCompatSync {
+pub trait ModelLister<H = reqwest::Client>:
+    WasmCompatSend + WasmCompatSync
+{
     /// The client type associated with this lister
     type Client;
 
@@ -124,5 +126,6 @@ pub trait ModelLister<H = reqwest::Client>: WasmCompatSend + WasmCompatSync {
     /// A `ModelList` containing all available models.
     fn list_all(
         &self,
-    ) -> impl std::future::Future<Output = Result<ModelList, ModelListingError>> + WasmCompatSend;
+    ) -> impl std::future::Future<Output = Result<ModelList, ModelListingError>>
+    + WasmCompatSend;
 }

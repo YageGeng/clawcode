@@ -4,7 +4,8 @@ use http::{HeaderName, HeaderValue};
 use super::completion::{ANTHROPIC_VERSION_LATEST, CompletionModel};
 use crate::{
     client::{
-        self, ApiKey, Capabilities, Capable, DebugExt, Provider, ProviderBuilder, ProviderClient,
+        self, ApiKey, Capabilities, Capable, DebugExt, Provider,
+        ProviderBuilder, ProviderClient,
     },
     http_client::{self, HttpClientExt},
     providers::anthropic::model_listing::AnthropicModelLister,
@@ -45,7 +46,9 @@ where
 }
 
 impl ApiKey for AnthropicKey {
-    fn into_header(self) -> Option<http_client::Result<(http::HeaderName, HeaderValue)>> {
+    fn into_header(
+        self,
+    ) -> Option<http_client::Result<(http::HeaderName, HeaderValue)>> {
         Some(
             HeaderValue::from_str(&self.0)
                 .map(|val| (HeaderName::from_static("x-api-key"), val))
@@ -180,7 +183,8 @@ pub fn finish_anthropic_builder<ExtBuilder, H>(
 where
     ExtBuilder: Clone,
 {
-    let normalized_base_url = normalize_anthropic_base_url(builder.get_base_url());
+    let normalized_base_url =
+        normalize_anthropic_base_url(builder.get_base_url());
     builder = builder.base_url(normalized_base_url);
 
     builder.headers_mut().insert(
@@ -201,11 +205,12 @@ where
 mod tests {
     #[test]
     fn test_client_initialization() {
-        let _client =
-            crate::providers::anthropic::Client::new("dummy-key").expect("Client::new() failed");
-        let _client_from_builder = crate::providers::anthropic::Client::builder()
-            .api_key("dummy-key")
-            .build()
-            .expect("Client::builder() failed");
+        let _client = crate::providers::anthropic::Client::new("dummy-key")
+            .expect("Client::new() failed");
+        let _client_from_builder =
+            crate::providers::anthropic::Client::builder()
+                .api_key("dummy-key")
+                .build()
+                .expect("Client::builder() failed");
     }
 }

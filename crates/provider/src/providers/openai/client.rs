@@ -1,7 +1,7 @@
 use crate::{
     client::{
-        self, BearerAuth, Capabilities, Capable, DebugExt, Provider, ProviderBuilder,
-        ProviderClient,
+        self, BearerAuth, Capabilities, Capable, DebugExt, Provider,
+        ProviderBuilder, ProviderClient,
     },
     http_client::{self, HttpClientExt},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
@@ -40,7 +40,8 @@ pub type ClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<OpenAIResponsesExtBuilder, OpenAIApiKey, H>;
 
 // Completions API client
-pub type CompletionsClient<H = reqwest::Client> = client::Client<OpenAICompletionsExt, H>;
+pub type CompletionsClient<H = reqwest::Client> =
+    client::Client<OpenAICompletionsExt, H>;
 pub type CompletionsClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<OpenAICompletionsExtBuilder, OpenAIApiKey, H>;
 
@@ -55,7 +56,8 @@ impl Provider for OpenAICompletionsExt {
 }
 
 impl<H> Capabilities<H> for OpenAIResponsesExt {
-    type Completion = Capable<super::responses_api::ResponsesCompletionModel<H>>;
+    type Completion =
+        Capable<super::responses_api::ResponsesCompletionModel<H>>;
     type ModelListing = Capable<super::OpenAIModelLister<H>>;
 }
 
@@ -231,7 +233,8 @@ mod tests {
     use crate::client::CompletionClient;
     use crate::message::{ImageDetail, TryIntoMany};
     use crate::providers::openai::{
-        AssistantContent, Function, ImageUrl, Message, ToolCall, ToolType, UserContent,
+        AssistantContent, Function, ImageUrl, Message, ToolCall, ToolType,
+        UserContent,
     };
     use crate::{OneOrMany, message};
     use serde_path_to_error::deserialize;
@@ -295,7 +298,8 @@ mod tests {
         "#;
 
         let assistant_message: Message = {
-            let jd = &mut serde_json::Deserializer::from_str(assistant_message_json);
+            let jd =
+                &mut serde_json::Deserializer::from_str(assistant_message_json);
             deserialize(jd).unwrap_or_else(|err| {
                 panic!(
                     "Deserialization error at {} ({}:{}): {}",
@@ -308,7 +312,9 @@ mod tests {
         };
 
         let assistant_message2: Message = {
-            let jd = &mut serde_json::Deserializer::from_str(assistant_message_json2);
+            let jd = &mut serde_json::Deserializer::from_str(
+                assistant_message_json2,
+            );
             deserialize(jd).unwrap_or_else(|err| {
                 panic!(
                     "Deserialization error at {} ({}:{}): {}",
@@ -352,7 +358,8 @@ mod tests {
                 assert_eq!(
                     content[0],
                     AssistantContent::Text {
-                        text: "\n\nHello there, how may I assist you today?".to_string()
+                        text: "\n\nHello there, how may I assist you today?"
+                            .to_string()
                     }
                 );
             }
@@ -368,7 +375,8 @@ mod tests {
                 assert_eq!(
                     content[0],
                     AssistantContent::Text {
-                        text: "\n\nHello there, how may I assist you today?".to_string()
+                        text: "\n\nHello there, how may I assist you today?"
+                            .to_string()
                     }
                 );
 
@@ -427,10 +435,13 @@ mod tests {
 
         let assistant_message = message::Message::Assistant {
             id: None,
-            content: OneOrMany::one(message::AssistantContent::text("Hi there!")),
+            content: OneOrMany::one(message::AssistantContent::text(
+                "Hi there!",
+            )),
         };
 
-        let converted_user_message: Vec<Message> = user_message.clone().try_into_many().unwrap();
+        let converted_user_message: Vec<Message> =
+            user_message.clone().try_into_many().unwrap();
         let converted_assistant_message: Vec<Message> =
             assistant_message.clone().try_into_many().unwrap();
 
@@ -486,13 +497,17 @@ mod tests {
             tool_calls: vec![],
         };
 
-        let converted_user_message: message::Message = user_message.clone().try_into().unwrap();
+        let converted_user_message: message::Message =
+            user_message.clone().try_into().unwrap();
         let converted_assistant_message: message::Message =
             assistant_message.clone().try_into().unwrap();
 
         match converted_user_message.clone() {
             message::Message::User { content } => {
-                assert_eq!(content.first(), message::UserContent::text("Hello"));
+                assert_eq!(
+                    content.first(),
+                    message::UserContent::text("Hello")
+                );
             }
             _ => panic!("Expected user message"),
         }
@@ -507,7 +522,8 @@ mod tests {
             _ => panic!("Expected assistant message"),
         }
 
-        let original_user_message: Vec<Message> = converted_user_message.try_into_many().unwrap();
+        let original_user_message: Vec<Message> =
+            converted_user_message.try_into_many().unwrap();
         let original_assistant_message: Vec<Message> =
             converted_assistant_message.try_into_many().unwrap();
 
@@ -575,8 +591,8 @@ mod tests {
     }
     #[test]
     fn test_client_initialization() {
-        let _client =
-            crate::providers::openai::Client::new("dummy-key").expect("Client::new() failed");
+        let _client = crate::providers::openai::Client::new("dummy-key")
+            .expect("Client::new() failed");
         let _client_from_builder = crate::providers::openai::Client::builder()
             .api_key("dummy-key")
             .build()
@@ -589,7 +605,8 @@ mod tests {
             .expect("Client::new() failed")
             .completions_api();
 
-        let _model: crate::providers::openai::completion::CompletionModel<reqwest::Client> =
-            client.completion_model("gpt-4o");
+        let _model: crate::providers::openai::completion::CompletionModel<
+            reqwest::Client,
+        > = client.completion_model("gpt-4o");
     }
 }

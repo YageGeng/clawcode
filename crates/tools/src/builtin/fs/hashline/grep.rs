@@ -66,12 +66,18 @@ impl Tool for HashlineGrep {
         })
     }
 
-    fn needs_approval(&self, arguments: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        arguments: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         // Require approval only when the target path escapes cwd.
         arguments
             .get("path")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|path| Path::new(path).is_absolute() || path.contains(".."))
+            .is_some_and(|path| {
+                Path::new(path).is_absolute() || path.contains("..")
+            })
     }
 
     async fn execute(
@@ -108,7 +114,8 @@ struct GrepArgs {
 impl GrepArgs {
     /// Parse model-facing grep arguments.
     fn from_value(arguments: serde_json::Value) -> Result<Self, String> {
-        serde_json::from_value(arguments).map_err(|error| format!("invalid arguments: {error}"))
+        serde_json::from_value(arguments)
+            .map_err(|error| format!("invalid arguments: {error}"))
     }
 
     /// Run ripgrep and return raw ripgrep output.
@@ -212,19 +219,25 @@ impl<'a> RgLine<'a> {
                 content,
             })
             .or_else(|| {
-                Self::parse_with_separator(input, '-').map(|(file, line, content)| Self::Context {
-                    file,
-                    line,
-                    content,
-                })
+                Self::parse_with_separator(input, '-').map(
+                    |(file, line, content)| Self::Context {
+                        file,
+                        line,
+                        content,
+                    },
+                )
             })
     }
 
     /// Parse `file<sep>line<sep>content` while tolerating separators inside file names.
-    fn parse_with_separator(input: &'a str, separator: char) -> Option<(&'a str, usize, &'a str)> {
+    fn parse_with_separator(
+        input: &'a str,
+        separator: char,
+    ) -> Option<(&'a str, usize, &'a str)> {
         let separator_len = separator.len_utf8();
         for (separator_index, _) in input.match_indices(separator) {
-            let after_separator = input.get(separator_index + separator_len..)?;
+            let after_separator =
+                input.get(separator_index + separator_len..)?;
             let digit_len = after_separator
                 .chars()
                 .take_while(|ch| ch.is_ascii_digit())
@@ -240,7 +253,8 @@ impl<'a> RgLine<'a> {
             }
 
             let file = input.get(..separator_index)?;
-            let line = after_separator.get(..digit_len)?.parse::<usize>().ok()?;
+            let line =
+                after_separator.get(..digit_len)?.parse::<usize>().ok()?;
             let content = after_digits.get(separator_len..)?;
             return Some((file, line, content));
         }
@@ -254,12 +268,18 @@ impl<'a> RgLine<'a> {
                 file,
                 line,
                 content,
-            } => format!("{file}:>>{line}:{}|{content}", compute_line_hash(content)),
+            } => format!(
+                "{file}:>>{line}:{}|{content}",
+                compute_line_hash(content)
+            ),
             Self::Context {
                 file,
                 line,
                 content,
-            } => format!("{file}:  {line}:{}|{content}", compute_line_hash(content)),
+            } => format!(
+                "{file}:  {line}:{}|{content}",
+                compute_line_hash(content)
+            ),
         }
     }
 }
@@ -356,8 +376,18 @@ mod tests {
             .await
             .expect("grep should succeed");
 
-        assert!(result.contains(&format!(":>>2:{}|needle", compute_line_hash("needle"))));
-        assert!(result.contains(&format!(":>>3:{}|NEEDLE", compute_line_hash("NEEDLE"))));
+        assert!(
+            result.contains(&format!(
+                ":>>2:{}|needle",
+                compute_line_hash("needle")
+            ))
+        );
+        assert!(
+            result.contains(&format!(
+                ":>>3:{}|NEEDLE",
+                compute_line_hash("NEEDLE")
+            ))
+        );
         assert!(!result.contains(":>>1:"));
         assert!(!result.contains("main.py"));
     }

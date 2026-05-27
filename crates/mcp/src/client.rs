@@ -16,7 +16,8 @@ pub struct Handler;
 
 impl rmcp::ClientHandler for Handler {}
 
-pub(crate) type RunningService = rmcp::service::RunningService<rmcp::RoleClient, Handler>;
+pub(crate) type RunningService =
+    rmcp::service::RunningService<rmcp::RoleClient, Handler>;
 
 /// A single MCP server connection with its cached tool list.
 #[derive(typed_builder::TypedBuilder)]
@@ -48,13 +49,15 @@ impl ManagedClient {
                 env,
                 cwd,
             } => {
-                let cmd = crate::transport::build_stdio_command(command, args, env, cwd);
-                let t = rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| {
-                    McpError::Startup {
+                let cmd = crate::transport::build_stdio_command(
+                    command, args, env, cwd,
+                );
+                let t = rmcp::transport::TokioChildProcess::new(cmd).map_err(
+                    |e| McpError::Startup {
                         server: config.name.clone(),
                         reason: format!("spawn failed: {e}"),
-                    }
-                })?;
+                    },
+                )?;
                 let running = timeout(
                     Duration::from_secs(config.startup_timeout_secs),
                     serve_client(Handler, t),
@@ -62,7 +65,10 @@ impl ManagedClient {
                 .await
                 .map_err(|_e| McpError::Startup {
                     server: config.name.clone(),
-                    reason: format!("timed out after {}s", config.startup_timeout_secs),
+                    reason: format!(
+                        "timed out after {}s",
+                        config.startup_timeout_secs
+                    ),
                 })?
                 .map_err(|e| McpError::Startup {
                     server: config.name.clone(),
@@ -77,9 +83,12 @@ impl ManagedClient {
             } => {
                 use reqwest::header::{HeaderName, HeaderValue};
 
-                let raw_headers =
-                    crate::transport::build_http_headers(bearer_token_env, http_headers)?;
-                let mut headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
+                let raw_headers = crate::transport::build_http_headers(
+                    bearer_token_env,
+                    http_headers,
+                )?;
+                let mut headers: HashMap<HeaderName, HeaderValue> =
+                    HashMap::new();
                 for (name, value) in raw_headers.iter() {
                     headers.insert(name.clone(), value.clone());
                 }
@@ -88,7 +97,10 @@ impl ManagedClient {
                 if let Some(ref _oauth) = config.oauth {
                     use oauth2::TokenResponse;
                     use rmcp::transport::auth::CredentialStore;
-                    let store = crate::auth::FileCredentialStore::new(auth_dir, &config.name);
+                    let store = crate::auth::FileCredentialStore::new(
+                        auth_dir,
+                        &config.name,
+                    );
                     if let Ok(Some(creds)) = store.load().await
                         && let Some(ref token_response) = creds.token_response
                     {
@@ -96,7 +108,9 @@ impl ManagedClient {
                         headers.insert(
                             HeaderName::from_static("authorization"),
                             HeaderValue::from_str(&format!("Bearer {token}"))
-                                .map_err(|_e| McpError::Transport("bad bearer token".into()))?,
+                                .map_err(|_e| {
+                                McpError::Transport("bad bearer token".into())
+                            })?,
                         );
                     }
                 }
@@ -107,10 +121,11 @@ impl ManagedClient {
                     )
                     .custom_headers(headers);
 
-                let t = rmcp::transport::StreamableHttpClientTransport::with_client(
-                    reqwest::Client::default(),
-                    cfg,
-                );
+                let t =
+                    rmcp::transport::StreamableHttpClientTransport::with_client(
+                        reqwest::Client::default(),
+                        cfg,
+                    );
                 let running = timeout(
                     Duration::from_secs(config.startup_timeout_secs),
                     serve_client(Handler, t),
@@ -118,7 +133,10 @@ impl ManagedClient {
                 .await
                 .map_err(|_e| McpError::Startup {
                     server: config.name.clone(),
-                    reason: format!("timed out after {}s", config.startup_timeout_secs),
+                    reason: format!(
+                        "timed out after {}s",
+                        config.startup_timeout_secs
+                    ),
                 })?
                 .map_err(|e| McpError::Startup {
                     server: config.name.clone(),
@@ -151,7 +169,9 @@ impl ManagedClient {
                 env,
                 cwd,
             } => {
-                let cmd = crate::transport::build_stdio_command(command, args, env, cwd);
+                let cmd = crate::transport::build_stdio_command(
+                    command, args, env, cwd,
+                );
                 let t = stdio_connector(cmd)?;
                 let running = timeout(
                     Duration::from_secs(config.startup_timeout_secs),
@@ -160,7 +180,10 @@ impl ManagedClient {
                 .await
                 .map_err(|_e| McpError::Startup {
                     server: config.name.clone(),
-                    reason: format!("timed out after {}s", config.startup_timeout_secs),
+                    reason: format!(
+                        "timed out after {}s",
+                        config.startup_timeout_secs
+                    ),
                 })?
                 .map_err(|e| McpError::Startup {
                     server: config.name.clone(),
@@ -168,7 +191,9 @@ impl ManagedClient {
                 })?;
                 Self::collect_tools(config, running).await
             }
-            McpTransportConfig::StreamableHttp { .. } => Self::connect(config, auth_dir).await,
+            McpTransportConfig::StreamableHttp { .. } => {
+                Self::connect(config, auth_dir).await
+            }
         }
     }
 
@@ -176,13 +201,14 @@ impl ManagedClient {
         config: &McpServerConfig,
         running: RunningService,
     ) -> Result<Self, McpError> {
-        let tools_result = running
-            .list_tools(None)
-            .await
-            .map_err(|e| McpError::Protocol {
-                server: config.name.clone(),
-                msg: format!("list_tools: {e}"),
-            })?;
+        let tools_result =
+            running
+                .list_tools(None)
+                .await
+                .map_err(|e| McpError::Protocol {
+                    server: config.name.clone(),
+                    msg: format!("list_tools: {e}"),
+                })?;
 
         let tools: Vec<McpToolInfo> = tools_result
             .tools
@@ -193,7 +219,9 @@ impl ManagedClient {
                     .raw_name(t.name.to_string())
                     .callable_name(String::new())
                     .description(t.description.unwrap_or_default().to_string())
-                    .input_schema(serde_json::Value::Object((*t.input_schema).clone()))
+                    .input_schema(serde_json::Value::Object(
+                        (*t.input_schema).clone(),
+                    ))
                     .build()
             })
             .collect();

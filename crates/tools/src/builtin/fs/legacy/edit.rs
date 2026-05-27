@@ -66,7 +66,11 @@ impl Tool for EditFile {
         }
     }
 
-    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         true
     }
 
@@ -83,35 +87,46 @@ impl Tool for EditFile {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>>,
+        std::pin::Pin<
+            Box<
+                dyn futures::stream::Stream<Item = protocol::ToolStreamItem>
+                    + Send,
+            >,
+        >,
         String,
     > {
         let (model_output, changes) = self.do_edit(arguments, ctx).await?;
 
-        let begin = protocol::ToolStreamItem::Begin(protocol::TurnItem::FileChange(
-            protocol::FileChangeItem::builder()
-                .id(String::new())
-                .title("Edit".into())
-                .changes(vec![])
-                .status(protocol::FileChangeStatus::InProgress)
-                .build(),
-        ));
-        let end = protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(
-            protocol::FileChangeItem::builder()
-                .id(String::new())
-                .title("Edit".into())
-                .changes(changes)
-                .status(protocol::FileChangeStatus::Completed)
-                .model_output(model_output.clone())
-                .build(),
-        ));
+        let begin =
+            protocol::ToolStreamItem::Begin(protocol::TurnItem::FileChange(
+                protocol::FileChangeItem::builder()
+                    .id(String::new())
+                    .title("Edit".into())
+                    .changes(vec![])
+                    .status(protocol::FileChangeStatus::InProgress)
+                    .build(),
+            ));
+        let end =
+            protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(
+                protocol::FileChangeItem::builder()
+                    .id(String::new())
+                    .title("Edit".into())
+                    .changes(changes)
+                    .status(protocol::FileChangeStatus::Completed)
+                    .model_output(model_output.clone())
+                    .build(),
+            ));
         let text = protocol::ToolStreamItem::Final {
             content: model_output,
             is_error: false,
         };
 
-        let stream: Pin<Box<dyn futures::stream::Stream<Item = protocol::ToolStreamItem> + Send>> =
-            Box::pin(futures::stream::iter([begin, end, text]));
+        let stream: Pin<
+            Box<
+                dyn futures::stream::Stream<Item = protocol::ToolStreamItem>
+                    + Send,
+            >,
+        > = Box::pin(futures::stream::iter([begin, end, text]));
         Ok(stream)
     }
 }
@@ -133,8 +148,8 @@ impl EditFile {
             replace_all: bool,
         }
 
-        let args: Args =
-            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = serde_json::from_value(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?;
 
         let resolved = resolve_file_path(&ctx.cwd, &args.file_path);
 
@@ -143,19 +158,20 @@ impl EditFile {
         }
 
         if args.old_string.is_empty() {
-            let old_text = if fs::try_exists(&resolved)
-                .await
-                .map_err(|e| format!("failed to inspect {}: {e}", resolved.display()))?
-            {
-                Some(
-                    fs::read_to_string(&resolved)
-                        .await
-                        .map_err(|e| format!("failed to read {}: {e}", resolved.display()))?,
-                )
+            let old_text = if fs::try_exists(&resolved).await.map_err(|e| {
+                format!("failed to inspect {}: {e}", resolved.display())
+            })? {
+                Some(fs::read_to_string(&resolved).await.map_err(|e| {
+                    format!("failed to read {}: {e}", resolved.display())
+                })?)
             } else {
                 None
             };
-            let content = normalize_for_existing_line_endings(&resolved, &args.new_string).await?;
+            let content = normalize_for_existing_line_endings(
+                &resolved,
+                &args.new_string,
+            )
+            .await?;
             write_full_file(&resolved, &content).await?;
             let model_output = format!(
                 "edited {}: wrote {} bytes",
@@ -179,16 +195,16 @@ impl EditFile {
             return Ok((model_output, vec![change]));
         }
 
-        let resolved = fs::canonicalize(&resolved)
-            .await
-            .map_err(|e| format!("failed to resolve {}: {e}", resolved.display()))?;
+        let resolved = fs::canonicalize(&resolved).await.map_err(|e| {
+            format!("failed to resolve {}: {e}", resolved.display())
+        })?;
 
         // Read the file and normalize line endings so CRLF/LF mismatches
         // between the model-supplied oldString and the on-disk content
         // do not cause spurious failures.
-        let original = fs::read_to_string(&resolved)
-            .await
-            .map_err(|e| format!("failed to read {}: {e}", resolved.display()))?;
+        let original = fs::read_to_string(&resolved).await.map_err(|e| {
+            format!("failed to read {}: {e}", resolved.display())
+        })?;
 
         let line_ending = detect_line_ending(&original);
         let old_string = normalize_line_endings(&args.old_string, line_ending);
@@ -204,15 +220,21 @@ impl EditFile {
                 candidates.len(),
             )
         } else {
-            let (offset, actual_search) = find_unique_match(&original, &old_string)?;
+            let (offset, actual_search) =
+                find_unique_match(&original, &old_string)?;
             (
-                apply_single_replacement(&original, offset, actual_search, &new_string),
+                apply_single_replacement(
+                    &original,
+                    offset,
+                    actual_search,
+                    &new_string,
+                ),
                 1,
             )
         };
-        fs::write(&resolved, &result)
-            .await
-            .map_err(|e| format!("failed to write {}: {e}", resolved.display()))?;
+        fs::write(&resolved, &result).await.map_err(|e| {
+            format!("failed to write {}: {e}", resolved.display())
+        })?;
         let model_output = format!(
             "edited {}: replaced {match_count} occurrence(s)",
             resolved.display()
@@ -228,7 +250,8 @@ impl EditFile {
     }
 }
 
-type ReplacerFn = for<'content> fn(&'content str, &str) -> Vec<(usize, &'content str)>;
+type ReplacerFn =
+    for<'content> fn(&'content str, &str) -> Vec<(usize, &'content str)>;
 
 const MULTIPLE_MATCHES_ERROR: &str = "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.";
 
@@ -299,16 +322,24 @@ fn apply_single_replacement(
 }
 
 /// Apply multiple non-overlapping replacements from back to front.
-fn apply_replacements(content: &str, candidates: &[(usize, &str)], new_string: &str) -> String {
+fn apply_replacements(
+    content: &str,
+    candidates: &[(usize, &str)],
+    new_string: &str,
+) -> String {
     let mut result = content.to_string();
     for (offset, actual_search) in candidates.iter().rev() {
-        result.replace_range(*offset..*offset + actual_search.len(), new_string);
+        result
+            .replace_range(*offset..*offset + actual_search.len(), new_string);
     }
     result
 }
 
 /// Match exact substrings in the content.
-fn simple_replacer<'content>(content: &'content str, old_str: &str) -> Vec<(usize, &'content str)> {
+fn simple_replacer<'content>(
+    content: &'content str,
+    old_str: &str,
+) -> Vec<(usize, &'content str)> {
     content.match_indices(old_str).collect()
 }
 
@@ -319,10 +350,9 @@ fn line_trimmed_replacer<'content>(
 ) -> Vec<(usize, &'content str)> {
     let old_lines = old_str.lines().collect::<Vec<_>>();
     find_line_windows(content, old_str, old_lines.len(), |block_lines| {
-        block_lines
-            .iter()
-            .zip(old_lines.iter())
-            .all(|(content_line, old_line)| content_line.trim() == old_line.trim())
+        block_lines.iter().zip(old_lines.iter()).all(
+            |(content_line, old_line)| content_line.trim() == old_line.trim(),
+        )
     })
 }
 
@@ -335,14 +365,21 @@ fn block_anchor_replacer<'content>(
     if old_lines.len() < 3 {
         return Vec::new();
     }
-    let mut candidates = find_line_windows_with_score(content, old_str, old_lines.len(), |block| {
-        if block.first().map(|line| line.trim()) != old_lines.first().map(|line| line.trim())
-            || block.last().map(|line| line.trim()) != old_lines.last().map(|line| line.trim())
-        {
-            return None;
-        }
-        Some(middle_similarity(&old_lines, block))
-    });
+    let mut candidates = find_line_windows_with_score(
+        content,
+        old_str,
+        old_lines.len(),
+        |block| {
+            if block.first().map(|line| line.trim())
+                != old_lines.first().map(|line| line.trim())
+                || block.last().map(|line| line.trim())
+                    != old_lines.last().map(|line| line.trim())
+            {
+                return None;
+            }
+            Some(middle_similarity(&old_lines, block))
+        },
+    );
     if candidates.len() == 1 {
         return vec![candidates.remove(0).0];
     }
@@ -397,7 +434,8 @@ fn escape_normalized_replacer<'content>(
         .match_indices(&old_unescaped)
         .filter_map(|(normalized_offset, actual)| {
             let normalized_end = normalized_offset + actual.len();
-            let original_start = byte_map.get(normalized_offset).map(|range| range.0)?;
+            let original_start =
+                byte_map.get(normalized_offset).map(|range| range.0)?;
             let original_end = byte_map
                 .get(normalized_end.checked_sub(1)?)
                 .map(|range| range.1)?;
@@ -433,8 +471,10 @@ fn context_aware_replacer<'content>(
         return Vec::new();
     }
     find_line_windows(content, old_str, old_lines.len(), |block| {
-        if block.first().map(|line| line.trim()) != old_lines.first().map(|line| line.trim())
-            || block.last().map(|line| line.trim()) != old_lines.last().map(|line| line.trim())
+        if block.first().map(|line| line.trim())
+            != old_lines.first().map(|line| line.trim())
+            || block.last().map(|line| line.trim())
+                != old_lines.last().map(|line| line.trim())
         {
             return false;
         }
@@ -450,7 +490,9 @@ fn context_aware_replacer<'content>(
         let matched = middle_old
             .iter()
             .zip(middle_block.iter())
-            .filter(|(old, actual)| !old.trim().is_empty() && old.trim() == actual.trim())
+            .filter(|(old, actual)| {
+                !old.trim().is_empty() && old.trim() == actual.trim()
+            })
             .count();
         matched * 2 >= required
     })
@@ -508,7 +550,8 @@ where
                 .collect::<Vec<_>>();
             let score = scorer(&block)?;
             let start = spans[start_index].0;
-            let end = matched_line_end(&spans, start_index, line_count, old_str);
+            let end =
+                matched_line_end(&spans, start_index, line_count, old_str);
             Some(((start, &content[start..end]), score))
         })
         .collect()
@@ -595,7 +638,8 @@ fn middle_similarity(old_lines: &[&str], content_lines: &[&str]) -> f64 {
     if max_len == 0 {
         return 1.0;
     }
-    1.0 - (levenshtein_distance(&old_middle, &content_middle) as f64 / max_len as f64)
+    1.0 - (levenshtein_distance(&old_middle, &content_middle) as f64
+        / max_len as f64)
 }
 
 /// Unescape common model-provided escape sequences.
@@ -682,7 +726,8 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, cb) in b_chars.iter().enumerate() {
             let cost = usize::from(ca != cb);
-            curr[j + 1] = (curr[j] + 1).min((prev[j + 1] + 1).min(prev[j] + cost));
+            curr[j + 1] =
+                (curr[j] + 1).min((prev[j + 1] + 1).min(prev[j] + cost));
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -711,7 +756,10 @@ async fn write_full_file(path: &Path, content: &str) -> Result<(), String> {
 }
 
 /// Normalize new content to an existing file's line endings when the target exists.
-async fn normalize_for_existing_line_endings(path: &Path, content: &str) -> Result<String, String> {
+async fn normalize_for_existing_line_endings(
+    path: &Path,
+    content: &str,
+) -> Result<String, String> {
     if fs::try_exists(path)
         .await
         .map_err(|e| format!("failed to inspect {}: {e}", path.display()))?
@@ -864,7 +912,9 @@ mod tests {
         let mut changes = Vec::new();
         while let Some(item) = stream.next().await {
             match item {
-                protocol::ToolStreamItem::End(protocol::TurnItem::FileChange(item)) => {
+                protocol::ToolStreamItem::End(
+                    protocol::TurnItem::FileChange(item),
+                ) => {
                     changes = item.changes;
                 }
                 protocol::ToolStreamItem::Final { content, .. } => {
@@ -947,7 +997,11 @@ mod tests {
     #[tokio::test]
     async fn edit_file_uses_line_trimmed_match() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("trimmed.txt"), "before\n  target  \nafter").unwrap();
+        std::fs::write(
+            dir.path().join("trimmed.txt"),
+            "before\n  target  \nafter",
+        )
+        .unwrap();
         let tool = EditFile::new();
 
         tool.execute(

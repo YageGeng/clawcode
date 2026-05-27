@@ -21,7 +21,10 @@ pub trait CompletionClient {
     /// # Ok(())
     /// # }
     /// ```
-    fn completion_model(&self, model: impl Into<String>) -> Self::CompletionModel {
+    fn completion_model(
+        &self,
+        model: impl Into<String>,
+    ) -> Self::CompletionModel {
         Self::CompletionModel::make(self, model)
     }
 }

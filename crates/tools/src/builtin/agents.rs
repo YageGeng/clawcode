@@ -55,10 +55,16 @@ pub struct SpawnAgentRequest {
 #[async_trait]
 pub trait AgentControlRef: Send + Sync {
     /// Spawn a new sub-agent. Returns JSON with agent_path and nickname.
-    async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<String, String>;
+    async fn spawn_agent(
+        &self,
+        request: SpawnAgentRequest,
+    ) -> Result<String, String>;
 
     /// Resolve a target string (nickname or path) to an AgentPath.
-    async fn resolve_target(&self, target: &str) -> Result<protocol::AgentPath, String>;
+    async fn resolve_target(
+        &self,
+        target: &str,
+    ) -> Result<protocol::AgentPath, String>;
 
     /// Send a message to another agent.
     async fn send_message_to(
@@ -70,7 +76,10 @@ pub trait AgentControlRef: Send + Sync {
     ) -> Result<(), String>;
 
     /// List active sub-agents with their model-visible V2 summary fields.
-    fn list_agents(&self, prefix: Option<&protocol::AgentPath>) -> Vec<AgentToolSummary>;
+    fn list_agents(
+        &self,
+        prefix: Option<&protocol::AgentPath>,
+    ) -> Vec<AgentToolSummary>;
 
     /// Subscribe to status changes for a specific agent.
     async fn subscribe_status(
@@ -91,7 +100,10 @@ pub trait AgentControlRef: Send + Sync {
     ) -> Result<watch::Receiver<()>, String>;
 
     /// Close an agent and its descendants, returning its previous status.
-    async fn close_agent(&self, agent_path: &protocol::AgentPath) -> Result<AgentStatus, String>;
+    async fn close_agent(
+        &self,
+        agent_path: &protocol::AgentPath,
+    ) -> Result<AgentStatus, String>;
 }
 
 // ── SpawnAgent ──
@@ -179,7 +191,11 @@ impl Tool for SpawnAgent {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         false
     }
 
@@ -188,8 +204,8 @@ impl Tool for SpawnAgent {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let args: SpawnAgentArgs =
-            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: SpawnAgentArgs = serde_json::from_value(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?;
         let role = args.role_name().to_string();
         let model = args.model;
 
@@ -249,7 +265,11 @@ impl Tool for SendMessage {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         false
     }
 
@@ -258,8 +278,8 @@ impl Tool for SendMessage {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let args: MessageArgs =
-            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: MessageArgs = serde_json::from_value(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?;
         validate_message_content(&args.message)?;
         let to = self.agent_control.resolve_target(&args.target).await?;
         let from = ctx.agent_path.clone();
@@ -306,7 +326,11 @@ impl Tool for FollowupTask {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         false
     }
 
@@ -315,8 +339,8 @@ impl Tool for FollowupTask {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let args: MessageArgs =
-            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: MessageArgs = serde_json::from_value(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?;
         validate_message_content(&args.message)?;
         let to = self.agent_control.resolve_target(&args.target).await?;
         if to.is_root() {
@@ -356,14 +380,15 @@ impl WaitAgentArgs {
     /// Validate timeout bounds and return the effective wait duration.
     fn timeout_ms(self) -> Result<u64, String> {
         match self.timeout_ms {
-            Some(ms) if ms < MIN_WAIT_TIMEOUT_MS as i64 => {
-                Err(format!("timeout_ms must be at least {MIN_WAIT_TIMEOUT_MS}"))
-            }
+            Some(ms) if ms < MIN_WAIT_TIMEOUT_MS as i64 => Err(format!(
+                "timeout_ms must be at least {MIN_WAIT_TIMEOUT_MS}"
+            )),
             Some(ms) if ms > MAX_WAIT_TIMEOUT_MS as i64 => {
                 Err(format!("timeout_ms must be at most {MAX_WAIT_TIMEOUT_MS}"))
             }
-            Some(ms) => u64::try_from(ms)
-                .map_err(|_error| format!("timeout_ms must be at least {MIN_WAIT_TIMEOUT_MS}")),
+            Some(ms) => u64::try_from(ms).map_err(|_error| {
+                format!("timeout_ms must be at least {MIN_WAIT_TIMEOUT_MS}")
+            }),
             None => Ok(DEFAULT_WAIT_TIMEOUT_MS),
         }
     }
@@ -401,7 +426,11 @@ impl Tool for WaitAgent {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         false
     }
 
@@ -418,7 +447,8 @@ impl Tool for WaitAgent {
             .agent_control
             .subscribe_session_mailbox_activity(&ctx.session_id)
             .await?;
-        let result = wait_for_session_mailbox_update(mailbox_rx, timeout_ms).await;
+        let result =
+            wait_for_session_mailbox_update(mailbox_rx, timeout_ms).await;
 
         serde_json::to_string(&result).map_err(|error| error.to_string())
     }
@@ -436,7 +466,8 @@ async fn wait_for_session_mailbox_update(
     timeout_ms: u64,
 ) -> WaitAgentResult {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let timed_out = !matches!(timeout_at(deadline, mailbox_rx.changed()).await, Ok(Ok(())));
+    let timed_out =
+        !matches!(timeout_at(deadline, mailbox_rx.changed()).await, Ok(Ok(())));
     WaitAgentResult {
         message: wait_agent_message(timed_out),
         timed_out,
@@ -511,7 +542,11 @@ impl Tool for ListAgents {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         false
     }
 
@@ -520,8 +555,8 @@ impl Tool for ListAgents {
         arguments: serde_json::Value,
         ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let args: ListAgentsArgs =
-            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: ListAgentsArgs = serde_json::from_value(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?;
         let prefix = args.resolved_prefix(&ctx.agent_path);
 
         let agents = self.agent_control.list_agents(prefix.as_ref());
@@ -571,7 +606,11 @@ impl Tool for CloseAgent {
         })
     }
 
-    fn needs_approval(&self, _args: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         true
     }
 
@@ -580,11 +619,13 @@ impl Tool for CloseAgent {
         arguments: serde_json::Value,
         _ctx: &crate::ToolContext,
     ) -> Result<String, String> {
-        let args: CloseAgentArgs =
-            serde_json::from_value(arguments).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: CloseAgentArgs = serde_json::from_value(arguments)
+            .map_err(|e| format!("invalid arguments: {e}"))?;
         let path = self.agent_control.resolve_target(&args.target).await?;
         if path.is_root() {
-            return Err("The root agent can't be closed with close_agent".to_string());
+            return Err(
+                "The root agent can't be closed with close_agent".to_string()
+            );
         }
         let status = self.agent_control.close_agent(&path).await?;
         serde_json::to_string(&serde_json::json!({ "previous_status": status }))
@@ -638,7 +679,8 @@ mod tests {
             let (mailbox_tx, _mailbox_rx) = watch::channel(());
             let mut mailbox_activity = HashMap::new();
             mailbox_activity.insert("/root/child".to_string(), mailbox_tx);
-            let (session_mailbox_activity, _session_mailbox_rx) = watch::channel(());
+            let (session_mailbox_activity, _session_mailbox_rx) =
+                watch::channel(());
             (
                 Arc::new(Self {
                     paths,
@@ -678,11 +720,15 @@ mod tests {
     #[async_trait]
     impl AgentControlRef for FakeAgentControl {
         /// Test stub: spawning is not used by wait-agent tests.
-        async fn spawn_agent(&self, request: SpawnAgentRequest) -> Result<String, String> {
+        async fn spawn_agent(
+            &self,
+            request: SpawnAgentRequest,
+        ) -> Result<String, String> {
             *self
                 .last_spawn_model
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = request.model.clone();
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                request.model.clone();
             Ok(serde_json::json!({
                 "task_name": request.parent_path.join(&request.task_name).to_string(),
                 "nickname": "child"
@@ -691,7 +737,10 @@ mod tests {
         }
 
         /// Resolves a nickname or path into a fake agent path.
-        async fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+        async fn resolve_target(
+            &self,
+            target: &str,
+        ) -> Result<AgentPath, String> {
             self.paths
                 .get(target)
                 .cloned()
@@ -715,11 +764,15 @@ mod tests {
         }
 
         /// Lists the fake child agent by canonical path.
-        fn list_agents(&self, prefix: Option<&AgentPath>) -> Vec<AgentToolSummary> {
+        fn list_agents(
+            &self,
+            prefix: Option<&AgentPath>,
+        ) -> Vec<AgentToolSummary> {
             *self
                 .last_list_prefix
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = prefix.cloned();
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                prefix.cloned();
             let statuses = self
                 .statuses
                 .lock()
@@ -742,7 +795,10 @@ mod tests {
         }
 
         /// Test stub: close is not used by wait-agent tests.
-        async fn close_agent(&self, _agent_path: &AgentPath) -> Result<AgentStatus, String> {
+        async fn close_agent(
+            &self,
+            _agent_path: &AgentPath,
+        ) -> Result<AgentStatus, String> {
             Ok(AgentStatus::Running)
         }
 

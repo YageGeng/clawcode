@@ -4,7 +4,9 @@ use std::path::Path;
 use protocol::Usage;
 use protocol::message::Message;
 
-use super::record::{AgentEdgeRecord, PersistedPayload, PersistedRecord, SessionMetaRecord};
+use super::record::{
+    AgentEdgeRecord, PersistedPayload, PersistedRecord, SessionMetaRecord,
+};
 
 /// Replayed session state loaded from a persisted JSONL file.
 #[derive(Clone, Debug, typed_builder::TypedBuilder)]
@@ -39,7 +41,9 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
         };
         let record_usage = record.usage;
         match record.payload {
-            PersistedPayload::SessionMeta(record) if meta.is_none() => meta = Some(record),
+            PersistedPayload::SessionMeta(record) if meta.is_none() => {
+                meta = Some(record)
+            }
             PersistedPayload::Message(record) => {
                 messages.push(record.message);
                 if let Some(record_usage) = record_usage {
@@ -54,7 +58,9 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
             | PersistedPayload::TurnAborted(_) => {}
         }
     }
-    let meta = meta.ok_or_else(|| io::Error::other("session file missing session_meta record"))?;
+    let meta = meta.ok_or_else(|| {
+        io::Error::other("session file missing session_meta record")
+    })?;
     let replayed = if let Some(usage) = usage {
         ReplayedSession::builder()
             .meta(meta)

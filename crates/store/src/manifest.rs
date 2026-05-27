@@ -52,7 +52,10 @@ pub fn manifest_path(data_home: &Path) -> PathBuf {
 }
 
 /// Append one manifest record to the append-only manifest file.
-pub fn append_manifest_record(data_home: &Path, record: &SessionManifestRecord) -> io::Result<()> {
+pub fn append_manifest_record(
+    data_home: &Path,
+    record: &SessionManifestRecord,
+) -> io::Result<()> {
     std::fs::create_dir_all(data_home)?;
     let path = manifest_path(data_home);
     let mut file = std::fs::OpenOptions::new()
@@ -88,7 +91,9 @@ pub fn active_manifest_record(
 }
 
 /// Build a closed manifest record for an existing manifest entry.
-pub fn closed_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
+pub fn closed_manifest_record(
+    record: &SessionManifestRecord,
+) -> SessionManifestRecord {
     let mut next = SessionManifestRecord::builder()
         .session_id(record.session_id.clone())
         .path(record.path.clone())
@@ -102,7 +107,9 @@ pub fn closed_manifest_record(record: &SessionManifestRecord) -> SessionManifest
 }
 
 /// Build an archived manifest record for an existing manifest entry.
-pub fn archived_manifest_record(record: &SessionManifestRecord) -> SessionManifestRecord {
+pub fn archived_manifest_record(
+    record: &SessionManifestRecord,
+) -> SessionManifestRecord {
     let mut next = SessionManifestRecord::builder()
         .session_id(record.session_id.clone())
         .path(record.path.clone())
@@ -144,7 +151,8 @@ pub fn read_latest_manifest(
             continue;
         }
         // Skip corrupt manifest lines so later valid entries can still recover sessions.
-        let Ok(record) = serde_json::from_str::<SessionManifestRecord>(line) else {
+        let Ok(record) = serde_json::from_str::<SessionManifestRecord>(line)
+        else {
             tracing::warn!(line, "skipping corrupt session manifest line");
             continue;
         };

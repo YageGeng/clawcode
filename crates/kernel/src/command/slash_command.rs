@@ -4,7 +4,17 @@ use strum::IntoEnumIterator;
 use strum_macros::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
 
 /// Commands that can be invoked by starting a message with a leading slash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, EnumIter, AsRefStr, IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    EnumString,
+    EnumIter,
+    AsRefStr,
+    IntoStaticStr,
+)]
 #[strum(serialize_all = "kebab-case")]
 pub enum SlashCommand {
     Raw,
@@ -21,7 +31,9 @@ impl SlashCommand {
     /// User-visible description.
     pub fn description(self) -> &'static str {
         match self {
-            Self::Raw => "toggle raw scrollback mode for copy-friendly terminal output",
+            Self::Raw => {
+                "toggle raw scrollback mode for copy-friendly terminal output"
+            }
             Self::Sessions => "list recent sessions",
             Self::Agent => "switch between main agent and subagents",
         }
@@ -35,7 +47,8 @@ impl SlashCommand {
     /// Parse a submitted line into a SlashCommand.
     /// Returns `None` if the line is not a recognized slash command.
     pub fn parse_from_text(text: &str) -> Option<Self> {
-        let (name, _rest, _rest_offset) = crate::command::prompt_args::parse_slash_name(text)?;
+        let (name, _rest, _rest_offset) =
+            crate::command::prompt_args::parse_slash_name(text)?;
         Self::from_str(name).ok()
     }
 }

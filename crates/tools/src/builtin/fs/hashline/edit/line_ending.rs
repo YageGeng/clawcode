@@ -13,7 +13,9 @@ impl LineEnding {
     /// Detect the first line ending style used by the file content.
     pub(super) fn detect(content: &str) -> Self {
         match (content.find("\r\n"), content.find('\n')) {
-            (Some(crlf), Some(lf)) if crlf == lf.saturating_sub(1) => Self::Crlf,
+            (Some(crlf), Some(lf)) if crlf == lf.saturating_sub(1) => {
+                Self::Crlf
+            }
             (Some(_), None) => Self::Crlf,
             _ => Self::Lf,
         }

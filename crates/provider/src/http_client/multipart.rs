@@ -86,7 +86,11 @@ impl MultipartForm {
     }
 
     /// Add a text field
-    pub fn text(self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn text(
+        self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         self.part(Part::text(name, value))
     }
 
@@ -167,7 +171,9 @@ impl MultipartForm {
 
             // Content
             match &part.content {
-                PartContent::Text(text) => body.extend_from_slice(text.as_bytes()),
+                PartContent::Text(text) => {
+                    body.extend_from_slice(text.as_bytes())
+                }
                 PartContent::Binary(bytes) => body.extend_from_slice(bytes),
             }
 
@@ -193,10 +199,14 @@ impl From<MultipartForm> for reqwest::multipart::Form {
                     form = form.text(part.name, text);
                 }
                 PartContent::Binary(bytes) => {
-                    let mut req_part = if let Some(content_type) = part.content_type.as_ref() {
+                    let mut req_part = if let Some(content_type) =
+                        part.content_type.as_ref()
+                    {
                         reqwest::multipart::Part::bytes(bytes.to_vec())
                             .mime_str(content_type.as_ref())
-                            .unwrap_or_else(|_| reqwest::multipart::Part::bytes(bytes.to_vec()))
+                            .unwrap_or_else(|_| {
+                                reqwest::multipart::Part::bytes(bytes.to_vec())
+                            })
                     } else {
                         reqwest::multipart::Part::bytes(bytes.to_vec())
                     };

@@ -44,12 +44,11 @@ async fn call_echo_tool_returns_message() {
         .await
         .expect("handshake should succeed");
 
-    let params = rmcp::model::CallToolRequestParams::new("echo").with_arguments(
-        serde_json::Map::from_iter([(
+    let params = rmcp::model::CallToolRequestParams::new("echo")
+        .with_arguments(serde_json::Map::from_iter([(
             "message".to_string(),
             serde_json::Value::String("hello world".into()),
-        )]),
-    );
+        )]));
 
     let result = client
         .call_tool(params)
@@ -72,7 +71,8 @@ async fn calc_server_lists_two_tools() {
         .expect("list_tools should succeed");
     assert_eq!(result.tools.len(), 2);
 
-    let names: Vec<&str> = result.tools.iter().map(|t| t.name.as_ref()).collect();
+    let names: Vec<&str> =
+        result.tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(names.contains(&"add"));
     assert!(names.contains(&"multiply"));
 }

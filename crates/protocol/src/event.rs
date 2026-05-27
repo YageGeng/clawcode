@@ -178,7 +178,10 @@ pub enum Event {
 impl Event {
     /// Create an `AgentMessageChunk` event.
     #[inline(always)]
-    pub fn message_chunk(session_id: impl Into<SessionId>, text: impl Into<String>) -> Self {
+    pub fn message_chunk(
+        session_id: impl Into<SessionId>,
+        text: impl Into<String>,
+    ) -> Self {
         Event::AgentMessageChunk {
             session_id: session_id.into(),
             text: text.into(),
@@ -187,7 +190,10 @@ impl Event {
 
     /// Create an `AgentThoughtChunk` event for reasoning / thinking deltas.
     #[inline(always)]
-    pub fn thought_chunk(session_id: impl Into<SessionId>, text: impl Into<String>) -> Self {
+    pub fn thought_chunk(
+        session_id: impl Into<SessionId>,
+        text: impl Into<String>,
+    ) -> Self {
         Event::AgentThoughtChunk {
             session_id: session_id.into(),
             text: text.into(),
@@ -302,7 +308,10 @@ impl Event {
 
     /// Create a `TurnComplete` event.
     #[inline(always)]
-    pub fn turn_complete(session_id: impl Into<SessionId>, stop_reason: StopReason) -> Self {
+    pub fn turn_complete(
+        session_id: impl Into<SessionId>,
+        stop_reason: StopReason,
+    ) -> Self {
         Event::TurnComplete {
             session_id: session_id.into(),
             stop_reason,
@@ -329,7 +338,10 @@ impl Event {
 
     /// Create a `PlanUpdate` event.
     #[inline(always)]
-    pub fn plan_update(session_id: impl Into<SessionId>, entries: Vec<PlanEntry>) -> Self {
+    pub fn plan_update(
+        session_id: impl Into<SessionId>,
+        entries: Vec<PlanEntry>,
+    ) -> Self {
         Event::PlanUpdate {
             session_id: session_id.into(),
             entries,
@@ -446,15 +458,22 @@ mod tests {
                 .build(),
         );
 
-        let started = Event::item_started(session_id.clone(), turn_id.clone(), item.clone());
-        let completed = Event::item_completed(session_id, turn_id.clone(), item);
+        let started = Event::item_started(
+            session_id.clone(),
+            turn_id.clone(),
+            item.clone(),
+        );
+        let completed =
+            Event::item_completed(session_id, turn_id.clone(), item);
 
-        let started_json = serde_json::to_string(&started).expect("serialize started event");
-        let completed_json = serde_json::to_string(&completed).expect("serialize completed event");
-        let decoded_started: Event =
-            serde_json::from_str(&started_json).expect("deserialize started event");
-        let decoded_completed: Event =
-            serde_json::from_str(&completed_json).expect("deserialize completed event");
+        let started_json =
+            serde_json::to_string(&started).expect("serialize started event");
+        let completed_json = serde_json::to_string(&completed)
+            .expect("serialize completed event");
+        let decoded_started: Event = serde_json::from_str(&started_json)
+            .expect("deserialize started event");
+        let decoded_completed: Event = serde_json::from_str(&completed_json)
+            .expect("deserialize completed event");
 
         assert!(matches!(
             decoded_started,
@@ -478,8 +497,10 @@ mod tests {
             }],
         );
 
-        let encoded = serde_json::to_string(&event).expect("serialize patch preview event");
-        let decoded: Event = serde_json::from_str(&encoded).expect("deserialize patch event");
+        let encoded = serde_json::to_string(&event)
+            .expect("serialize patch preview event");
+        let decoded: Event =
+            serde_json::from_str(&encoded).expect("deserialize patch event");
 
         assert!(matches!(
             decoded,

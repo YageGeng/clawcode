@@ -42,8 +42,13 @@ pub trait SessionStore: Send + Sync {
     ) -> io::Result<()>;
 
     /// Persist a human-readable session title in the manifest.
-    fn record_session_title(&self, session_id: &SessionId, title: &str) -> io::Result<()>;
+    fn record_session_title(
+        &self,
+        session_id: &SessionId,
+        title: &str,
+    ) -> io::Result<()>;
 
     /// List persisted sessions from the manifest, optionally filtered by cwd.
-    fn list_sessions(&self, cwd: Option<&Path>) -> io::Result<Vec<SessionInfo>>;
+    fn list_sessions(&self, cwd: Option<&Path>)
+    -> io::Result<Vec<SessionInfo>>;
 }

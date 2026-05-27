@@ -8,7 +8,8 @@ use crate::ToolArgumentsConsumer;
 use super::{Hunk, UpdateChunk};
 
 const PATCH_TEXT_KEY: &str = "\"patchText\"";
-const APPLY_PATCH_ARGUMENTS_PREVIEW_INTERVAL: Duration = Duration::from_millis(500);
+const APPLY_PATCH_ARGUMENTS_PREVIEW_INTERVAL: Duration =
+    Duration::from_millis(500);
 
 /// Consumes streamed apply_patch JSON arguments and emits patch previews.
 pub(super) struct ApplyPatchArgumentsConsumer {
@@ -42,11 +43,9 @@ impl ApplyPatchArgumentsConsumer {
             changes,
         };
         let now = Instant::now();
-        if self
-            .state
-            .last_sent_at
-            .is_some_and(|last| now.duration_since(last) < APPLY_PATCH_ARGUMENTS_PREVIEW_INTERVAL)
-        {
+        if self.state.last_sent_at.is_some_and(|last| {
+            now.duration_since(last) < APPLY_PATCH_ARGUMENTS_PREVIEW_INTERVAL
+        }) {
             self.state.pending = Some(item);
             Vec::new()
         } else {
@@ -86,7 +85,10 @@ impl ToolArgumentsConsumer for ApplyPatchArgumentsConsumer {
         self.preview_item(call_id, &hunks)
     }
 
-    fn finish(&mut self, _call_id: &str) -> Result<Vec<protocol::ToolArgumentsStreamItem>, String> {
+    fn finish(
+        &mut self,
+        _call_id: &str,
+    ) -> Result<Vec<protocol::ToolArgumentsStreamItem>, String> {
         if self.state.disabled {
             return Ok(Vec::new());
         }
@@ -133,7 +135,11 @@ impl PatchTextDeltaExtractor {
     }
 
     /// Process one character from the streamed JSON argument payload.
-    fn process_char(&mut self, ch: char, output: &mut String) -> Result<(), String> {
+    fn process_char(
+        &mut self,
+        ch: char,
+        output: &mut String,
+    ) -> Result<(), String> {
         match &mut self.mode {
             ExtractMode::SearchingKey => self.process_key_search(ch),
             ExtractMode::WaitingColon => {
@@ -141,7 +147,9 @@ impl PatchTextDeltaExtractor {
                     self.mode = ExtractMode::WaitingValue;
                 } else if !ch.is_whitespace() {
                     self.failed = true;
-                    return Err("patchText key was not followed by ':'".to_string());
+                    return Err(
+                        "patchText key was not followed by ':'".to_string()
+                    );
                 }
             }
             ExtractMode::WaitingValue => {
@@ -153,7 +161,9 @@ impl PatchTextDeltaExtractor {
                     };
                 } else if !ch.is_whitespace() {
                     self.failed = true;
-                    return Err("patchText value was not a JSON string".to_string());
+                    return Err(
+                        "patchText value was not a JSON string".to_string()
+                    );
                 }
             }
             ExtractMode::ReadingPatchText {
@@ -161,7 +171,13 @@ impl PatchTextDeltaExtractor {
                 unicode,
                 pending_high_surrogate,
             } => {
-                if process_patch_text_char(ch, output, escape, unicode, pending_high_surrogate)? {
+                if process_patch_text_char(
+                    ch,
+                    output,
+                    escape,
+                    unicode,
+                    pending_high_surrogate,
+                )? {
                     self.mode = ExtractMode::Done;
                 }
             }
@@ -221,8 +237,9 @@ impl UnicodeEscape {
         if self.digits.len() < 4 {
             return Ok(None);
         }
-        let value = u32::from_str_radix(&self.digits, 16)
-            .map_err(|error| format!("invalid unicode escape in patchText: {error}"))?;
+        let value = u32::from_str_radix(&self.digits, 16).map_err(|error| {
+            format!("invalid unicode escape in patchText: {error}")
+        })?;
         Ok(Some(value))
     }
 }
@@ -237,7 +254,11 @@ fn process_patch_text_char(
 ) -> Result<bool, String> {
     if let Some(unicode_escape) = unicode {
         if let Some(code_unit) = unicode_escape.push(ch)? {
-            push_json_unicode_code_unit(code_unit, output, pending_high_surrogate)?;
+            push_json_unicode_code_unit(
+                code_unit,
+                output,
+                pending_high_surrogate,
+            )?;
             *unicode = None;
             *escape = false;
         }
@@ -252,7 +273,8 @@ fn process_patch_text_char(
             }
             _ if pending_high_surrogate.is_some() => {
                 return Err(
-                    "high surrogate in patchText must be followed by unicode escape".into(),
+                    "high surrogate in patchText must be followed by unicode escape"
+                        .into(),
                 );
             }
             '"' => output.push('"'),
@@ -262,7 +284,9 @@ fn process_patch_text_char(
             'r' => output.push('\r'),
             't' => output.push('\t'),
             other => {
-                return Err(format!("unsupported JSON escape in patchText: \\{other}"));
+                return Err(format!(
+                    "unsupported JSON escape in patchText: \\{other}"
+                ));
             }
         }
         *escape = false;
@@ -272,7 +296,9 @@ fn process_patch_text_char(
     match ch {
         '\\' => *escape = true,
         _ if pending_high_surrogate.is_some() => {
-            return Err("high surrogate in patchText must be followed by unicode escape".into());
+            return Err(
+                "high surrogate in patchText must be followed by unicode escape".into(),
+            );
         }
         '"' => return Ok(true),
         _ => output.push(ch),
@@ -294,17 +320,24 @@ fn push_json_unicode_code_unit(
         }
         0xDC00..=0xDFFF => {
             let Some(high) = pending_high_surrogate.take() else {
-                return Err("low surrogate in patchText had no high surrogate".to_string());
+                return Err("low surrogate in patchText had no high surrogate"
+                    .to_string());
             };
-            let scalar = 0x10000 + (((u32::from(high) - 0xD800) << 10) | (code_unit - 0xDC00));
-            let decoded = char::from_u32(scalar).ok_or("invalid unicode scalar in patchText")?;
+            let scalar = 0x10000
+                + (((u32::from(high) - 0xD800) << 10) | (code_unit - 0xDC00));
+            let decoded = char::from_u32(scalar)
+                .ok_or("invalid unicode scalar in patchText")?;
             output.push(decoded);
         }
         _ => {
             if pending_high_surrogate.is_some() {
-                return Err("high surrogate in patchText must be followed by low surrogate".into());
+                return Err(
+                    "high surrogate in patchText must be followed by low surrogate"
+                        .into(),
+                );
             }
-            let decoded = char::from_u32(code_unit).ok_or("invalid unicode scalar in patchText")?;
+            let decoded = char::from_u32(code_unit)
+                .ok_or("invalid unicode scalar in patchText")?;
             output.push(decoded);
         }
     }
@@ -329,7 +362,10 @@ impl StreamingPatchParser {
     }
 
     /// Push raw patch text and return the currently parsed hunk snapshot.
-    pub(super) fn push_delta(&mut self, delta: &str) -> Result<Vec<Hunk>, String> {
+    pub(super) fn push_delta(
+        &mut self,
+        delta: &str,
+    ) -> Result<Vec<Hunk>, String> {
         for ch in delta.chars() {
             if ch == '\n' {
                 let mut line = std::mem::take(&mut self.line_buffer);
@@ -353,7 +389,8 @@ impl StreamingPatchParser {
             self.process_line(&line)?;
         }
         if !matches!(self.state.mode, StreamingParserMode::EndedPatch) {
-            return Err("The last line of the patch must be '*** End Patch'".to_string());
+            return Err("The last line of the patch must be '*** End Patch'"
+                .to_string());
         }
         Ok(self.state.hunks.clone())
     }
@@ -367,10 +404,13 @@ impl StreamingPatchParser {
                     self.state.mode = StreamingParserMode::StartedPatch;
                     Ok(())
                 } else {
-                    Err("The first line of the patch must be '*** Begin Patch'".to_string())
+                    Err("The first line of the patch must be '*** Begin Patch'"
+                        .to_string())
                 }
             }
-            StreamingParserMode::StartedPatch => self.process_hunk_header(trimmed),
+            StreamingParserMode::StartedPatch => {
+                self.process_hunk_header(trimmed)
+            }
             StreamingParserMode::AddFile => {
                 if self.process_hunk_header(trimmed).is_ok() {
                     return Ok(());
@@ -378,14 +418,17 @@ impl StreamingPatchParser {
                 // Keep the preview parser aligned with opencode's permissive
                 // add-file body parser by ignoring lines without a `+` prefix.
                 if let Some(line_to_add) = line.strip_prefix('+')
-                    && let Some(Hunk::Add { contents, .. }) = self.state.hunks.last_mut()
+                    && let Some(Hunk::Add { contents, .. }) =
+                        self.state.hunks.last_mut()
                 {
                     contents.push_str(line_to_add);
                     contents.push('\n');
                 }
                 Ok(())
             }
-            StreamingParserMode::DeleteFile => self.process_hunk_header(trimmed),
+            StreamingParserMode::DeleteFile => {
+                self.process_hunk_header(trimmed)
+            }
             StreamingParserMode::UpdateFile => self.process_update_line(line),
             StreamingParserMode::EndedPatch => Ok(()),
         }
@@ -492,7 +535,9 @@ enum StreamingParserMode {
 }
 
 /// Convert parsed patch hunks into protocol preview changes.
-pub(super) fn preview_changes_from_hunks(hunks: &[Hunk]) -> Vec<PatchPreviewChange> {
+pub(super) fn preview_changes_from_hunks(
+    hunks: &[Hunk],
+) -> Vec<PatchPreviewChange> {
     hunks
         .iter()
         .map(|hunk| match hunk {
@@ -587,7 +632,9 @@ mod tests {
         let mut extractor = PatchTextDeltaExtractor::new();
 
         let extracted = extractor
-            .push_delta("{\"patchText\":\"line\\\\path\\n\\\"quoted\\\"\\u0021\"}")
+            .push_delta(
+                "{\"patchText\":\"line\\\\path\\n\\\"quoted\\\"\\u0021\"}",
+            )
             .unwrap();
 
         assert_eq!(extracted, "line\\path\n\"quoted\"!");
@@ -650,7 +697,9 @@ mod tests {
         let mut parser = StreamingPatchParser::new();
 
         let hunks = parser
-            .push_delta("*** Begin Patch\n*** Add File: added.txt\nignored\n+kept\n")
+            .push_delta(
+                "*** Begin Patch\n*** Add File: added.txt\nignored\n+kept\n",
+            )
             .unwrap();
 
         assert!(matches!(
@@ -665,7 +714,9 @@ mod tests {
         let mut parser = StreamingPatchParser::new();
 
         let hunks = parser
-            .push_delta("*** Begin Patch\n*** Update File: file.txt\n-old\n@@\n-old\n+new\n")
+            .push_delta(
+                "*** Begin Patch\n*** Update File: file.txt\n-old\n@@\n-old\n+new\n",
+            )
             .unwrap();
 
         assert!(matches!(
@@ -681,7 +732,9 @@ mod tests {
         let mut parser = StreamingPatchParser::new();
 
         let hunks = parser
-            .push_delta("*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n")
+            .push_delta(
+                "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n",
+            )
             .unwrap();
 
         assert!(matches!(
@@ -717,8 +770,10 @@ mod tests {
         let mut consumer = ApplyPatchArgumentsConsumer::new();
 
         let first = consumer.consume_delta("call-1", "{\"patchText\":\"bad\\x");
-        let second =
-            consumer.consume_delta("call-1", "*** Begin Patch\\n*** Add File: a.txt\\n+ok\\n");
+        let second = consumer.consume_delta(
+            "call-1",
+            "*** Begin Patch\\n*** Add File: a.txt\\n+ok\\n",
+        );
 
         assert!(first.is_empty());
         assert!(second.is_empty());

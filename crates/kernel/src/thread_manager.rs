@@ -103,7 +103,10 @@ impl ThreadManager {
     }
 
     /// Return a cloned live thread handle for a session id.
-    pub(crate) async fn get_thread(&self, session_id: &SessionId) -> Option<Thread> {
+    pub(crate) async fn get_thread(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Thread> {
         self.threads.lock().await.get(session_id).cloned()
     }
 
@@ -137,7 +140,11 @@ impl ThreadManager {
     }
 
     /// Send an operation to a live thread.
-    pub(crate) async fn send_op(&self, session_id: &SessionId, op: Op) -> Result<(), KernelError> {
+    pub(crate) async fn send_op(
+        &self,
+        session_id: &SessionId,
+        op: Op,
+    ) -> Result<(), KernelError> {
         let Some(thread) = self.get_thread(session_id).await else {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         };
@@ -176,7 +183,10 @@ impl ThreadManager {
     }
 
     /// Signal cancellation for a live thread while keeping it registered.
-    pub(crate) async fn cancel_thread(&self, session_id: &SessionId) -> Result<(), KernelError> {
+    pub(crate) async fn cancel_thread(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), KernelError> {
         let thread = self
             .get_thread(session_id)
             .await
@@ -186,7 +196,10 @@ impl ThreadManager {
     }
 
     /// Close and remove a live thread.
-    pub(crate) async fn close_thread(&self, session_id: &SessionId) -> Result<Thread, KernelError> {
+    pub(crate) async fn close_thread(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Thread, KernelError> {
         let removed = self
             .threads
             .lock()
@@ -261,7 +274,10 @@ mod tests {
     /// Build a real recorder for thread-manager tests.
     fn test_recorder() -> Arc<dyn SessionRecorder> {
         Arc::new(store::FileSessionRecorder::new(
-            std::env::temp_dir().join(format!("clawcode-thread-{}.jsonl", uuid::Uuid::new_v4())),
+            std::env::temp_dir().join(format!(
+                "clawcode-thread-{}.jsonl",
+                uuid::Uuid::new_v4()
+            )),
         ))
     }
 
@@ -280,7 +296,9 @@ mod tests {
             .await
             .expect_err("missing session should fail");
 
-        assert!(matches!(error, KernelError::SessionNotFound(id) if id == missing));
+        assert!(
+            matches!(error, KernelError::SessionNotFound(id) if id == missing)
+        );
     }
 
     #[tokio::test]
@@ -338,8 +356,11 @@ mod tests {
         let manager = ThreadManager::new();
         let session_id = SessionId::from("child");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
-        let thread =
-            test_thread_with_path(session_id.clone(), AgentPath::root().join("child"), tx_op);
+        let thread = test_thread_with_path(
+            session_id.clone(),
+            AgentPath::root().join("child"),
+            tx_op,
+        );
         manager.insert_thread(thread).await;
 
         manager
@@ -347,9 +368,9 @@ mod tests {
             .await
             .expect("subagent model switch should be ignored");
 
-        let error = rx_op
-            .try_recv()
-            .expect_err("subagent model switch should not enqueue an operation");
+        let error = rx_op.try_recv().expect_err(
+            "subagent model switch should not enqueue an operation",
+        );
         assert!(matches!(error, mpsc::error::TryRecvError::Empty));
     }
 
@@ -383,7 +404,10 @@ mod tests {
     }
 
     /// Build a minimal thread handle for ThreadManager routing tests.
-    fn test_thread(session_id: SessionId, tx_op: mpsc::UnboundedSender<Op>) -> Thread {
+    fn test_thread(
+        session_id: SessionId,
+        tx_op: mpsc::UnboundedSender<Op>,
+    ) -> Thread {
         test_thread_with_path(session_id, AgentPath::root(), tx_op)
     }
 
@@ -409,7 +433,8 @@ mod tests {
             .pending_approvals(Arc::new(tokio::sync::Mutex::new(HashMap::<
                 String,
                 oneshot::Sender<protocol::ReviewDecision>,
-            >::new())))
+            >::new(
+            ))))
             .cancel_tx(cancel_tx)
             .tools(Arc::new(ToolRegistry::new()))
             .mcp_manager(Arc::new(mcp::McpConnectionManager::new(

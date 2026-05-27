@@ -1,7 +1,11 @@
 //! Streaming completion primitives shared by the remaining provider clients.
 
-use crate::completion::{CompletionError, CompletionResponse, GetTokenUsage, Usage};
-use crate::message::{AssistantContent, Reasoning, ReasoningContent, Text, ToolCall, ToolFunction};
+use crate::completion::{
+    CompletionError, CompletionResponse, GetTokenUsage, Usage,
+};
+use crate::message::{
+    AssistantContent, Reasoning, ReasoningContent, Text, ToolCall, ToolFunction,
+};
 use crate::one_or_many::OneOrMany;
 use futures::stream::{AbortHandle, Abortable};
 use futures::{Stream, StreamExt};
@@ -161,7 +165,10 @@ impl RawStreamingToolCall {
     }
 
     /// Attach provider-specific metadata.
-    pub fn with_additional_params(mut self, additional_params: Option<serde_json::Value>) -> Self {
+    pub fn with_additional_params(
+        mut self,
+        additional_params: Option<serde_json::Value>,
+    ) -> Self {
         self.additional_params = additional_params;
         self
     }
@@ -184,8 +191,12 @@ impl From<RawStreamingToolCall> for ToolCall {
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
 /// Provider stream of raw completion chunks on native targets.
-pub type StreamingResult<R> =
-    Pin<Box<dyn Stream<Item = Result<RawStreamingChoice<R>, CompletionError>> + Send>>;
+pub type StreamingResult<R> = Pin<
+    Box<
+        dyn Stream<Item = Result<RawStreamingChoice<R>, CompletionError>>
+            + Send,
+    >,
+>;
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 /// Provider stream of raw completion chunks on wasm targets.
@@ -257,7 +268,8 @@ where
 
     fn append_text_chunk(&mut self, text: &str) {
         if let Some(index) = self.text_item_index
-            && let Some(AssistantContent::Text(existing_text)) = self.assistant_items.get_mut(index)
+            && let Some(AssistantContent::Text(existing_text)) =
+                self.assistant_items.get_mut(index)
         {
             existing_text.text.push_str(text);
             return;
@@ -271,7 +283,8 @@ where
     /// Accumulate replayable reasoning deltas into the aggregated assistant output.
     fn append_reasoning_chunk(&mut self, id: &Option<String>, text: &str) {
         if let Some(index) = self.reasoning_item_index
-            && let Some(AssistantContent::Reasoning(existing)) = self.assistant_items.get_mut(index)
+            && let Some(AssistantContent::Reasoning(existing)) =
+                self.assistant_items.get_mut(index)
             && let Some(ReasoningContent::Text {
                 text: existing_text,
                 ..
@@ -293,9 +306,14 @@ where
     }
 
     /// Accumulate complete reasoning blocks, merging same-id provider blocks.
-    fn append_reasoning_block(&mut self, id: Option<String>, content: ReasoningContent) {
+    fn append_reasoning_block(
+        &mut self,
+        id: Option<String>,
+        content: ReasoningContent,
+    ) {
         if id.is_some()
-            && let Some(AssistantContent::Reasoning(existing)) = self.assistant_items.last_mut()
+            && let Some(AssistantContent::Reasoning(existing)) =
+                self.assistant_items.last_mut()
             && existing.id == id
         {
             existing.content.push(content);
@@ -314,7 +332,9 @@ impl<R> From<StreamingCompletionResponse<R>> for CompletionResponse<Option<R>>
 where
     R: Clone + Unpin + GetTokenUsage,
 {
-    fn from(value: StreamingCompletionResponse<R>) -> CompletionResponse<Option<R>> {
+    fn from(
+        value: StreamingCompletionResponse<R>,
+    ) -> CompletionResponse<Option<R>> {
         CompletionResponse {
             choice: value.choice,
             usage: Usage::new(),
@@ -330,7 +350,10 @@ where
 {
     type Item = Result<StreamedAssistantContent<R>, CompletionError>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         let stream = self.get_mut();
 
         if stream.is_paused() {
@@ -345,9 +368,9 @@ where
                     stream.assistant_items.push(AssistantContent::text(""));
                 }
 
-                if let Some(choice) =
-                    OneOrMany::from_iter_optional(std::mem::take(&mut stream.assistant_items))
-                {
+                if let Some(choice) = OneOrMany::from_iter_optional(
+                    std::mem::take(&mut stream.assistant_items),
+                ) {
                     stream.choice = choice;
                 }
 
@@ -370,11 +393,13 @@ where
                     id,
                     internal_call_id,
                     content,
-                } => Poll::Ready(Some(Ok(StreamedAssistantContent::ToolCallDelta {
-                    id,
-                    internal_call_id,
-                    content,
-                }))),
+                } => Poll::Ready(Some(Ok(
+                    StreamedAssistantContent::ToolCallDelta {
+                        id,
+                        internal_call_id,
+                        content,
+                    },
+                ))),
                 RawStreamingChoice::Reasoning { id, content } => {
                     let reasoning = Reasoning {
                         id: id.clone(),
@@ -383,7 +408,9 @@ where
                     stream.text_item_index = None;
                     stream.reasoning_item_index = None;
                     stream.append_reasoning_block(id, content);
-                    Poll::Ready(Some(Ok(StreamedAssistantContent::Reasoning(reasoning))))
+                    Poll::Ready(Some(Ok(StreamedAssistantContent::Reasoning(
+                        reasoning,
+                    ))))
                 }
                 RawStreamingChoice::ReasoningDelta {
                     id,
@@ -394,14 +421,17 @@ where
                     if replayable {
                         stream.append_reasoning_chunk(&id, &reasoning);
                     }
-                    Poll::Ready(Some(Ok(StreamedAssistantContent::ReasoningDelta {
-                        id,
-                        reasoning,
-                        replayable,
-                    })))
+                    Poll::Ready(Some(Ok(
+                        StreamedAssistantContent::ReasoningDelta {
+                            id,
+                            reasoning,
+                            replayable,
+                        },
+                    )))
                 }
                 RawStreamingChoice::ToolCall(raw_tool_call) => {
-                    let internal_call_id = raw_tool_call.internal_call_id.clone();
+                    let internal_call_id =
+                        raw_tool_call.internal_call_id.clone();
                     let tool_call: ToolCall = raw_tool_call.into();
                     stream.text_item_index = None;
                     stream.reasoning_item_index = None;
@@ -424,7 +454,9 @@ where
                         stream
                             .final_response_yielded
                             .store(true, std::sync::atomic::Ordering::SeqCst);
-                        Poll::Ready(Some(Ok(StreamedAssistantContent::final_response(response))))
+                        Poll::Ready(Some(Ok(
+                            StreamedAssistantContent::final_response(response),
+                        )))
                     }
                 }
                 RawStreamingChoice::MessageId(id) => {

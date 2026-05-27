@@ -13,7 +13,9 @@ pub(crate) fn stream_from_completion_response<R, F>(
 ) -> Result<StreamingCompletionResponse<R>, CompletionError>
 where
     R: Clone + Unpin + GetTokenUsage + WasmCompatSend + 'static,
-    F: FnMut(AssistantContent) -> Result<Vec<RawStreamingChoice<R>>, CompletionError>
+    F: FnMut(
+            AssistantContent,
+        ) -> Result<Vec<RawStreamingChoice<R>>, CompletionError>
         + WasmCompatSend
         + 'static,
 {

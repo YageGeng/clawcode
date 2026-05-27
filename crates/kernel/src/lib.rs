@@ -21,8 +21,9 @@ use async_trait::async_trait;
 use config::ConfigHandle;
 use futures::Stream;
 use protocol::{
-    AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, ReviewDecision, SessionCreated,
-    SessionId, SessionInfo, SessionLaunchOptions, SessionListPage, SessionMode,
+    AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, ReviewDecision,
+    SessionCreated, SessionId, SessionInfo, SessionLaunchOptions,
+    SessionListPage, SessionMode,
 };
 use provider::factory::LlmFactory;
 
@@ -35,10 +36,12 @@ use crate::context::InMemoryContext;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
 use crate::session::{Thread, event_stream};
-use crate::thread_manager::{LoadThreadParams, SpawnThreadParams, ThreadManager};
+use crate::thread_manager::{
+    LoadThreadParams, SpawnThreadParams, ThreadManager,
+};
 use store::{
-    AgentEdgeStatus, AgentGraphStore, CreateSessionParams, FileSessionStore, SessionRecorder,
-    SessionStore,
+    AgentEdgeStatus, AgentGraphStore, CreateSessionParams, FileSessionStore,
+    SessionRecorder, SessionStore,
 };
 use tools::ToolRegistry;
 
@@ -85,7 +88,8 @@ impl Kernel {
         let file_store = Arc::new(FileSessionStore::new(
             cfg.session_persistence.data_home.as_deref(),
         ));
-        let store: Arc<dyn SessionStore> = Arc::clone(&file_store) as Arc<dyn SessionStore>;
+        let store: Arc<dyn SessionStore> =
+            Arc::clone(&file_store) as Arc<dyn SessionStore>;
         let graph_store: Arc<dyn AgentGraphStore> =
             Arc::clone(&file_store) as Arc<dyn AgentGraphStore>;
         let thread_manager = Arc::new(ThreadManager::new());
@@ -115,7 +119,8 @@ impl Kernel {
     /// Internally creates an [`AgentControlAdapter`] and registers it with
     /// the tool registry.
     pub fn register_agent_tools(&self) {
-        let adapter = Arc::new(AgentControlAdapter::new(Arc::clone(&self.agent_control)));
+        let adapter =
+            Arc::new(AgentControlAdapter::new(Arc::clone(&self.agent_control)));
         self.tools.register_agent_tools(adapter);
     }
 
@@ -142,7 +147,8 @@ impl Kernel {
         model_id: &str,
         app_cfg: &config::AppConfig,
     ) -> String {
-        let skill_registry = skills::SkillRegistry::discover(cwd, &app_cfg.skills);
+        let skill_registry =
+            skills::SkillRegistry::discover(cwd, &app_cfg.skills);
         let skills_xml = if app_cfg.skills.include_instructions {
             skill_registry.render_catalog()
         } else {
@@ -203,12 +209,16 @@ impl Kernel {
             SessionMode {
                 id: "auto".to_string(),
                 name: "Auto".to_string(),
-                description: Some("Agent asks for approval before making changes".to_string()),
+                description: Some(
+                    "Agent asks for approval before making changes".to_string(),
+                ),
             },
             SessionMode {
                 id: "full-access".to_string(),
                 name: "Full Access".to_string(),
-                description: Some("Agent can modify files without approval".to_string()),
+                description: Some(
+                    "Agent can modify files without approval".to_string(),
+                ),
             },
         ]
     }
@@ -226,7 +236,11 @@ impl Kernel {
                     self.llm_factory.get(p.id.as_str(), &m.id).map(|_| {
                         ModelInfo::builder()
                             .id(format!("{}/{}", p.id.as_str(), m.id))
-                            .display_name(m.display_name.clone().unwrap_or_else(|| m.id.clone()))
+                            .display_name(
+                                m.display_name
+                                    .clone()
+                                    .unwrap_or_else(|| m.id.clone()),
+                            )
                             .description(None)
                             .context_tokens(m.context_tokens)
                             .max_output_tokens(m.max_output_tokens)
@@ -236,7 +250,9 @@ impl Kernel {
             })
             .collect::<Vec<_>>();
 
-        if let Some(active_index) = models.iter().position(|model| model.id == active_model) {
+        if let Some(active_index) =
+            models.iter().position(|model| model.id == active_model)
+        {
             // Keep the configured active model prominent while preserving the
             // configured order of all other models.
             let active = models.remove(active_index);
@@ -303,7 +319,8 @@ impl Kernel {
                 tracing::warn!(child_id = %edge.child_session_id, "failed to load subagent session");
                 continue;
             };
-            let child_recorder: Arc<dyn SessionRecorder> = Arc::from(child_recorder);
+            let child_recorder: Arc<dyn SessionRecorder> =
+                Arc::from(child_recorder);
             let llm = match self.default_llm() {
                 Some(llm) => llm,
                 None => {
@@ -323,7 +340,9 @@ impl Kernel {
                         .tools(Arc::clone(&self.tools))
                         .agent_path(edge.child_agent_path.clone())
                         .agent_control(Arc::clone(agent_control))
-                        .approval(Arc::new(ApprovalPolicy::new(app_cfg.approval)))
+                        .approval(Arc::new(ApprovalPolicy::new(
+                            app_cfg.approval,
+                        )))
                         .app_config(Arc::clone(app_cfg))
                         .recorder(Arc::clone(&child_recorder))
                         .build(),
@@ -348,10 +367,17 @@ impl Kernel {
                 continue;
             }
             agent_control
-                .register_recorder(edge.child_session_id.clone(), Arc::clone(&child_recorder))
+                .register_recorder(
+                    edge.child_session_id.clone(),
+                    Arc::clone(&child_recorder),
+                )
                 .await;
-            Box::pin(self.restore_subagent_tree(&edge.child_session_id, agent_control, app_cfg))
-                .await;
+            Box::pin(self.restore_subagent_tree(
+                &edge.child_session_id,
+                agent_control,
+                app_cfg,
+            ))
+            .await;
         }
     }
 }
@@ -376,7 +402,8 @@ impl AgentKernel for Kernel {
         let agent_ctrl = Arc::clone(&self.agent_control);
 
         let app_cfg = self.config.current();
-        let base_system_prompt = self.render_base_system_prompt(&cwd, &model_id, &app_cfg);
+        let base_system_prompt =
+            self.render_base_system_prompt(&cwd, &model_id, &app_cfg);
         let recorder = self
             .session_store
             .create_session(
@@ -406,8 +433,11 @@ impl AgentKernel for Kernel {
             )
             .await?;
 
-        self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
-            .await?;
+        self.register_external_mcp_servers_for_thread(
+            &handle,
+            options.external_mcp_servers,
+        )
+        .await?;
 
         // Register root only after session creation succeeds, avoiding stale registry entries.
         agent_ctrl.registry.register_root_thread(session_id.clone());
@@ -430,8 +460,11 @@ impl AgentKernel for Kernel {
         options: SessionLaunchOptions,
     ) -> Result<SessionCreated, KernelError> {
         if let Some(handle) = self.thread_manager.get_thread(session_id).await {
-            self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
-                .await?;
+            self.register_external_mcp_servers_for_thread(
+                &handle,
+                options.external_mcp_servers,
+            )
+            .await?;
             // Active sessions may still be loaded by the TUI when switching agents. Replay the
             // persisted message log so ACP can hydrate the newly-created TUI session state.
             let replayed = self
@@ -496,8 +529,11 @@ impl AgentKernel for Kernel {
                     .build(),
             )
             .await?;
-        self.register_external_mcp_servers_for_thread(&handle, options.external_mcp_servers)
-            .await?;
+        self.register_external_mcp_servers_for_thread(
+            &handle,
+            options.external_mcp_servers,
+        )
+        .await?;
         let agent_ctrl = Arc::clone(&self.agent_control);
         agent_ctrl.registry.register_root_thread(session_id.clone());
         agent_ctrl
@@ -526,11 +562,13 @@ impl AgentKernel for Kernel {
             .session_store
             .list_sessions(cwd)
             .map_err(|error| KernelError::Internal(error.into()))?;
-        let persisted_titles: std::collections::HashMap<SessionId, Option<String>> =
-            persisted_sessions
-                .iter()
-                .map(|session| (session.session_id.clone(), session.title.clone()))
-                .collect();
+        let persisted_titles: std::collections::HashMap<
+            SessionId,
+            Option<String>,
+        > = persisted_sessions
+            .iter()
+            .map(|session| (session.session_id.clone(), session.title.clone()))
+            .collect();
         let mut sessions: Vec<SessionInfo> = self
             .thread_manager
             .live_sessions()
@@ -541,7 +579,12 @@ impl AgentKernel for Kernel {
                 SessionInfo::builder()
                     .session_id(thread.session_id.clone())
                     .cwd(thread.cwd.clone())
-                    .title(persisted_titles.get(&thread.session_id).cloned().flatten())
+                    .title(
+                        persisted_titles
+                            .get(&thread.session_id)
+                            .cloned()
+                            .flatten(),
+                    )
                     .build()
             })
             .collect();
@@ -562,14 +605,21 @@ impl AgentKernel for Kernel {
         &self,
         session_id: &SessionId,
         text: String,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
-    {
-        if let Some(SlashCommand::Sessions) = SlashCommand::parse_from_text(&text) {
+    ) -> Result<
+        Pin<
+            Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>,
+        >,
+        KernelError,
+    > {
+        if let Some(SlashCommand::Sessions) =
+            SlashCommand::parse_from_text(&text)
+        {
             return self.prompt_sessions_command(session_id, &text).await;
         }
 
         if let Some(title) = Self::session_title_from_prompt_text(&text)
-            && let Err(error) = self.session_store.record_session_title(session_id, &title)
+            && let Err(error) =
+                self.session_store.record_session_title(session_id, &title)
         {
             tracing::warn!(%error, %session_id, "failed to persist session title");
         }
@@ -594,8 +644,12 @@ impl AgentKernel for Kernel {
     async fn subscribe_session_events(
         &self,
         session_id: &SessionId,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
-    {
+    ) -> Result<
+        Pin<
+            Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>,
+        >,
+        KernelError,
+    > {
         let rx_event = self.thread_manager.take_rx(session_id).await?;
         let cancel_rx = self.thread_manager.cancel_rx(session_id).await?;
         Ok(event_stream(rx_event, cancel_rx))
@@ -605,7 +659,11 @@ impl AgentKernel for Kernel {
         self.thread_manager.cancel_thread(session_id).await
     }
 
-    async fn set_mode(&self, session_id: &SessionId, _mode: &str) -> Result<(), KernelError> {
+    async fn set_mode(
+        &self,
+        session_id: &SessionId,
+        _mode: &str,
+    ) -> Result<(), KernelError> {
         if self.thread_manager.get_thread(session_id).await.is_none() {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         }
@@ -623,7 +681,10 @@ impl AgentKernel for Kernel {
             .await
     }
 
-    async fn close_session(&self, session_id: &SessionId) -> Result<(), KernelError> {
+    async fn close_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), KernelError> {
         let handle = self
             .thread_manager
             .get_thread(session_id)
@@ -659,7 +720,9 @@ impl AgentKernel for Kernel {
             .thread_manager
             .get_thread(parent_session)
             .await
-            .ok_or_else(|| KernelError::SessionNotFound(parent_session.clone()))?;
+            .ok_or_else(|| {
+                KernelError::SessionNotFound(parent_session.clone())
+            })?;
         let parent_path = self
             .agent_control
             .registry
@@ -734,8 +797,12 @@ impl Kernel {
         &self,
         session_id: &SessionId,
         text: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>>, KernelError>
-    {
+    ) -> Result<
+        Pin<
+            Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>,
+        >,
+        KernelError,
+    > {
         let cursor = Self::sessions_cursor_from_prompt_text(text)?;
         let thread = self
             .thread_manager
@@ -757,7 +824,9 @@ impl Kernel {
     }
 
     /// Parse the optional offset cursor from `/sessions` prompt text.
-    fn sessions_cursor_from_prompt_text(text: &str) -> Result<Option<String>, KernelError> {
+    fn sessions_cursor_from_prompt_text(
+        text: &str,
+    ) -> Result<Option<String>, KernelError> {
         let Some((name, rest, _rest_offset)) = parse_slash_name(text) else {
             return Err(KernelError::Internal(anyhow::anyhow!(
                 "Usage: /sessions [offset]"
@@ -799,7 +868,9 @@ impl Kernel {
                 format!(
                     "| {} | {} | {} | {} |",
                     Self::escape_markdown_table_cell(&session.session_id.0),
-                    Self::escape_markdown_table_cell(&session.cwd.display().to_string()),
+                    Self::escape_markdown_table_cell(
+                        &session.cwd.display().to_string()
+                    ),
                     Self::escape_markdown_table_cell(&title),
                     Self::escape_markdown_table_cell(time)
                 )
@@ -856,7 +927,10 @@ fn session_list_offset(cursor: Option<&str>) -> Result<usize, KernelError> {
 }
 
 /// Returns one fixed-size session page and the next offset cursor when available.
-fn paginate_session_list(sessions: Vec<SessionInfo>, offset: usize) -> SessionListPage {
+fn paginate_session_list(
+    sessions: Vec<SessionInfo>,
+    offset: usize,
+) -> SessionListPage {
     let total = sessions.len();
     let page: Vec<SessionInfo> = sessions
         .into_iter()
@@ -882,7 +956,8 @@ mod tests {
     use protocol::mcp::{McpServerConfig, McpTransportConfig};
     use protocol::message::Message;
     use store::{
-        AgentEdgeStatus, AgentGraphStore, MessageRecord, PersistedPayload, TurnContextRecord,
+        AgentEdgeStatus, AgentGraphStore, MessageRecord, PersistedPayload,
+        TurnContextRecord,
     };
 
     /// Builds a kernel with config-driven providers for metadata-only tests.
@@ -937,7 +1012,9 @@ mod tests {
     }
 
     /// Read the latest persisted turn context from a test data-home directory.
-    fn latest_turn_context_record(data_home: &std::path::Path) -> TurnContextRecord {
+    fn latest_turn_context_record(
+        data_home: &std::path::Path,
+    ) -> TurnContextRecord {
         let mut session_files = Vec::new();
         collect_jsonl_files(data_home, &mut session_files);
         session_files.sort();
@@ -946,11 +1023,16 @@ mod tests {
             .iter()
             .rev()
             .find_map(|path| {
-                let text = std::fs::read_to_string(path).expect("read session file");
+                let text =
+                    std::fs::read_to_string(path).expect("read session file");
                 text.lines().rev().find_map(|line| {
-                    let record = serde_json::from_str::<store::PersistedRecord>(line).ok()?;
+                    let record =
+                        serde_json::from_str::<store::PersistedRecord>(line)
+                            .ok()?;
                     match record.payload {
-                        store::PersistedPayload::TurnContext(turn_context) => Some(turn_context),
+                        store::PersistedPayload::TurnContext(turn_context) => {
+                            Some(turn_context)
+                        }
                         _ => None,
                     }
                 })
@@ -959,12 +1041,17 @@ mod tests {
     }
 
     /// Recursively collect persisted session JSONL files.
-    fn collect_jsonl_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    fn collect_jsonl_files(
+        dir: &std::path::Path,
+        files: &mut Vec<std::path::PathBuf>,
+    ) {
         for entry in std::fs::read_dir(dir).expect("read data home") {
             let path = entry.expect("read data home entry").path();
             if path.is_dir() {
                 collect_jsonl_files(&path, files);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            } else if path.extension().and_then(|ext| ext.to_str())
+                == Some("jsonl")
+            {
                 files.push(path);
             }
         }
@@ -976,7 +1063,8 @@ mod tests {
             .name(name.to_string())
             .external(true)
             .transport(McpTransportConfig::Stdio {
-                command: "/definitely/missing/clawcode-mcp-test-server".to_string(),
+                command: "/definitely/missing/clawcode-mcp-test-server"
+                    .to_string(),
                 args: Vec::new(),
                 env: HashMap::new(),
                 cwd: None,
@@ -1069,7 +1157,10 @@ mod tests {
         app_config.session_persistence.data_home = Some(data_home);
         let kernel = kernel_with_config(app_config);
         let created = kernel
-            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .new_session(
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
             .await
             .expect("session should start");
 
@@ -1104,7 +1195,9 @@ mod tests {
                 missing_external_mcp_options("missing"),
             )
             .await
-            .expect("session creation should not wait for external MCP startup");
+            .expect(
+                "session creation should not wait for external MCP startup",
+            );
 
         assert!(
             kernel
@@ -1117,12 +1210,16 @@ mod tests {
 
     /// Verifies active load-session options register external MCP servers asynchronously.
     #[tokio::test]
-    async fn active_load_session_returns_before_external_mcp_server_startup_finishes() {
+    async fn active_load_session_returns_before_external_mcp_server_startup_finishes()
+     {
         let app_config = app_config_with_provider();
         let kernel = kernel_with_config(app_config);
         let cwd = tempfile::tempdir().expect("temp cwd");
         let created = kernel
-            .new_session(cwd.path().to_path_buf(), SessionLaunchOptions::default())
+            .new_session(
+                cwd.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
             .await
             .expect("session should start without external MCP");
 
@@ -1265,13 +1362,19 @@ mod tests {
         app_config.session_persistence.data_home = Some(data_home.clone());
         let kernel = kernel_with_config(app_config);
         let created = kernel
-            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .new_session(
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
             .await
             .expect("session should start");
 
         kernel
             .session_store
-            .record_session_title(&created.session_id, "Implement persisted titles")
+            .record_session_title(
+                &created.session_id,
+                "Implement persisted titles",
+            )
             .expect("record title");
 
         let page = kernel
@@ -1293,7 +1396,8 @@ mod tests {
             "x".repeat(SESSION_TITLE_MAX_CHARS)
         );
 
-        let title = Kernel::session_title_from_prompt_text(&long_prompt).expect("title");
+        let title = Kernel::session_title_from_prompt_text(&long_prompt)
+            .expect("title");
 
         assert!(!title.contains('\n'));
         assert!(!title.contains("  "));
@@ -1320,7 +1424,10 @@ mod tests {
         }
         let kernel = kernel_with_config(app_config);
         let created = kernel
-            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .new_session(
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
             .await
             .expect("session should start before slash command");
 
@@ -1340,16 +1447,20 @@ mod tests {
         assert!(text.contains("Recent sessions:"));
         assert!(text.contains("| Session | Cwd | Title | Updated |"));
         assert!(text.contains("| --- | --- | --- | --- |"));
-        assert!(text.contains(&format!("| session-09 | {} | - |", temp.path().display())));
+        assert!(text.contains(&format!(
+            "| session-09 | {} | - |",
+            temp.path().display()
+        )));
         assert!(text.contains("session-09"));
         assert!(text.contains("session-11"));
         assert!(!text.contains("session-08"));
 
-        let second = tokio::time::timeout(Duration::from_secs(1), events.next())
-            .await
-            .expect("slash command should finish promptly")
-            .expect("slash command should emit completion")
-            .expect("slash command completion should be valid");
+        let second =
+            tokio::time::timeout(Duration::from_secs(1), events.next())
+                .await
+                .expect("slash command should finish promptly")
+                .expect("slash command should emit completion")
+                .expect("slash command completion should be valid");
         assert!(matches!(
             second,
             Event::TurnComplete {
@@ -1421,7 +1532,11 @@ mod tests {
             .await
             .expect("closed child initial edge");
         store
-            .set_agent_edge_status(&root_id, &closed_id, AgentEdgeStatus::Closed)
+            .set_agent_edge_status(
+                &root_id,
+                &closed_id,
+                AgentEdgeStatus::Closed,
+            )
             .await
             .expect("closed edge");
 
@@ -1459,7 +1574,10 @@ mod tests {
         app_config.session_persistence.data_home = Some(data_home);
         let kernel = kernel_with_config(app_config);
         let created = kernel
-            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .new_session(
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
             .await
             .expect("create root session");
         let child_path = AgentPath::root().join("worker");
@@ -1491,7 +1609,10 @@ mod tests {
         app_config.session_persistence.data_home = Some(data_home);
         let kernel = kernel_with_config(app_config);
         let created = kernel
-            .new_session(temp.path().to_path_buf(), SessionLaunchOptions::default())
+            .new_session(
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
             .await
             .expect("create root session");
 

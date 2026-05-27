@@ -103,9 +103,11 @@ impl TryFrom<schema::McpServer> for McpServerConfig {
         match server {
             schema::McpServer::Stdio(server) => server.try_into(),
             schema::McpServer::Http(server) => Ok(server.into()),
-            schema::McpServer::Sse(server) => Err(AcpMcpServerConfigError::UnsupportedSse {
-                server: server.name,
-            }),
+            schema::McpServer::Sse(server) => {
+                Err(AcpMcpServerConfigError::UnsupportedSse {
+                    server: server.name,
+                })
+            }
             _ => Err(AcpMcpServerConfigError::UnsupportedTransport),
         }
     }
@@ -116,13 +118,14 @@ impl TryFrom<schema::McpServerStdio> for McpServerConfig {
 
     /// Convert an ACP stdio MCP server config into a runtime MCP server config.
     fn try_from(server: schema::McpServerStdio) -> Result<Self, Self::Error> {
-        let command = server
-            .command
-            .into_os_string()
-            .into_string()
-            .map_err(|_e| AcpMcpServerConfigError::NonUtf8Command {
-                server: server.name.clone(),
-            })?;
+        let command =
+            server
+                .command
+                .into_os_string()
+                .into_string()
+                .map_err(|_e| AcpMcpServerConfigError::NonUtf8Command {
+                    server: server.name.clone(),
+                })?;
         let env = server
             .env
             .into_iter()
@@ -215,7 +218,10 @@ impl SessionCreated {
             })
             .collect();
 
-        schema::SessionModelState::new(schema::ModelId::new(self.current_model.clone()), acp_models)
+        schema::SessionModelState::new(
+            schema::ModelId::new(self.current_model.clone()),
+            acp_models,
+        )
     }
 }
 
@@ -236,7 +242,9 @@ impl From<FileChangeStatus> for schema::ToolCallStatus {
         match status {
             FileChangeStatus::InProgress => Self::InProgress,
             FileChangeStatus::Completed => Self::Completed,
-            FileChangeStatus::Failed | FileChangeStatus::Declined => Self::Failed,
+            FileChangeStatus::Failed | FileChangeStatus::Declined => {
+                Self::Failed
+            }
         }
     }
 }
@@ -248,7 +256,10 @@ impl From<FileChange> for schema::ToolCallContent {
     fn from(change: FileChange) -> Self {
         // ACP renders file-change items through Diff content so clients can show
         // additions, updates, and deletions in a native edit tool cell.
-        Self::Diff(schema::Diff::new(change.path, change.new_text).old_text(change.old_text))
+        Self::Diff(
+            schema::Diff::new(change.path, change.new_text)
+                .old_text(change.old_text),
+        )
     }
 }
 
@@ -265,7 +276,10 @@ impl TurnItemAcpExt for TurnItem {
                     .status(status)
                     .title(item.title);
                 Some(schema::SessionUpdate::ToolCallUpdate(
-                    schema::ToolCallUpdate::new(schema::ToolCallId::new(item.id), fields),
+                    schema::ToolCallUpdate::new(
+                        schema::ToolCallId::new(item.id),
+                        fields,
+                    ),
                 ))
             }
             TurnItem::McpToolCall(_) => None,
@@ -294,7 +308,10 @@ impl TurnItemAcpExt for TurnItem {
                     );
                 }
                 Some(schema::SessionUpdate::ToolCallUpdate(
-                    schema::ToolCallUpdate::new(schema::ToolCallId::new(item.id), fields),
+                    schema::ToolCallUpdate::new(
+                        schema::ToolCallId::new(item.id),
+                        fields,
+                    ),
                 ))
             }
             TurnItem::McpToolCall(_) => None,
@@ -315,7 +332,8 @@ mod tests {
 
     /// Verifies that ACP model state uses SessionCreated.current_model explicitly.
     #[test]
-    fn session_created_model_state_uses_current_model_not_first_available_model() {
+    fn session_created_model_state_uses_current_model_not_first_available_model()
+     {
         let created = SessionCreated::builder()
             .session_id(SessionId::from("session"))
             .current_model("chatgpt/gpt-5.4".to_string())
@@ -436,7 +454,8 @@ mod tests {
                 .env(vec![schema::EnvVariable::new("RUST_LOG", "debug")]),
         );
 
-        let config = McpServerConfig::try_from(server).expect("stdio MCP config should convert");
+        let config = McpServerConfig::try_from(server)
+            .expect("stdio MCP config should convert");
 
         assert_eq!(config.name, "filesystem");
         assert!(config.enabled);
@@ -460,12 +479,15 @@ mod tests {
     #[test]
     fn acp_http_mcp_server_maps_to_runtime_config() {
         let server = schema::McpServer::Http(
-            schema::McpServerHttp::new("remote", "https://example.com/mcp").headers(vec![
-                schema::HttpHeader::new("Authorization", "Bearer token"),
-            ]),
+            schema::McpServerHttp::new("remote", "https://example.com/mcp")
+                .headers(vec![schema::HttpHeader::new(
+                    "Authorization",
+                    "Bearer token",
+                )]),
         );
 
-        let config = McpServerConfig::try_from(server).expect("HTTP MCP config should convert");
+        let config = McpServerConfig::try_from(server)
+            .expect("HTTP MCP config should convert");
 
         assert_eq!(config.name, "remote");
         assert!(config.enabled);
@@ -494,7 +516,8 @@ mod tests {
             "https://example.com/sse",
         ));
 
-        let error = McpServerConfig::try_from(server).expect_err("SSE should be unsupported");
+        let error = McpServerConfig::try_from(server)
+            .expect_err("SSE should be unsupported");
 
         assert_eq!(
             error,

@@ -6,7 +6,10 @@ use super::boundary::next_wrap_range;
 use super::chars::{styled_chars, styled_line_from_chars};
 
 /// Wraps one styled line by character display width.
-pub(super) fn wrap_display_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+pub(super) fn wrap_display_line(
+    line: Line<'static>,
+    width: usize,
+) -> Vec<Line<'static>> {
     let chars = styled_chars(line);
     if chars.is_empty() {
         return vec![Line::from("")];

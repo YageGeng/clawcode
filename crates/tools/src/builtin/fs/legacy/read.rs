@@ -55,7 +55,11 @@ impl Tool for ReadFile {
         })
     }
 
-    fn needs_approval(&self, arguments: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        arguments: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         // Require approval only when the path escapes cwd.
         arguments["path"]
             .as_str()
@@ -107,7 +111,9 @@ impl Tool for ReadFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsBackend, FsBackendError, FsReadRequest, FsReadResponse, ToolContext};
+    use crate::{
+        FsBackend, FsBackendError, FsReadRequest, FsReadResponse, ToolContext,
+    };
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -137,7 +143,8 @@ mod tests {
             *self
                 .request
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(request);
             Ok(FsReadResponse {
                 content: "from backend".to_string(),
             })
@@ -167,7 +174,10 @@ mod tests {
 
         let tool = ReadFile::new();
         let result = tool
-            .execute(serde_json::json!({"path": path}), &test_context(dir.path()))
+            .execute(
+                serde_json::json!({"path": path}),
+                &test_context(dir.path()),
+            )
             .await
             .unwrap();
 
@@ -180,7 +190,8 @@ mod tests {
         let backend = Arc::new(RecordingReadBackend {
             request: Mutex::new(None),
         });
-        let tool = ReadFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool =
+            ReadFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
 
         let result = tool
             .execute(

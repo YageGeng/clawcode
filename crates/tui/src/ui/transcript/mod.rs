@@ -36,7 +36,8 @@ fn render_cached_transcript(
 ) {
     cache.retain_entries(state.transcript().iter().map(TranscriptEntry::id));
     let render_mode = view.transcript_render_mode();
-    let total_rows = transcript_row_count(area.width, state, cache, render_mode);
+    let total_rows =
+        transcript_row_count(area.width, state, cache, render_mode);
     if total_rows == 0 {
         viewport::render_transcript_lines(
             frame,
@@ -48,7 +49,14 @@ fn render_cached_transcript(
     }
 
     let (start, end) = viewport::visible_row_range(total_rows, area, view);
-    let visible = visible_transcript_lines(area.width, state, cache, render_mode, start, end);
+    let visible = visible_transcript_lines(
+        area.width,
+        state,
+        cache,
+        render_mode,
+        start,
+        end,
+    );
     viewport::render_transcript_lines_at_top(frame, area, &visible);
 }
 
@@ -85,7 +93,13 @@ fn visible_transcript_lines(
         let lines = cache.entry_lines(width, state.theme(), entry, render_mode);
         append_visible_rows(&mut visible, lines, cursor, start, end);
         cursor = cursor.saturating_add(lines.len());
-        append_visible_rows(&mut visible, &[Line::from("")], cursor, start, end);
+        append_visible_rows(
+            &mut visible,
+            &[Line::from("")],
+            cursor,
+            start,
+            end,
+        );
         cursor = cursor.saturating_add(1);
         if cursor >= end {
             break;

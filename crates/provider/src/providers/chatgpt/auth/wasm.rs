@@ -14,7 +14,9 @@ impl PlatformAuthenticator {
         Self
     }
 
-    pub(super) async fn auth_context_oauth(&self) -> Result<AuthContext, AuthError> {
+    pub(super) async fn auth_context_oauth(
+        &self,
+    ) -> Result<AuthContext, AuthError> {
         Err(AuthError::Message(
             "ChatGPT OAuth is not supported on wasm targets".into(),
         ))

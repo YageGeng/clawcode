@@ -69,9 +69,15 @@ where
             }
 
             let body = response.into_body().await?;
-            let page: ListModelsResponse = serde_json::from_slice(&body).map_err(|error| {
-                ModelListingError::parse_error_with_context("Anthropic", &path, &error, &body)
-            })?;
+            let page: ListModelsResponse = serde_json::from_slice(&body)
+                .map_err(|error| {
+                    ModelListingError::parse_error_with_context(
+                        "Anthropic",
+                        &path,
+                        &error,
+                        &body,
+                    )
+                })?;
 
             all_models.extend(page.data.into_iter().map(Model::from));
 

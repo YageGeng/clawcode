@@ -41,7 +41,10 @@ impl InputQueue {
     }
 
     /// Queue an inter-agent message for the next eligible delivery phase.
-    pub(crate) fn enqueue_mailbox_communication(&mut self, message: InterAgentMessage) {
+    pub(crate) fn enqueue_mailbox_communication(
+        &mut self,
+        message: InterAgentMessage,
+    ) {
         self.mailbox_pending_mails.push_back(message);
         self.mailbox_tx.send_replace(());
     }
@@ -52,7 +55,9 @@ impl InputQueue {
     }
 
     /// Remove the next queued message that requested a follow-up turn.
-    pub(crate) fn take_next_triggering_message(&mut self) -> Option<InterAgentMessage> {
+    pub(crate) fn take_next_triggering_message(
+        &mut self,
+    ) -> Option<InterAgentMessage> {
         let index = self
             .mailbox_pending_mails
             .iter()
@@ -61,7 +66,9 @@ impl InputQueue {
     }
 
     /// Drain all queued inter-agent messages in delivery order.
-    pub(crate) fn drain_mailbox_input_items(&mut self) -> Vec<InterAgentMessage> {
+    pub(crate) fn drain_mailbox_input_items(
+        &mut self,
+    ) -> Vec<InterAgentMessage> {
         self.mailbox_pending_mails.drain(..).collect()
     }
 }

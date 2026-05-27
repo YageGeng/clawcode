@@ -1,6 +1,8 @@
 use crate::http_client::sse::BoxedStream;
 use bytes::Bytes;
-pub use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri, request::Builder};
+pub use http::{
+    HeaderMap, HeaderValue, Method, Request, Response, Uri, request::Builder,
+};
 use http::{HeaderName, StatusCode};
 use reqwest::Body;
 pub mod multipart;
@@ -39,7 +41,9 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) fn instance_error<E: std::error::Error + Send + Sync + 'static>(error: E) -> Error {
+pub(crate) fn instance_error<E: std::error::Error + Send + Sync + 'static>(
+    error: E,
+) -> Error {
     Error::Instance(error.into())
 }
 
@@ -50,10 +54,9 @@ fn instance_error<E: std::error::Error + 'static>(error: E) -> Error {
 
 async fn non_success_status_error(response: reqwest::Response) -> Error {
     let status = response.status();
-    let message = response
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("failed to read error response body: {error}"));
+    let message = response.text().await.unwrap_or_else(|error| {
+        format!("failed to read error response body: {error}")
+    });
     Error::InvalidStatusCodeWithMessage(status, message)
 }
 
@@ -82,14 +85,19 @@ pub async fn text(response: Response<LazyBody<Vec<u8>>>) -> Result<String> {
     Ok(String::from(String::from_utf8_lossy(&text)))
 }
 
-pub fn make_auth_header(key: impl AsRef<str>) -> Result<(HeaderName, HeaderValue)> {
+pub fn make_auth_header(
+    key: impl AsRef<str>,
+) -> Result<(HeaderName, HeaderValue)> {
     Ok((
         http::header::AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", key.as_ref()))?,
     ))
 }
 
-pub fn bearer_auth_header(headers: &mut HeaderMap, key: impl AsRef<str>) -> Result<()> {
+pub fn bearer_auth_header(
+    headers: &mut HeaderMap,
+    key: impl AsRef<str>,
+) -> Result<()> {
     let (k, v) = make_auth_header(key)?;
 
     headers.insert(k, v);
@@ -235,7 +243,8 @@ impl HttpClientExt for reqwest::Client {
                 .body(body.into())
                 .build()
                 .map_err(|error| Error::Instance(error.into()))?;
-            let response: reqwest::Response = client.execute(req).await.map_err(instance_error)?;
+            let response: reqwest::Response =
+                client.execute(req).await.map_err(instance_error)?;
             if !response.status().is_success() {
                 return Err(non_success_status_error(response).await);
             }
@@ -254,12 +263,12 @@ impl HttpClientExt for reqwest::Client {
 
             use futures::StreamExt;
 
-            let mapped_stream: Pin<Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>> =
-                Box::pin(
-                    response
-                        .bytes_stream()
-                        .map(|chunk| chunk.map_err(|e| Error::Instance(Box::new(e)))),
-                );
+            let mapped_stream: Pin<
+                Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>,
+            > =
+                Box::pin(response.bytes_stream().map(|chunk| {
+                    chunk.map_err(|e| Error::Instance(Box::new(e)))
+                }));
 
             res.body(mapped_stream).map_err(Error::Protocol)
         }
@@ -369,7 +378,8 @@ impl HttpClientExt for reqwest_middleware::ClientWithMiddleware {
                 .body(body.into())
                 .build()
                 .map_err(|error| Error::Instance(error.into()))?;
-            let response: reqwest::Response = client.execute(req).await.map_err(instance_error)?;
+            let response: reqwest::Response =
+                client.execute(req).await.map_err(instance_error)?;
             if !response.status().is_success() {
                 return Err(non_success_status_error(response).await);
             }
@@ -388,12 +398,12 @@ impl HttpClientExt for reqwest_middleware::ClientWithMiddleware {
 
             use futures::StreamExt;
 
-            let mapped_stream: Pin<Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>> =
-                Box::pin(
-                    response
-                        .bytes_stream()
-                        .map(|chunk| chunk.map_err(|e| Error::Instance(Box::new(e)))),
-                );
+            let mapped_stream: Pin<
+                Box<dyn WasmCompatSendStream<InnerItem = Result<Bytes>>>,
+            > =
+                Box::pin(response.bytes_stream().map(|chunk| {
+                    chunk.map_err(|e| Error::Instance(Box::new(e)))
+                }));
 
             res.body(mapped_stream).map_err(Error::Protocol)
         }

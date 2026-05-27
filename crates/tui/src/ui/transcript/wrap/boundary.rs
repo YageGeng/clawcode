@@ -3,7 +3,11 @@
 use super::chars::StyledChar;
 
 /// Returns the visible range and next start offset for one wrapped row.
-pub(super) fn next_wrap_range(chars: &[StyledChar], start: usize, width: usize) -> (usize, usize) {
+pub(super) fn next_wrap_range(
+    chars: &[StyledChar],
+    start: usize,
+    width: usize,
+) -> (usize, usize) {
     let mut used_width = 0usize;
     let mut end = start;
     let mut last_space = None;
@@ -35,7 +39,11 @@ pub(super) fn next_wrap_range(chars: &[StyledChar], start: usize, width: usize) 
 }
 
 /// Removes whitespace at the end of a soft-wrapped row.
-fn trim_trailing_whitespace(chars: &[StyledChar], start: usize, mut end: usize) -> usize {
+fn trim_trailing_whitespace(
+    chars: &[StyledChar],
+    start: usize,
+    mut end: usize,
+) -> usize {
     while end > start
         && chars
             .get(end - 1)

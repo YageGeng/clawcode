@@ -154,7 +154,8 @@ impl std::fmt::Display for Document {
             if self.additional_props.is_empty() {
                 self.text.clone()
             } else {
-                let mut sorted_props = self.additional_props.iter().collect::<Vec<_>>();
+                let mut sorted_props =
+                    self.additional_props.iter().collect::<Vec<_>>();
                 sorted_props.sort_by(|a, b| a.0.cmp(b.0));
                 let metadata = sorted_props
                     .iter()
@@ -180,7 +181,11 @@ pub struct ProviderToolDefinition {
     #[serde(rename = "type")]
     pub kind: String,
     /// Additional provider-specific configuration for this hosted tool.
-    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "serde_json::Map::is_empty"
+    )]
     pub config: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -194,7 +199,11 @@ impl ProviderToolDefinition {
     }
 
     /// Adds a provider-specific configuration key/value.
-    pub fn with_config(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn with_config(
+        mut self,
+        key: impl Into<String>,
+        value: serde_json::Value,
+    ) -> Self {
         self.config.insert(key.into(), value);
         self
     }
@@ -216,7 +225,10 @@ pub trait Prompt: WasmCompatSend + WasmCompatSync {
     fn prompt(
         &self,
         prompt: impl Into<Message> + WasmCompatSend,
-    ) -> impl std::future::IntoFuture<Output = Result<String, PromptError>, IntoFuture: WasmCompatSend>;
+    ) -> impl std::future::IntoFuture<
+        Output = Result<String, PromptError>,
+        IntoFuture: WasmCompatSend,
+    >;
 }
 
 /// Trait defining a high-level LLM chat interface (i.e.: prompt and chat history in, response out).
@@ -238,7 +250,8 @@ pub trait Chat: WasmCompatSend + WasmCompatSync {
         &self,
         prompt: impl Into<Message> + WasmCompatSend,
         chat_history: &mut Vec<Message>,
-    ) -> impl std::future::Future<Output = Result<String, PromptError>> + WasmCompatSend;
+    ) -> impl std::future::Future<Output = Result<String, PromptError>>
+    + WasmCompatSend;
 }
 
 /// Trait defining a high-level typed prompt interface for structured output.
@@ -289,7 +302,10 @@ pub trait TypedPrompt: WasmCompatSend + WasmCompatSync {
     /// // Or specified explicitly with turbofish
     /// let forecast = agent.prompt_typed::<WeatherForecast>("What's the weather?").await?;
     /// ```
-    fn prompt_typed<T>(&self, prompt: impl Into<Message> + WasmCompatSend) -> Self::TypedRequest<T>
+    fn prompt_typed<T>(
+        &self,
+        prompt: impl Into<Message> + WasmCompatSend,
+    ) -> Self::TypedRequest<T>
     where
         T: schemars::JsonSchema + DeserializeOwned + WasmCompatSend;
 }
@@ -311,8 +327,9 @@ pub trait Completion<M: CompletionModel> {
         &self,
         prompt: impl Into<Message> + WasmCompatSend,
         chat_history: I,
-    ) -> impl std::future::Future<Output = Result<CompletionRequestBuilder<M>, CompletionError>>
-    + WasmCompatSend
+    ) -> impl std::future::Future<
+        Output = Result<CompletionRequestBuilder<M>, CompletionError>,
+    > + WasmCompatSend
     where
         I: IntoIterator<Item = T> + WasmCompatSend,
         T: Into<Message>;
@@ -366,7 +383,10 @@ where
 /// either from a third party provider (e.g.: OpenAI) or a local model.
 pub trait CompletionModel: Clone + WasmCompatSend + WasmCompatSync {
     /// The raw response type returned by the underlying completion model.
-    type Response: WasmCompatSend + WasmCompatSync + Serialize + DeserializeOwned;
+    type Response: WasmCompatSend
+        + WasmCompatSync
+        + Serialize
+        + DeserializeOwned;
     /// The raw response type returned by the underlying completion model when streaming.
     type StreamingResponse: Clone
         + Unpin
@@ -394,11 +414,17 @@ pub trait CompletionModel: Clone + WasmCompatSend + WasmCompatSync {
         &self,
         request: CompletionRequest,
     ) -> impl std::future::Future<
-        Output = Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError>,
+        Output = Result<
+            StreamingCompletionResponse<Self::StreamingResponse>,
+            CompletionError,
+        >,
     > + WasmCompatSend;
 
     /// Generates a completion request builder for the given `prompt`.
-    fn completion_request(&self, prompt: impl Into<Message>) -> CompletionRequestBuilder<Self> {
+    fn completion_request(
+        &self,
+        prompt: impl Into<Message>,
+    ) -> CompletionRequestBuilder<Self> {
         CompletionRequestBuilder::new(self.clone(), prompt)
     }
 }
@@ -458,15 +484,22 @@ impl CompletionRequest {
 
     /// Adds a provider-hosted tool by storing it in `additional_params.tools`.
     pub fn with_provider_tool(mut self, tool: ProviderToolDefinition) -> Self {
-        self.additional_params =
-            merge_provider_tools_into_additional_params(self.additional_params, vec![tool]);
+        self.additional_params = merge_provider_tools_into_additional_params(
+            self.additional_params,
+            vec![tool],
+        );
         self
     }
 
     /// Adds provider-hosted tools by storing them in `additional_params.tools`.
-    pub fn with_provider_tools(mut self, tools: Vec<ProviderToolDefinition>) -> Self {
-        self.additional_params =
-            merge_provider_tools_into_additional_params(self.additional_params, tools);
+    pub fn with_provider_tools(
+        mut self,
+        tools: Vec<ProviderToolDefinition>,
+    ) -> Self {
+        self.additional_params = merge_provider_tools_into_additional_params(
+            self.additional_params,
+            tools,
+        );
         self
     }
 }
@@ -503,7 +536,8 @@ fn merge_provider_tools_into_additional_params(
         _ => Vec::new(),
     };
     merged_tools.append(&mut provider_tools_json);
-    params_map.insert("tools".to_string(), serde_json::Value::Array(merged_tools));
+    params_map
+        .insert("tools".to_string(), serde_json::Value::Array(merged_tools));
     Some(serde_json::Value::Object(params_map))
 }
 
@@ -623,7 +657,10 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     }
 
     /// Adds a list of messages to the chat history for the completion request.
-    pub fn messages(mut self, messages: impl IntoIterator<Item = Message>) -> Self {
+    pub fn messages(
+        mut self,
+        messages: impl IntoIterator<Item = Message>,
+    ) -> Self {
         self.chat_history.extend(messages);
 
         self
@@ -636,7 +673,10 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     }
 
     /// Adds a list of documents to the completion request.
-    pub fn documents(self, documents: impl IntoIterator<Item = Document>) -> Self {
+    pub fn documents(
+        self,
+        documents: impl IntoIterator<Item = Document>,
+    ) -> Self {
         documents
             .into_iter()
             .fold(self, |builder, doc| builder.document(doc))
@@ -671,10 +711,14 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     /// Adds additional parameters to the completion request.
     /// This can be used to set additional provider-specific parameters that do
     /// not have a first-class field on [`CompletionRequest`].
-    pub fn additional_params(mut self, additional_params: serde_json::Value) -> Self {
+    pub fn additional_params(
+        mut self,
+        additional_params: serde_json::Value,
+    ) -> Self {
         match self.additional_params {
             Some(params) => {
-                self.additional_params = Some(json_utils::merge(params, additional_params));
+                self.additional_params =
+                    Some(json_utils::merge(params, additional_params));
             }
             None => {
                 self.additional_params = Some(additional_params);
@@ -686,7 +730,10 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     /// Sets the additional parameters for the completion request.
     /// This can be used to set additional provider-specific parameters that do
     /// not have a first-class field on [`CompletionRequest`].
-    pub fn additional_params_opt(mut self, additional_params: Option<serde_json::Value>) -> Self {
+    pub fn additional_params_opt(
+        mut self,
+        additional_params: Option<serde_json::Value>,
+    ) -> Self {
         self.additional_params = additional_params;
         self
     }
@@ -737,7 +784,10 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     /// NOTE: For direct type conversion, prefer [`TypedPrompt::prompt_typed`].
     /// This builder-level schema is mainly an escape hatch for wrappers that
     /// still want provider-native structured output enforcement.
-    pub fn output_schema_opt(mut self, schema: Option<schemars::Schema>) -> Self {
+    pub fn output_schema_opt(
+        mut self,
+        schema: Option<schemars::Schema>,
+    ) -> Self {
         self.output_schema = schema;
         self
     }
@@ -752,8 +802,8 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
         }
         chat_history.push(prompt.clone());
 
-        let chat_history =
-            OneOrMany::from_iter_optional(chat_history).unwrap_or_else(|| OneOrMany::one(prompt));
+        let chat_history = OneOrMany::from_iter_optional(chat_history)
+            .unwrap_or_else(|| OneOrMany::one(prompt));
         let additional_params = merge_provider_tools_into_additional_params(
             self.additional_params,
             self.provider_tools,
@@ -772,7 +822,9 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     }
 
     /// Sends the completion request to the completion model provider and returns the completion response.
-    pub async fn send(self) -> Result<CompletionResponse<M::Response>, CompletionError> {
+    pub async fn send(
+        self,
+    ) -> Result<CompletionResponse<M::Response>, CompletionError> {
         let model = self.model.clone();
         model.completion(self.build()).await
     }
@@ -780,7 +832,10 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     /// Stream the completion request
     pub async fn stream<'a>(
         self,
-    ) -> Result<StreamingCompletionResponse<M::StreamingResponse>, CompletionError>
+    ) -> Result<
+        StreamingCompletionResponse<M::StreamingResponse>,
+        CompletionError,
+    >
     where
         <M as CompletionModel>::StreamingResponse: 'a,
         Self: 'a,

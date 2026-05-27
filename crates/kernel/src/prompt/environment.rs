@@ -118,8 +118,10 @@ mod tests {
 
     #[test]
     fn capture_does_not_panic() {
-        let info =
-            EnvironmentInfo::capture("test-model".to_string(), std::env::current_dir().unwrap());
+        let info = EnvironmentInfo::capture(
+            "test-model".to_string(),
+            std::env::current_dir().unwrap(),
+        );
         assert!(!info.model_id.is_empty());
         assert!(!info.platform.is_empty());
         assert!(!info.date.is_empty());

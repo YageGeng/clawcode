@@ -44,10 +44,12 @@ pub(crate) fn render_catalog(skills: &[&SkillMetadata]) -> Option<String> {
     // Intro and usage instructions, matching OpenCode's system prompt style.
     lines.push(String::new());
     lines.push(
-        "Skills provide specialized instructions and workflows for specific tasks.".to_string(),
+        "Skills provide specialized instructions and workflows for specific tasks."
+            .to_string(),
     );
     lines.push(
-        "Use the skill tool to load a skill when a task matches its description.".to_string(),
+        "Use the skill tool to load a skill when a task matches its description."
+            .to_string(),
     );
     lines.push(String::new());
     lines.push("### How to use skills".to_string());

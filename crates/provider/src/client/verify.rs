@@ -19,5 +19,7 @@ pub enum VerifyError {
 /// Clone is required for conversions between client types.
 pub trait VerifyClient {
     /// Verify the configuration.
-    fn verify(&self) -> impl Future<Output = Result<(), VerifyError>> + WasmCompatSend;
+    fn verify(
+        &self,
+    ) -> impl Future<Output = Result<(), VerifyError>> + WasmCompatSend;
 }

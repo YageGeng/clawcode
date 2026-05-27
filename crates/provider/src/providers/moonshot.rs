@@ -23,13 +23,14 @@
 //!     .expect("Failed to build Moonshot client");
 //! ```
 use crate::client::{
-    self, BearerAuth, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
-    ProviderClient,
+    self, BearerAuth, Capabilities, Capable, DebugExt, Nothing, Provider,
+    ProviderBuilder, ProviderClient,
 };
 use crate::http_client::HttpClientExt;
 use crate::message::TryIntoMany;
 use crate::providers::anthropic::client::{
-    AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey, finish_anthropic_builder,
+    AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey,
+    finish_anthropic_builder,
 };
 use crate::streaming::StreamingCompletionResponse;
 use crate::{
@@ -131,15 +132,20 @@ impl<H> Capabilities<H> for MoonshotExt {
 }
 
 impl<H> Capabilities<H> for MoonshotAnthropicExt {
-    type Completion =
-        Capable<super::anthropic::completion::GenericCompletionModel<MoonshotAnthropicExt, H>>;
+    type Completion = Capable<
+        super::anthropic::completion::GenericCompletionModel<
+            MoonshotAnthropicExt,
+            H,
+        >,
+    >;
     type ModelListing = Nothing;
 }
 
 pub type Client<H = reqwest::Client> = client::Client<MoonshotExt, H>;
 pub type ClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MoonshotBuilder, MoonshotApiKey, H>;
-pub type AnthropicClient<H = reqwest::Client> = client::Client<MoonshotAnthropicExt, H>;
+pub type AnthropicClient<H = reqwest::Client> =
+    client::Client<MoonshotAnthropicExt, H>;
 pub type AnthropicClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MoonshotAnthropicBuilder, AnthropicKey, H>;
 
@@ -151,7 +157,9 @@ impl ProviderClient for Client {
     fn from_env() -> Result<Self, Self::Error> {
         let api_key = crate::client::required_env_var("MOONSHOT_API_KEY")?;
         let mut builder = Self::builder().api_key(&api_key);
-        if let Some(base_url) = crate::client::optional_env_var("MOONSHOT_API_BASE")? {
+        if let Some(base_url) =
+            crate::client::optional_env_var("MOONSHOT_API_BASE")?
+        {
             builder = builder.base_url(base_url);
         }
         builder.build().map_err(Into::into)
@@ -169,9 +177,10 @@ impl ProviderClient for AnthropicClient {
     fn from_env() -> Result<Self, Self::Error> {
         let api_key = crate::client::required_env_var("MOONSHOT_API_KEY")?;
         let mut builder = Self::builder().api_key(api_key);
-        if let Some(base_url) =
-            anthropic_base_override("MOONSHOT_ANTHROPIC_API_BASE", "MOONSHOT_API_BASE")?
-        {
+        if let Some(base_url) = anthropic_base_override(
+            "MOONSHOT_ANTHROPIC_API_BASE",
+            "MOONSHOT_API_BASE",
+        )? {
             builder = builder.base_url(base_url);
         }
         builder.build().map_err(Into::into)
@@ -221,7 +230,9 @@ impl<H> AnthropicClientBuilder<H> {
     }
 }
 
-impl super::anthropic::completion::AnthropicCompatibleProvider for MoonshotAnthropicExt {
+impl super::anthropic::completion::AnthropicCompatibleProvider
+    for MoonshotAnthropicExt
+{
     const PROVIDER_NAME: &'static str = "moonshot";
 
     fn default_max_tokens(_model: &str) -> Option<u64> {
@@ -313,9 +324,13 @@ pub(super) struct MoonshotCompletionRequest {
 impl TryFrom<(&str, CompletionRequest)> for MoonshotCompletionRequest {
     type Error = CompletionError;
 
-    fn try_from((model, req): (&str, CompletionRequest)) -> Result<Self, Self::Error> {
+    fn try_from(
+        (model, req): (&str, CompletionRequest),
+    ) -> Result<Self, Self::Error> {
         if req.output_schema.is_some() {
-            tracing::warn!("Structured outputs currently not supported for Moonshot");
+            tracing::warn!(
+                "Structured outputs currently not supported for Moonshot"
+            );
         }
         let model = req.model.clone().unwrap_or_else(|| model.to_string());
         // Build up the order of messages (context, chat_history, prompt)
@@ -337,10 +352,14 @@ impl TryFrom<(&str, CompletionRequest)> for MoonshotCompletionRequest {
             match choice {
                 message::ToolChoice::Required => {
                     tool_choice_required = true;
-                    tool_choice = Some(crate::providers::openai::completion::ToolChoice::Auto);
+                    tool_choice = Some(
+                        crate::providers::openai::completion::ToolChoice::Auto,
+                    );
                 }
                 other => {
-                    tool_choice = Some(crate::providers::openai::ToolChoice::try_from(other)?);
+                    tool_choice = Some(
+                        crate::providers::openai::ToolChoice::try_from(other)?,
+                    );
                 }
             }
         }
@@ -372,13 +391,16 @@ impl TryFrom<(&str, CompletionRequest)> for MoonshotCompletionRequest {
     }
 }
 
-fn moonshot_history_values(history: Vec<message::Message>) -> Result<Vec<Value>, CompletionError> {
+fn moonshot_history_values(
+    history: Vec<message::Message>,
+) -> Result<Vec<Value>, CompletionError> {
     let mut result = Vec::new();
 
     for message in history {
         match message {
             message::Message::Assistant { id: _, content } => {
-                if let Some(value) = moonshot_assistant_message_value(content)? {
+                if let Some(value) = moonshot_assistant_message_value(content)?
+                {
                     result.push(value);
                 }
             }
@@ -406,7 +428,8 @@ fn moonshot_assistant_message_value(
     for item in content {
         match item {
             message::AssistantContent::Text(text) => {
-                text_content.push(openai::AssistantContent::Text { text: text.text });
+                text_content
+                    .push(openai::AssistantContent::Text { text: text.text });
             }
             message::AssistantContent::ToolCall(tool_call) => {
                 tool_calls.push(openai::ToolCall::from(tool_call));
@@ -419,13 +442,17 @@ fn moonshot_assistant_message_value(
             }
             message::AssistantContent::Image(_) => {
                 return Err(CompletionError::ProviderError(
-                    "Moonshot does not support assistant image content in chat history".into(),
+                    "Moonshot does not support assistant image content in chat history"
+                        .into(),
                 ));
             }
         }
     }
 
-    if text_content.is_empty() && tool_calls.is_empty() && reasoning_parts.is_empty() {
+    if text_content.is_empty()
+        && tool_calls.is_empty()
+        && reasoning_parts.is_empty()
+    {
         return Ok(None);
     }
 
@@ -441,7 +468,10 @@ fn moonshot_assistant_message_value(
     ]);
 
     if !tool_calls.is_empty() {
-        object.insert("tool_calls".to_string(), serde_json::to_value(tool_calls)?);
+        object.insert(
+            "tool_calls".to_string(),
+            serde_json::to_value(tool_calls)?,
+        );
     }
 
     if !reasoning_parts.is_empty() {
@@ -474,7 +504,8 @@ where
     T: HttpClientExt + Clone + Default + std::fmt::Debug + Send + 'static,
 {
     type Response = openai::CompletionResponse;
-    type StreamingResponse = openai::completion::streaming::StreamingCompletionResponse;
+    type StreamingResponse =
+        openai::completion::streaming::StreamingCompletionResponse;
 
     type Client = Client<T>;
 
@@ -485,7 +516,10 @@ where
     async fn completion(
         &self,
         completion_request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<openai::CompletionResponse>, CompletionError> {
+    ) -> Result<
+        completion::CompletionResponse<openai::CompletionResponse>,
+        CompletionError,
+    > {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: "clawcode::completions",
@@ -506,8 +540,10 @@ where
 
         span.record("gen_ai.system_instructions", &completion_request.preamble);
 
-        let request =
-            MoonshotCompletionRequest::try_from((self.model.as_ref(), completion_request))?;
+        let request = MoonshotCompletionRequest::try_from((
+            self.model.as_ref(),
+            completion_request,
+        ))?;
 
         if tracing::enabled!(tracing::Level::TRACE) {
             tracing::trace!(target: "clawcode::completions",
@@ -527,18 +563,26 @@ where
             let response = self.client.send::<_, bytes::Bytes>(req).await?;
 
             let status = response.status();
-            let response_body = response.into_body().into_future().await?.to_vec();
+            let response_body =
+                response.into_body().into_future().await?.to_vec();
 
             if status.is_success() {
-                match serde_json::from_slice::<ApiResponse<openai::CompletionResponse>>(
-                    &response_body,
-                )? {
+                match serde_json::from_slice::<
+                    ApiResponse<openai::CompletionResponse>,
+                >(&response_body)?
+                {
                     ApiResponse::Ok(response) => {
                         let span = tracing::Span::current();
                         span.record("gen_ai.response.id", response.id.clone());
-                        span.record("gen_ai.response.model", response.model.clone());
+                        span.record(
+                            "gen_ai.response.model",
+                            response.model.clone(),
+                        );
                         if let Some(ref usage) = response.usage {
-                            span.record("gen_ai.usage.input_tokens", usage.prompt_tokens);
+                            span.record(
+                                "gen_ai.usage.input_tokens",
+                                usage.prompt_tokens,
+                            );
                             span.record(
                                 "gen_ai.usage.output_tokens",
                                 usage.total_tokens - usage.prompt_tokens,
@@ -552,7 +596,9 @@ where
                         }
                         response.try_into()
                     }
-                    ApiResponse::Err(err) => Err(CompletionError::ProviderError(err.error.message)),
+                    ApiResponse::Err(err) => {
+                        Err(CompletionError::ProviderError(err.error.message))
+                    }
                 }
             } else {
                 Err(CompletionError::ProviderError(
@@ -567,7 +613,10 @@ where
     async fn stream(
         &self,
         request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+    ) -> Result<
+        StreamingCompletionResponse<Self::StreamingResponse>,
+        CompletionError,
+    > {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: "clawcode::completions",
@@ -587,7 +636,10 @@ where
         };
 
         span.record("gen_ai.system_instructions", &request.preamble);
-        let mut request = MoonshotCompletionRequest::try_from((self.model.as_ref(), request))?;
+        let mut request = MoonshotCompletionRequest::try_from((
+            self.model.as_ref(),
+            request,
+        ))?;
 
         let params = json_utils::merge(
             request.additional_params.unwrap_or(serde_json::json!({})),
@@ -646,27 +698,32 @@ impl TryFrom<message::ToolChoice> for ToolChoice {
 #[cfg(test)]
 mod tests {
     use super::{
-        MoonshotCompletionRequest, normalize_anthropic_base_url, resolve_anthropic_base_override,
+        MoonshotCompletionRequest, normalize_anthropic_base_url,
+        resolve_anthropic_base_override,
     };
     use crate::completion::CompletionRequest;
     use crate::message::{
-        AssistantContent, Message, Reasoning, ToolCall, ToolChoice, ToolFunction,
+        AssistantContent, Message, Reasoning, ToolCall, ToolChoice,
+        ToolFunction,
     };
 
     #[test]
     fn test_client_initialization() {
-        let _client =
-            crate::providers::moonshot::Client::new("dummy-key").expect("Client::new() failed");
-        let _client_from_builder = crate::providers::moonshot::Client::builder()
-            .api_key("dummy-key")
-            .build()
-            .expect("Client::builder() failed");
-        let _anthropic_client = crate::providers::moonshot::AnthropicClient::new("dummy-key")
-            .expect("AnthropicClient::new() failed");
-        let _anthropic_client_from_builder = crate::providers::moonshot::AnthropicClient::builder()
-            .api_key("dummy-key")
-            .build()
-            .expect("AnthropicClient::builder() failed");
+        let _client = crate::providers::moonshot::Client::new("dummy-key")
+            .expect("Client::new() failed");
+        let _client_from_builder =
+            crate::providers::moonshot::Client::builder()
+                .api_key("dummy-key")
+                .build()
+                .expect("Client::builder() failed");
+        let _anthropic_client =
+            crate::providers::moonshot::AnthropicClient::new("dummy-key")
+                .expect("AnthropicClient::new() failed");
+        let _anthropic_client_from_builder =
+            crate::providers::moonshot::AnthropicClient::builder()
+                .api_key("dummy-key")
+                .build()
+                .expect("AnthropicClient::builder() failed");
     }
 
     #[test]
@@ -695,7 +752,8 @@ mod tests {
             .build();
 
         let converted =
-            MoonshotCompletionRequest::try_from(("kimi-k2-thinking", request)).expect("convert");
+            MoonshotCompletionRequest::try_from(("kimi-k2-thinking", request))
+                .expect("convert");
         let assistant = converted
             .messages
             .first()
@@ -719,7 +777,8 @@ mod tests {
             .build();
 
         let converted =
-            MoonshotCompletionRequest::try_from(("kimi-k2.5", request)).expect("convert");
+            MoonshotCompletionRequest::try_from(("kimi-k2.5", request))
+                .expect("convert");
         assert!(matches!(
             converted.tool_choice,
             Some(crate::providers::openai::completion::ToolChoice::Auto)
@@ -737,15 +796,18 @@ mod tests {
     #[test]
     fn normalize_openai_style_base_to_anthropic_base() {
         assert_eq!(
-            normalize_anthropic_base_url("https://api.moonshot.ai/v1").as_deref(),
+            normalize_anthropic_base_url("https://api.moonshot.ai/v1")
+                .as_deref(),
             Some("https://api.moonshot.ai/anthropic")
         );
         assert_eq!(
-            normalize_anthropic_base_url("https://api.moonshot.cn/v1").as_deref(),
+            normalize_anthropic_base_url("https://api.moonshot.cn/v1")
+                .as_deref(),
             Some("https://api.moonshot.cn/anthropic")
         );
         assert_eq!(
-            normalize_anthropic_base_url("https://proxy.example.com/v1").as_deref(),
+            normalize_anthropic_base_url("https://proxy.example.com/v1")
+                .as_deref(),
             Some("https://proxy.example.com/anthropic")
         );
     }
@@ -753,7 +815,8 @@ mod tests {
     #[test]
     fn normalize_preserves_existing_anthropic_base() {
         assert_eq!(
-            normalize_anthropic_base_url("https://proxy.example.com/anthropic").as_deref(),
+            normalize_anthropic_base_url("https://proxy.example.com/anthropic")
+                .as_deref(),
             Some("https://proxy.example.com/anthropic")
         );
     }

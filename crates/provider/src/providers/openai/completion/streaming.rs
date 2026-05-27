@@ -7,10 +7,12 @@ use crate::completion::{CompletionError, CompletionRequest, GetTokenUsage};
 use crate::http_client::HttpClientExt;
 use crate::json_utils::{self, merge};
 use crate::providers::internal::openai_chat_completions_compatible::{
-    self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason, CompatibleStreamProfile,
-    CompatibleToolCallChunk,
+    self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason,
+    CompatibleStreamProfile, CompatibleToolCallChunk,
 };
-use crate::providers::openai::completion::{GenericCompletionModel, OpenAIRequestParams, Usage};
+use crate::providers::openai::completion::{
+    GenericCompletionModel, OpenAIRequestParams, Usage,
+};
 use crate::streaming;
 
 // ================================================================
@@ -94,14 +96,17 @@ where
     pub(crate) async fn stream(
         &self,
         completion_request: CompletionRequest,
-    ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
-    {
-        let request = super::CompletionRequest::try_from(OpenAIRequestParams {
-            model: self.model.clone(),
-            request: completion_request,
-            strict_tools: self.strict_tools,
-            tool_result_array_content: self.tool_result_array_content,
-        })?;
+    ) -> Result<
+        streaming::StreamingCompletionResponse<StreamingCompletionResponse>,
+        CompletionError,
+    > {
+        let request =
+            super::CompletionRequest::try_from(OpenAIRequestParams {
+                model: self.model.clone(),
+                request: completion_request,
+                strict_tools: self.strict_tools,
+                tool_result_array_content: self.tool_result_array_content,
+            })?;
         let request_messages = serde_json::to_string(&request.messages)?;
         let mut request_as_json = serde_json::to_value(request)?;
 
@@ -147,7 +152,11 @@ where
 
         let client = self.client.clone();
 
-        tracing::Instrument::instrument(send_compatible_streaming_request(client, req), span).await
+        tracing::Instrument::instrument(
+            send_compatible_streaming_request(client, req),
+            span,
+        )
+        .await
     }
 }
 
@@ -162,11 +171,19 @@ impl CompatibleStreamProfile for OpenAICompatibleProfile {
     fn normalize_chunk(
         &self,
         data: &str,
-    ) -> Result<Option<CompatibleChunk<Self::Usage, Self::Detail>>, CompletionError> {
-        let data = match serde_json::from_str::<StreamingCompletionChunk>(data) {
+    ) -> Result<
+        Option<CompatibleChunk<Self::Usage, Self::Detail>>,
+        CompletionError,
+    > {
+        let data = match serde_json::from_str::<StreamingCompletionChunk>(data)
+        {
             Ok(data) => data,
             Err(error) => {
-                tracing::error!(?error, message = data, "Failed to parse SSE message");
+                tracing::error!(
+                    ?error,
+                    message = data,
+                    "Failed to parse SSE message"
+                );
                 return Ok(None);
             }
         };
@@ -178,16 +195,19 @@ impl CompatibleStreamProfile for OpenAICompatibleProfile {
                 data.usage,
                 &data.choices,
                 |choice| CompatibleChoiceData {
-                    finish_reason: if choice.finish_reason == Some(FinishReason::ToolCalls) {
+                    finish_reason: if choice.finish_reason
+                        == Some(FinishReason::ToolCalls)
+                    {
                         CompatibleFinishReason::ToolCalls
                     } else {
                         CompatibleFinishReason::Other
                     },
                     text: choice.delta.content.clone(),
                     reasoning: choice.delta.reasoning_content.clone(),
-                    tool_calls: openai_chat_completions_compatible::tool_call_chunks(
-                        &choice.delta.tool_calls,
-                    ),
+                    tool_calls:
+                        openai_chat_completions_compatible::tool_call_chunks(
+                            &choice.delta.tool_calls,
+                        ),
                     details: Vec::new(),
                 },
             ),
@@ -206,7 +226,10 @@ impl CompatibleStreamProfile for OpenAICompatibleProfile {
 pub async fn send_compatible_streaming_request<T>(
     http_client: T,
     req: Request<Vec<u8>>,
-) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
+) -> Result<
+    streaming::StreamingCompletionResponse<StreamingCompletionResponse>,
+    CompletionError,
+>
 where
     T: HttpClientExt + Clone + 'static,
 {

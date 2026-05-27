@@ -5,7 +5,15 @@ use serde::{Deserialize, Serialize};
 use crate::{AgentPath, AgentStatus, SessionId};
 
 /// Metadata required by frontends to show and switch agent sessions.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
 pub struct AgentUiMetadata {
     /// ACP/kernel session id for the represented agent.
     pub session_id: SessionId,
@@ -36,7 +44,15 @@ pub enum AgentUiEventKind {
 }
 
 /// Versioned UI metadata patch sent to clients.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
 pub struct AgentUiMetadataPatch {
     /// Extension payload version.
     pub version: u32,
@@ -64,7 +80,8 @@ mod tests {
             .is_root(false)
             .build();
 
-        let value = serde_json::to_value(entry).expect("metadata should serialize");
+        let value =
+            serde_json::to_value(entry).expect("metadata should serialize");
 
         assert_eq!(value["session_id"], "child-session");
         assert_eq!(value["parent_session_id"], "root-session");

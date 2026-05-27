@@ -36,7 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print!("{}", text.text);
                 std::io::stdout().flush()?;
             }
-            provider::streaming::StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+            provider::streaming::StreamedAssistantContent::ReasoningDelta {
+                reasoning,
+                ..
+            } => {
                 print!("{}", reasoning);
                 std::io::stdout().flush()?;
             }

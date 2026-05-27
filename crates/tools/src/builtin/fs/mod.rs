@@ -20,11 +20,18 @@ pub enum FsToolSet {
 impl ToolRegistry {
     /// Register built-in file-system tools.
     pub fn register_fs_tools(&self, is_anthropic: bool) {
-        self.register_fs_tools_with_backend(is_anthropic, Arc::new(LocalFsBackend::new()));
+        self.register_fs_tools_with_backend(
+            is_anthropic,
+            Arc::new(LocalFsBackend::new()),
+        );
     }
 
     /// Register built-in file-system tools from the selected tool set.
-    pub fn register_fs_tools_with_set(&self, is_anthropic: bool, tool_set: FsToolSet) {
+    pub fn register_fs_tools_with_set(
+        &self,
+        is_anthropic: bool,
+        tool_set: FsToolSet,
+    ) {
         self.register_fs_tools_with_backend_and_set(
             is_anthropic,
             Arc::new(LocalFsBackend::new()),
@@ -33,8 +40,16 @@ impl ToolRegistry {
     }
 
     /// Register built-in file-system tools using the provided backend.
-    pub fn register_fs_tools_with_backend(&self, is_anthropic: bool, backend: Arc<dyn FsBackend>) {
-        self.register_fs_tools_with_backend_and_set(is_anthropic, backend, FsToolSet::Legacy);
+    pub fn register_fs_tools_with_backend(
+        &self,
+        is_anthropic: bool,
+        backend: Arc<dyn FsBackend>,
+    ) {
+        self.register_fs_tools_with_backend_and_set(
+            is_anthropic,
+            backend,
+            FsToolSet::Legacy,
+        );
     }
 
     /// Register built-in file-system tools using the selected tool set and backend.
@@ -45,16 +60,22 @@ impl ToolRegistry {
         tool_set: FsToolSet,
     ) {
         match tool_set {
-            FsToolSet::Legacy => self.register_legacy_fs_tools(is_anthropic, backend),
+            FsToolSet::Legacy => {
+                self.register_legacy_fs_tools(is_anthropic, backend)
+            }
             FsToolSet::Hashline => self.register_hashline_fs_tools(backend),
         }
     }
 
     /// Register the historical file-system tool set.
-    fn register_legacy_fs_tools(&self, is_anthropic: bool, backend: Arc<dyn FsBackend>) {
-        self.register(Arc::new(legacy::read::ReadFile::with_backend(Arc::clone(
-            &backend,
-        ))));
+    fn register_legacy_fs_tools(
+        &self,
+        is_anthropic: bool,
+        backend: Arc<dyn FsBackend>,
+    ) {
+        self.register(Arc::new(legacy::read::ReadFile::with_backend(
+            Arc::clone(&backend),
+        )));
         self.register(Arc::new(legacy::write::WriteFile::with_backend(
             Arc::clone(&backend),
         )));
@@ -68,15 +89,21 @@ impl ToolRegistry {
 
     /// Register the hashline file-system tool set.
     fn register_hashline_fs_tools(&self, backend: Arc<dyn FsBackend>) {
-        self.register(Arc::new(hashline::read::HashlineReadFile::with_backend(
-            Arc::clone(&backend),
-        )));
-        self.register(Arc::new(hashline::write::HashlineWriteFile::with_backend(
-            Arc::clone(&backend),
-        )));
-        self.register(Arc::new(hashline::edit::HashlineEditFile::with_backend(
-            Arc::clone(&backend),
-        )));
+        self.register(Arc::new(
+            hashline::read::HashlineReadFile::with_backend(Arc::clone(
+                &backend,
+            )),
+        ));
+        self.register(Arc::new(
+            hashline::write::HashlineWriteFile::with_backend(Arc::clone(
+                &backend,
+            )),
+        ));
+        self.register(Arc::new(
+            hashline::edit::HashlineEditFile::with_backend(Arc::clone(
+                &backend,
+            )),
+        ));
         if hashline::grep::HashlineGrep::is_available() {
             self.register(Arc::new(hashline::grep::HashlineGrep::new()));
         }
@@ -86,7 +113,9 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsBackend, FsBackendError, FsReadRequest, FsReadResponse, ToolContext};
+    use crate::{
+        FsBackend, FsBackendError, FsReadRequest, FsReadResponse, ToolContext,
+    };
     use async_trait::async_trait;
     use std::sync::Arc;
 

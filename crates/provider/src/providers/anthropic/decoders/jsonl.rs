@@ -48,7 +48,10 @@ where
     }
 
     /// Process a chunk of data, returning a Result with any JSON parsing errors
-    fn process_chunk(&mut self, chunk: &[u8]) -> Result<Vec<T>, JSONLDecoderError> {
+    fn process_chunk(
+        &mut self,
+        chunk: &[u8],
+    ) -> Result<Vec<T>, JSONLDecoderError> {
         let lines = self.line_decoder.decode(chunk);
         let mut results = Vec::with_capacity(lines.len());
 
@@ -91,7 +94,10 @@ where
 {
     type Item = Result<T, JSONLDecoderError>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         // Get a mutable reference to self
         let this = self.get_mut();
 

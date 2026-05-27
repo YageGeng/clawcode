@@ -60,7 +60,11 @@ impl Tool for HashlineReadFile {
         })
     }
 
-    fn needs_approval(&self, arguments: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        arguments: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         // Require approval only when the path escapes cwd.
         arguments["path"]
             .as_str()
@@ -146,10 +150,16 @@ fn format_read_response(
 
     let mut header = format!("File: {path} ({total_lines} lines)");
     if start_line > 1 || end_index < total_lines {
-        header.push_str(&format!(" [showing lines {}-{}]", start_line, end_index));
+        header.push_str(&format!(
+            " [showing lines {}-{}]",
+            start_line, end_index
+        ));
     }
     if end_index < total_lines {
-        header.push_str(&format!(" ({} more lines below)", total_lines - end_index));
+        header.push_str(&format!(
+            " ({} more lines below)",
+            total_lines - end_index
+        ));
     }
 
     format!("{header}\n\n```\n{formatted}\n```")
@@ -158,7 +168,10 @@ fn format_read_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsBackendError, FsReadResponse, FsWriteRequest, FsWriteResponse, ToolContext};
+    use crate::{
+        FsBackendError, FsReadResponse, FsWriteRequest, FsWriteResponse,
+        ToolContext,
+    };
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -187,7 +200,8 @@ mod tests {
             *self
                 .request
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(request);
             Ok(FsReadResponse {
                 content: self.content.clone(),
             })
@@ -253,7 +267,9 @@ mod tests {
             content: "registered backend".to_string(),
             request: Mutex::new(None),
         });
-        let tool = HashlineReadFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool = HashlineReadFile::with_backend(
+            Arc::clone(&backend) as Arc<dyn FsBackend>
+        );
 
         let _ = tool
             .execute(

@@ -1,7 +1,8 @@
 //! ACP client-side filesystem request handlers for the local TUI.
 
 use agent_client_protocol::schema::{
-    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest, WriteTextFileResponse,
+    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 
 /// Handles an ACP client-side request to read a UTF-8 text file.
@@ -14,22 +15,25 @@ pub(crate) async fn handle_read_text_file(
     );
 
     if !request.path.is_absolute() {
-        return Err(agent_client_protocol::Error::invalid_params()
-            .data(format!("path must be absolute: {}", request.path.display())));
+        return Err(agent_client_protocol::Error::invalid_params().data(
+            format!("path must be absolute: {}", request.path.display()),
+        ));
     }
 
     if request.line == Some(0) {
-        return Err(agent_client_protocol::Error::invalid_params().data("line must be 1-based"));
+        return Err(agent_client_protocol::Error::invalid_params()
+            .data("line must be 1-based"));
     }
 
-    let content = tokio::fs::read_to_string(&request.path)
-        .await
-        .map_err(|error| {
-            agent_client_protocol::Error::internal_error().data(format!(
-                "failed to read {}: {error}",
-                request.path.display()
-            ))
-        })?;
+    let content =
+        tokio::fs::read_to_string(&request.path)
+            .await
+            .map_err(|error| {
+                agent_client_protocol::Error::internal_error().data(format!(
+                    "failed to read {}: {error}",
+                    request.path.display()
+                ))
+            })?;
 
     let start_line = request.line.unwrap_or(1) as usize;
     let limit = request.limit.map(|limit| limit as usize);
@@ -55,23 +59,26 @@ pub(crate) async fn handle_write_text_file(
     );
 
     if !request.path.is_absolute() {
-        return Err(agent_client_protocol::Error::invalid_params()
-            .data(format!("path must be absolute: {}", request.path.display())));
+        return Err(agent_client_protocol::Error::invalid_params().data(
+            format!("path must be absolute: {}", request.path.display()),
+        ));
     }
 
     let parent = request.path.parent().ok_or_else(|| {
         agent_client_protocol::Error::invalid_params()
             .data(format!("path has no parent: {}", request.path.display()))
     })?;
-    let parent_exists = tokio::fs::try_exists(parent).await.map_err(|error| {
-        agent_client_protocol::Error::internal_error()
-            .data(format!("failed to inspect {}: {error}", parent.display()))
-    })?;
+    let parent_exists =
+        tokio::fs::try_exists(parent).await.map_err(|error| {
+            agent_client_protocol::Error::internal_error().data(format!(
+                "failed to inspect {}: {error}",
+                parent.display()
+            ))
+        })?;
     if !parent_exists {
-        return Err(agent_client_protocol::Error::internal_error().data(format!(
-            "parent directory does not exist: {}",
-            parent.display()
-        )));
+        return Err(agent_client_protocol::Error::internal_error().data(
+            format!("parent directory does not exist: {}", parent.display()),
+        ));
     }
 
     tokio::fs::write(&request.path, request.content)

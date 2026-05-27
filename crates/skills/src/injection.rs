@@ -20,7 +20,10 @@ impl MentionMatcher {
     /// (case-insensitive).  Common env-var names and tokens longer than 64
     /// characters are excluded.  Duplicate and unmatched mentions are
     /// silently skipped.
-    pub fn resolve<'a>(registry: &'a SkillRegistry, text: &str) -> Vec<&'a SkillMetadata> {
+    pub fn resolve<'a>(
+        registry: &'a SkillRegistry,
+        text: &str,
+    ) -> Vec<&'a SkillMetadata> {
         let mentions = Self::extract(text);
         if mentions.is_empty() {
             return Vec::new();
@@ -120,7 +123,8 @@ mod tests {
 
     #[test]
     fn allows_hyphens_and_underscores() {
-        let mentions = MentionMatcher::extract("use $skill-creator and $my_skill");
+        let mentions =
+            MentionMatcher::extract("use $skill-creator and $my_skill");
         assert_eq!(mentions, vec!["skill-creator", "my_skill"]);
     }
 

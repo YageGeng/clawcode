@@ -112,7 +112,9 @@ pub(crate) fn fold_agent_edges(
     if let Some(status) = status_filter {
         edges.retain(|edge| edge.status == status);
     }
-    edges.sort_by(|left, right| left.child_session_id.0.cmp(&right.child_session_id.0));
+    edges.sort_by(|left, right| {
+        left.child_session_id.0.cmp(&right.child_session_id.0)
+    });
     edges
 }
 
@@ -128,11 +130,27 @@ mod tests {
         let child = SessionId::from("child");
         let path = AgentPath("/root/child".to_string());
         let records = vec![
-            edge_record(&parent, &child, &path, "reviewer", AgentEdgeStatus::Open),
-            edge_record(&parent, &child, &path, "reviewer", AgentEdgeStatus::Closed),
+            edge_record(
+                &parent,
+                &child,
+                &path,
+                "reviewer",
+                AgentEdgeStatus::Open,
+            ),
+            edge_record(
+                &parent,
+                &child,
+                &path,
+                "reviewer",
+                AgentEdgeStatus::Closed,
+            ),
         ];
 
-        let children = fold_agent_edges(parent.clone(), records, Some(AgentEdgeStatus::Open));
+        let children = fold_agent_edges(
+            parent.clone(),
+            records,
+            Some(AgentEdgeStatus::Open),
+        );
 
         assert!(children.is_empty());
     }
@@ -144,7 +162,13 @@ mod tests {
         let first_path = AgentPath("/root/old".to_string());
         let latest_path = AgentPath("/root/new".to_string());
         let records = vec![
-            edge_record(&parent, &child, &first_path, "", AgentEdgeStatus::Open),
+            edge_record(
+                &parent,
+                &child,
+                &first_path,
+                "",
+                AgentEdgeStatus::Open,
+            ),
             edge_record(
                 &parent,
                 &child,

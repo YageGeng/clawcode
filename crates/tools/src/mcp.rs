@@ -16,7 +16,10 @@ pub struct McpToolHandler {
 }
 
 impl McpToolHandler {
-    pub fn new(tool_info: McpToolInfo, manager: Arc<McpConnectionManager>) -> Self {
+    pub fn new(
+        tool_info: McpToolInfo,
+        manager: Arc<McpConnectionManager>,
+    ) -> Self {
         Self { tool_info, manager }
     }
 }
@@ -35,7 +38,11 @@ impl Tool for McpToolHandler {
         self.tool_info.input_schema.clone()
     }
 
-    fn needs_approval(&self, _arguments: &serde_json::Value, _ctx: &ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> bool {
         true
     }
 

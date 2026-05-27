@@ -78,7 +78,8 @@ impl ParsedEdit {
 
     /// Parse a `LINE:HASH` reference and normalize the error into edit context.
     fn parse_line_ref(value: &str) -> Result<LineRef, HashlineEditError> {
-        LineRef::try_from(value).map_err(|error| HashlineEditError::Invalid(error.to_string()))
+        LineRef::try_from(value)
+            .map_err(|error| HashlineEditError::Invalid(error.to_string()))
     }
 }
 
@@ -92,9 +93,9 @@ impl TryFrom<&HashlineEdit> for ParsedEdit {
                 spec: ParsedSpec::Single {
                     reference: Self::parse_line_ref(&set_line.anchor)?,
                 },
-                dst_lines: ReplacementNormalizer::strip_new_line_prefixes(Self::split_dst_lines(
-                    &set_line.new_text,
-                )),
+                dst_lines: ReplacementNormalizer::strip_new_line_prefixes(
+                    Self::split_dst_lines(&set_line.new_text),
+                ),
             }),
             HashlineEdit::ReplaceLines { replace_lines } => {
                 let start = Self::parse_line_ref(&replace_lines.start_anchor)?;

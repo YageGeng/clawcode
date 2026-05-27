@@ -66,9 +66,10 @@ impl ConfigRules {
                 .filter(|s| s.name.eq_ignore_ascii_case(name.trim()))
                 .map(|s| s.path.clone())
                 .collect()),
-            (Some(_), Some(_)) => {
-                Err("entry has both path and name selectors (must have exactly one)".to_string())
-            }
+            (Some(_), Some(_)) => Err(
+                "entry has both path and name selectors (must have exactly one)"
+                    .to_string(),
+            ),
             (None, None) => Err("entry missing path or name selector".to_string()),
             (None, Some(_)) => Err("entry has empty name selector".to_string()),
         }

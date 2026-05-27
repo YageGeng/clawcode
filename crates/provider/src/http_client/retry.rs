@@ -6,7 +6,11 @@ use std::time::Duration;
 pub trait RetryPolicy {
     /// Submit a new retry delay based on the [`enum@Error`], last retry number and duration, if
     /// available. A policy may also return `None` if it does not want to retry
-    fn retry(&self, error: &Error, last_retry: Option<(usize, Duration)>) -> Option<Duration>;
+    fn retry(
+        &self,
+        error: &Error,
+        last_retry: Option<(usize, Duration)>,
+    ) -> Option<Duration>;
 
     /// Set a new reconnection time if received from an event
     fn set_reconnection_time(&mut self, duration: Duration);
@@ -43,7 +47,11 @@ impl ExponentialBackoff {
 }
 
 impl RetryPolicy for ExponentialBackoff {
-    fn retry(&self, _error: &Error, last_retry: Option<(usize, Duration)>) -> Option<Duration> {
+    fn retry(
+        &self,
+        _error: &Error,
+        last_retry: Option<(usize, Duration)>,
+    ) -> Option<Duration> {
         if let Some((retry_num, last_duration)) = last_retry {
             if self
                 .max_retries
@@ -87,7 +95,11 @@ impl Constant {
 }
 
 impl RetryPolicy for Constant {
-    fn retry(&self, _error: &Error, last_retry: Option<(usize, Duration)>) -> Option<Duration> {
+    fn retry(
+        &self,
+        _error: &Error,
+        last_retry: Option<(usize, Duration)>,
+    ) -> Option<Duration> {
         if let Some((retry_num, _)) = last_retry {
             if self
                 .max_retries
@@ -111,7 +123,11 @@ impl RetryPolicy for Constant {
 pub struct Never;
 
 impl RetryPolicy for Never {
-    fn retry(&self, _error: &Error, _last_retry: Option<(usize, Duration)>) -> Option<Duration> {
+    fn retry(
+        &self,
+        _error: &Error,
+        _last_retry: Option<(usize, Duration)>,
+    ) -> Option<Duration> {
         None
     }
     fn set_reconnection_time(&mut self, _duration: Duration) {}

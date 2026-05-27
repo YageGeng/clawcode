@@ -7,7 +7,14 @@ use serde::{Deserialize, Serialize};
 /// Provider-reported token usage for one model response or an accumulated replay total.
 /// If tokens used are `0`, then the provider failed to supply token usage metrics.
 #[derive(
-    Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, typed_builder::TypedBuilder,
+    Debug,
+    PartialEq,
+    Eq,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
 )]
 pub struct Usage {
     /// The number of input ("prompt") tokens used in a given request.
@@ -55,7 +62,8 @@ impl Add for Usage {
             input_tokens: self.input_tokens + other.input_tokens,
             output_tokens: self.output_tokens + other.output_tokens,
             total_tokens: self.total_tokens + other.total_tokens,
-            cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
+            cached_input_tokens: self.cached_input_tokens
+                + other.cached_input_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens
                 + other.cache_creation_input_tokens,
         }

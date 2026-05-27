@@ -4,7 +4,9 @@ use crate::completion::{self, CompletionError, GetTokenUsage};
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::message::ReasoningContent;
-use crate::providers::openai::responses_api::{ReasoningSummary, ResponsesUsage};
+use crate::providers::openai::responses_api::{
+    ReasoningSummary, ResponsesUsage,
+};
 use crate::streaming;
 use crate::streaming::RawStreamingChoice;
 use crate::wasm_compat::WasmCompatSend;
@@ -48,10 +50,12 @@ pub(crate) fn reasoning_choices_from_done_item(
     let mut choices = summary
         .iter()
         .map(|reasoning_summary| match reasoning_summary {
-            ReasoningSummary::SummaryText { text } => RawStreamingChoice::Reasoning {
-                id: Some(id.to_owned()),
-                content: ReasoningContent::Summary(text.to_owned()),
-            },
+            ReasoningSummary::SummaryText { text } => {
+                RawStreamingChoice::Reasoning {
+                    id: Some(id.to_owned()),
+                    content: ReasoningContent::Summary(text.to_owned()),
+                }
+            }
         })
         .collect::<Vec<_>>();
 
@@ -107,7 +111,9 @@ fn response_chunk_error_message(
     match kind {
         ResponseChunkKind::ResponseFailed => Some(response_error_message(
             response.error.as_ref(),
-            &format!("{provider_name} response stream returned a failed response"),
+            &format!(
+                "{provider_name} response stream returned a failed response"
+            ),
         )),
         ResponseChunkKind::ResponseIncomplete => {
             let reason = response
@@ -124,7 +130,10 @@ fn response_chunk_error_message(
     }
 }
 
-fn response_error_message(error: Option<&super::ResponseError>, fallback: &str) -> String {
+fn response_error_message(
+    error: Option<&super::ResponseError>,
+    fallback: &str,
+) -> String {
     if let Some(error) = error {
         if error.code.is_empty() {
             error.message.clone()
@@ -176,7 +185,9 @@ pub(crate) fn parse_sse_completion_body(
             continue;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) =
+            serde_json::from_str::<StreamingCompletionChunk>(data)
+        {
             if let StreamingCompletionChunk::Response(chunk) = chunk {
                 let ResponseChunk { kind, response, .. } = *chunk;
                 match kind {
@@ -184,9 +195,13 @@ pub(crate) fn parse_sse_completion_body(
                         completed = Some(response);
                         break;
                     }
-                    ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete => {
-                        provider_error =
-                            response_chunk_error_message(&kind, &response, provider_name);
+                    ResponseChunkKind::ResponseFailed
+                    | ResponseChunkKind::ResponseIncomplete => {
+                        provider_error = response_chunk_error_message(
+                            &kind,
+                            &response,
+                            provider_name,
+                        );
                     }
                     _ => {}
                 }
@@ -211,17 +226,24 @@ pub(crate) fn parse_sse_completion_body(
                     .get("response")
                     .cloned()
                     .and_then(|response| {
-                        serde_json::from_value::<CompletionResponse>(response).ok()
+                        serde_json::from_value::<CompletionResponse>(response)
+                            .ok()
                     })
                     .and_then(|response| {
-                        let kind = if value.get("type").and_then(serde_json::Value::as_str)
+                        let kind = if value
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
                             == Some("response.failed")
                         {
                             ResponseChunkKind::ResponseFailed
                         } else {
                             ResponseChunkKind::ResponseIncomplete
                         };
-                        response_chunk_error_message(&kind, &response, provider_name)
+                        response_chunk_error_message(
+                            &kind,
+                            &response,
+                            provider_name,
+                        )
                     })
                     .or_else(|| {
                         value
@@ -245,11 +267,9 @@ pub(crate) fn parse_sse_completion_body(
     }
 
     completed.ok_or_else(|| {
-        CompletionError::ProviderError(
-            provider_error.unwrap_or_else(|| {
-                format!("{provider_name} stream did not yield response.completed")
-            }),
-        )
+        CompletionError::ProviderError(provider_error.unwrap_or_else(|| {
+            format!("{provider_name} stream did not yield response.completed")
+        }))
     })
 }
 
@@ -299,7 +319,8 @@ impl RawChoiceAccumulator {
                 );
             }
             ItemChunkKind::OutputTextDelta(delta) => {
-                immediate.push(streaming::RawStreamingChoice::Message(delta.delta));
+                immediate
+                    .push(streaming::RawStreamingChoice::Message(delta.delta));
             }
             ItemChunkKind::ReasoningSummaryTextDelta(delta) => {
                 // OpenAI documents `reasoning.encrypted_content` as the stateful
@@ -314,7 +335,8 @@ impl RawChoiceAccumulator {
                 });
             }
             ItemChunkKind::RefusalDelta(delta) => {
-                immediate.push(streaming::RawStreamingChoice::Message(delta.delta));
+                immediate
+                    .push(streaming::RawStreamingChoice::Message(delta.delta));
             }
             ItemChunkKind::FunctionCallArgsDelta(delta) => {
                 let internal_call_id = self
@@ -325,7 +347,9 @@ impl RawChoiceAccumulator {
                 immediate.push(streaming::RawStreamingChoice::ToolCallDelta {
                     id: delta.item_id,
                     internal_call_id,
-                    content: streaming::ToolCallDeltaContent::Delta(delta.delta),
+                    content: streaming::ToolCallDeltaContent::Delta(
+                        delta.delta,
+                    ),
                 });
             }
             _ => {}
@@ -348,7 +372,8 @@ impl RawChoiceAccumulator {
                 }
                 Ok(())
             }
-            ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete
+            ResponseChunkKind::ResponseFailed
+            | ResponseChunkKind::ResponseIncomplete
                 if options.errors_on_terminal_response() =>
             {
                 let error_message = response_chunk_error_message(&kind, &response, provider_name)
@@ -377,16 +402,22 @@ impl RawChoiceAccumulator {
                     .entry(func.id.clone())
                     .or_insert_with(|| nanoid::nanoid!())
                     .clone();
-                let tool_call =
-                    streaming::RawStreamingToolCall::new(func.id, func.name, func.arguments)
-                        .with_internal_call_id(internal_call_id)
-                        .with_call_id(func.call_id);
+                let tool_call = streaming::RawStreamingToolCall::new(
+                    func.id,
+                    func.name,
+                    func.arguments,
+                )
+                .with_internal_call_id(internal_call_id)
+                .with_call_id(func.call_id);
 
                 if emit_completed_tool_calls_immediately {
-                    immediate.push(streaming::RawStreamingChoice::ToolCall(tool_call));
+                    immediate.push(streaming::RawStreamingChoice::ToolCall(
+                        tool_call,
+                    ));
                 } else {
-                    self.tool_calls
-                        .push(streaming::RawStreamingChoice::ToolCall(tool_call));
+                    self.tool_calls.push(
+                        streaming::RawStreamingChoice::ToolCall(tool_call),
+                    );
                 }
             }
             Output::Reasoning {
@@ -402,7 +433,8 @@ impl RawChoiceAccumulator {
                 ));
             }
             Output::Message(message) => {
-                immediate.push(streaming::RawStreamingChoice::MessageId(message.id));
+                immediate
+                    .push(streaming::RawStreamingChoice::MessageId(message.id));
             }
             Output::Unknown => {}
         }
@@ -438,14 +470,23 @@ pub(crate) fn raw_choices_from_sse_body(
             continue;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) =
+            serde_json::from_str::<StreamingCompletionChunk>(data)
+        {
             match chunk {
                 StreamingCompletionChunk::Delta(chunk) => {
-                    raw_choices.extend(accumulator.decode_item_chunk(chunk.data, options));
+                    raw_choices.extend(
+                        accumulator.decode_item_chunk(chunk.data, options),
+                    );
                 }
                 StreamingCompletionChunk::Response(chunk) => {
                     let ResponseChunk { kind, response, .. } = *chunk;
-                    accumulator.record_response_chunk(kind, response, provider_name, options)?;
+                    accumulator.record_response_chunk(
+                        kind,
+                        response,
+                        provider_name,
+                        options,
+                    )?;
                 }
             }
             continue;
@@ -457,30 +498,39 @@ pub(crate) fn raw_choices_from_sse_body(
         };
 
         match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("response.output_text.delta") | Some("response.refusal.delta") => {
-                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
-                    raw_choices.push(streaming::RawStreamingChoice::Message(delta.to_owned()));
+            Some("response.output_text.delta")
+            | Some("response.refusal.delta") => {
+                if let Some(delta) =
+                    value.get("delta").and_then(serde_json::Value::as_str)
+                {
+                    raw_choices.push(streaming::RawStreamingChoice::Message(
+                        delta.to_owned(),
+                    ));
                 }
             }
             Some("response.reasoning_summary_text.delta") => {
-                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                if let Some(delta) =
+                    value.get("delta").and_then(serde_json::Value::as_str)
+                {
                     // OpenAI documents `reasoning.encrypted_content` as the stateful
                     // payload for stateless multi-turn replay when `store=false`.
                     // Summary text deltas are only user-visible previews, so keep
                     // them out of replayable assistant history.
                     // See: https://developers.openai.com/api/reference/resources/responses/methods/create
-                    raw_choices.push(streaming::RawStreamingChoice::ReasoningDelta {
-                        id: None,
-                        reasoning: delta.to_owned(),
-                        replayable: false,
-                    });
+                    raw_choices.push(
+                        streaming::RawStreamingChoice::ReasoningDelta {
+                            id: None,
+                            reasoning: delta.to_owned(),
+                            replayable: false,
+                        },
+                    );
                 }
             }
             Some("response.output_item.added") => {
-                if let Some(item) = value
-                    .get("item")
-                    .cloned()
-                    .and_then(|item| serde_json::from_value::<Output>(item).ok())
+                if let Some(item) =
+                    value.get("item").cloned().and_then(|item| {
+                        serde_json::from_value::<Output>(item).ok()
+                    })
                     && let Output::FunctionCall(func) = item
                 {
                     let internal_call_id = accumulator
@@ -488,20 +538,28 @@ pub(crate) fn raw_choices_from_sse_body(
                         .entry(func.id.clone())
                         .or_insert_with(|| nanoid::nanoid!())
                         .clone();
-                    raw_choices.push(streaming::RawStreamingChoice::ToolCallDelta {
-                        id: func.id,
-                        internal_call_id,
-                        content: streaming::ToolCallDeltaContent::Name(func.name),
-                    });
+                    raw_choices.push(
+                        streaming::RawStreamingChoice::ToolCallDelta {
+                            id: func.id,
+                            internal_call_id,
+                            content: streaming::ToolCallDeltaContent::Name(
+                                func.name,
+                            ),
+                        },
+                    );
                 }
             }
             Some("response.output_item.done") => {
-                if let Some(item) = value
-                    .get("item")
-                    .cloned()
-                    .and_then(|item| serde_json::from_value::<Output>(item).ok())
+                if let Some(item) =
+                    value.get("item").cloned().and_then(|item| {
+                        serde_json::from_value::<Output>(item).ok()
+                    })
                 {
-                    accumulator.push_output_item_done(item, &mut raw_choices, false);
+                    accumulator.push_output_item_done(
+                        item,
+                        &mut raw_choices,
+                        false,
+                    );
                 }
             }
             Some("response.function_call_arguments.delta") => {
@@ -514,25 +572,46 @@ pub(crate) fn raw_choices_from_sse_body(
                         .entry(item_id.to_owned())
                         .or_insert_with(|| nanoid::nanoid!())
                         .clone();
-                    raw_choices.push(streaming::RawStreamingChoice::ToolCallDelta {
-                        id: item_id.to_owned(),
-                        internal_call_id,
-                        content: streaming::ToolCallDeltaContent::Delta(delta.to_owned()),
-                    });
+                    raw_choices.push(
+                        streaming::RawStreamingChoice::ToolCallDelta {
+                            id: item_id.to_owned(),
+                            internal_call_id,
+                            content: streaming::ToolCallDeltaContent::Delta(
+                                delta.to_owned(),
+                            ),
+                        },
+                    );
                 }
             }
-            Some("response.completed") | Some("response.failed") | Some("response.incomplete") => {
+            Some("response.completed")
+            | Some("response.failed")
+            | Some("response.incomplete") => {
                 if let Some(response) = value.get("response").cloned() {
-                    let response = serde_json::from_value::<CompletionResponse>(response)?;
-                    let Some(kind) = (match value.get("type").and_then(serde_json::Value::as_str) {
-                        Some("response.completed") => Some(ResponseChunkKind::ResponseCompleted),
-                        Some("response.failed") => Some(ResponseChunkKind::ResponseFailed),
-                        Some("response.incomplete") => Some(ResponseChunkKind::ResponseIncomplete),
+                    let response =
+                        serde_json::from_value::<CompletionResponse>(response)?;
+                    let Some(kind) = (match value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("response.completed") => {
+                            Some(ResponseChunkKind::ResponseCompleted)
+                        }
+                        Some("response.failed") => {
+                            Some(ResponseChunkKind::ResponseFailed)
+                        }
+                        Some("response.incomplete") => {
+                            Some(ResponseChunkKind::ResponseIncomplete)
+                        }
                         _ => None,
                     }) else {
                         continue;
                     };
-                    accumulator.record_response_chunk(kind, response, provider_name, options)?;
+                    accumulator.record_response_chunk(
+                        kind,
+                        response,
+                        provider_name,
+                        options,
+                    )?;
                 }
             }
             Some("error") => {
@@ -555,7 +634,8 @@ pub(crate) async fn completion_response_from_sse_body(
     body: &str,
     raw_response: CompletionResponse,
     provider_name: &str,
-) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError>
+{
     let raw_choices = raw_choices_from_sse_body(
         body,
         raw_response
@@ -570,7 +650,8 @@ pub(crate) async fn completion_response_from_sse_body(
             .map(Ok::<_, CompletionError>)
             .collect::<Vec<_>>(),
     );
-    let mut stream = crate::streaming::StreamingCompletionResponse::stream(Box::pin(stream));
+    let mut stream =
+        crate::streaming::StreamingCompletionResponse::stream(Box::pin(stream));
 
     while let Some(item) = stream.next().await {
         item?;
@@ -597,10 +678,14 @@ pub(crate) async fn completion_response_from_sse_body(
     })
 }
 
-fn choice_is_empty(choice: &crate::OneOrMany<completion::AssistantContent>) -> bool {
+fn choice_is_empty(
+    choice: &crate::OneOrMany<completion::AssistantContent>,
+) -> bool {
     choice.iter().all(|content| match content {
         completion::AssistantContent::Text(text) => text.text.trim().is_empty(),
-        completion::AssistantContent::Reasoning(reasoning) => reasoning.content.is_empty(),
+        completion::AssistantContent::Reasoning(reasoning) => {
+            reasoning.content.is_empty()
+        }
         completion::AssistantContent::Image(_) => false,
         completion::AssistantContent::ToolCall(_) => false,
     })
@@ -876,8 +961,10 @@ where
     pub(crate) async fn stream(
         &self,
         completion_request: crate::completion::CompletionRequest,
-    ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
-    {
+    ) -> Result<
+        streaming::StreamingCompletionResponse<StreamingCompletionResponse>,
+        CompletionError,
+    > {
         let mut request = self.create_completion_request(completion_request)?;
         request.stream = Some(true);
 
@@ -930,17 +1017,19 @@ mod tests {
     use crate::message::{AssistantContent, ReasoningContent};
 
     #[tokio::test]
-    async fn streamed_summary_delta_does_not_create_replayable_reasoning_history() {
+    async fn streamed_summary_delta_does_not_create_replayable_reasoning_history()
+     {
         let body = r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking","summary_index":0,"sequence_number":1}
 data: {"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc_1"}}
 data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":3},"output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc_1"}],"tools":[]}}
 data: [DONE]"#;
 
-        let raw_response =
-            parse_sse_completion_body(body, "OpenAI").expect("expected completed response");
-        let response = completion_response_from_sse_body(body, raw_response, "OpenAI")
-            .await
-            .expect("expected fallback completion");
+        let raw_response = parse_sse_completion_body(body, "OpenAI")
+            .expect("expected completed response");
+        let response =
+            completion_response_from_sse_body(body, raw_response, "OpenAI")
+                .await
+                .expect("expected fallback completion");
 
         let reasonings = response
             .choice

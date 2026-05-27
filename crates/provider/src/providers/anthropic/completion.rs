@@ -7,7 +7,10 @@ use crate::{
     client::Provider,
     completion::{self, CompletionError, GetTokenUsage},
     http_client::HttpClientExt,
-    message::{self, DocumentMediaType, DocumentSourceKind, MessageError, MimeType, Reasoning},
+    message::{
+        self, DocumentMediaType, DocumentSourceKind, MessageError, MimeType,
+        Reasoning,
+    },
     one_or_many::string_or_one_or_many,
     telemetry::{ProviderResponseExt, SpanCombinator},
     wasm_compat::*,
@@ -33,7 +36,8 @@ pub const CLAUDE_HAIKU_4_5: &str = "claude-haiku-4-5";
 pub const ANTHROPIC_VERSION_2023_01_01: &str = "2023-01-01";
 pub const ANTHROPIC_VERSION_2023_06_01: &str = "2023-06-01";
 pub const ANTHROPIC_VERSION_LATEST: &str = ANTHROPIC_VERSION_2023_06_01;
-const EMPTY_RESPONSE_ERROR: &str = "Response contained no message or tool call (empty)";
+const EMPTY_RESPONSE_ERROR: &str =
+    "Response contained no message or tool call (empty)";
 
 pub trait AnthropicCompatibleProvider: Provider {
     const PROVIDER_NAME: &'static str;
@@ -134,8 +138,10 @@ impl GetTokenUsage for Usage {
 
         usage.input_tokens = self.input_tokens;
         usage.output_tokens = self.output_tokens;
-        usage.cached_input_tokens = self.cache_read_input_tokens.unwrap_or_default();
-        usage.cache_creation_input_tokens = self.cache_creation_input_tokens.unwrap_or_default();
+        usage.cached_input_tokens =
+            self.cache_read_input_tokens.unwrap_or_default();
+        usage.cache_creation_input_tokens =
+            self.cache_creation_input_tokens.unwrap_or_default();
         usage.total_tokens = self.input_tokens
             + self.cache_read_input_tokens.unwrap_or_default()
             + self.cache_creation_input_tokens.unwrap_or_default()
@@ -207,7 +213,9 @@ pub enum SystemContent {
     },
 }
 
-impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionResponse> {
+impl TryFrom<CompletionResponse>
+    for completion::CompletionResponse<CompletionResponse>
+{
     type Error = CompletionError;
 
     fn try_from(response: CompletionResponse) -> Result<Self, Self::Error> {
@@ -229,8 +237,9 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                 ));
             }
         } else {
-            OneOrMany::many(content)
-                .map_err(|_e| CompletionError::ResponseError(EMPTY_RESPONSE_ERROR.to_owned()))?
+            OneOrMany::many(content).map_err(|_e| {
+                CompletionError::ResponseError(EMPTY_RESPONSE_ERROR.to_owned())
+            })?
         };
 
         let usage = completion::Usage {
@@ -240,8 +249,14 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                 + response.usage.cache_read_input_tokens.unwrap_or(0)
                 + response.usage.cache_creation_input_tokens.unwrap_or(0)
                 + response.usage.output_tokens,
-            cached_input_tokens: response.usage.cache_read_input_tokens.unwrap_or(0),
-            cache_creation_input_tokens: response.usage.cache_creation_input_tokens.unwrap_or(0),
+            cached_input_tokens: response
+                .usage
+                .cache_read_input_tokens
+                .unwrap_or(0),
+            cache_creation_input_tokens: response
+                .usage
+                .cache_creation_input_tokens
+                .unwrap_or(0),
         };
 
         Ok(completion::CompletionResponse {
@@ -465,7 +480,9 @@ impl From<SourceType> for message::ContentFormat {
 impl TryFrom<message::ImageMediaType> for ImageFormat {
     type Error = MessageError;
 
-    fn try_from(media_type: message::ImageMediaType) -> Result<Self, Self::Error> {
+    fn try_from(
+        media_type: message::ImageMediaType,
+    ) -> Result<Self, Self::Error> {
         Ok(match media_type {
             message::ImageMediaType::JPEG => ImageFormat::JPEG,
             message::ImageMediaType::PNG => ImageFormat::PNG,
@@ -473,7 +490,8 @@ impl TryFrom<message::ImageMediaType> for ImageFormat {
             message::ImageMediaType::WEBP => ImageFormat::WEBP,
             _ => {
                 return Err(MessageError::ConversionError(
-                    format!("Unsupported image media type: {media_type:?}").to_owned(),
+                    format!("Unsupported image media type: {media_type:?}")
+                        .to_owned(),
                 ));
             }
         })
@@ -508,24 +526,32 @@ impl TryFrom<message::AssistantContent> for Content {
     type Error = MessageError;
     fn try_from(text: message::AssistantContent) -> Result<Self, Self::Error> {
         match text {
-            message::AssistantContent::Text(message::Text { text }) => Ok(Content::Text {
-                text,
-                cache_control: None,
-            }),
-            message::AssistantContent::Image(_) => Err(MessageError::ConversionError(
-                "Anthropic currently doesn't support images.".to_string(),
-            )),
-            message::AssistantContent::ToolCall(message::ToolCall { id, function, .. }) => {
-                Ok(Content::ToolUse {
-                    id,
-                    name: function.name,
-                    input: function.arguments,
+            message::AssistantContent::Text(message::Text { text }) => {
+                Ok(Content::Text {
+                    text,
+                    cache_control: None,
                 })
             }
-            message::AssistantContent::Reasoning(reasoning) => Ok(Content::Thinking {
-                thinking: reasoning.display_text(),
-                signature: reasoning.first_signature().map(str::to_owned),
+            message::AssistantContent::Image(_) => {
+                Err(MessageError::ConversionError(
+                    "Anthropic currently doesn't support images.".to_string(),
+                ))
+            }
+            message::AssistantContent::ToolCall(message::ToolCall {
+                id,
+                function,
+                ..
+            }) => Ok(Content::ToolUse {
+                id,
+                name: function.name,
+                input: function.arguments,
             }),
+            message::AssistantContent::Reasoning(reasoning) => {
+                Ok(Content::Thinking {
+                    thinking: reasoning.display_text(),
+                    signature: reasoning.first_signature().map(str::to_owned),
+                })
+            }
         }
     }
 }
@@ -534,20 +560,26 @@ fn anthropic_content_from_assistant_content(
     content: message::AssistantContent,
 ) -> Result<Vec<Content>, MessageError> {
     match content {
-        message::AssistantContent::Text(message::Text { text }) => Ok(vec![Content::Text {
-            text,
-            cache_control: None,
-        }]),
-        message::AssistantContent::Image(_) => Err(MessageError::ConversionError(
-            "Anthropic currently doesn't support images.".to_string(),
-        )),
-        message::AssistantContent::ToolCall(message::ToolCall { id, function, .. }) => {
-            Ok(vec![Content::ToolUse {
-                id,
-                name: function.name,
-                input: function.arguments,
+        message::AssistantContent::Text(message::Text { text }) => {
+            Ok(vec![Content::Text {
+                text,
+                cache_control: None,
             }])
         }
+        message::AssistantContent::Image(_) => {
+            Err(MessageError::ConversionError(
+                "Anthropic currently doesn't support images.".to_string(),
+            ))
+        }
+        message::AssistantContent::ToolCall(message::ToolCall {
+            id,
+            function,
+            ..
+        }) => Ok(vec![Content::ToolUse {
+            id,
+            name: function.name,
+            input: function.arguments,
+        }]),
         message::AssistantContent::Reasoning(reasoning) => {
             let mut converted = Vec::new();
             for block in reasoning.content {
@@ -573,7 +605,8 @@ fn anthropic_content_from_assistant_content(
 
             if converted.is_empty() {
                 return Err(MessageError::ConversionError(
-                    "Cannot convert empty reasoning content to Anthropic format".to_string(),
+                    "Cannot convert empty reasoning content to Anthropic format"
+                        .to_string(),
                 ));
             }
 
@@ -759,15 +792,16 @@ impl TryFrom<Content> for message::AssistantContent {
             Content::Thinking {
                 thinking,
                 signature,
-            } => message::AssistantContent::Reasoning(Reasoning::new_with_signature(
-                &thinking, signature,
-            )),
+            } => message::AssistantContent::Reasoning(
+                Reasoning::new_with_signature(&thinking, signature),
+            ),
             Content::RedactedThinking { data } => {
                 message::AssistantContent::Reasoning(Reasoning::redacted(data))
             }
             _ => {
                 return Err(MessageError::ConversionError(
-                    "Content did not contain a message, tool call, or reasoning".to_owned(),
+                    "Content did not contain a message, tool call, or reasoning"
+                        .to_owned(),
                 ));
             }
         })
@@ -777,12 +811,20 @@ impl TryFrom<Content> for message::AssistantContent {
 impl From<ToolResultContent> for message::ToolResultContent {
     fn from(content: ToolResultContent) -> Self {
         match content {
-            ToolResultContent::Text { text } => message::ToolResultContent::text(text),
+            ToolResultContent::Text { text } => {
+                message::ToolResultContent::text(text)
+            }
             ToolResultContent::Image(source) => match source {
                 ImageSource::Base64 { data, media_type } => {
-                    message::ToolResultContent::image_base64(data, Some(media_type.into()), None)
+                    message::ToolResultContent::image_base64(
+                        data,
+                        Some(media_type.into()),
+                        None,
+                    )
                 }
-                ImageSource::Url { url } => message::ToolResultContent::image_url(url, None, None),
+                ImageSource::Url { url } => {
+                    message::ToolResultContent::image_url(url, None, None)
+                }
             },
         }
     }
@@ -796,7 +838,9 @@ impl TryFrom<Message> for message::Message {
             Role::User => message::Message::User {
                 content: message.content.try_map(|content| {
                     Ok(match content {
-                        Content::Text { text, .. } => message::UserContent::text(text),
+                        Content::Text { text, .. } => {
+                            message::UserContent::text(text)
+                        }
                         Content::ToolResult {
                             tool_use_id,
                             content,
@@ -826,28 +870,40 @@ impl TryFrom<Message> for message::Message {
                         Content::Document { source, .. } => match source {
                             DocumentSource::Base64 { data, media_type } => {
                                 let rig_media_type = match media_type {
-                                    DocumentFormat::PDF => message::DocumentMediaType::PDF,
+                                    DocumentFormat::PDF => {
+                                        message::DocumentMediaType::PDF
+                                    }
                                 };
-                                message::UserContent::document(data, Some(rig_media_type))
+                                message::UserContent::document(
+                                    data,
+                                    Some(rig_media_type),
+                                )
                             }
-                            DocumentSource::Text { data, .. } => message::UserContent::document(
-                                data,
-                                Some(message::DocumentMediaType::TXT),
-                            ),
+                            DocumentSource::Text { data, .. } => {
+                                message::UserContent::document(
+                                    data,
+                                    Some(message::DocumentMediaType::TXT),
+                                )
+                            }
                             DocumentSource::Url { url } => {
                                 message::UserContent::document_url(url, None)
                             }
                             DocumentSource::File { file_id } => {
-                                message::UserContent::Document(message::Document {
-                                    data: DocumentSourceKind::FileId(file_id),
-                                    media_type: None,
-                                    additional_params: None,
-                                })
+                                message::UserContent::Document(
+                                    message::Document {
+                                        data: DocumentSourceKind::FileId(
+                                            file_id,
+                                        ),
+                                        media_type: None,
+                                        additional_params: None,
+                                    },
+                                )
                             }
                         },
                         _ => {
                             return Err(MessageError::ConversionError(
-                                "Unsupported content type for User role".to_owned(),
+                                "Unsupported content type for User role"
+                                    .to_owned(),
                             ));
                         }
                     })
@@ -855,7 +911,9 @@ impl TryFrom<Message> for message::Message {
             },
             Role::Assistant => message::Message::Assistant {
                 id: None,
-                content: message.content.try_map(|content| content.try_into())?,
+                content: message
+                    .content
+                    .try_map(|content| content.try_into())?,
             },
         })
     }
@@ -863,7 +921,10 @@ impl TryFrom<Message> for message::Message {
 
 #[doc(hidden)]
 #[derive(Clone)]
-pub struct GenericCompletionModel<Ext = super::client::AnthropicExt, T = reqwest::Client> {
+pub struct GenericCompletionModel<
+    Ext = super::client::AnthropicExt,
+    T = reqwest::Client,
+> {
     pub(crate) client: crate::client::Client<Ext, T>,
     pub model: String,
     pub default_max_tokens: Option<u64>,
@@ -891,7 +952,10 @@ where
     T: HttpClientExt,
     Ext: AnthropicCompatibleProvider + Clone + 'static,
 {
-    pub fn new(client: crate::client::Client<Ext, T>, model: impl Into<String>) -> Self {
+    pub fn new(
+        client: crate::client::Client<Ext, T>,
+        model: impl Into<String>,
+    ) -> Self {
         let model = model.into();
         let default_max_tokens = Ext::default_max_tokens(&model);
 
@@ -905,7 +969,10 @@ where
         }
     }
 
-    pub fn with_model(client: crate::client::Client<Ext, T>, model: &str) -> Self {
+    pub fn with_model(
+        client: crate::client::Client<Ext, T>,
+        model: &str,
+    ) -> Self {
         Self {
             client,
             model: model.to_string(),
@@ -993,7 +1060,9 @@ where
 /// set or if set too high, the request will fail. The following values are based on Anthropic's
 /// published synchronous Messages API output limits for current models.
 fn default_max_tokens_for_model(model: &str) -> Option<u64> {
-    if model.starts_with("claude-opus-4-7") || model.starts_with("claude-opus-4-6") {
+    if model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-opus-4-6")
+    {
         Some(128_000)
     } else if model.starts_with("claude-opus-4")
         || model.starts_with("claude-sonnet-4")
@@ -1036,13 +1105,15 @@ impl TryFrom<message::ToolChoice> for ToolChoice {
             message::ToolChoice::Specific { function_names } => {
                 if function_names.len() != 1 {
                     return Err(CompletionError::ProviderError(
-                        "Only one tool may be specified to be used by Claude".into(),
+                        "Only one tool may be specified to be used by Claude"
+                            .into(),
                     ));
                 }
 
                 let Some(name) = function_names.into_iter().next() else {
                     return Err(CompletionError::ProviderError(
-                        "Only one tool may be specified to be used by Claude".into(),
+                        "Only one tool may be specified to be used by Claude"
+                            .into(),
                     ));
                 };
 
@@ -1063,7 +1134,8 @@ fn sanitize_schema(schema: &mut serde_json::Value) {
     use serde_json::Value;
 
     if let Value::Object(obj) = schema {
-        let is_object_schema = obj.get("type") == Some(&Value::String("object".to_string()))
+        let is_object_schema = obj.get("type")
+            == Some(&Value::String("object".to_string()))
             || obj.contains_key("properties");
 
         if is_object_schema && !obj.contains_key("additionalProperties") {
@@ -1071,12 +1143,14 @@ fn sanitize_schema(schema: &mut serde_json::Value) {
         }
 
         if let Some(Value::Object(properties)) = obj.get("properties") {
-            let prop_keys = properties.keys().cloned().map(Value::String).collect();
+            let prop_keys =
+                properties.keys().cloned().map(Value::String).collect();
             obj.insert("required".to_string(), Value::Array(prop_keys));
         }
 
         // Anthropic does not support numerical constraints on integer/number types.
-        let is_numeric_schema = obj.get("type") == Some(&Value::String("integer".to_string()))
+        let is_numeric_schema = obj.get("type")
+            == Some(&Value::String("integer".to_string()))
             || obj.get("type") == Some(&Value::String("number".to_string()));
 
         if is_numeric_schema {
@@ -1178,7 +1252,10 @@ struct AnthropicCompletionRequest {
 }
 
 /// Helper to set cache_control on a Content block
-fn set_content_cache_control(content: &mut Content, value: Option<CacheControl>) {
+fn set_content_cache_control(
+    content: &mut Content,
+    value: Option<CacheControl>,
+) {
     match content {
         Content::Text { cache_control, .. } => *cache_control = value,
         Content::Image { cache_control, .. } => *cache_control = value,
@@ -1192,7 +1269,10 @@ fn set_content_cache_control(content: &mut Content, value: Option<CacheControl>)
 /// Strategy: cache the system prompt, and mark the last content block of the last message
 /// for caching. This allows the conversation history to be cached while new messages
 /// are added.
-pub fn apply_cache_control(system: &mut [SystemContent], messages: &mut [Message]) {
+pub fn apply_cache_control(
+    system: &mut [SystemContent],
+    messages: &mut [Message],
+) {
     // Add cache_control to the system prompt (if non-empty)
     if let Some(SystemContent::Text { cache_control, .. }) = system.last_mut() {
         *cache_control = Some(CacheControl::ephemeral());
@@ -1207,7 +1287,10 @@ pub fn apply_cache_control(system: &mut [SystemContent], messages: &mut [Message
 
     // Add cache_control to the last content block of the last message
     if let Some(last_msg) = messages.last_mut() {
-        set_content_cache_control(last_msg.content.last_mut(), Some(CacheControl::ephemeral()));
+        set_content_cache_control(
+            last_msg.content.last_mut(),
+            Some(CacheControl::ephemeral()),
+        );
     }
 }
 
@@ -1248,7 +1331,9 @@ pub struct AnthropicRequestParams<'a> {
 impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
     type Error = CompletionError;
 
-    fn try_from(params: AnthropicRequestParams<'_>) -> Result<Self, Self::Error> {
+    fn try_from(
+        params: AnthropicRequestParams<'_>,
+    ) -> Result<Self, Self::Error> {
         let AnthropicRequestParams {
             model,
             request: mut req,
@@ -1266,7 +1351,8 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
 
         let mut full_history = vec![];
         full_history.extend(req.chat_history);
-        let (history_system, full_history) = split_system_messages_from_history(full_history);
+        let (history_system, full_history) =
+            split_system_messages_from_history(full_history);
 
         let mut messages = full_history
             .into_iter()
@@ -1277,8 +1363,9 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             .additional_params
             .take()
             .unwrap_or(serde_json::Value::Null);
-        let mut additional_tools =
-            extract_tools_from_additional_params(&mut additional_params_payload)?;
+        let mut additional_tools = extract_tools_from_additional_params(
+            &mut additional_params_payload,
+        )?;
 
         let mut tools = req
             .tools
@@ -1330,7 +1417,9 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             max_tokens,
             system,
             temperature: req.temperature,
-            tool_choice: req.tool_choice.and_then(|x| ToolChoice::try_from(x).ok()),
+            tool_choice: req
+                .tool_choice
+                .and_then(|x| ToolChoice::try_from(x).ok()),
             tools,
             output_config,
             // Automatic caching: one top-level field; the API moves the breakpoint automatically.
@@ -1356,11 +1445,14 @@ fn extract_tools_from_additional_params(
     if let Some(map) = additional_params.as_object_mut()
         && let Some(raw_tools) = map.remove("tools")
     {
-        return serde_json::from_value::<Vec<serde_json::Value>>(raw_tools).map_err(|err| {
-            CompletionError::RequestError(
-                format!("Invalid Anthropic `additional_params.tools` payload: {err}").into(),
-            )
-        });
+        return serde_json::from_value::<Vec<serde_json::Value>>(raw_tools).map_err(
+            |err| {
+                CompletionError::RequestError(
+                    format!("Invalid Anthropic `additional_params.tools` payload: {err}")
+                        .into(),
+                )
+            },
+        );
     }
 
     Ok(Vec::new())
@@ -1368,8 +1460,17 @@ fn extract_tools_from_additional_params(
 
 impl<Ext, T> completion::CompletionModel for GenericCompletionModel<Ext, T>
 where
-    T: HttpClientExt + Clone + Default + WasmCompatSend + WasmCompatSync + 'static,
-    Ext: AnthropicCompatibleProvider + Clone + WasmCompatSend + WasmCompatSync + 'static,
+    T: HttpClientExt
+        + Clone
+        + Default
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
+    Ext: AnthropicCompatibleProvider
+        + Clone
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
 {
     type Response = CompletionResponse;
     type StreamingResponse = StreamingCompletionResponse;
@@ -1382,7 +1483,10 @@ where
     async fn completion(
         &self,
         mut completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+    ) -> Result<
+        completion::CompletionResponse<CompletionResponse>,
+        CompletionError,
+    > {
         let request_model = completion_request
             .model
             .clone()
@@ -1417,13 +1521,14 @@ where
             }
         }
 
-        let request = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-            model: &request_model,
-            request: completion_request,
-            prompt_caching: self.prompt_caching,
-            automatic_caching: self.automatic_caching,
-            automatic_caching_ttl: self.automatic_caching_ttl.clone(),
-        })?;
+        let request =
+            AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+                model: &request_model,
+                request: completion_request,
+                prompt_caching: self.prompt_caching,
+                automatic_caching: self.automatic_caching,
+                automatic_caching_ttl: self.automatic_caching_ttl.clone(),
+            })?;
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
@@ -1520,13 +1625,22 @@ mod tests {
 
     #[test]
     fn current_model_default_max_tokens_match_anthropic_limits() {
-        assert_eq!(default_max_tokens_for_model(CLAUDE_OPUS_4_7), Some(128_000));
-        assert_eq!(default_max_tokens_for_model(CLAUDE_OPUS_4_6), Some(128_000));
+        assert_eq!(
+            default_max_tokens_for_model(CLAUDE_OPUS_4_7),
+            Some(128_000)
+        );
+        assert_eq!(
+            default_max_tokens_for_model(CLAUDE_OPUS_4_6),
+            Some(128_000)
+        );
         assert_eq!(
             default_max_tokens_for_model(CLAUDE_SONNET_4_6),
             Some(64_000)
         );
-        assert_eq!(default_max_tokens_for_model(CLAUDE_HAIKU_4_5), Some(64_000));
+        assert_eq!(
+            default_max_tokens_for_model(CLAUDE_HAIKU_4_5),
+            Some(64_000)
+        );
     }
 
     #[test]
@@ -1588,14 +1702,17 @@ mod tests {
         "#;
 
         let assistant_message: Message = {
-            let jd = &mut serde_json::Deserializer::from_str(assistant_message_json);
+            let jd =
+                &mut serde_json::Deserializer::from_str(assistant_message_json);
             deserialize(jd).unwrap_or_else(|err| {
                 panic!("Deserialization error at {}: {}", err.path(), err);
             })
         };
 
         let assistant_message2: Message = {
-            let jd = &mut serde_json::Deserializer::from_str(assistant_message_json2);
+            let jd = &mut serde_json::Deserializer::from_str(
+                assistant_message_json2,
+            );
             deserialize(jd).unwrap_or_else(|err| {
                 panic!("Deserialization error at {}: {}", err.path(), err);
             })
@@ -1627,7 +1744,10 @@ mod tests {
 
             match iter.next().unwrap() {
                 Content::Text { text, .. } => {
-                    assert_eq!(text, "\n\nHello there, how may I assist you today?");
+                    assert_eq!(
+                        text,
+                        "\n\nHello there, how may I assist you today?"
+                    );
                 }
                 _ => panic!("Expected text content"),
             }
@@ -1748,10 +1868,12 @@ mod tests {
             }),
         };
 
-        let converted_user_message: message::Message = user_message.clone().try_into().unwrap();
+        let converted_user_message: message::Message =
+            user_message.clone().try_into().unwrap();
         let converted_assistant_message: message::Message =
             assistant_message.clone().try_into().unwrap();
-        let converted_tool_message: message::Message = tool_message.clone().try_into().unwrap();
+        let converted_tool_message: message::Message =
+            tool_message.clone().try_into().unwrap();
 
         match converted_user_message.clone() {
             message::Message::User { content } => {
@@ -1761,10 +1883,18 @@ mod tests {
 
                 match iter.next().unwrap() {
                     message::UserContent::Image(message::Image {
-                        data, media_type, ..
+                        data,
+                        media_type,
+                        ..
                     }) => {
-                        assert_eq!(data, DocumentSourceKind::base64("/9j/4AAQSkZJRg..."));
-                        assert_eq!(media_type, Some(message::ImageMediaType::JPEG));
+                        assert_eq!(
+                            data,
+                            DocumentSourceKind::base64("/9j/4AAQSkZJRg...")
+                        );
+                        assert_eq!(
+                            media_type,
+                            Some(message::ImageMediaType::JPEG)
+                        );
                     }
                     _ => panic!("Expected image content"),
                 }
@@ -1778,13 +1908,20 @@ mod tests {
 
                 match iter.next().unwrap() {
                     message::UserContent::Document(message::Document {
-                        data, media_type, ..
+                        data,
+                        media_type,
+                        ..
                     }) => {
                         assert_eq!(
                             data,
-                            DocumentSourceKind::String("base64_encoded_pdf_data".into())
+                            DocumentSourceKind::String(
+                                "base64_encoded_pdf_data".into()
+                            )
                         );
-                        assert_eq!(media_type, Some(message::DocumentMediaType::PDF));
+                        assert_eq!(
+                            media_type,
+                            Some(message::DocumentMediaType::PDF)
+                        );
                     }
                     _ => panic!("Expected document content"),
                 }
@@ -1796,13 +1933,18 @@ mod tests {
 
         match converted_tool_message.clone() {
             message::Message::User { content } => {
-                let message::ToolResult { id, content, .. } = match content.first() {
-                    message::UserContent::ToolResult(tool_result) => tool_result,
-                    _ => panic!("Expected tool result content"),
-                };
+                let message::ToolResult { id, content, .. } =
+                    match content.first() {
+                        message::UserContent::ToolResult(tool_result) => {
+                            tool_result
+                        }
+                        _ => panic!("Expected tool result content"),
+                    };
                 assert_eq!(id, "toolu_01A09q90qw90lq917835lq9");
                 match content.first() {
-                    message::ToolResultContent::Text(message::Text { text }) => {
+                    message::ToolResultContent::Text(message::Text {
+                        text,
+                    }) => {
                         assert_eq!(text, "15 degrees");
                     }
                     _ => panic!("Expected text content"),
@@ -1816,12 +1958,15 @@ mod tests {
                 assert_eq!(content.len(), 1);
 
                 match content.first() {
-                    message::AssistantContent::ToolCall(message::ToolCall {
-                        id, function, ..
-                    }) => {
+                    message::AssistantContent::ToolCall(
+                        message::ToolCall { id, function, .. },
+                    ) => {
                         assert_eq!(id, "toolu_01A09q90qw90lq917835lq9");
                         assert_eq!(function.name, "get_weather");
-                        assert_eq!(function.arguments, json!({"location": "San Francisco, CA"}));
+                        assert_eq!(
+                            function.arguments,
+                            json!({"location": "San Francisco, CA"})
+                        );
                     }
                     _ => panic!("Expected tool call content"),
                 }
@@ -1829,9 +1974,12 @@ mod tests {
             _ => panic!("Expected assistant message"),
         }
 
-        let original_user_message: Message = converted_user_message.try_into().unwrap();
-        let original_assistant_message: Message = converted_assistant_message.try_into().unwrap();
-        let original_tool_message: Message = converted_tool_message.try_into().unwrap();
+        let original_user_message: Message =
+            converted_user_message.try_into().unwrap();
+        let original_assistant_message: Message =
+            converted_assistant_message.try_into().unwrap();
+        let original_tool_message: Message =
+            converted_tool_message.try_into().unwrap();
 
         assert_eq!(user_message, original_user_message);
         assert_eq!(assistant_message, original_assistant_message);
@@ -1886,7 +2034,9 @@ mod tests {
             cache_control: Some(CacheControl::ephemeral()),
         };
         let json_content = serde_json::to_string(&content).unwrap();
-        assert!(json_content.contains(r#""cache_control":{"type":"ephemeral"}"#));
+        assert!(
+            json_content.contains(r#""cache_control":{"type":"ephemeral"}"#)
+        );
 
         // Test apply_cache_control function
         let mut system_vec = vec![SystemContent::Text {
@@ -2075,11 +2225,13 @@ mod tests {
         use crate::completion::message as msg;
 
         let rig_message = msg::Message::User {
-            content: OneOrMany::one(msg::UserContent::Document(msg::Document {
-                data: DocumentSourceKind::FileId("file_abc".to_string()),
-                media_type: None,
-                additional_params: None,
-            })),
+            content: OneOrMany::one(msg::UserContent::Document(
+                msg::Document {
+                    data: DocumentSourceKind::FileId("file_abc".to_string()),
+                    media_type: None,
+                    additional_params: None,
+                },
+            )),
         };
 
         let anthropic_message: Message = rig_message.try_into().unwrap();
@@ -2119,9 +2271,14 @@ mod tests {
                 let mut iter = content.into_iter();
                 match iter.next().unwrap() {
                     msg::UserContent::Document(msg::Document {
-                        data, media_type, ..
+                        data,
+                        media_type,
+                        ..
                     }) => {
-                        assert_eq!(data, DocumentSourceKind::FileId("file_abc".to_string()));
+                        assert_eq!(
+                            data,
+                            DocumentSourceKind::FileId("file_abc".to_string())
+                        );
                         assert_eq!(media_type, None);
                     }
                     other => {
@@ -2183,13 +2340,20 @@ mod tests {
                 let mut iter = content.into_iter();
                 match iter.next().unwrap() {
                     msg::UserContent::Document(msg::Document {
-                        data, media_type, ..
+                        data,
+                        media_type,
+                        ..
                     }) => {
                         assert_eq!(
                             data,
-                            DocumentSourceKind::String("Some plain text content".into())
+                            DocumentSourceKind::String(
+                                "Some plain text content".into()
+                            )
                         );
-                        assert_eq!(media_type, Some(msg::DocumentMediaType::TXT));
+                        assert_eq!(
+                            media_type,
+                            Some(msg::DocumentMediaType::TXT)
+                        );
                     }
                     other => {
                         panic!("Expected Document content, got: {other:?}")
@@ -2246,18 +2410,22 @@ mod tests {
         use crate::completion::message as msg;
 
         let rig_message = msg::Message::User {
-            content: OneOrMany::one(msg::UserContent::Document(msg::Document {
-                data: DocumentSourceKind::String("data".into()),
-                media_type: Some(msg::DocumentMediaType::HTML),
-                additional_params: None,
-            })),
+            content: OneOrMany::one(msg::UserContent::Document(
+                msg::Document {
+                    data: DocumentSourceKind::String("data".into()),
+                    media_type: Some(msg::DocumentMediaType::HTML),
+                    additional_params: None,
+                },
+            )),
         };
 
         let result: Result<Message, _> = rig_message.try_into();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Anthropic only supports PDF and plain text documents"),
+            err.contains(
+                "Anthropic only supports PDF and plain text documents"
+            ),
             "Unexpected error: {err}"
         );
     }
@@ -2267,18 +2435,24 @@ mod tests {
         use crate::completion::message as msg;
 
         let rig_message = msg::Message::User {
-            content: OneOrMany::one(msg::UserContent::Document(msg::Document {
-                data: DocumentSourceKind::Url("https://example.com/doc.txt".into()),
-                media_type: Some(msg::DocumentMediaType::TXT),
-                additional_params: None,
-            })),
+            content: OneOrMany::one(msg::UserContent::Document(
+                msg::Document {
+                    data: DocumentSourceKind::Url(
+                        "https://example.com/doc.txt".into(),
+                    ),
+                    media_type: Some(msg::DocumentMediaType::TXT),
+                    additional_params: None,
+                },
+            )),
         };
 
         let result: Result<Message, _> = rig_message.try_into();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Only string or base64 data is supported for plain text documents"),
+            err.contains(
+                "Only string or base64 data is supported for plain text documents"
+            ),
             "Unexpected error: {err}"
         );
     }
@@ -2370,10 +2544,14 @@ mod tests {
 
         let msg = message::Message::Assistant {
             id: None,
-            content: OneOrMany::one(message::AssistantContent::Reasoning(reasoning)),
+            content: OneOrMany::one(message::AssistantContent::Reasoning(
+                reasoning,
+            )),
         };
-        let converted: Message = msg.try_into().expect("convert assistant message");
-        let converted_content = converted.content.iter().cloned().collect::<Vec<_>>();
+        let converted: Message =
+            msg.try_into().expect("convert assistant message");
+        let converted_content =
+            converted.content.iter().cloned().collect::<Vec<_>>();
 
         assert_eq!(converted.role, Role::Assistant);
         assert_eq!(converted_content.len(), 4);
@@ -2425,11 +2603,15 @@ mod tests {
         };
         let msg = message::Message::Assistant {
             id: None,
-            content: OneOrMany::one(message::AssistantContent::Reasoning(reasoning)),
+            content: OneOrMany::one(message::AssistantContent::Reasoning(
+                reasoning,
+            )),
         };
 
-        let converted: Message = msg.try_into().expect("convert assistant message");
-        let converted_content = converted.content.iter().cloned().collect::<Vec<_>>();
+        let converted: Message =
+            msg.try_into().expect("convert assistant message");
+        let converted_content =
+            converted.content.iter().cloned().collect::<Vec<_>>();
 
         assert_eq!(converted_content.len(), 1);
         assert!(matches!(
@@ -2455,9 +2637,10 @@ mod tests {
             },
         };
 
-        let parsed: completion::CompletionResponse<CompletionResponse> = response
-            .try_into()
-            .expect("empty end_turn should not error");
+        let parsed: completion::CompletionResponse<CompletionResponse> =
+            response
+                .try_into()
+                .expect("empty end_turn should not error");
 
         assert_eq!(parsed.choice.len(), 1);
         assert!(matches!(
@@ -2483,7 +2666,10 @@ mod tests {
             },
         };
 
-        let err = completion::CompletionResponse::<CompletionResponse>::try_from(response)
+        let err =
+            completion::CompletionResponse::<CompletionResponse>::try_from(
+                response,
+            )
             .expect_err("empty non-end_turn should remain an error");
 
         assert!(matches!(

@@ -393,8 +393,12 @@ impl ModelListingError {
         status_code: u16,
         body: &[u8],
     ) -> Self {
-        let message =
-            format_response_context(provider, path, format_args!("status={status_code}"), body);
+        let message = format_response_context(
+            provider,
+            path,
+            format_args!("status={status_code}"),
+            body,
+        );
         Self::api_error(status_code, message)
     }
 
@@ -404,8 +408,12 @@ impl ModelListingError {
         error: &serde_json::Error,
         body: &[u8],
     ) -> Self {
-        let message =
-            format_response_context(provider, path, format_args!("parse_error={error}"), body);
+        let message = format_response_context(
+            provider,
+            path,
+            format_args!("parse_error={error}"),
+            body,
+        );
         Self::parse_error(message)
     }
 
@@ -633,7 +641,8 @@ mod tests {
         let json = serde_json::to_string(&error).unwrap();
         assert!(json.contains("ApiError"));
 
-        let deserialized: ModelListingError = serde_json::from_str(&json).unwrap();
+        let deserialized: ModelListingError =
+            serde_json::from_str(&json).unwrap();
         match deserialized {
             ModelListingError::ApiError {
                 status_code,
@@ -701,8 +710,13 @@ mod tests {
             ModelListingError::ParseError { message } => {
                 assert!(message.contains("provider=Gemini"));
                 assert!(message.contains("path=/v1beta/models?pageSize=1000"));
-                assert!(message.contains("parse_error=EOF while parsing an object"));
-                assert!(message.contains(r#"{"models":[{"displayName":"broken"}]}"#));
+                assert!(
+                    message.contains("parse_error=EOF while parsing an object")
+                );
+                assert!(
+                    message
+                        .contains(r#"{"models":[{"displayName":"broken"}]}"#)
+                );
             }
             _ => panic!("Expected ParseError"),
         }

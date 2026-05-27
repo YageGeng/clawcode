@@ -90,7 +90,9 @@ impl AgentRegistry {
     ) -> Result<SpawnReservation, String> {
         if let Some(limit) = max_threads {
             if !self.try_increment_spawned(limit) {
-                return Err(format!("agent limit reached: max {limit} threads"));
+                return Err(format!(
+                    "agent limit reached: max {limit} threads"
+                ));
             }
         } else {
             self.total_count.fetch_add(1, Ordering::AcqRel);
@@ -109,12 +111,13 @@ impl AgentRegistry {
                 .active_agents
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let key = agents
-                .agent_tree
-                .iter()
-                .find_map(|(k, m)| (m.agent_id.as_ref() == Some(&thread_id)).then_some(k.clone()));
+            let key = agents.agent_tree.iter().find_map(|(k, m)| {
+                (m.agent_id.as_ref() == Some(&thread_id)).then_some(k.clone())
+            });
             key.and_then(|k| agents.agent_tree.remove(&k))
-                .is_some_and(|m| !m.agent_path.as_ref().is_some_and(|p| p.is_root()))
+                .is_some_and(|m| {
+                    !m.agent_path.as_ref().is_some_and(|p| p.is_root())
+                })
         };
         if removed {
             self.total_count.fetch_sub(1, Ordering::AcqRel);
@@ -188,7 +191,10 @@ impl AgentRegistry {
     /// If the target starts with `/`, it is treated as an agent path and
     /// verified against the registry. Otherwise it is matched against both
     /// nicknames and session ids so tool calls can use notification payloads.
-    pub(crate) fn resolve_target(&self, target: &str) -> Result<AgentPath, String> {
+    pub(crate) fn resolve_target(
+        &self,
+        target: &str,
+    ) -> Result<AgentPath, String> {
         let agents = self
             .active_agents
             .lock()
@@ -199,7 +205,8 @@ impl AgentRegistry {
             }
         } else {
             for meta in agents.agent_tree.values() {
-                let matches_nickname = meta.agent_nickname.as_deref() == Some(target);
+                let matches_nickname =
+                    meta.agent_nickname.as_deref() == Some(target);
                 let matches_session_id = meta
                     .agent_id
                     .as_ref()
@@ -216,7 +223,10 @@ impl AgentRegistry {
     }
 
     /// Look up an agent's thread id by path.
-    pub(crate) fn agent_id_for_path(&self, agent_path: &AgentPath) -> Option<SessionId> {
+    pub(crate) fn agent_id_for_path(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Option<SessionId> {
         self.active_agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -226,7 +236,10 @@ impl AgentRegistry {
     }
 
     /// Look up agent metadata by thread id.
-    pub(crate) fn agent_metadata_for_thread(&self, thread_id: SessionId) -> Option<AgentMetadata> {
+    pub(crate) fn agent_metadata_for_thread(
+        &self,
+        thread_id: SessionId,
+    ) -> Option<AgentMetadata> {
         self.active_agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -265,7 +278,10 @@ impl AgentRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .agent_tree
             .values()
-            .filter(|m| m.agent_id.is_some() && !m.agent_path.as_ref().is_some_and(|p| p.is_root()))
+            .filter(|m| {
+                m.agent_id.is_some()
+                    && !m.agent_path.as_ref().is_some_and(|p| p.is_root())
+            })
             .filter(|m| !m.agent_status.is_final())
             .cloned()
             .collect()
@@ -278,7 +294,10 @@ impl AgentRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .agent_tree
             .values()
-            .filter(|m| m.agent_id.is_some() && !m.agent_path.as_ref().is_some_and(|p| p.is_root()))
+            .filter(|m| {
+                m.agent_id.is_some()
+                    && !m.agent_path.as_ref().is_some_and(|p| p.is_root())
+            })
             .cloned()
             .collect()
     }
@@ -296,7 +315,11 @@ impl AgentRegistry {
     }
 
     /// Update the latest known status for a thread.
-    pub(crate) fn update_agent_status(&self, thread_id: &SessionId, status: AgentStatus) {
+    pub(crate) fn update_agent_status(
+        &self,
+        thread_id: &SessionId,
+        status: AgentStatus,
+    ) {
         let mut agents = self
             .active_agents
             .lock()
@@ -344,7 +367,10 @@ impl AgentRegistry {
     /// `used_agent_nicknames` set is cleared and `nickname_reset_count`
     /// is incremented, causing names to gain ordinal suffixes like
     /// "Euclid the 2nd", "Hypatia the 3rd", etc.
-    fn reserve_agent_nickname(&self, preferred: Option<&str>) -> Option<String> {
+    fn reserve_agent_nickname(
+        &self,
+        preferred: Option<&str>,
+    ) -> Option<String> {
         let mut agents = self
             .active_agents
             .lock()
@@ -372,7 +398,10 @@ impl AgentRegistry {
             // Pool exhausted — reset with next ordinal rank.
             agents.used_agent_nicknames.clear();
             agents.nickname_reset_count += 1;
-            format_agent_nickname(names.choose(&mut rand::rng())?, agents.nickname_reset_count)
+            format_agent_nickname(
+                names.choose(&mut rand::rng())?,
+                agents.nickname_reset_count,
+            )
         };
 
         agents.used_agent_nicknames.insert(chosen.clone());
@@ -388,7 +417,9 @@ impl AgentRegistry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match agents.agent_tree.entry(agent_path.to_string()) {
-            Entry::Occupied(_) => Err(format!("agent path `{agent_path}` already exists")),
+            Entry::Occupied(_) => {
+                Err(format!("agent path `{agent_path}` already exists"))
+            }
             Entry::Vacant(entry) => {
                 entry.insert(
                     AgentMetadata::builder()
@@ -457,7 +488,10 @@ pub(crate) struct SpawnReservation {
 
 impl SpawnReservation {
     /// Reserve a nickname from the pool, optionally preferring a specific one.
-    pub(crate) fn reserve_nickname(&mut self, preferred: Option<&str>) -> Result<String, String> {
+    pub(crate) fn reserve_nickname(
+        &mut self,
+        preferred: Option<&str>,
+    ) -> Result<String, String> {
         let nick = self
             .state
             .reserve_agent_nickname(preferred)
@@ -467,7 +501,10 @@ impl SpawnReservation {
     }
 
     /// Reserve a path.
-    pub(crate) fn reserve_path(&mut self, path: &AgentPath) -> Result<(), String> {
+    pub(crate) fn reserve_path(
+        &mut self,
+        path: &AgentPath,
+    ) -> Result<(), String> {
         self.state.reserve_agent_path(path)?;
         self.reserved_agent_path = Some(path.clone());
         Ok(())
@@ -518,7 +555,8 @@ mod tests {
                 .build(),
         );
 
-        let found = registry.agent_id_for_path(&AgentPath::root().join("test1"));
+        let found =
+            registry.agent_id_for_path(&AgentPath::root().join("test1"));
         assert_eq!(found, Some(id));
     }
 
@@ -591,7 +629,9 @@ mod tests {
             1
         );
         assert_eq!(
-            AgentRegistry::next_thread_spawn_depth(&AgentPath::root().join("a").join("b")),
+            AgentRegistry::next_thread_spawn_depth(
+                &AgentPath::root().join("a").join("b")
+            ),
             3
         );
     }
@@ -721,7 +761,13 @@ mod tests {
         let registry = AgentRegistry::new();
         let path = AgentPath::root().join("dup_restore");
         registry
-            .restore_agent(SessionId::from("r1"), path.clone(), None, None, None)
+            .restore_agent(
+                SessionId::from("r1"),
+                path.clone(),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             registry

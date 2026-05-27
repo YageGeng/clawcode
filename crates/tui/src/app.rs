@@ -36,34 +36,40 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let theme = Theme::from_config(config::load()?.current().tui.theme);
     let (app_tx, app_rx) = mpsc::unbounded_channel::<AppEvent>();
-    acp_client::with_in_process_client(app_tx.clone(), move |client| async move {
-        client.initialize().await?;
-        let (session_id, model_label) = open_session(&client, cwd.clone(), resume).await?;
-        let mut router = SessionRouterState::new(session_id, cwd, model_label, theme);
-        let mut view = ViewState::default();
-        let mut composer = Composer::default();
+    acp_client::with_in_process_client(
+        app_tx.clone(),
+        move |client| async move {
+            client.initialize().await?;
+            let (session_id, model_label) =
+                open_session(&client, cwd.clone(), resume).await?;
+            let mut router =
+                SessionRouterState::new(session_id, cwd, model_label, theme);
+            let mut view = ViewState::default();
+            let mut composer = Composer::default();
 
-        let (mut terminal, mut terminal_guard) = enter(use_alt_screen)?;
-        let mut ui = UiRuntime {
-            router: &mut router,
-            view: &mut view,
-            composer: &mut composer,
-        };
-        let result = run_loop(client, app_rx, app_tx, &mut terminal, &mut ui).await;
+            let (mut terminal, mut terminal_guard) = enter(use_alt_screen)?;
+            let mut ui = UiRuntime {
+                router: &mut router,
+                view: &mut view,
+                composer: &mut composer,
+            };
+            let result =
+                run_loop(client, app_rx, app_tx, &mut terminal, &mut ui).await;
 
-        let restore_result = terminal_guard.restore();
-        match (result, restore_result) {
-            (Err(run_error), Err(restore_error)) => {
-                tracing::warn!(
-                    restore_error = %restore_error,
-                    "failed to restore terminal after run failure"
-                );
-                Err(run_error)
+            let restore_result = terminal_guard.restore();
+            match (result, restore_result) {
+                (Err(run_error), Err(restore_error)) => {
+                    tracing::warn!(
+                        restore_error = %restore_error,
+                        "failed to restore terminal after run failure"
+                    );
+                    Err(run_error)
+                }
+                (Ok(()), Err(restore_error)) => Err(restore_error),
+                (result, Ok(())) => result,
             }
-            (Ok(()), Err(restore_error)) => Err(restore_error),
-            (result, Ok(())) => result,
-        }
-    })
+        },
+    )
     .await
 }
 
@@ -150,7 +156,8 @@ async fn run_loop(
     terminal: &mut TuiTerminal,
     ui: &mut UiRuntime<'_>,
 ) -> anyhow::Result<()> {
-    terminal.draw(|frame| render_router(frame, ui.router, ui.view, ui.composer))?;
+    terminal
+        .draw(|frame| render_router(frame, ui.router, ui.view, ui.composer))?;
 
     let mut terminal_events = EventStream::new().fuse();
     let mut redraw = time::interval(Duration::from_millis(100));
@@ -208,7 +215,9 @@ async fn run_loop(
         if should_exit {
             break;
         }
-        terminal.draw(|frame| render_router(frame, ui.router, ui.view, ui.composer))?;
+        terminal.draw(|frame| {
+            render_router(frame, ui.router, ui.view, ui.composer)
+        })?;
     }
 
     client.reject_pending_permissions();
@@ -271,12 +280,23 @@ async fn handle_key_event(
     }
 
     if ui.router.is_agent_picker_focused() {
-        if let Some(target_session_id) = handle_agent_picker_key(ui.router, key_event.code)? {
-            if !ensure_loaded_agent_session(client, ui.router, &target_session_id).await {
+        if let Some(target_session_id) =
+            handle_agent_picker_key(ui.router, key_event.code)?
+        {
+            if !ensure_loaded_agent_session(
+                client,
+                ui.router,
+                &target_session_id,
+            )
+            .await
+            {
                 return Ok(false);
             }
-            ui.router
-                .select_agent_session(target_session_id, ui.view, ui.composer)?;
+            ui.router.select_agent_session(
+                target_session_id,
+                ui.view,
+                ui.composer,
+            )?;
             ui.router.close_agent_picker();
         }
         return Ok(false);
@@ -309,7 +329,9 @@ async fn handle_key_event(
         }
         KeyCode::Char('c') if key_event.modifiers == KeyModifiers::CONTROL => {
             if ui.router.active_state().is_running_prompt() {
-                if let Err(error) = client.cancel(ui.router.active_session_id().clone()) {
+                if let Err(error) =
+                    client.cancel(ui.router.active_session_id().clone())
+                {
                     ui.router.active_state_mut().set_error(error.to_string());
                 }
             } else {
@@ -317,7 +339,9 @@ async fn handle_key_event(
             }
             Ok(false)
         }
-        KeyCode::Esc if !ui.router.active_state().is_running_prompt() => Ok(true),
+        KeyCode::Esc if !ui.router.active_state().is_running_prompt() => {
+            Ok(true)
+        }
         _ => {
             let action = ui.composer.handle_key(key_event);
             if let ComposerAction::Submit(text) = action

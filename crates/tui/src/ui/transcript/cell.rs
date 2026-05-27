@@ -52,7 +52,11 @@ pub trait TranscriptCell: std::fmt::Debug + Send + Sync + Any {
     }
 
     /// Returns logical lines for transcript cache rendering.
-    fn transcript_lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    fn transcript_lines(
+        &self,
+        width: u16,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
         self.display_lines(width, theme)
     }
 

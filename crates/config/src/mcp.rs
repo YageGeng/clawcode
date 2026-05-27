@@ -4,7 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Flat TOML struct for `[[mcp_servers]]`.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, typed_builder::TypedBuilder)]
+#[derive(
+    Debug,
+    Clone,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    typed_builder::TypedBuilder,
+)]
 pub struct McpServerConfig {
     /// Unique server name used in MCP tool names and auth file names.
     pub name: String,
@@ -55,7 +63,15 @@ pub struct McpServerConfig {
 }
 
 /// OAuth 2.0 configuration for an MCP server.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, typed_builder::TypedBuilder)]
+#[derive(
+    Debug,
+    Clone,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    typed_builder::TypedBuilder,
+)]
 pub struct McpOAuthConfig {
     /// OAuth client ID.
     pub client_id: String,
@@ -142,12 +158,16 @@ impl McpServerConfig {
             }),
             (false, false) => Err(McpConfigError::InvalidTransport {
                 server: self.name.clone(),
-                reason: "configure either command for stdio or url for streamable HTTP".to_string(),
+                reason: "configure either command for stdio or url for streamable HTTP"
+                    .to_string(),
             }),
-            (true, false) if self.oauth.is_some() => Err(McpConfigError::InvalidTransport {
-                server: self.name.clone(),
-                reason: "oauth is only supported for streamable HTTP servers".to_string(),
-            }),
+            (true, false) if self.oauth.is_some() => {
+                Err(McpConfigError::InvalidTransport {
+                    server: self.name.clone(),
+                    reason: "oauth is only supported for streamable HTTP servers"
+                        .to_string(),
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -191,12 +211,16 @@ impl TryFrom<McpServerConfig> for protocol::mcp::McpServerConfig {
                 env: env.unwrap_or_default(),
                 cwd: None,
             },
-            (None, Some(u)) => protocol::mcp::McpTransportConfig::StreamableHttp {
-                url: u,
-                bearer_token_env,
-                http_headers: http_headers.unwrap_or_default(),
-            },
-            _ => unreachable!("MCP transport validation must reject ambiguous configs"),
+            (None, Some(u)) => {
+                protocol::mcp::McpTransportConfig::StreamableHttp {
+                    url: u,
+                    bearer_token_env,
+                    http_headers: http_headers.unwrap_or_default(),
+                }
+            }
+            _ => unreachable!(
+                "MCP transport validation must reject ambiguous configs"
+            ),
         };
 
         // The Option builder setter uses strip_option, so keep the Some/None branches explicit.

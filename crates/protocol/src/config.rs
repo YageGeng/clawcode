@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::{AgentPath, SessionId};
 
 /// Tool-approval behaviour for a session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     /// Ask the user before each tool call that needs confirmation.

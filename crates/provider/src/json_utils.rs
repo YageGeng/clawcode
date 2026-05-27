@@ -7,7 +7,10 @@ use std::str::FromStr;
 
 pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     match (a, b) {
-        (serde_json::Value::Object(mut a_map), serde_json::Value::Object(b_map)) => {
+        (
+            serde_json::Value::Object(mut a_map),
+            serde_json::Value::Object(b_map),
+        ) => {
             b_map.into_iter().for_each(|(key, value)| {
                 a_map.insert(key, value);
             });
@@ -18,7 +21,11 @@ pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
 }
 
 pub fn merge_inplace(a: &mut serde_json::Value, b: serde_json::Value) {
-    if let (serde_json::Value::Object(a_map), serde_json::Value::Object(b_map)) = (a, b) {
+    if let (
+        serde_json::Value::Object(a_map),
+        serde_json::Value::Object(b_map),
+    ) = (a, b)
+    {
         b_map.into_iter().for_each(|(key, value)| {
             a_map.insert(key, value);
         });
@@ -37,7 +44,9 @@ pub fn value_to_json_string(value: &serde_json::Value) -> String {
 
 /// Parse tool arguments from a streamed string payload.
 /// Some providers emit an empty string for parameterless tool calls; normalize that to `{}`.
-pub fn parse_tool_arguments(arguments: &str) -> serde_json::Result<serde_json::Value> {
+pub fn parse_tool_arguments(
+    arguments: &str,
+) -> serde_json::Result<serde_json::Value> {
     if arguments.trim().is_empty() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
     }
@@ -52,7 +61,10 @@ pub mod stringified_json {
     use super::parse_tool_arguments;
     use serde::{self, Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(value: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(
+        value: &serde_json::Value,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -60,7 +72,9 @@ pub mod stringified_json {
         serializer.serialize_str(&s)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<serde_json::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -195,7 +209,9 @@ mod tests {
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct DummyMaybeStringified {
-        #[serde(deserialize_with = "stringified_json::deserialize_maybe_stringified")]
+        #[serde(
+            deserialize_with = "stringified_json::deserialize_maybe_stringified"
+        )]
         data: serde_json::Value,
     }
 
@@ -247,21 +263,24 @@ mod tests {
     #[test]
     fn test_deserialize_maybe_stringified_value_from_string() {
         let json_str = r#"{"data":"{\"key\":\"value\"}"}"#;
-        let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
+        let dummy: DummyMaybeStringified =
+            serde_json::from_str(json_str).unwrap();
         assert_eq!(dummy.data, serde_json::json!({"key": "value"}));
     }
 
     #[test]
     fn test_deserialize_maybe_stringified_value_from_object() {
         let json_str = r#"{"data":{"key":"value"}}"#;
-        let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
+        let dummy: DummyMaybeStringified =
+            serde_json::from_str(json_str).unwrap();
         assert_eq!(dummy.data, serde_json::json!({"key": "value"}));
     }
 
     #[test]
     fn test_deserialize_maybe_stringified_value_from_empty_string() {
         let json_str = r#"{"data":""}"#;
-        let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
+        let dummy: DummyMaybeStringified =
+            serde_json::from_str(json_str).unwrap();
         assert_eq!(dummy.data, serde_json::json!({}));
     }
 

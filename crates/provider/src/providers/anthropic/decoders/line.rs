@@ -34,7 +34,8 @@ impl LineDecoder {
         let mut lines = Vec::new();
 
         // Process lines while we can find newlines
-        while let Some(pattern_index) = find_newline_index(&self.buffer, self.carriage_return_index)
+        while let Some(pattern_index) =
+            find_newline_index(&self.buffer, self.carriage_return_index)
         {
             if pattern_index.carriage && self.carriage_return_index.is_none() {
                 // Skip until we either get a corresponding `\n`, a new `\r` or nothing
@@ -46,10 +47,13 @@ impl LineDecoder {
             // TODO: Collapse this if statement (whenever `||` operator is supported in if-let chains).
             #[allow(clippy::collapsible_if)]
             if let Some(cr_index) = self.carriage_return_index {
-                if pattern_index.index != cr_index + 1 || pattern_index.carriage {
+                if pattern_index.index != cr_index + 1 || pattern_index.carriage
+                {
                     if cr_index > 0 {
                         let line = decode_text(
-                            self.buffer.get(..cr_index.saturating_sub(1)).unwrap_or(&[]),
+                            self.buffer
+                                .get(..cr_index.saturating_sub(1))
+                                .unwrap_or(&[]),
                         );
                         lines.push(line);
                     } else {
@@ -58,7 +62,8 @@ impl LineDecoder {
                     }
 
                     if cr_index < self.buffer.len() {
-                        self.buffer = self.buffer.get(cr_index..).unwrap_or(&[]).to_vec();
+                        self.buffer =
+                            self.buffer.get(cr_index..).unwrap_or(&[]).to_vec();
                     } else {
                         self.buffer.clear();
                     }
@@ -74,7 +79,8 @@ impl LineDecoder {
             };
 
             if end_index > 0 {
-                let line = decode_text(self.buffer.get(..end_index).unwrap_or(&[]));
+                let line =
+                    decode_text(self.buffer.get(..end_index).unwrap_or(&[]));
                 lines.push(line);
             } else {
                 lines.push(String::new());
@@ -112,7 +118,10 @@ struct NewlineIndex {
 }
 
 /// Find the index of the next newline character in the buffer
-fn find_newline_index(buffer: &[u8], start_index: Option<usize>) -> Option<NewlineIndex> {
+fn find_newline_index(
+    buffer: &[u8],
+    start_index: Option<usize>,
+) -> Option<NewlineIndex> {
     const NEWLINE: u8 = 0x0a; // \n
     const CARRIAGE: u8 = 0x0d; // \r
 
@@ -195,7 +204,8 @@ mod tests {
     use super::*;
 
     fn decode_string_chunks(chunks: &[&str], flush: bool) -> Vec<String> {
-        let byte_chunks: Vec<&[u8]> = chunks.iter().map(|s| s.as_bytes()).collect();
+        let byte_chunks: Vec<&[u8]> =
+            chunks.iter().map(|s| s.as_bytes()).collect();
         decode_chunks(&byte_chunks, flush)
     }
 
@@ -231,7 +241,10 @@ mod tests {
     #[test]
     fn test_trailing_new_lines_with_cr() {
         assert_eq!(
-            decode_string_chunks(&["foo", " bar", "baz\r\n", "thing\r\n"], false),
+            decode_string_chunks(
+                &["foo", " bar", "baz\r\n", "thing\r\n"],
+                false
+            ),
             vec!["foo barbaz", "thing"]
         );
     }
@@ -288,7 +301,10 @@ mod tests {
     #[test]
     fn test_double_cr_then_crlf() {
         assert_eq!(
-            decode_string_chunks(&["foo\r", "\r", "\r", "\n", "bar", "\n"], false),
+            decode_string_chunks(
+                &["foo\r", "\r", "\r", "\n", "bar", "\n"],
+                false
+            ),
             vec!["foo", "", "", "bar"]
         );
         assert_eq!(
@@ -330,7 +346,8 @@ mod tests {
         );
         assert_eq!(
             decoder.decode(&[
-                0xb2, 0xd0, 0xb5, 0xd1, 0x81, 0xd1, 0x82, 0xd0, 0xbd, 0xd0, 0xb8
+                0xb2, 0xd0, 0xb5, 0xd1, 0x81, 0xd1, 0x82, 0xd0, 0xbd, 0xd0,
+                0xb8
             ]),
             Vec::<String>::new()
         );

@@ -14,8 +14,9 @@ use crate::streaming::{StreamedAssistantContent, ToolCallDeltaContent};
 /// Built on top of [`WasmCompatStream`](crate::wasm_compat::WasmCompatStream)
 /// so that `Send` is included on native targets and dropped on wasm32 with
 /// the `wasm` feature.
-pub type DynLlmStream =
-    crate::wasm_compat::WasmCompatStream<Result<LlmStreamEvent, CompletionError>>;
+pub type DynLlmStream = crate::wasm_compat::WasmCompatStream<
+    Result<LlmStreamEvent, CompletionError>,
+>;
 
 // ── LlmStreamEvent ──────────────────────────────────────────────────────────
 
@@ -82,7 +83,9 @@ where
 {
     type Error = CompletionError;
 
-    fn try_from(item: StreamedAssistantContent<T>) -> Result<Self, Self::Error> {
+    fn try_from(
+        item: StreamedAssistantContent<T>,
+    ) -> Result<Self, Self::Error> {
         match item {
             StreamedAssistantContent::Text(t) => Ok(LlmStreamEvent::Text(t)),
             StreamedAssistantContent::ToolCall {
@@ -101,7 +104,9 @@ where
                 internal_call_id,
                 content,
             }),
-            StreamedAssistantContent::Reasoning(r) => Ok(LlmStreamEvent::Reasoning(r)),
+            StreamedAssistantContent::Reasoning(r) => {
+                Ok(LlmStreamEvent::Reasoning(r))
+            }
             StreamedAssistantContent::ReasoningDelta {
                 id,
                 reasoning,
@@ -112,7 +117,8 @@ where
                 replayable,
             }),
             StreamedAssistantContent::Final(r) => Ok(LlmStreamEvent::Final {
-                raw: serde_json::to_value(&r).map_err(CompletionError::JsonError)?,
+                raw: serde_json::to_value(&r)
+                    .map_err(CompletionError::JsonError)?,
                 usage: r.token_usage(),
             }),
         }

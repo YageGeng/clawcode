@@ -17,15 +17,16 @@ use http::Request;
 use tracing::{Instrument, Level, enabled, info_span};
 
 use crate::client::{
-    self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Provider, ProviderBuilder,
-    ProviderClient,
+    self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Provider,
+    ProviderBuilder, ProviderClient,
 };
 use crate::completion::GetTokenUsage;
 use crate::http_client::{self, HttpClientExt};
 use crate::message::{Document, DocumentSourceKind, TryIntoMany};
 use crate::model::{Model, ModelList, ModelListingError};
 use crate::providers::internal::openai_chat_completions_compatible::{
-    self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason, CompatibleStreamProfile,
+    self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason,
+    CompatibleStreamProfile,
 };
 use crate::{
     OneOrMany,
@@ -351,7 +352,8 @@ impl TryIntoMany<Message> for message::Message {
                             text_content.push_str(text.text());
                         }
                         message::AssistantContent::Reasoning(reasoning) => {
-                            reasoning_content.push_str(&reasoning.display_text());
+                            reasoning_content
+                                .push_str(&reasoning.display_text());
                         }
                         message::AssistantContent::ToolCall(tool_call) => {
                             tool_calls.push(ToolCall::from(tool_call.clone()));
@@ -415,12 +417,16 @@ impl From<crate::completion::ToolDefinition> for ToolDefinition {
     }
 }
 
-impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionResponse> {
+impl TryFrom<CompletionResponse>
+    for completion::CompletionResponse<CompletionResponse>
+{
     type Error = CompletionError;
 
     fn try_from(response: CompletionResponse) -> Result<Self, Self::Error> {
         let choice = response.choices.first().ok_or_else(|| {
-            CompletionError::ResponseError("Response contained no choices".to_owned())
+            CompletionError::ResponseError(
+                "Response contained no choices".to_owned(),
+            )
         })?;
         let content = match &choice.message {
             Message::Assistant {
@@ -449,7 +455,9 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                 );
 
                 if let Some(reasoning_content) = reasoning_content {
-                    content.push(completion::AssistantContent::reasoning(reasoning_content));
+                    content.push(completion::AssistantContent::reasoning(
+                        reasoning_content,
+                    ));
                 }
 
                 Ok(content)
@@ -505,9 +513,13 @@ pub(super) struct DeepseekCompletionRequest {
 impl TryFrom<(&str, CompletionRequest)> for DeepseekCompletionRequest {
     type Error = CompletionError;
 
-    fn try_from((model, req): (&str, CompletionRequest)) -> Result<Self, Self::Error> {
+    fn try_from(
+        (model, req): (&str, CompletionRequest),
+    ) -> Result<Self, Self::Error> {
         if req.output_schema.is_some() {
-            tracing::warn!("Structured outputs currently not supported for DeepSeek");
+            tracing::warn!(
+                "Structured outputs currently not supported for DeepSeek"
+            );
         }
         let model = req.model.clone().unwrap_or_else(|| model.to_string());
         let mut full_history: Vec<Message> = match &req.preamble {
@@ -599,8 +611,10 @@ where
 
         span.record("gen_ai.system_instructions", &completion_request.preamble);
 
-        let request =
-            DeepseekCompletionRequest::try_from((self.model.as_ref(), completion_request))?;
+        let request = DeepseekCompletionRequest::try_from((
+            self.model.as_ref(),
+            completion_request,
+        ))?;
 
         if enabled!(Level::TRACE) {
             tracing::trace!(target: "clawcode::completions",
@@ -619,13 +633,19 @@ where
         async move {
             let response = self.client.send::<_, Bytes>(req).await?;
             let status = response.status();
-            let response_body = response.into_body().into_future().await?.to_vec();
+            let response_body =
+                response.into_body().into_future().await?.to_vec();
 
             if status.is_success() {
-                match serde_json::from_slice::<ApiResponse<CompletionResponse>>(&response_body)? {
+                match serde_json::from_slice::<ApiResponse<CompletionResponse>>(
+                    &response_body,
+                )? {
                     ApiResponse::Ok(response) => {
                         let span = tracing::Span::current();
-                        span.record("gen_ai.usage.input_tokens", response.usage.prompt_tokens);
+                        span.record(
+                            "gen_ai.usage.input_tokens",
+                            response.usage.prompt_tokens,
+                        );
                         span.record(
                             "gen_ai.usage.output_tokens",
                             response.usage.completion_tokens,
@@ -647,7 +667,9 @@ where
                         }
                         response.try_into()
                     }
-                    ApiResponse::Err(err) => Err(CompletionError::ProviderError(err.message)),
+                    ApiResponse::Err(err) => {
+                        Err(CompletionError::ProviderError(err.message))
+                    }
                 }
             } else {
                 Err(CompletionError::ProviderError(
@@ -667,8 +689,10 @@ where
         CompletionError,
     > {
         let preamble = completion_request.preamble.clone();
-        let mut request =
-            DeepseekCompletionRequest::try_from((self.model.as_ref(), completion_request))?;
+        let mut request = DeepseekCompletionRequest::try_from((
+            self.model.as_ref(),
+            completion_request,
+        ))?;
 
         let params = json_utils::merge(
             request.additional_params.unwrap_or(serde_json::json!({})),
@@ -762,8 +786,12 @@ impl CompatibleStreamProfile for DeepSeekCompatibleProfile {
     fn normalize_chunk(
         &self,
         data: &str,
-    ) -> Result<Option<CompatibleChunk<Self::Usage, Self::Detail>>, CompletionError> {
-        let data = match serde_json::from_str::<StreamingCompletionChunk>(data) {
+    ) -> Result<
+        Option<CompatibleChunk<Self::Usage, Self::Detail>>,
+        CompletionError,
+    > {
+        let data = match serde_json::from_str::<StreamingCompletionChunk>(data)
+        {
             Ok(data) => data,
             Err(error) => {
                 tracing::debug!(
@@ -784,9 +812,10 @@ impl CompatibleStreamProfile for DeepSeekCompatibleProfile {
                     finish_reason: CompatibleFinishReason::Other,
                     text: choice.delta.content.clone(),
                     reasoning: choice.delta.reasoning_content.clone(),
-                    tool_calls: openai_chat_completions_compatible::tool_call_chunks(
-                        &choice.delta.tool_calls,
-                    ),
+                    tool_calls:
+                        openai_chat_completions_compatible::tool_call_chunks(
+                            &choice.delta.tool_calls,
+                        ),
                     details: Vec::new(),
                 },
             ),
@@ -862,20 +891,20 @@ where
     async fn list_all(&self) -> Result<ModelList, ModelListingError> {
         let path = "/models";
         let req = self.client.get(path)?.body(http_client::NoBody)?;
-        let response = self
-            .client
-            .send::<_, Vec<u8>>(req)
-            .await
-            .map_err(|error| match error {
-                http_client::Error::InvalidStatusCodeWithMessage(status, message) => {
-                    ModelListingError::api_error_with_context(
+        let response =
+            self.client.send::<_, Vec<u8>>(req).await.map_err(|error| {
+                match error {
+                    http_client::Error::InvalidStatusCodeWithMessage(
+                        status,
+                        message,
+                    ) => ModelListingError::api_error_with_context(
                         "DeepSeek",
                         path,
                         status.as_u16(),
                         message.as_bytes(),
-                    )
+                    ),
+                    other => ModelListingError::from(other),
                 }
-                other => ModelListingError::from(other),
             })?;
 
         if !response.status().is_success() {
@@ -890,9 +919,12 @@ where
         }
 
         let body = response.into_body().await?;
-        let api_resp: ListModelsResponse = serde_json::from_slice(&body).map_err(|error| {
-            ModelListingError::parse_error_with_context("DeepSeek", path, &error, &body)
-        })?;
+        let api_resp: ListModelsResponse = serde_json::from_slice(&body)
+            .map_err(|error| {
+                ModelListingError::parse_error_with_context(
+                    "DeepSeek", path, &error, &body,
+                )
+            })?;
 
         let models = api_resp.data.into_iter().map(Model::from).collect();
 

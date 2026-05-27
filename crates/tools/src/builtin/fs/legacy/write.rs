@@ -53,7 +53,11 @@ impl Tool for WriteFile {
         })
     }
 
-    fn needs_approval(&self, _: &serde_json::Value, _ctx: &crate::ToolContext) -> bool {
+    fn needs_approval(
+        &self,
+        _: &serde_json::Value,
+        _ctx: &crate::ToolContext,
+    ) -> bool {
         true
     }
 
@@ -98,7 +102,10 @@ mod tests {
     use super::*;
     use crate::ToolContext;
     use crate::builtin::fs::legacy::read::ReadFile;
-    use crate::{FsBackend, FsBackendError, FsReadRequest, FsReadResponse, FsWriteResponse};
+    use crate::{
+        FsBackend, FsBackendError, FsReadRequest, FsReadResponse,
+        FsWriteResponse,
+    };
     use async_trait::async_trait;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -135,7 +142,8 @@ mod tests {
             *self
                 .request
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(request);
             Ok(FsWriteResponse {
                 bytes_written: 12,
                 display_path: std::path::PathBuf::from("/workspace/out.txt"),
@@ -175,7 +183,8 @@ mod tests {
         let backend = Arc::new(RecordingWriteBackend {
             request: Mutex::new(None),
         });
-        let tool = WriteFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
+        let tool =
+            WriteFile::with_backend(Arc::clone(&backend) as Arc<dyn FsBackend>);
 
         let result = tool
             .execute(
@@ -209,7 +218,9 @@ mod tests {
         .await
         .unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("nested/test.txt")).unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join("nested/test.txt"))
+                .unwrap();
         assert_eq!(content, "cwd scoped");
     }
 

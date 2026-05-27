@@ -20,8 +20,8 @@ mod auth;
 
 use crate::OneOrMany;
 use crate::client::{
-    self, ApiKey, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
-    ProviderClient, Transport,
+    self, ApiKey, Capabilities, Capable, DebugExt, Nothing, Provider,
+    ProviderBuilder, ProviderClient, Transport,
 };
 use crate::completion::{self, CompletionError};
 use crate::http_client::{self, HttpClientExt};
@@ -142,14 +142,22 @@ impl Provider for ChatGPTExt {
 
     const VERIFY_PATH: &'static str = "";
 
-    fn with_custom(&self, req: http_client::Builder) -> http_client::Result<http_client::Builder> {
+    fn with_custom(
+        &self,
+        req: http_client::Builder,
+    ) -> http_client::Result<http_client::Builder> {
         Ok(req
             .header("originator", &self.originator)
             .header("user-agent", &self.user_agent)
             .header(http::header::ACCEPT, "text/event-stream"))
     }
 
-    fn build_uri(&self, base_url: &str, path: &str, _transport: Transport) -> String {
+    fn build_uri(
+        &self,
+        base_url: &str,
+        path: &str,
+        _transport: Transport,
+    ) -> String {
         format!(
             "{}/{}",
             base_url.trim_end_matches('/'),
@@ -201,7 +209,10 @@ impl ProviderBuilder for ChatGPTBuilder {
             ),
             default_instructions: ext.default_instructions.clone(),
             originator: ext.originator.clone(),
-            user_agent: ext.user_agent.clone().unwrap_or_else(default_user_agent),
+            user_agent: ext
+                .user_agent
+                .clone()
+                .unwrap_or_else(default_user_agent),
         })
     }
 }
@@ -213,14 +224,18 @@ impl ProviderClient for Client {
     fn from_env() -> Result<Self, Self::Error> {
         let mut builder = Self::builder();
 
-        if let Some(base_url) = crate::client::optional_env_var("CHATGPT_API_BASE")?
-            .or(crate::client::optional_env_var("OPENAI_CHATGPT_API_BASE")?)
+        if let Some(base_url) =
+            crate::client::optional_env_var("CHATGPT_API_BASE")?
+                .or(crate::client::optional_env_var("OPENAI_CHATGPT_API_BASE")?)
         {
             builder = builder.base_url(base_url);
         }
 
-        if let Some(access_token) = crate::client::optional_env_var("CHATGPT_ACCESS_TOKEN")? {
-            let account_id = crate::client::optional_env_var("CHATGPT_ACCOUNT_ID")?;
+        if let Some(access_token) =
+            crate::client::optional_env_var("CHATGPT_ACCESS_TOKEN")?
+        {
+            let account_id =
+                crate::client::optional_env_var("CHATGPT_ACCOUNT_ID")?;
             builder
                 .api_key(ChatGPTAuth::AccessToken {
                     access_token,
@@ -239,7 +254,9 @@ impl ProviderClient for Client {
 }
 
 impl<H> client::ClientBuilder<ChatGPTBuilder, crate::markers::Missing, H> {
-    pub fn oauth(self) -> client::ClientBuilder<ChatGPTBuilder, ChatGPTAuth, H> {
+    pub fn oauth(
+        self,
+    ) -> client::ClientBuilder<ChatGPTBuilder, ChatGPTAuth, H> {
         self.api_key(ChatGPTAuth::OAuth)
     }
 }
@@ -316,7 +333,10 @@ where
         }
     }
 
-    pub fn with_tool(mut self, tool: impl Into<responses_api::ResponsesToolDefinition>) -> Self {
+    pub fn with_tool(
+        mut self,
+        tool: impl Into<responses_api::ResponsesToolDefinition>,
+    ) -> Self {
         self.tools.push(tool.into());
         self
     }
@@ -330,7 +350,9 @@ where
         self
     }
 
-    fn openai_model(&self) -> responses_api::GenericResponsesCompletionModel<ChatGPTExt, H> {
+    fn openai_model(
+        &self,
+    ) -> responses_api::GenericResponsesCompletionModel<ChatGPTExt, H> {
         let mut model = responses_api::GenericResponsesCompletionModel::new(
             self.client.clone(),
             self.model.clone(),
@@ -343,20 +365,24 @@ where
         &self,
         request: completion::CompletionRequest,
     ) -> Result<ResponsesRequest, CompletionError> {
-        let mut request = self.openai_model().create_completion_request(request)?;
+        let mut request =
+            self.openai_model().create_completion_request(request)?;
 
         if let Some(system_instructions) =
             normalize_system_messages_into_instructions(&mut request)?
         {
-            request.instructions = Some(match request.instructions.as_deref() {
-                Some(existing) if !existing.trim().is_empty() => {
-                    format!("{system_instructions}\n\n{existing}")
-                }
-                _ => system_instructions,
-            });
+            request.instructions =
+                Some(match request.instructions.as_deref() {
+                    Some(existing) if !existing.trim().is_empty() => {
+                        format!("{system_instructions}\n\n{existing}")
+                    }
+                    _ => system_instructions,
+                });
         }
 
-        if let Some(default_instructions) = &self.client.ext().default_instructions {
+        if let Some(default_instructions) =
+            &self.client.ext().default_instructions
+        {
             request.instructions = Some(merge_instructions(
                 default_instructions,
                 request.instructions.as_deref(),
@@ -412,16 +438,15 @@ where
     async fn completion_from_sse(
         &self,
         request: ResponsesRequest,
-    ) -> Result<completion::CompletionResponse<responses_api::CompletionResponse>, CompletionError>
-    {
+    ) -> Result<
+        completion::CompletionResponse<responses_api::CompletionResponse>,
+        CompletionError,
+    > {
         let body = serde_json::to_vec(&request)?;
-        let auth = self
-            .client
-            .ext()
-            .auth
-            .auth_context()
-            .await
-            .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
+        let auth =
+            self.client.ext().auth.auth_context().await.map_err(|err| {
+                CompletionError::ProviderError(err.to_string())
+            })?;
 
         let req = self
             .add_auth_headers(self.client.post("/responses")?, &auth)
@@ -430,7 +455,9 @@ where
 
         let response = self.client.send(req).await?;
         let text = http_client::text(response).await?;
-        let raw_response = responses_api::streaming::parse_sse_completion_body(&text, "ChatGPT")?;
+        let raw_response = responses_api::streaming::parse_sse_completion_body(
+            &text, "ChatGPT",
+        )?;
 
         match raw_response.clone().try_into() {
             Ok(response) => Ok(response),
@@ -451,7 +478,13 @@ where
 
 impl<H> Client<H>
 where
-    H: HttpClientExt + Clone + Debug + Default + WasmCompatSend + WasmCompatSync + 'static,
+    H: HttpClientExt
+        + Clone
+        + Debug
+        + Default
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
 {
     pub async fn authorize(&self) -> Result<(), auth::AuthError> {
         self.ext().auth.auth_context().await.map(|_| ())
@@ -464,7 +497,8 @@ where
     H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
 {
     type Response = responses_api::CompletionResponse;
-    type StreamingResponse = responses_api::streaming::StreamingCompletionResponse;
+    type StreamingResponse =
+        responses_api::streaming::StreamingCompletionResponse;
     type Client = Client<H>;
 
     fn make(client: &Self::Client, model: impl Into<String>) -> Self {
@@ -474,7 +508,8 @@ where
     async fn completion(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
+    ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError>
+    {
         let request = self.create_request(completion_request)?;
 
         let span = if tracing::Span::current().is_disabled() {
@@ -501,9 +536,18 @@ where
                 let response = self.completion_from_sse(request).await?;
                 let span = tracing::Span::current();
                 span.record("gen_ai.response.id", &response.raw_response.id);
-                span.record("gen_ai.response.model", &response.raw_response.model);
-                span.record("gen_ai.usage.output_tokens", response.usage.output_tokens);
-                span.record("gen_ai.usage.input_tokens", response.usage.input_tokens);
+                span.record(
+                    "gen_ai.response.model",
+                    &response.raw_response.model,
+                );
+                span.record(
+                    "gen_ai.usage.output_tokens",
+                    response.usage.output_tokens,
+                );
+                span.record(
+                    "gen_ai.usage.input_tokens",
+                    response.usage.input_tokens,
+                );
                 span.record(
                     "gen_ai.usage.cache_read.input_tokens",
                     response.usage.cached_input_tokens,
@@ -518,7 +562,10 @@ where
     async fn stream(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+    ) -> Result<
+        StreamingCompletionResponse<Self::StreamingResponse>,
+        CompletionError,
+    > {
         Self::stream(self, completion_request).await
     }
 }
@@ -532,7 +579,9 @@ where
         &self,
         completion_request: completion::CompletionRequest,
     ) -> Result<
-        StreamingCompletionResponse<responses_api::streaming::StreamingCompletionResponse>,
+        StreamingCompletionResponse<
+            responses_api::streaming::StreamingCompletionResponse,
+        >,
         CompletionError,
     > {
         let request = self.create_request(completion_request)?;
@@ -546,13 +595,10 @@ where
         }
 
         let body = serde_json::to_vec(&request)?;
-        let auth = self
-            .client
-            .ext()
-            .auth
-            .auth_context()
-            .await
-            .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
+        let auth =
+            self.client.ext().auth.auth_context().await.map_err(|err| {
+                CompletionError::ProviderError(err.to_string())
+            })?;
 
         let req = self
             .add_auth_headers(self.client.post("/responses")?, &auth)
@@ -577,8 +623,9 @@ where
         };
 
         let client = self.client.clone();
-        let event_source = crate::http_client::sse::GenericEventSource::new(client, req)
-            .allow_missing_content_type();
+        let event_source =
+            crate::http_client::sse::GenericEventSource::new(client, req)
+                .allow_missing_content_type();
 
         Ok(responses_api::streaming::stream_from_event_source(
             event_source,
@@ -612,7 +659,10 @@ fn config_dir() -> Option<PathBuf> {
     {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| PathBuf::from(home).join(".config"))
+            })
     }
 }
 
@@ -635,7 +685,8 @@ fn normalize_system_messages_into_instructions(
 
     request.input = OneOrMany::many(filtered_items).map_err(|_e| {
         CompletionError::RequestError(
-            "ChatGPT responses request input must contain at least one non-system item".into(),
+            "ChatGPT responses request input must contain at least one non-system item"
+                .into(),
         )
     })?;
 
@@ -646,12 +697,17 @@ fn normalize_system_messages_into_instructions(
     }
 }
 
-fn merge_instructions(default_instructions: &str, existing_instructions: Option<&str>) -> String {
+fn merge_instructions(
+    default_instructions: &str,
+    existing_instructions: Option<&str>,
+) -> String {
     match existing_instructions
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        Some(existing) if existing.contains(default_instructions) => existing.to_string(),
+        Some(existing) if existing.contains(default_instructions) => {
+            existing.to_string()
+        }
         Some(existing) => format!("{default_instructions}\n\n{existing}"),
         None => default_instructions.to_string(),
     }
@@ -667,8 +723,10 @@ mod tests {
 data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2},"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","annotations":[],"text":"hi"}]}],"tools":[]}}
 data: [DONE]"#;
 
-        let response = responses_api::streaming::parse_sse_completion_body(body, "ChatGPT")
-            .expect("expected response");
+        let response = responses_api::streaming::parse_sse_completion_body(
+            body, "ChatGPT",
+        )
+        .expect("expected response");
         assert_eq!(response.id, "resp_1");
         assert_eq!(response.model, "gpt-5");
     }
@@ -691,7 +749,8 @@ data: [DONE]"#;
 
     #[test]
     fn test_merge_instructions_appends_existing_request_instructions() {
-        let merged = merge_instructions(DEFAULT_INSTRUCTIONS, Some("Respond tersely."));
+        let merged =
+            merge_instructions(DEFAULT_INSTRUCTIONS, Some("Respond tersely."));
         assert!(merged.starts_with(DEFAULT_INSTRUCTIONS));
         assert!(merged.ends_with("Respond tersely."));
     }
@@ -700,7 +759,9 @@ data: [DONE]"#;
     fn test_merge_instructions_avoids_duplicate_default() {
         let merged = merge_instructions(
             DEFAULT_INSTRUCTIONS,
-            Some("You are ChatGPT, a helpful AI assistant.\n\nRespond tersely."),
+            Some(
+                "You are ChatGPT, a helpful AI assistant.\n\nRespond tersely.",
+            ),
         );
         assert_eq!(
             merged,
@@ -721,12 +782,16 @@ data: [DONE]"#;
                 .expect("history"),
             )
             .build();
-        let mut request = ResponsesRequest::try_from(("gpt-5.4".to_string(), completion_request))
-            .expect("request");
+        let mut request = ResponsesRequest::try_from((
+            "gpt-5.4".to_string(),
+            completion_request,
+        ))
+        .expect("request");
 
-        let instructions = normalize_system_messages_into_instructions(&mut request)
-            .expect("normalize")
-            .expect("instructions");
+        let instructions =
+            normalize_system_messages_into_instructions(&mut request)
+                .expect("normalize")
+                .expect("instructions");
 
         assert_eq!(instructions, "System one\n\nSystem two");
         assert_eq!(request.input.len(), 1);
@@ -743,7 +808,9 @@ data: [DONE]"#;
         let request = model
             .create_request(
                 completion::CompletionRequest::builder()
-                    .chat_history(OneOrMany::one(completion::Message::user("hello")))
+                    .chat_history(OneOrMany::one(completion::Message::user(
+                        "hello",
+                    )))
                     .temperature(Some(0.5))
                     .build(),
             )
@@ -753,26 +820,32 @@ data: [DONE]"#;
     }
 
     #[tokio::test]
-    async fn test_completion_response_from_sse_body_falls_back_to_streamed_text() {
+    async fn test_completion_response_from_sse_body_falls_back_to_streamed_text()
+     {
         let body = r#"data: {"type":"response.output_text.delta","delta":"hi"}
 data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2},"output":[],"tools":[]}}
 data: [DONE]"#;
 
-        let raw_response = responses_api::streaming::parse_sse_completion_body(body, "ChatGPT")
-            .expect("expected response");
-        let response = responses_api::streaming::completion_response_from_sse_body(
-            body,
-            raw_response,
-            "ChatGPT",
+        let raw_response = responses_api::streaming::parse_sse_completion_body(
+            body, "ChatGPT",
         )
-        .await
-        .expect("fallback response");
+        .expect("expected response");
+        let response =
+            responses_api::streaming::completion_response_from_sse_body(
+                body,
+                raw_response,
+                "ChatGPT",
+            )
+            .await
+            .expect("fallback response");
 
         let text: String = response
             .choice
             .iter()
             .filter_map(|content| match content {
-                completion::AssistantContent::Text(text) => Some(text.text.as_str()),
+                completion::AssistantContent::Text(text) => {
+                    Some(text.text.as_str())
+                }
                 _ => None,
             })
             .collect();

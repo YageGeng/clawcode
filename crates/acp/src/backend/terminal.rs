@@ -4,15 +4,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    ClientCapabilities, CreateTerminalRequest, KillTerminalRequest, ReleaseTerminalRequest,
-    SessionId as AcpSessionId, TerminalId, TerminalOutputRequest, WaitForTerminalExitRequest,
+    ClientCapabilities, CreateTerminalRequest, KillTerminalRequest,
+    ReleaseTerminalRequest, SessionId as AcpSessionId, TerminalId,
+    TerminalOutputRequest, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use async_trait::async_trait;
 use protocol::SessionId;
 use tools::{
-    RunningTerminal, TerminalBackend, TerminalBackendError, TerminalCreateParams,
-    TerminalExitResult, TerminalOutputSnapshot,
+    RunningTerminal, TerminalBackend, TerminalBackendError,
+    TerminalCreateParams, TerminalExitResult, TerminalOutputSnapshot,
 };
 
 /// ACP client route used by terminal backend requests.
@@ -106,7 +107,9 @@ impl TerminalBackend for AcpTerminalBackend {
         let acp_env: Vec<_> = params
             .env
             .into_iter()
-            .map(|e| agent_client_protocol::schema::EnvVariable::new(e.name, e.value))
+            .map(|e| {
+                agent_client_protocol::schema::EnvVariable::new(e.name, e.value)
+            })
             .collect();
         let response = route
             .client
@@ -121,7 +124,9 @@ impl TerminalBackend for AcpTerminalBackend {
             .block_task()
             .await
             .map_err(|error| {
-                TerminalBackendError::Io(format!("ACP terminal/create failed: {error}"))
+                TerminalBackendError::Io(format!(
+                    "ACP terminal/create failed: {error}"
+                ))
             })?;
 
         Ok(Box::new(AcpRunningTerminal {
@@ -146,7 +151,10 @@ impl Drop for AcpRunningTerminal {
         let terminal_id = self.terminal_id.clone();
         tokio::spawn(async move {
             let _ = client
-                .send_request(ReleaseTerminalRequest::new(session_id, terminal_id))
+                .send_request(ReleaseTerminalRequest::new(
+                    session_id,
+                    terminal_id,
+                ))
                 .block_task()
                 .await;
         });
@@ -155,7 +163,9 @@ impl Drop for AcpRunningTerminal {
 
 #[async_trait]
 impl RunningTerminal for AcpRunningTerminal {
-    async fn output(&self) -> Result<TerminalOutputSnapshot, TerminalBackendError> {
+    async fn output(
+        &self,
+    ) -> Result<TerminalOutputSnapshot, TerminalBackendError> {
         let response = self
             .client
             .send_request(TerminalOutputRequest::new(
@@ -165,7 +175,9 @@ impl RunningTerminal for AcpRunningTerminal {
             .block_task()
             .await
             .map_err(|error| {
-                TerminalBackendError::Io(format!("ACP terminal/output failed: {error}"))
+                TerminalBackendError::Io(format!(
+                    "ACP terminal/output failed: {error}"
+                ))
             })?;
 
         Ok(TerminalOutputSnapshot {
@@ -177,7 +189,9 @@ impl RunningTerminal for AcpRunningTerminal {
         })
     }
 
-    async fn wait_for_exit(&self) -> Result<TerminalExitResult, TerminalBackendError> {
+    async fn wait_for_exit(
+        &self,
+    ) -> Result<TerminalExitResult, TerminalBackendError> {
         let response = self
             .client
             .send_request(WaitForTerminalExitRequest::new(
@@ -187,7 +201,9 @@ impl RunningTerminal for AcpRunningTerminal {
             .block_task()
             .await
             .map_err(|error| {
-                TerminalBackendError::Io(format!("ACP terminal/wait_for_exit failed: {error}"))
+                TerminalBackendError::Io(format!(
+                    "ACP terminal/wait_for_exit failed: {error}"
+                ))
             })?;
 
         Ok(TerminalExitResult {
@@ -204,12 +220,17 @@ impl RunningTerminal for AcpRunningTerminal {
             .block_task()
             .await
             .map_err(|error| {
-                TerminalBackendError::Io(format!("ACP terminal/kill failed: {error}"))
+                TerminalBackendError::Io(format!(
+                    "ACP terminal/kill failed: {error}"
+                ))
             })?;
         Ok(())
     }
 
-    async fn write_stdin(&self, _bytes: &[u8]) -> Result<(), TerminalBackendError> {
+    async fn write_stdin(
+        &self,
+        _bytes: &[u8],
+    ) -> Result<(), TerminalBackendError> {
         Err(TerminalBackendError::InvalidRequest(
             "ACP terminal backend does not support stdin writes".to_string(),
         ))

@@ -10,7 +10,9 @@ use crate::{
     wasm_compat::{WasmCompatSend, WasmCompatSendStream},
 };
 use bytes::Bytes;
-use eventsource_stream::{Event as MessageEvent, EventStreamError, Eventsource};
+use eventsource_stream::{
+    Event as MessageEvent, EventStreamError, Eventsource,
+};
 use futures::Stream;
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
 use futures::{future::BoxFuture, stream::BoxStream};
@@ -27,17 +29,24 @@ use std::{
     time::Duration,
 };
 
-pub type BoxedStream = Pin<Box<dyn WasmCompatSendStream<InnerItem = StreamResult<Bytes>>>>;
+pub type BoxedStream =
+    Pin<Box<dyn WasmCompatSendStream<InnerItem = StreamResult<Bytes>>>>;
 
 #[cfg(not(target_arch = "wasm32"))]
-type ResponseFuture = BoxFuture<'static, Result<Response<BoxedStream>, super::Error>>;
+type ResponseFuture =
+    BoxFuture<'static, Result<Response<BoxedStream>, super::Error>>;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-type ResponseFuture = LocalBoxFuture<'static, Result<Response<BoxedStream>, super::Error>>;
+type ResponseFuture =
+    LocalBoxFuture<'static, Result<Response<BoxedStream>, super::Error>>;
 
 #[cfg(not(target_arch = "wasm32"))]
-type EventStream = BoxStream<'static, Result<MessageEvent, EventStreamError<super::Error>>>;
+type EventStream =
+    BoxStream<'static, Result<MessageEvent, EventStreamError<super::Error>>>;
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
-type EventStream = LocalBoxStream<'static, Result<MessageEvent, EventStreamError<super::Error>>>;
+type EventStream = LocalBoxStream<
+    'static,
+    Result<MessageEvent, EventStreamError<super::Error>>,
+>;
 
 pin_project! {
     /// Internal state variants for the SSE state machine.
@@ -181,14 +190,18 @@ impl From<MessageEvent> for Event {
     }
 }
 
-impl<HttpClient, RequestBody> Stream for GenericEventSource<HttpClient, RequestBody>
+impl<HttpClient, RequestBody> Stream
+    for GenericEventSource<HttpClient, RequestBody>
 where
     HttpClient: HttpClientExt + Clone + 'static,
     RequestBody: Into<Bytes> + Clone + WasmCompatSend + 'static,
 {
     type Item = Result<Event, super::Error>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
         loop {
@@ -197,12 +210,17 @@ where
                     match response_future.poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(response)) => {
-                            match check_response(response, *this.allow_missing_content_type) {
+                            match check_response(
+                                response,
+                                *this.allow_missing_content_type,
+                            ) {
                                 Ok(response) => {
                                     // Transition: Connecting -> Open
-                                    let mut event_stream = response.into_body().eventsource();
+                                    let mut event_stream =
+                                        response.into_body().eventsource();
                                     if let Some(id) = &this.last_event_id {
-                                        event_stream.set_last_event_id(id.clone());
+                                        event_stream
+                                            .set_last_event_id(id.clone());
                                     }
                                     this.state.set(SourceState::Open {
                                         event_stream: Box::pin(event_stream),
@@ -218,7 +236,9 @@ where
                         }
                         Poll::Ready(Err(err)) => {
                             // First connection attempt failed - start retry cycle
-                            if let Some(delay_duration) = this.retry_policy.retry(&err, None) {
+                            if let Some(delay_duration) =
+                                this.retry_policy.retry(&err, None)
+                            {
                                 // Transition: Connecting -> WaitingToRetry
                                 this.state.set(SourceState::WaitingToRetry {
                                     retry_delay: Delay::new(delay_duration),
@@ -241,12 +261,17 @@ where
                     match response_future.poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(response)) => {
-                            match check_response(response, *this.allow_missing_content_type) {
+                            match check_response(
+                                response,
+                                *this.allow_missing_content_type,
+                            ) {
                                 Ok(response) => {
                                     // Transition: Reconnecting -> Open (retry cycle complete)
-                                    let mut event_stream = response.into_body().eventsource();
+                                    let mut event_stream =
+                                        response.into_body().eventsource();
                                     if let Some(id) = &this.last_event_id {
-                                        event_stream.set_last_event_id(id.clone());
+                                        event_stream
+                                            .set_last_event_id(id.clone());
                                     }
                                     this.state.set(SourceState::Open {
                                         event_stream: Box::pin(event_stream),
@@ -269,7 +294,10 @@ where
                                 // Transition: Reconnecting -> WaitingToRetry
                                 this.state.set(SourceState::WaitingToRetry {
                                     retry_delay: Delay::new(delay_duration),
-                                    current_retry: (retry_num + 1, delay_duration),
+                                    current_retry: (
+                                        retry_num + 1,
+                                        delay_duration,
+                                    ),
                                 });
                                 return Poll::Ready(Some(Err(err)));
                             } else {
@@ -289,13 +317,20 @@ where
                                 *this.last_event_id = Some(event.id.clone());
                             }
                             if let Some(duration) = event.retry {
-                                this.retry_policy.set_reconnection_time(duration);
+                                this.retry_policy
+                                    .set_reconnection_time(duration);
                             }
-                            return Poll::Ready(Some(Ok(Event::Message(event))));
+                            return Poll::Ready(Some(Ok(Event::Message(
+                                event,
+                            ))));
                         }
-                        Poll::Ready(Some(Err(EventStreamError::Transport(err)))) => {
+                        Poll::Ready(Some(Err(
+                            EventStreamError::Transport(err),
+                        ))) => {
                             // Connection error while open - start fresh retry cycle
-                            if let Some(delay_duration) = this.retry_policy.retry(&err, None) {
+                            if let Some(delay_duration) =
+                                this.retry_policy.retry(&err, None)
+                            {
                                 // Transition: Open -> WaitingToRetry
                                 this.state.set(SourceState::WaitingToRetry {
                                     retry_delay: Delay::new(delay_duration),
@@ -367,16 +402,17 @@ fn check_response<T>(
         return Err(super::Error::InvalidStatusCode(response.status()));
     };
 
-    let content_type =
-        if let Some(content_type) = response.headers().get(&reqwest::header::CONTENT_TYPE) {
-            content_type
-        } else if allow_missing_content_type {
-            return Ok(response);
-        } else {
-            return Err(super::Error::InvalidContentType(HeaderValue::from_static(
-                "",
-            )));
-        };
+    let content_type = if let Some(content_type) =
+        response.headers().get(&reqwest::header::CONTENT_TYPE)
+    {
+        content_type
+    } else if allow_missing_content_type {
+        return Ok(response);
+    } else {
+        return Err(super::Error::InvalidContentType(
+            HeaderValue::from_static(""),
+        ));
+    };
 
     if content_type
         .to_str()

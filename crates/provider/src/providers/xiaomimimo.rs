@@ -22,20 +22,22 @@
 //! ```
 
 use crate::client::{
-    self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Nothing, Provider,
-    ProviderBuilder, ProviderClient,
+    self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Nothing,
+    Provider, ProviderBuilder, ProviderClient,
 };
 use crate::http_client::{self, HttpClientExt};
 use crate::model::{Model, ModelList, ModelListingError};
 use crate::providers::anthropic::client::{
-    AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey, finish_anthropic_builder,
+    AnthropicBuilder as AnthropicCompatBuilder, AnthropicKey,
+    finish_anthropic_builder,
 };
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 
 /// OpenAI-compatible base URL.
 pub const API_BASE_URL: &str = "https://api.xiaomimimo.com/v1";
 /// Anthropic-compatible base URL.
-pub const ANTHROPIC_API_BASE_URL: &str = "https://api.xiaomimimo.com/anthropic/v1";
+pub const ANTHROPIC_API_BASE_URL: &str =
+    "https://api.xiaomimimo.com/anthropic/v1";
 
 /// `mimo-v2-flash`
 pub const MIMO_V2_FLASH: &str = "mimo-v2-flash";
@@ -68,7 +70,8 @@ pub type Client<H = reqwest::Client> = client::Client<XiaomiMimoExt, H>;
 pub type ClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<XiaomiMimoBuilder, XiaomiMimoApiKey, H>;
 
-pub type AnthropicClient<H = reqwest::Client> = client::Client<XiaomiMimoAnthropicExt, H>;
+pub type AnthropicClient<H = reqwest::Client> =
+    client::Client<XiaomiMimoAnthropicExt, H>;
 pub type AnthropicClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<XiaomiMimoAnthropicBuilder, AnthropicKey, H>;
 
@@ -85,13 +88,19 @@ impl Provider for XiaomiMimoAnthropicExt {
 }
 
 impl<H> Capabilities<H> for XiaomiMimoExt {
-    type Completion = Capable<super::openai::completion::GenericCompletionModel<XiaomiMimoExt, H>>;
+    type Completion = Capable<
+        super::openai::completion::GenericCompletionModel<XiaomiMimoExt, H>,
+    >;
     type ModelListing = Capable<XiaomiMimoModelLister<H>>;
 }
 
 impl<H> Capabilities<H> for XiaomiMimoAnthropicExt {
-    type Completion =
-        Capable<super::anthropic::completion::GenericCompletionModel<XiaomiMimoAnthropicExt, H>>;
+    type Completion = Capable<
+        super::anthropic::completion::GenericCompletionModel<
+            XiaomiMimoAnthropicExt,
+            H,
+        >,
+    >;
     type ModelListing = Nothing;
 }
 
@@ -143,7 +152,9 @@ impl ProviderBuilder for XiaomiMimoAnthropicBuilder {
     }
 }
 
-impl super::anthropic::completion::AnthropicCompatibleProvider for XiaomiMimoAnthropicExt {
+impl super::anthropic::completion::AnthropicCompatibleProvider
+    for XiaomiMimoAnthropicExt
+{
     const PROVIDER_NAME: &'static str = "xiaomimimo";
 
     fn default_max_tokens(_model: &str) -> Option<u64> {
@@ -159,7 +170,9 @@ impl ProviderClient for Client {
         let api_key = crate::client::required_env_var("XIAOMI_MIMO_API_KEY")?;
         let mut builder = Self::builder().api_key(api_key);
 
-        if let Some(base_url) = crate::client::optional_env_var("XIAOMI_MIMO_API_BASE")? {
+        if let Some(base_url) =
+            crate::client::optional_env_var("XIAOMI_MIMO_API_BASE")?
+        {
             builder = builder.base_url(base_url);
         }
 
@@ -179,9 +192,10 @@ impl ProviderClient for AnthropicClient {
         let api_key = crate::client::required_env_var("XIAOMI_MIMO_API_KEY")?;
         let mut builder = Self::builder().api_key(api_key);
 
-        if let Some(base_url) =
-            anthropic_base_override("XIAOMI_MIMO_ANTHROPIC_API_BASE", "XIAOMI_MIMO_API_BASE")?
-        {
+        if let Some(base_url) = anthropic_base_override(
+            "XIAOMI_MIMO_ANTHROPIC_API_BASE",
+            "XIAOMI_MIMO_API_BASE",
+        )? {
             builder = builder.base_url(base_url);
         }
 
@@ -295,20 +309,20 @@ where
     async fn list_all(&self) -> Result<ModelList, ModelListingError> {
         let path = "/models";
         let req = self.client.get(path)?.body(http_client::NoBody)?;
-        let response = self
-            .client
-            .send::<_, Vec<u8>>(req)
-            .await
-            .map_err(|error| match error {
-                http_client::Error::InvalidStatusCodeWithMessage(status, message) => {
-                    ModelListingError::api_error_with_context(
+        let response =
+            self.client.send::<_, Vec<u8>>(req).await.map_err(|error| {
+                match error {
+                    http_client::Error::InvalidStatusCodeWithMessage(
+                        status,
+                        message,
+                    ) => ModelListingError::api_error_with_context(
                         "Xiaomi MiMo",
                         path,
                         status.as_u16(),
                         message.as_bytes(),
-                    )
+                    ),
+                    other => ModelListingError::from(other),
                 }
-                other => ModelListingError::from(other),
             })?;
 
         if !response.status().is_success() {
@@ -323,9 +337,15 @@ where
         }
 
         let body = response.into_body().await?;
-        let api_resp: ListModelsResponse = serde_json::from_slice(&body).map_err(|error| {
-            ModelListingError::parse_error_with_context("Xiaomi MiMo", path, &error, &body)
-        })?;
+        let api_resp: ListModelsResponse = serde_json::from_slice(&body)
+            .map_err(|error| {
+                ModelListingError::parse_error_with_context(
+                    "Xiaomi MiMo",
+                    path,
+                    &error,
+                    &body,
+                )
+            })?;
 
         let models = api_resp.data.into_iter().map(Model::from).collect();
 
@@ -342,14 +362,16 @@ mod tests {
 
     #[test]
     fn test_client_initialization() {
-        let _client =
-            crate::providers::xiaomimimo::Client::new("dummy-key").expect("Client::new()");
-        let _client_from_builder = crate::providers::xiaomimimo::Client::builder()
-            .api_key("dummy-key")
-            .build()
-            .expect("Client::builder()");
-        let _anthropic_client = crate::providers::xiaomimimo::AnthropicClient::new("dummy-key")
-            .expect("AnthropicClient::new()");
+        let _client = crate::providers::xiaomimimo::Client::new("dummy-key")
+            .expect("Client::new()");
+        let _client_from_builder =
+            crate::providers::xiaomimimo::Client::builder()
+                .api_key("dummy-key")
+                .build()
+                .expect("Client::builder()");
+        let _anthropic_client =
+            crate::providers::xiaomimimo::AnthropicClient::new("dummy-key")
+                .expect("AnthropicClient::new()");
         let _anthropic_client_from_builder =
             crate::providers::xiaomimimo::AnthropicClient::builder()
                 .api_key("dummy-key")
@@ -364,7 +386,8 @@ mod tests {
             Some(ANTHROPIC_API_BASE_URL)
         );
         assert_eq!(
-            normalize_anthropic_base_url("https://proxy.example.com/v1").as_deref(),
+            normalize_anthropic_base_url("https://proxy.example.com/v1")
+                .as_deref(),
             Some("https://proxy.example.com/anthropic/v1")
         );
     }

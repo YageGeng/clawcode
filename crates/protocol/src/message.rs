@@ -16,7 +16,8 @@ use thiserror::Error;
 pub trait ConvertMessage: Sized + Send + Sync {
     type Error: std::error::Error + Send;
 
-    fn convert_from_message(message: Message) -> Result<Vec<Self>, Self::Error>;
+    fn convert_from_message(message: Message)
+    -> Result<Vec<Self>, Self::Error>;
 }
 
 /// A provider-agnostic chat message.
@@ -273,7 +274,10 @@ impl ToolCall {
         self
     }
 
-    pub fn with_additional_params(mut self, additional_params: Option<serde_json::Value>) -> Self {
+    pub fn with_additional_params(
+        mut self,
+        additional_params: Option<serde_json::Value>,
+    ) -> Self {
         self.additional_params = additional_params;
         self
     }
@@ -563,7 +567,10 @@ impl Message {
     }
 
     /// Helper constructor to make creating tool result messages easier.
-    pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool_result(
+        id: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Message::User {
             content: OneOrMany::one(UserContent::ToolResult(ToolResult {
                 id: id.into(),
@@ -638,7 +645,10 @@ impl UserContent {
 
     /// Helper constructor to make creating user document content easier.
     /// This creates a document that assumes the data being passed in is a raw string.
-    pub fn document(data: impl Into<String>, media_type: Option<DocumentMediaType>) -> Self {
+    pub fn document(
+        data: impl Into<String>,
+        media_type: Option<DocumentMediaType>,
+    ) -> Self {
         let data: String = data.into();
         UserContent::Document(Document {
             data: DocumentSourceKind::string(&data),
@@ -648,7 +658,10 @@ impl UserContent {
     }
 
     /// Helper to create a document from raw unencoded bytes
-    pub fn document_raw(data: impl Into<Vec<u8>>, media_type: Option<DocumentMediaType>) -> Self {
+    pub fn document_raw(
+        data: impl Into<Vec<u8>>,
+        media_type: Option<DocumentMediaType>,
+    ) -> Self {
         UserContent::Document(Document {
             data: DocumentSourceKind::Raw(data.into()),
             media_type,
@@ -657,7 +670,10 @@ impl UserContent {
     }
 
     /// Helper to create a document from a URL
-    pub fn document_url(url: impl Into<String>, media_type: Option<DocumentMediaType>) -> Self {
+    pub fn document_url(
+        url: impl Into<String>,
+        media_type: Option<DocumentMediaType>,
+    ) -> Self {
         UserContent::Document(Document {
             data: DocumentSourceKind::Url(url.into()),
             media_type,
@@ -666,7 +682,10 @@ impl UserContent {
     }
 
     /// Helper constructor to make creating user tool result content easier.
-    pub fn tool_result(id: impl Into<String>, content: OneOrMany<ToolResultContent>) -> Self {
+    pub fn tool_result(
+        id: impl Into<String>,
+        content: OneOrMany<ToolResultContent>,
+    ) -> Self {
         UserContent::ToolResult(ToolResult {
             id: id.into(),
             call_id: None,
@@ -802,10 +821,13 @@ impl ToolResultContent {
     /// 3. Hybrid JSON: `{"response": {...}, "parts": [...]}` → `OneOrMany::many([Text, Image, ...])`
     ///
     /// If JSON parsing fails, treats the entire string as text.
-    pub fn from_tool_output(output: impl Into<String>) -> OneOrMany<ToolResultContent> {
+    pub fn from_tool_output(
+        output: impl Into<String>,
+    ) -> OneOrMany<ToolResultContent> {
         let output_str = output.into();
 
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output_str) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output_str)
+        {
             if json.get("response").is_some() || json.get("parts").is_some() {
                 let mut results: Vec<ToolResultContent> = Vec::new();
 
@@ -815,7 +837,9 @@ impl ToolResultContent {
                     }));
                 }
 
-                if let Some(parts) = json.get("parts").and_then(|p| p.as_array()) {
+                if let Some(parts) =
+                    json.get("parts").and_then(|p| p.as_array())
+                {
                     for part in parts {
                         let is_image = part
                             .get("type")
@@ -830,16 +854,19 @@ impl ToolResultContent {
                             part.get("data").and_then(|v| v.as_str()),
                             part.get("mimeType").and_then(|v| v.as_str()),
                         ) {
-                            let data_kind =
-                                if data.starts_with("http://") || data.starts_with("https://") {
-                                    DocumentSourceKind::Url(data.to_string())
-                                } else {
-                                    DocumentSourceKind::Base64(data.to_string())
-                                };
+                            let data_kind = if data.starts_with("http://")
+                                || data.starts_with("https://")
+                            {
+                                DocumentSourceKind::Url(data.to_string())
+                            } else {
+                                DocumentSourceKind::Base64(data.to_string())
+                            };
 
                             results.push(ToolResultContent::Image(Image {
                                 data: data_kind,
-                                media_type: ImageMediaType::from_mime_type(mime_type),
+                                media_type: ImageMediaType::from_mime_type(
+                                    mime_type,
+                                ),
                                 detail: None,
                                 additional_params: None,
                             }));
@@ -849,7 +876,9 @@ impl ToolResultContent {
 
                 if !results.is_empty() {
                     return OneOrMany::many(results).unwrap_or_else(|_| {
-                        OneOrMany::one(ToolResultContent::Text(output_str.into()))
+                        OneOrMany::one(ToolResultContent::Text(
+                            output_str.into(),
+                        ))
                     });
                 }
             }
@@ -865,7 +894,9 @@ impl ToolResultContent {
                     json.get("mimeType").and_then(|v| v.as_str()),
                 )
             {
-                let data_kind = if data.starts_with("http://") || data.starts_with("https://") {
+                let data_kind = if data.starts_with("http://")
+                    || data.starts_with("https://")
+                {
                     DocumentSourceKind::Url(data.to_string())
                 } else {
                     DocumentSourceKind::Base64(data.to_string())
@@ -896,7 +927,10 @@ impl MimeType for MediaType {
     fn from_mime_type(mime_type: &str) -> Option<Self> {
         ImageMediaType::from_mime_type(mime_type)
             .map(MediaType::Image)
-            .or_else(|| DocumentMediaType::from_mime_type(mime_type).map(MediaType::Document))
+            .or_else(|| {
+                DocumentMediaType::from_mime_type(mime_type)
+                    .map(MediaType::Document)
+            })
     }
 
     fn to_mime_type(&self) -> &'static str {
@@ -945,8 +979,12 @@ impl MimeType for DocumentMediaType {
             "text/md" | "text/markdown" => Some(DocumentMediaType::MARKDOWN),
             "text/csv" => Some(DocumentMediaType::CSV),
             "text/xml" => Some(DocumentMediaType::XML),
-            "application/x-javascript" | "text/x-javascript" => Some(DocumentMediaType::Javascript),
-            "application/x-python" | "text/x-python" => Some(DocumentMediaType::Python),
+            "application/x-javascript" | "text/x-javascript" => {
+                Some(DocumentMediaType::Javascript)
+            }
+            "application/x-python" | "text/x-python" => {
+                Some(DocumentMediaType::Python)
+            }
             _ => None,
         }
     }
@@ -1173,7 +1211,8 @@ mod tests {
         assert_eq!(single.first_text(), Some("think"));
         assert_eq!(single.first_signature(), None);
 
-        let signed = Reasoning::new_with_signature("signed", Some("sig-1".to_string()));
+        let signed =
+            Reasoning::new_with_signature("signed", Some("sig-1".to_string()));
         assert_eq!(signed.first_text(), Some("signed"));
         assert_eq!(signed.first_signature(), Some("sig-1"));
 
@@ -1189,7 +1228,8 @@ mod tests {
         assert_eq!(encrypted.encrypted_content(), Some("enc"));
         assert_eq!(encrypted.display_text(), "");
 
-        let summaries = Reasoning::summaries(vec!["s1".to_string(), "s2".to_string()]);
+        let summaries =
+            Reasoning::summaries(vec!["s1".to_string(), "s2".to_string()]);
         assert_eq!(summaries.display_text(), "s1\ns2");
         assert_eq!(summaries.encrypted_content(), None);
     }
@@ -1210,7 +1250,8 @@ mod tests {
 
         for variant in variants {
             let json = serde_json::to_string(&variant).expect("serialize");
-            let roundtrip: ReasoningContent = serde_json::from_str(&json).expect("deserialize");
+            let roundtrip: ReasoningContent =
+                serde_json::from_str(&json).expect("deserialize");
             assert_eq!(roundtrip, variant);
         }
     }
@@ -1227,7 +1268,8 @@ mod tests {
         }
 
         let json = serde_json::to_string(&message).expect("serialize");
-        let roundtrip: Message = serde_json::from_str(&json).expect("deserialize");
+        let roundtrip: Message =
+            serde_json::from_str(&json).expect("deserialize");
         assert_eq!(roundtrip, message);
     }
 }
