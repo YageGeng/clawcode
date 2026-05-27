@@ -46,7 +46,7 @@ clawcode ships two binaries:
 | `skills` | Skill discovery from `.agents/skills/` and `$HOME/.agents/skills/`, catalog rendering, `$skill-name` mention matching |
 | `mcp` | MCP client — server connection management, tool discovery, calls over stdio or streamable HTTP |
 | `store` | Session persistence — file-based store with manifest, recording, and replay |
-| `tui` | Interactive terminal UI — starts the local ACP agent in-process and renders streamed session updates |
+| `tui` | Interactive terminal UI — starts the local ACP agent in-process, renders streamed session updates, and switches between main/sub-agent sessions |
 
 ## Quick start
 
@@ -105,6 +105,16 @@ The TUI also supports listing persisted sessions and resuming one:
 cargo run -p tui -- --list-sessions
 cargo run -p tui -- --resume <SESSION_ID>
 ```
+
+In the TUI, use `/agent` to open the agent picker. It lists the main session
+and live sub-agents, then switches the active transcript to the selected agent
+session.
+
+## Sub-agents
+
+Models can use the built-in agent tools to spawn and coordinate sub-agents.
+Sub-agents run as separate sessions with their own transcript streams, and the
+TUI can switch between the main session and sub-agent sessions with `/agent`.
 
 ## Skills
 

@@ -42,7 +42,7 @@ clawcode 包含两个二进制文件：
 | `skills` | 技能发现（`.agents/skills/` 与 `$HOME/.agents/skills/`）、目录渲染、`$skill-name` 提及匹配 |
 | `mcp` | MCP 客户端 — 服务端连接管理、工具发现、通过 stdio 或 streamable HTTP 调用 |
 | `store` | 会话持久化 — 基于文件的存储，含清单、录制与回放 |
-| `tui` | 交互式终端 UI — 在进程内启动本地 ACP 代理，并渲染流式会话更新 |
+| `tui` | 交互式终端 UI — 在进程内启动本地 ACP 代理，渲染流式会话更新，并在主代理/子代理会话之间切换 |
 
 ## 快速开始
 
@@ -98,6 +98,12 @@ TUI 还支持列出已持久化的会话并恢复其中一个会话：
 cargo run -p tui -- --list-sessions
 cargo run -p tui -- --resume <SESSION_ID>
 ```
+
+在 TUI 中，可以使用 `/agent` 打开代理选择器。它会列出主会话和当前存活的子代理，并将当前 transcript 切换到选中的代理会话。
+
+## 子代理
+
+模型可以使用内置 agent 工具创建并协调子代理。子代理会作为独立会话运行，拥有自己的 transcript 流；TUI 可以通过 `/agent` 在主会话和子代理会话之间切换。
 
 ## 技能（Skills）
 
