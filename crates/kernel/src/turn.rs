@@ -232,6 +232,9 @@ pub(crate) async fn execute_turn(
         let mut argument_consumers = ArgumentsConsumers::default();
         let mut response_usage = None;
 
+        // Track whether the assistant content has final text that can complete the turn
+        let mut is_answer = false;
+
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| {
                 KernelError::Internal(anyhow::anyhow!(
@@ -244,6 +247,9 @@ pub(crate) async fn execute_turn(
                     assistant_content.push(AssistantContent::text(&text.text));
                     let _ = tx_event
                         .send(Event::message_chunk(sid.clone(), text.text));
+
+                    // Mark the answer as complete when we receive text content
+                    is_answer = true;
                 }
                 LlmStreamEvent::ToolCall {
                     mut tool_call,
@@ -379,7 +385,7 @@ pub(crate) async fn execute_turn(
         }
 
         // If no tool calls were made, the turn is done
-        if tool_outputs.is_empty() {
+        if tool_outputs.is_empty() && is_answer {
             return Ok(turn_usage);
         }
 
@@ -801,6 +807,7 @@ mod tests {
     use provider::completion::CompletionError;
     use provider::message::Text;
     use provider::wasm_compat::WasmBoxedFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tools::Tool;
 
     #[derive(Debug)]
@@ -894,6 +901,78 @@ mod tests {
                         usage: Some(usage),
                     }),
                 ];
+                let stream: provider::factory::DynLlmStream =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReasoningOnlyThenTextLlm {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl provider::factory::Llm for ReasoningOnlyThenTextLlm {
+        /// Return the fixed provider id used by this test double.
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        /// Return the fixed model id used by this test double.
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        /// Reject non-streaming completion because this test only exercises streaming turns.
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::LlmCompletion, CompletionError>,
+        > {
+            Box::pin(async {
+                Err(CompletionError::ProviderError(
+                    "test llm completion is unused".to_string(),
+                ))
+            })
+        }
+
+        /// Return reasoning-only content on the first call and final text thereafter.
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::DynLlmStream, CompletionError>,
+        > {
+            let call_index = self.call_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let events: Vec<Result<LlmStreamEvent, CompletionError>> =
+                    if call_index == 0 {
+                        vec![
+                            Ok(LlmStreamEvent::ReasoningDelta {
+                                id: Some("reasoning-1".to_string()),
+                                reasoning: "think".to_string(),
+                                replayable: true,
+                            }),
+                            Ok(LlmStreamEvent::Final {
+                                raw: serde_json::json!({}),
+                                usage: None,
+                            }),
+                        ]
+                    } else {
+                        vec![
+                            Ok(LlmStreamEvent::Text(Text {
+                                text: "answer".to_string(),
+                            })),
+                            Ok(LlmStreamEvent::Final {
+                                raw: serde_json::json!({}),
+                                usage: None,
+                            }),
+                        ]
+                    };
                 let stream: provider::factory::DynLlmStream =
                     Box::pin(futures::stream::iter(events));
                 Ok(stream)
@@ -1094,6 +1173,30 @@ mod tests {
         assert_eq!(usage_records.len(), 1);
         assert_eq!(usage_records[0]["usage"]["input_tokens"], 11);
         assert_eq!(usage_records[0]["usage"]["output_tokens"], 4);
+    }
+
+    /// Verifies that thought-only provider iterations do not complete a turn prematurely.
+    #[tokio::test]
+    async fn execute_turn_continues_after_reasoning_only_iteration() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let llm = Arc::new(ReasoningOnlyThenTextLlm {
+            call_count: Arc::clone(&call_count),
+        });
+        let ctx = test_turn_context_with_recorder(
+            Arc::new(ToolRegistry::default()),
+            llm,
+            test_recorder(),
+        );
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should continue until assistant text arrives");
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(context.last_assistant_text().as_deref(), Some("answer"));
     }
 
     #[test]
