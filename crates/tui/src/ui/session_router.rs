@@ -4,12 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::{
-    SessionId, SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
+    ModelInfo as AcpModelInfo, SessionId, SessionNotification, SessionUpdate,
+    StopReason, ToolCallUpdate,
 };
+use crossterm::event::KeyCode;
 
 use crate::ui::agent_navigation::AgentNavigationState;
-use crate::ui::agent_picker::AgentPickerPanelState;
 use crate::ui::composer::Composer;
+use crate::ui::picker::{AgentPicker, ModelPicker, Picker};
 use crate::ui::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
@@ -42,6 +44,8 @@ pub(crate) struct SessionRouterState {
     cwd: PathBuf,
     /// Model label copied into lazily constructed session states.
     model_label: String,
+    /// Models available for root-session switching.
+    available_models: Vec<ModelOption>,
     /// Render theme copied into lazily constructed session states.
     theme: Theme,
     /// Per-session transcript reducers.
@@ -59,15 +63,75 @@ pub(crate) struct SessionRouterState {
     agent_navigation: AgentNavigationState,
     /// Inline picker focus and selection state.
     #[builder(default)]
-    agent_picker: AgentPickerPanelState,
+    agent_picker: AgentPicker,
+    /// Inline model picker focus and selection state.
+    #[builder(default)]
+    model_picker: ModelPicker,
+}
+
+/// User-visible model option for the local `/model` command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelOption {
+    /// Stable provider/model identifier sent through ACP.
+    id: String,
+    /// Human-readable display label.
+    name: String,
+}
+
+impl ModelOption {
+    /// Create a model option from stable id and display name.
+    pub(crate) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// Create a local model option from an ACP model entry.
+    pub(crate) fn from_acp(info: &AcpModelInfo) -> Self {
+        Self::new(info.model_id.0.to_string(), info.name.clone())
+    }
+
+    /// Convert ACP model entries into local model options.
+    pub(crate) fn from_acp_slice(models: &[AcpModelInfo]) -> Vec<Self> {
+        models.iter().map(Self::from_acp).collect()
+    }
+
+    /// Returns the stable provider/model identifier.
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the human-readable model name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl SessionRouterState {
-    /// Create a router with a root AppState and root picker entry.
+    /// Create a test router with a root AppState and root picker entry.
+    #[cfg(test)]
     pub(crate) fn new(
         root_session_id: SessionId,
         cwd: PathBuf,
         model_label: String,
+        theme: Theme,
+    ) -> Self {
+        Self::new_with_models(
+            root_session_id,
+            cwd,
+            model_label,
+            Vec::new(),
+            theme,
+        )
+    }
+
+    /// Create a router with root state and available model metadata.
+    pub(crate) fn new_with_models(
+        root_session_id: SessionId,
+        cwd: PathBuf,
+        model_label: String,
+        available_models: Vec<ModelOption>,
         theme: Theme,
     ) -> Self {
         let root_state = AppState::new_with_theme(
@@ -84,6 +148,7 @@ impl SessionRouterState {
             .active_session_id(root_session_id.clone())
             .cwd(cwd)
             .model_label(model_label)
+            .available_models(available_models)
             .theme(theme)
             .states(states)
             .loaded_sessions(loaded_sessions)
@@ -153,6 +218,7 @@ impl SessionRouterState {
 
     /// Open the inline agent picker.
     pub(crate) fn open_agent_picker(&mut self) {
+        self.model_picker.close();
         self.agent_picker.open(self.agent_navigation.len());
     }
 
@@ -175,17 +241,8 @@ impl SessionRouterState {
         }
     }
 
-    /// Move picker selection to the previous agent.
-    pub(crate) fn move_agent_picker_previous(&mut self) {
-        self.agent_picker.move_previous(self.agent_navigation.len());
-    }
-
-    /// Move picker selection to the next agent.
-    pub(crate) fn move_agent_picker_next(&mut self) {
-        self.agent_picker.move_next(self.agent_navigation.len());
-    }
-
     /// Return the currently selected picker entry.
+    #[cfg(test)]
     pub(crate) fn selected_agent_session_id(&self) -> Option<&SessionId> {
         self.agent_navigation
             .entry_at(self.agent_picker.selected_index())
@@ -197,10 +254,114 @@ impl SessionRouterState {
         self.agent_picker.selected_index()
     }
 
+    /// Handles shared agent picker key behavior and returns a selected session.
+    pub(crate) fn handle_agent_picker_key(
+        &mut self,
+        code: KeyCode,
+    ) -> Option<SessionId> {
+        self.agent_picker
+            .handle_key_for_navigation(code, &self.agent_navigation)
+    }
+
+    /// Return the available models used by the inline model picker.
+    pub(crate) fn available_models(&self) -> &[ModelOption] {
+        &self.available_models
+    }
+
+    /// Open the inline model picker.
+    pub(crate) fn open_model_picker(&mut self) {
+        self.agent_picker.close();
+        self.model_picker.open(self.available_models.len());
+    }
+
+    /// Close the inline model picker.
+    pub(crate) fn close_model_picker(&mut self) {
+        self.model_picker.close();
+    }
+
+    /// Return whether the inline model picker is focused.
+    pub(crate) fn is_model_picker_focused(&self) -> bool {
+        self.model_picker.is_focused()
+    }
+
+    /// Return the height the visible inline picker should reserve.
+    pub(crate) fn inline_picker_height(&self) -> u16 {
+        if self.agent_picker.is_visible() {
+            self.agent_picker_height()
+        } else {
+            self.model_picker_height()
+        }
+    }
+
+    /// Return the height the model picker should reserve in the bottom input area.
+    pub(crate) fn model_picker_height(&self) -> u16 {
+        if self.model_picker.is_visible() {
+            self.available_models.len().clamp(1, 5) as u16
+        } else {
+            0
+        }
+    }
+
+    /// Return the currently selected model id.
+    #[cfg(test)]
+    pub(crate) fn selected_model_id(&self) -> Option<&str> {
+        self.available_models
+            .get(self.model_picker.selected_index())
+            .map(ModelOption::id)
+    }
+
+    /// Return the selected model picker index for rendering.
+    pub(crate) fn model_picker_selected_index(&self) -> usize {
+        self.model_picker.selected_index()
+    }
+
+    /// Handles shared model picker key behavior and returns a selected model id.
+    pub(crate) fn handle_model_picker_key(
+        &mut self,
+        code: KeyCode,
+    ) -> Option<String> {
+        self.model_picker
+            .handle_key_for_models(code, &self.available_models)
+    }
+
     /// Return the active agent label for status rendering.
     pub(crate) fn active_agent_label(&self) -> String {
         self.agent_navigation
             .label_for_session(&self.active_session_id)
+    }
+
+    /// Return whether the active session is the root session.
+    pub(crate) fn is_active_root_session(&self) -> bool {
+        self.agent_navigation
+            .is_root_session(&self.active_session_id)
+    }
+
+    /// Render available models for the local `/model` command.
+    pub(crate) fn model_list_message(&self) -> String {
+        if self.available_models.is_empty() {
+            return "No models available.".to_string();
+        }
+
+        let current = self.active_state().model_label();
+        let mut lines = vec!["Available models:".to_string()];
+        lines.extend(self.available_models.iter().map(|model| {
+            let marker = if model.id == current { "*" } else { " " };
+            format!("{marker} {} - {}", model.id, model.name)
+        }));
+        lines.join("\n")
+    }
+
+    /// Return whether a provider/model id is selectable.
+    pub(crate) fn has_model(&self, model_id: &str) -> bool {
+        self.available_models
+            .iter()
+            .any(|model| model.id == model_id)
+    }
+
+    /// Apply a root-session model switch to local render state.
+    pub(crate) fn set_active_model_label(&mut self, model_id: String) {
+        self.model_label = model_id.clone();
+        self.active_state_mut().set_model_label(model_id);
     }
 
     /// Route one ACP session notification to metadata state or the matching AppState.
@@ -583,7 +744,7 @@ mod tests {
         let mut view = ViewState::default();
         let mut composer = Composer::default();
         router.open_agent_picker();
-        router.move_agent_picker_next();
+        router.handle_agent_picker_key(KeyCode::Down);
         assert_eq!(router.selected_agent_session_id(), Some(&child));
         router
             .select_agent_session(
@@ -687,5 +848,89 @@ mod tests {
             .expect("select child");
 
         assert_eq!(router.active_state().top_status_line(), "running");
+    }
+
+    /// Verifies the model list marks the active root model.
+    #[test]
+    fn model_list_message_marks_current_model() {
+        let root = SessionId::new("root-session");
+        let router = SessionRouterState::new_with_models(
+            root,
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![
+                ModelOption {
+                    id: "deepseek/deepseek-chat".to_string(),
+                    name: "DeepSeek Chat".to_string(),
+                },
+                ModelOption {
+                    id: "openai/gpt-5".to_string(),
+                    name: "GPT-5".to_string(),
+                },
+            ],
+            Theme::dark(),
+        );
+
+        let message = router.model_list_message();
+
+        assert!(message.contains("* deepseek/deepseek-chat - DeepSeek Chat"));
+        assert!(message.contains("  openai/gpt-5 - GPT-5"));
+    }
+
+    /// Verifies model switching updates the root status label.
+    #[test]
+    fn set_active_model_label_updates_root_state() {
+        let root = SessionId::new("root-session");
+        let mut router = SessionRouterState::new_with_models(
+            root,
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![ModelOption {
+                id: "openai/gpt-5".to_string(),
+                name: "GPT-5".to_string(),
+            }],
+            Theme::dark(),
+        );
+
+        router.set_active_model_label("openai/gpt-5".to_string());
+
+        assert_eq!(router.active_state().model_label(), "openai/gpt-5");
+        assert!(router.has_model("openai/gpt-5"));
+    }
+
+    /// Verifies the model picker mirrors agent picker focus and selection behavior.
+    #[test]
+    fn model_picker_focus_moves_selection_with_wraparound() {
+        let root = SessionId::new("root-session");
+        let mut router = SessionRouterState::new_with_models(
+            root,
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![
+                ModelOption {
+                    id: "deepseek/deepseek-chat".to_string(),
+                    name: "DeepSeek Chat".to_string(),
+                },
+                ModelOption {
+                    id: "openai/gpt-5".to_string(),
+                    name: "GPT-5".to_string(),
+                },
+            ],
+            Theme::dark(),
+        );
+
+        router.open_model_picker();
+
+        assert!(router.is_model_picker_focused());
+        assert_eq!(router.model_picker_selected_index(), 0);
+
+        router.handle_model_picker_key(KeyCode::Down);
+        assert_eq!(router.selected_model_id(), Some("openai/gpt-5"));
+
+        router.handle_model_picker_key(KeyCode::Down);
+        assert_eq!(router.selected_model_id(), Some("deepseek/deepseek-chat"));
+
+        router.close_model_picker();
+        assert_eq!(router.model_picker_height(), 0);
     }
 }

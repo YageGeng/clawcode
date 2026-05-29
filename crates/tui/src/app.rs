@@ -17,8 +17,9 @@ use crate::event::{TuiEvent, map_crossterm_event};
 use crate::terminal::enter;
 use crate::ui::approval::decision_for_key;
 use crate::ui::composer::{Composer, ComposerAction};
+use crate::ui::picker;
 use crate::ui::render::render_router;
-use crate::ui::session_router::SessionRouterState;
+use crate::ui::session_router::{ModelOption, SessionRouterState};
 use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
 use kernel::command::slash_command::SlashCommand;
@@ -40,10 +41,15 @@ pub async fn run(
         app_tx.clone(),
         move |client| async move {
             client.initialize().await?;
-            let (session_id, model_label) =
+            let (session_id, model_label, models) =
                 open_session(&client, cwd.clone(), resume).await?;
-            let mut router =
-                SessionRouterState::new(session_id, cwd, model_label, theme);
+            let mut router = SessionRouterState::new_with_models(
+                session_id,
+                cwd,
+                model_label,
+                models,
+                theme,
+            );
             let mut view = ViewState::default();
             let mut composer = Composer::default();
 
@@ -90,17 +96,20 @@ async fn open_session(
     client: &AcpClient,
     cwd: PathBuf,
     resume: Option<SessionId>,
-) -> anyhow::Result<(SessionId, String)> {
+) -> anyhow::Result<(SessionId, String, Vec<ModelOption>)> {
     if let Some(session_id) = resume {
         let response = client.load_session(session_id.clone(), cwd).await?;
         eprintln!("resumed session: {session_id}");
-        return Ok((session_id, model_label_from_load(&response)));
+        let model_label = model_label_from_load(&response);
+        let models = model_options_from_load(&response);
+        return Ok((session_id, model_label, models));
     }
 
     let response = client.new_session(cwd).await?;
     eprintln!("session: {}", response.session_id);
     let model_label = model_label_from_new(&response);
-    Ok((response.session_id, model_label))
+    let models = model_options_from_new(&response);
+    Ok((response.session_id, model_label, models))
 }
 
 /// Returns a compact model label from a new-session response.
@@ -121,6 +130,24 @@ fn model_label_from_load(response: &LoadSessionResponse) -> String {
         .map(|models| models.current_model_id.0.to_string())
         .filter(|model| !model.is_empty())
         .unwrap_or_else(|| "model: unknown".to_string())
+}
+
+/// Returns selectable models from a new-session response.
+fn model_options_from_new(response: &NewSessionResponse) -> Vec<ModelOption> {
+    response
+        .models
+        .as_ref()
+        .map(|models| ModelOption::from_acp_slice(&models.available_models))
+        .unwrap_or_default()
+}
+
+/// Returns selectable models from a load-session response.
+fn model_options_from_load(response: &LoadSessionResponse) -> Vec<ModelOption> {
+    response
+        .models
+        .as_ref()
+        .map(|models| ModelOption::from_acp_slice(&models.available_models))
+        .unwrap_or_default()
 }
 
 /// Prints persisted session metadata for `cwd` and exits.
@@ -280,25 +307,20 @@ async fn handle_key_event(
     }
 
     if ui.router.is_agent_picker_focused() {
-        if let Some(target_session_id) =
-            handle_agent_picker_key(ui.router, key_event.code)?
-        {
-            if !ensure_loaded_agent_session(
-                client,
-                ui.router,
-                &target_session_id,
-            )
-            .await
-            {
-                return Ok(false);
-            }
-            ui.router.select_agent_session(
-                target_session_id,
-                ui.view,
-                ui.composer,
-            )?;
-            ui.router.close_agent_picker();
-        }
+        picker::handle_agent_picker_key(
+            client,
+            ui.router,
+            ui.view,
+            ui.composer,
+            key_event.code,
+        )
+        .await?;
+        return Ok(false);
+    }
+
+    if ui.router.is_model_picker_focused() {
+        picker::handle_model_picker_key(client, ui.router, key_event.code)
+            .await;
         return Ok(false);
     }
 
@@ -350,33 +372,17 @@ async fn handle_key_event(
                 if handle_local_command(ui, &text) {
                     return Ok(false);
                 }
+                if let Some(SlashCommand::Model) =
+                    SlashCommand::parse_from_text(&text)
+                {
+                    handle_model_command(client, ui, &text).await;
+                    return Ok(false);
+                }
                 run_prompt(client, app_tx, ui.router, text, prompt_task);
             }
             Ok(false)
         }
     }
-}
-
-/// Try to load a target agent session before switching to it.
-async fn ensure_loaded_agent_session(
-    client: &AcpClient,
-    router: &mut SessionRouterState,
-    target_session_id: &SessionId,
-) -> bool {
-    if router.is_session_loaded(target_session_id) {
-        return true;
-    }
-    if let Err(error) = client
-        .load_session(target_session_id.clone(), router.cwd().clone())
-        .await
-    {
-        router
-            .active_state_mut()
-            .set_error(format!("failed to load agent session: {error}"));
-        return false;
-    }
-    router.mark_session_loaded(target_session_id.clone());
-    true
 }
 
 /// Mutable UI pieces shared while handling one terminal key event.
@@ -418,8 +424,76 @@ fn handle_local_command(ui: &mut UiRuntime<'_>, text: &str) -> bool {
             ui.router.open_agent_picker();
             true
         }
+        Some(SlashCommand::Model) => {
+            if matches!(parse_model_arg(text.trim()), Some(None)) {
+                open_model_picker_from_command(ui);
+                true
+            } else {
+                false
+            }
+        }
         _ => false,
     }
+}
+
+/// Handles `/model <provider/model>` switch commands before they reach the ACP prompt path.
+async fn handle_model_command(
+    client: &AcpClient,
+    ui: &mut UiRuntime<'_>,
+    text: &str,
+) {
+    let Some(requested_model) = parse_model_arg(text.trim()) else {
+        ui.router
+            .active_state_mut()
+            .add_system_message("Usage: /model [provider/model]");
+        return;
+    };
+
+    let Some(requested_model) = requested_model else {
+        return;
+    };
+
+    if !ui.router.is_active_root_session() {
+        ui.router.active_state_mut().add_system_message(
+            "Model switching is only available in the main agent session.",
+        );
+        return;
+    }
+
+    if !requested_model.contains('/') {
+        ui.router
+            .active_state_mut()
+            .add_system_message("Usage: /model [provider/model]");
+        return;
+    }
+
+    if !ui.router.has_model(requested_model) {
+        let available = ui.router.model_list_message();
+        ui.router.active_state_mut().add_system_message(format!(
+            "Model is not available: {requested_model}\n{}",
+            available
+        ));
+        return;
+    }
+
+    picker::switch_model(client, ui.router, requested_model.to_string()).await;
+}
+
+/// Opens the model picker for `/model` when root-session model choices exist.
+fn open_model_picker_from_command(ui: &mut UiRuntime<'_>) {
+    if !ui.router.is_active_root_session() {
+        ui.router.active_state_mut().add_system_message(
+            "Model switching is only available in the main agent session.",
+        );
+        return;
+    }
+    if ui.router.available_models().is_empty() {
+        ui.router
+            .active_state_mut()
+            .add_system_message("No models available.");
+        return;
+    }
+    ui.router.open_model_picker();
 }
 
 /// Handles `/raw` transcript mode commands before they reach the ACP prompt path.
@@ -440,29 +514,6 @@ fn handle_raw_command(ui: &mut UiRuntime<'_>, text: &str) -> bool {
     true
 }
 
-/// Handles keys while the inline agent picker has focus.
-fn handle_agent_picker_key(
-    router: &mut SessionRouterState,
-    code: KeyCode,
-) -> anyhow::Result<Option<SessionId>> {
-    match code {
-        KeyCode::Up => {
-            router.move_agent_picker_previous();
-            Ok(None)
-        }
-        KeyCode::Down => {
-            router.move_agent_picker_next();
-            Ok(None)
-        }
-        KeyCode::Enter => Ok(router.selected_agent_session_id().cloned()),
-        KeyCode::Esc => {
-            router.close_agent_picker();
-            Ok(None)
-        }
-        _ => Ok(None),
-    }
-}
-
 /// Parses `/raw`, `/raw on`, and `/raw off` argument.
 fn parse_raw_arg(text: &str) -> Option<Option<bool>> {
     let mut parts = text.split_whitespace();
@@ -477,6 +528,19 @@ fn parse_raw_arg(text: &str) -> Option<Option<bool>> {
     }
 }
 
+/// Parses `/model` and `/model provider/model` arguments.
+fn parse_model_arg(text: &str) -> Option<Option<&str>> {
+    let mut parts = text.split_whitespace();
+    if parts.next()? != "/model" {
+        return None;
+    }
+    match (parts.next(), parts.next()) {
+        (None, None) => Some(None),
+        (Some(model), None) => Some(Some(model)),
+        _ => None,
+    }
+}
+
 /// Returns the user-visible raw output mode notice.
 fn raw_output_mode_notice(enabled: bool) -> &'static str {
     if enabled {
@@ -485,6 +549,7 @@ fn raw_output_mode_notice(enabled: bool) -> &'static str {
         "Raw output mode off: rich transcript rendering restored."
     }
 }
+
 /// Starts one ACP prompt and streams ACP notifications back into AppState.
 fn run_prompt(
     client: &AcpClient,
@@ -604,6 +669,47 @@ mod tests {
         assert!(ui.router.is_agent_picker_focused());
     }
 
+    /// Verifies `/model` opens the inline picker locally.
+    #[test]
+    fn model_command_opens_inline_picker() {
+        let root = SessionId::new("root-session");
+        let mut router = SessionRouterState::new_with_models(
+            root,
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![ModelOption::new("deepseek/deepseek-chat", "DeepSeek Chat")],
+            Theme::dark(),
+        );
+        let mut view = ViewState::default();
+        let mut composer = Composer::default();
+        let mut ui = test_ui_runtime(&mut router, &mut view, &mut composer);
+
+        assert!(handle_local_command(&mut ui, "/model"));
+
+        assert!(ui.router.is_model_picker_focused());
+    }
+
+    /// Verifies direct model switches are left for async ACP handling.
+    #[test]
+    fn model_command_with_arg_is_not_consumed_locally() {
+        let root = SessionId::new("root-session");
+        let mut router = SessionRouterState::new_with_models(
+            root,
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![ModelOption::new("deepseek/deepseek-chat", "DeepSeek Chat")],
+            Theme::dark(),
+        );
+        let mut view = ViewState::default();
+        let mut composer = Composer::default();
+        let mut ui = test_ui_runtime(&mut router, &mut view, &mut composer);
+
+        assert!(!handle_local_command(
+            &mut ui,
+            "/model deepseek/deepseek-chat"
+        ));
+    }
+
     /// Verifies focused picker consumes Up/Down/Enter and selects the expected session.
     #[test]
     fn focused_agent_picker_handles_arrow_and_enter() {
@@ -626,15 +732,34 @@ mod tests {
         );
         router.open_agent_picker();
 
-        assert!(
-            handle_agent_picker_key(&mut router, KeyCode::Down)
-                .unwrap()
-                .is_none()
+        assert!(router.handle_agent_picker_key(KeyCode::Down).is_none());
+        assert_eq!(router.handle_agent_picker_key(KeyCode::Enter), Some(child));
+    }
+
+    /// Verifies focused model picker consumes arrows, enter, and escape.
+    #[test]
+    fn focused_model_picker_handles_arrow_enter_and_escape() {
+        let root = SessionId::new("root-session");
+        let mut router = SessionRouterState::new_with_models(
+            root,
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![
+                ModelOption::new("deepseek/deepseek-chat", "DeepSeek Chat"),
+                ModelOption::new("openai/gpt-5", "GPT-5"),
+            ],
+            Theme::dark(),
         );
+        router.open_model_picker();
+
+        assert!(router.handle_model_picker_key(KeyCode::Down).is_none());
         assert_eq!(
-            handle_agent_picker_key(&mut router, KeyCode::Enter).unwrap(),
-            Some(child)
+            router.handle_model_picker_key(KeyCode::Enter),
+            Some("openai/gpt-5".to_string())
         );
+
+        assert!(router.handle_model_picker_key(KeyCode::Esc).is_none());
+        assert!(!router.is_model_picker_focused());
     }
 
     /// Verifies non-command text that merely shares the prefix is not consumed.
@@ -642,5 +767,22 @@ mod tests {
     fn raw_command_does_not_consume_prefix_matches() {
         assert_eq!(SlashCommand::parse_from_text("/rawhide"), None);
         assert_eq!(SlashCommand::parse_from_text(" /raw"), None);
+    }
+
+    /// Verifies `/model` accepts either list or single model forms.
+    #[test]
+    fn parse_model_arg_accepts_list_and_switch_forms() {
+        assert_eq!(parse_model_arg("/model"), Some(None));
+        assert_eq!(
+            parse_model_arg("/model deepseek/deepseek-chat"),
+            Some(Some("deepseek/deepseek-chat"))
+        );
+    }
+
+    /// Verifies `/model` rejects unsupported argument shapes.
+    #[test]
+    fn parse_model_arg_rejects_invalid_forms() {
+        assert_eq!(parse_model_arg("/models"), None);
+        assert_eq!(parse_model_arg("/model a b"), None);
     }
 }

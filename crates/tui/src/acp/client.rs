@@ -119,6 +119,20 @@ impl AcpClient {
         Ok(response.stop_reason)
     }
 
+    /// Requests a model switch for an ACP session.
+    pub async fn set_model(
+        &self,
+        session_id: SessionId,
+        model_id: String,
+    ) -> anyhow::Result<()> {
+        self.conn
+            .send_request(SetSessionModelRequest::new(session_id, model_id))
+            .block_task()
+            .await
+            .context("set ACP session model")
+            .map(|_: SetSessionModelResponse| ())
+    }
+
     /// Sends an ACP cancellation notification for the current prompt turn.
     pub fn cancel(&self, session_id: SessionId) -> anyhow::Result<()> {
         self.conn

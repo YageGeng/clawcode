@@ -20,6 +20,7 @@ pub enum SlashCommand {
     Raw,
     Sessions,
     Agent,
+    Model,
 }
 
 impl SlashCommand {
@@ -36,12 +37,13 @@ impl SlashCommand {
             }
             Self::Sessions => "list recent sessions",
             Self::Agent => "switch between main agent and subagents",
+            Self::Model => "list or switch available models",
         }
     }
 
     /// Whether this command supports inline args (e.g. `/raw on`).
     pub fn supports_inline_args(self) -> bool {
-        matches!(self, Self::Raw | Self::Sessions)
+        matches!(self, Self::Raw | Self::Sessions | Self::Model)
     }
 
     /// Parse a submitted line into a SlashCommand.
@@ -71,6 +73,7 @@ mod tests {
             Ok(SlashCommand::Sessions)
         );
         assert_eq!(SlashCommand::from_str("agent"), Ok(SlashCommand::Agent));
+        assert_eq!(SlashCommand::from_str("model"), Ok(SlashCommand::Model));
     }
 
     #[test]
@@ -92,6 +95,10 @@ mod tests {
             SlashCommand::parse_from_text("/agent"),
             Some(SlashCommand::Agent)
         );
+        assert_eq!(
+            SlashCommand::parse_from_text("/model x/y"),
+            Some(SlashCommand::Model)
+        );
     }
 
     #[test]
@@ -104,6 +111,7 @@ mod tests {
         assert_eq!(SlashCommand::Raw.command(), "raw");
         assert_eq!(SlashCommand::Sessions.command(), "sessions");
         assert_eq!(SlashCommand::Agent.command(), "agent");
+        assert_eq!(SlashCommand::Model.command(), "model");
     }
 
     #[test]
@@ -111,22 +119,25 @@ mod tests {
         assert!(SlashCommand::Raw.description().contains("raw"));
         assert!(SlashCommand::Sessions.description().contains("session"));
         assert!(SlashCommand::Agent.description().contains("agent"));
+        assert!(SlashCommand::Model.description().contains("model"));
     }
 
     #[test]
     fn built_in_commands_contains_all() {
         let commands = built_in_slash_commands();
-        assert_eq!(commands.len(), 3);
+        assert_eq!(commands.len(), 4);
         let names: Vec<&str> = commands.iter().map(|(name, _)| *name).collect();
         assert!(names.contains(&"raw"));
         assert!(names.contains(&"sessions"));
         assert!(names.contains(&"agent"));
+        assert!(names.contains(&"model"));
     }
 
     #[test]
     fn supports_inline_args() {
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::Sessions.supports_inline_args());
+        assert!(SlashCommand::Model.supports_inline_args());
         assert!(!SlashCommand::Agent.supports_inline_args());
     }
 }

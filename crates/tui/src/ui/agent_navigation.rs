@@ -16,6 +16,20 @@ pub(crate) enum AgentPickerStatus {
     Unknown,
 }
 
+impl AgentPickerStatus {
+    /// Return a compact status token for picker rows.
+    pub(crate) fn symbol(self) -> &'static str {
+        match self {
+            Self::Pending => "!",
+            Self::Running => "*",
+            Self::Completed => "v",
+            Self::Errored => "x",
+            Self::Closed => "-",
+            Self::Unknown => "?",
+        }
+    }
+}
+
 /// One selectable agent row in the picker.
 #[derive(Clone, Debug, PartialEq, Eq, typed_builder::TypedBuilder)]
 pub(crate) struct AgentPickerEntry {
@@ -281,6 +295,17 @@ mod tests {
             .status(status)
             .is_root(false)
             .build()
+    }
+
+    /// Verifies agent picker status symbols stay compact for inline rows.
+    #[test]
+    fn agent_picker_status_maps_to_compact_symbols() {
+        assert_eq!(AgentPickerStatus::Pending.symbol(), "!");
+        assert_eq!(AgentPickerStatus::Running.symbol(), "*");
+        assert_eq!(AgentPickerStatus::Completed.symbol(), "v");
+        assert_eq!(AgentPickerStatus::Errored.symbol(), "x");
+        assert_eq!(AgentPickerStatus::Closed.symbol(), "-");
+        assert_eq!(AgentPickerStatus::Unknown.symbol(), "?");
     }
 
     /// Verifies root is always first and labeled as Main [default].

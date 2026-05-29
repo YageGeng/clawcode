@@ -188,6 +188,11 @@ impl AppState {
         &self.model_label
     }
 
+    /// Updates the provider/model label used in status lines.
+    pub fn set_model_label(&mut self, model_label: impl Into<String>) {
+        self.model_label = model_label.into();
+    }
+
     /// Returns the configured TUI render theme.
     pub fn theme(&self) -> &Theme {
         &self.theme

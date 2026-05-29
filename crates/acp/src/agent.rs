@@ -1603,10 +1603,10 @@ impl ClawcodeAgent {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let update = SessionUpdate::AvailableCommandsUpdate(
-            AvailableCommandsUpdate::new(vec![AvailableCommand::new(
-                "sessions",
-                "list recent sessions",
-            )]),
+            AvailableCommandsUpdate::new(vec![
+                AvailableCommand::new("sessions", "list recent sessions"),
+                AvailableCommand::new("model", "list or switch models"),
+            ]),
         );
         cx.send_notification(SessionNotification::new(
             session_id.clone(),

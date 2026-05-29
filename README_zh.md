@@ -104,6 +104,8 @@ cargo run -p tui -- --resume <SESSION_ID>
 
 在 TUI 中，可以使用 `/agent` 打开代理选择器。它会列出主会话和当前存活的子代理，并将当前 transcript 切换到选中的代理会话。
 
+在主会话中使用 `/model` 可以打开模型选择器，并通过方向键和 Enter 切换当前模型；`/model <provider/model>` 也可以直接切换。
+
 ## 子代理
 
 模型可以使用内置 agent 工具创建并协调子代理。子代理会作为独立会话运行，拥有自己的 transcript 流；TUI 可以通过 `/agent` 在主会话和子代理会话之间切换。

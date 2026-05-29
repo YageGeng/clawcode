@@ -2,6 +2,7 @@
 # active_model = "deepseek/deepseek-v4-flash"
 active_model = "deepseek/deepseek-v4-pro"
 # active_model = "chatgpt/gpt-5.4"
+# active_model = "xiaomimimo/mimo-v2.5-pro"
 
 # Approval strategy to use.
 approval = "yolo"
@@ -92,6 +93,27 @@ max_output_tokens = 384000
 [providers.models.extra_param]
 thinking = { type = "enabled" }
 reasoning_effort = "high"
+
+[[providers]]
+id = "xiaomimimo"
+display_name = "Xiaomi MiMo"
+provider_type = "anthropic"
+base_url = "https://api.xiaomimimo.com/anthropic"
+
+[providers.api_key]
+env = "MIMO_API_KEY"
+
+[[providers.models]]
+id = "mimo-v2.5-pro"
+display_name = "MiMo V2.5 Pro"
+context_tokens = 1000000
+max_output_tokens = 384000
+
+[[providers.models]]
+id = "mimo-v2.5"
+display_name = "MiMo V2.5"
+context_tokens = 1000000
+max_output_tokens = 384000
 
 [[mcp_servers]]
 enabled = false

@@ -12,7 +12,7 @@ use crate::ui::session_router::SessionRouterState;
 use crate::ui::state::AppState;
 use crate::ui::theme::Theme;
 use crate::ui::view::ViewState;
-use crate::ui::{agent_picker, approval, layout, status, transcript};
+use crate::ui::{approval, layout, picker, status, transcript};
 
 /// Render the complete TUI frame for the current application state.
 pub fn render(
@@ -51,10 +51,10 @@ pub(crate) fn render_router(
     view: &ViewState,
     composer: &Composer,
 ) {
-    let Some(rows) = layout::frame_rows_with_agent_picker(
+    let Some(rows) = layout::frame_rows_with_picker(
         frame.area(),
         composer.text(),
-        router.agent_picker_height(),
+        router.inline_picker_height(),
     ) else {
         return;
     };
@@ -63,12 +63,12 @@ pub(crate) fn render_router(
     transcript::render_transcript(frame, rows.transcript, state, view);
     status::render_top_status(frame, rows.top_status, state);
     render_composer(frame, rows.composer, composer, state.theme());
-    agent_picker::render_agent_picker(
-        frame,
-        rows.agent_picker,
-        router,
-        state.theme(),
-    );
+
+    if router.is_model_picker_focused() {
+        picker::render_model_picker(frame, rows.picker, router, state.theme());
+    } else {
+        picker::render_agent_picker(frame, rows.picker, router, state.theme());
+    }
     status::render_bottom_status_with_agent(
         frame,
         rows.bottom_status,
@@ -139,6 +139,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
+
+    use crate::ui::session_router::ModelOption;
 
     /// Builds an ACP session id for render tests.
     fn sid(value: &str) -> SessionId {
@@ -1027,6 +1029,39 @@ mod tests {
 
         let screen = rendered_screen(&terminal);
         assert!(screen.iter().any(|line| line.contains("Main [default]")));
+    }
+
+    /// Verifies `/model` picker renders available models under the composer.
+    #[test]
+    fn render_model_picker_shows_available_models_under_composer() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut router = SessionRouterState::new_with_models(
+            sid("root-session"),
+            "/tmp/project".into(),
+            "deepseek/deepseek-chat".to_string(),
+            vec![
+                ModelOption::new("deepseek/deepseek-chat", "DeepSeek Chat"),
+                ModelOption::new("openai/gpt-5", "GPT-5"),
+            ],
+            Theme::dark(),
+        );
+        router.open_model_picker();
+
+        terminal
+            .draw(|frame| {
+                render_router(
+                    frame,
+                    &router,
+                    &ViewState::default(),
+                    &composer(""),
+                )
+            })
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        assert!(screen.iter().any(|line| line.contains("DeepSeek Chat")));
+        assert!(screen.iter().any(|line| line.contains("GPT-5")));
     }
 
     /// Verifies the bottom status keeps the active agent visible when cwd is long.

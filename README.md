@@ -109,6 +109,10 @@ In the TUI, use `/agent` to open the agent picker. It lists the main session
 and live sub-agents, then switches the active transcript to the selected agent
 session.
 
+Use `/model` from the main session to open the model picker, then use the arrow
+keys and Enter to switch the active model. `/model <provider/model>` also
+switches directly.
+
 ## Sub-agents
 
 Models can use the built-in agent tools to spawn and coordinate sub-agents.
