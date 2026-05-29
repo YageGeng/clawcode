@@ -447,6 +447,34 @@ impl Tool for WaitAgent {
             .agent_control
             .subscribe_session_mailbox_activity(&ctx.session_id)
             .await?;
+        // If there are no pending mailbox items and no live sub-agents,
+        // return immediately to avoid blocking for the full timeout when
+        // there is nothing to wait for.
+        if !mailbox_rx.has_changed().unwrap_or(false) {
+            let agents = self.agent_control.list_agents(None);
+            let has_live = agents
+                .iter()
+                .any(|a| a.agent_name != "/root" && !a.agent_status.is_final());
+
+            if !has_live {
+                // A terminal notification can arrive between the initial mailbox check
+                // and list_agents observing that every child is final.
+                if mailbox_rx.has_changed().unwrap_or(false) {
+                    let result =
+                        wait_for_session_mailbox_update(mailbox_rx, timeout_ms)
+                            .await;
+                    return serde_json::to_string(&result)
+                        .map_err(|e| e.to_string());
+                }
+
+                return serde_json::to_string(&WaitAgentResult {
+                    message: "No live agents to wait for.".to_string(),
+                    timed_out: false,
+                })
+                .map_err(|e| e.to_string());
+            }
+        }
+
         let result =
             wait_for_session_mailbox_update(mailbox_rx, timeout_ms).await;
 
@@ -639,6 +667,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use protocol::{AgentPath, AgentStatus, ToolContext};
@@ -714,6 +743,95 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
+        }
+    }
+
+    /// Minimal control that emits mailbox activity while wait_agent checks live agents.
+    struct RacingNoLiveControl {
+        mailbox_tx: watch::Sender<()>,
+        list_calls: AtomicUsize,
+    }
+
+    impl RacingNoLiveControl {
+        /// Create a control whose mailbox starts unchanged for fresh subscribers.
+        fn new() -> Arc<Self> {
+            let (mailbox_tx, _mailbox_rx) = watch::channel(());
+            Arc::new(Self {
+                mailbox_tx,
+                list_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentControlRef for RacingNoLiveControl {
+        /// Test stub: spawning is not used by this wait-agent race test.
+        async fn spawn_agent(
+            &self,
+            _request: SpawnAgentRequest,
+        ) -> Result<String, String> {
+            Err("spawn not used".to_string())
+        }
+
+        /// Test stub: target resolution is not used by this wait-agent race test.
+        async fn resolve_target(
+            &self,
+            _target: &str,
+        ) -> Result<AgentPath, String> {
+            Err("resolve not used".to_string())
+        }
+
+        /// Test stub: message sending is not used by this wait-agent race test.
+        async fn send_message_to(
+            &self,
+            _from: AgentPath,
+            _to: AgentPath,
+            _content: String,
+            _trigger_turn: bool,
+        ) -> Result<(), String> {
+            Err("send not used".to_string())
+        }
+
+        /// Emit a mailbox update while reporting no live agents.
+        fn list_agents(
+            &self,
+            _prefix: Option<&AgentPath>,
+        ) -> Vec<AgentToolSummary> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            self.mailbox_tx.send_replace(());
+            Vec::new()
+        }
+
+        /// Test stub: status subscription is not used by this wait-agent race test.
+        async fn subscribe_status(
+            &self,
+            _agent_path: &AgentPath,
+        ) -> Result<watch::Receiver<AgentStatus>, String> {
+            Err("status not used".to_string())
+        }
+
+        /// Test stub: agent mailbox subscription is not used by this wait-agent race test.
+        async fn subscribe_mailbox_activity(
+            &self,
+            _agent_path: &AgentPath,
+        ) -> Result<watch::Receiver<()>, String> {
+            Err("mailbox not used".to_string())
+        }
+
+        /// Subscribe to the session mailbox before the injected race update happens.
+        async fn subscribe_session_mailbox_activity(
+            &self,
+            _session_id: &protocol::SessionId,
+        ) -> Result<watch::Receiver<()>, String> {
+            Ok(self.mailbox_tx.subscribe())
+        }
+
+        /// Test stub: close is not used by this wait-agent race test.
+        async fn close_agent(
+            &self,
+            _agent_path: &AgentPath,
+        ) -> Result<AgentStatus, String> {
+            Err("close not used".to_string())
         }
     }
 
@@ -898,6 +1016,30 @@ mod tests {
         notifier.notify_session_mailbox();
 
         let output = waiter.await.expect("wait task").expect("wait output");
+
+        assert!(output.contains("\"timed_out\":false"), "{output}");
+        assert!(
+            output.contains("\"message\":\"Wait completed.\""),
+            "{output}"
+        );
+    }
+
+    /// Verifies wait_agent rechecks mailbox activity before returning no-live.
+    #[tokio::test]
+    async fn wait_agent_observes_mailbox_race_before_no_live_return() {
+        let control = RacingNoLiveControl::new();
+        let tool = WaitAgent::new(control);
+        let ctx = test_context(Path::new("."));
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "timeout_ms": 20000
+                }),
+                &ctx,
+            )
+            .await
+            .expect("wait output");
 
         assert!(output.contains("\"timed_out\":false"), "{output}");
         assert!(

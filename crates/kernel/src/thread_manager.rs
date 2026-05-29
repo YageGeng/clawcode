@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use config::AppConfig;
 use protocol::message::Message;
-use protocol::{AgentPath, Event, KernelError, Op, SessionId, Usage};
+use protocol::{
+    AgentPath, Event, InterAgentMessage, KernelError, Op, SessionId, Usage,
+};
 use provider::factory::{ArcLlm, LlmFactory};
 use store::SessionRecorder;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -153,6 +155,23 @@ impl ThreadManager {
                 "failed to send operation to session {session_id}: {error}"
             ))
         })
+    }
+
+    /// Queue an inter-agent mailbox message directly into a live session.
+    pub(crate) async fn enqueue_mailbox_message(
+        &self,
+        session_id: &SessionId,
+        message: InterAgentMessage,
+    ) -> Result<(), KernelError> {
+        let Some(thread) = self.get_thread(session_id).await else {
+            return Err(KernelError::SessionNotFound(session_id.clone()));
+        };
+        thread
+            .input_queue
+            .lock()
+            .await
+            .enqueue_mailbox_communication(message);
+        Ok(())
     }
 
     /// Request a runtime model switch and wait until the session applies it.

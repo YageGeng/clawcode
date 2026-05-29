@@ -218,7 +218,7 @@ impl AgentControl {
         }
 
         // Step 2–3: reserve slot + path + nickname
-        let max_threads = self.config.max_concurrent_threads_per_session;
+        let max_threads = self.config.max_threads;
         let mut reservation =
             self.registry.reserve_spawn_slot(Some(max_threads))?;
 
@@ -422,23 +422,18 @@ impl AgentControl {
         child_session_id: &SessionId,
         status: AgentStatus,
     ) -> Result<(), String> {
-        self.registry
-            .update_agent_status(child_session_id, status.clone());
-
-        if let Some(status_tx) =
-            self.status_watchers.lock().await.get(child_session_id)
-        {
-            let _ = status_tx.send(status.clone());
-        }
-
         let Some(metadata) = self
             .registry
             .agent_metadata_for_thread(child_session_id.clone())
         else {
+            self.update_child_terminal_status(child_session_id, status)
+                .await;
             return Ok(());
         };
 
         let Some(parent_session_id) = metadata.parent_session_id.clone() else {
+            self.update_child_terminal_status(child_session_id, status)
+                .await;
             return Ok(());
         };
 
@@ -479,12 +474,31 @@ impl AgentControl {
             .trigger_turn(false)
             .build();
 
-        self.thread_manager
-            .send_op(&parent_session_id, Op::InterAgentMessage { message })
+        let notify_result = self
+            .thread_manager
+            .enqueue_mailbox_message(&parent_session_id, message)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string());
 
-        Ok(())
+        self.update_child_terminal_status(child_session_id, status)
+            .await;
+        notify_result
+    }
+
+    /// Store a child's terminal status and wake any status subscribers.
+    async fn update_child_terminal_status(
+        &self,
+        child_session_id: &SessionId,
+        status: AgentStatus,
+    ) {
+        self.registry
+            .update_agent_status(child_session_id, status.clone());
+
+        if let Some(status_tx) =
+            self.status_watchers.lock().await.get(child_session_id)
+        {
+            let _ = status_tx.send(status);
+        }
     }
 
     /// List active sub-agents, optionally filtered by path prefix.
@@ -1353,10 +1367,10 @@ mod tests {
         let parent_id = SessionId::from("parent");
         let child_id = SessionId::from("child");
         let child_path = AgentPath::root().join("child");
-        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
-        thread_manager
-            .insert_thread(test_thread(parent_id.clone(), tx_op))
-            .await;
+        let (tx_op, _rx_op) = mpsc::unbounded_channel();
+        let parent_thread = test_thread(parent_id.clone(), tx_op);
+        let parent_queue = Arc::clone(&parent_thread.input_queue);
+        thread_manager.insert_thread(parent_thread).await;
         control.registry.register_root_thread(parent_id.clone());
         control
             .registry
@@ -1393,10 +1407,13 @@ mod tests {
                 message: Some("done".to_string())
             }
         );
-        let sent = rx_op.recv().await.expect("parent notification");
-        let Op::InterAgentMessage { message } = sent else {
-            panic!("expected inter-agent message");
-        };
+        let message = parent_queue
+            .lock()
+            .await
+            .drain_mailbox_input_items()
+            .into_iter()
+            .next()
+            .expect("parent notification");
         assert!(!message.trigger_turn);
         assert!(message.content.contains("kid"));
         assert!(message.content.contains("done"));
@@ -1421,10 +1438,10 @@ mod tests {
         let parent_id = SessionId::from("parent");
         let child_id = SessionId::from("child");
         let child_path = AgentPath::root().join("child");
-        let (tx_op, mut rx_op) = mpsc::unbounded_channel();
-        thread_manager
-            .insert_thread(test_thread(parent_id.clone(), tx_op))
-            .await;
+        let (tx_op, _rx_op) = mpsc::unbounded_channel();
+        let parent_thread = test_thread(parent_id.clone(), tx_op);
+        let parent_queue = Arc::clone(&parent_thread.input_queue);
+        thread_manager.insert_thread(parent_thread).await;
         control.registry.register_root_thread(parent_id.clone());
         control
             .registry
@@ -1447,17 +1464,86 @@ mod tests {
             .await
             .expect("notify parent");
 
-        let Op::InterAgentMessage { message } =
-            rx_op.recv().await.expect("parent notification")
-        else {
-            panic!("expected inter-agent message");
-        };
+        let message = parent_queue
+            .lock()
+            .await
+            .drain_mailbox_input_items()
+            .into_iter()
+            .next()
+            .expect("parent notification");
         assert!(!message.trigger_turn);
         assert!(message.content.contains("<subagent_notification>"));
         assert!(message.content.contains("\"agent_path\":\"/root/child\""));
         assert!(message.content.contains("\"child_session_id\":\"child\""));
         assert!(message.content.contains("\"final_message\":\"done\""));
         assert!(message.content.contains("</subagent_notification>"));
+    }
+
+    /// Verifies terminal child notifications are visible to wait_agent after status becomes final.
+    #[tokio::test]
+    async fn child_terminal_turn_marks_parent_mailbox_pending() {
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            tools,
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            None,
+            None,
+        );
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
+        let child_path = AgentPath::root().join("child");
+        let (tx_op, _rx_op) = mpsc::unbounded_channel();
+        let parent_thread = test_thread(parent_id.clone(), tx_op);
+        let parent_queue = Arc::clone(&parent_thread.input_queue);
+        thread_manager.insert_thread(parent_thread).await;
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .registry
+            .restore_agent(
+                child_id.clone(),
+                child_path,
+                Some("kid".to_string()),
+                Some("default".to_string()),
+                Some(parent_id.clone()),
+            )
+            .expect("restore child");
+
+        control
+            .notify_child_terminal_turn(
+                &child_id,
+                AgentStatus::Completed {
+                    message: Some("done".to_string()),
+                },
+            )
+            .await
+            .expect("notify parent");
+
+        assert!(
+            control
+                .list_agents(None)
+                .iter()
+                .all(|agent| agent.agent_name == "/root"),
+            "child should already be final and omitted from live agents"
+        );
+        let pending_rx = control
+            .subscribe_session_mailbox_activity(&parent_id)
+            .await
+            .expect("parent mailbox subscription");
+        assert!(
+            pending_rx.has_changed().expect("mailbox watcher open"),
+            "wait_agent must observe pending terminal notification mail"
+        );
+        let pending_messages =
+            parent_queue.lock().await.drain_mailbox_input_items();
+        assert_eq!(pending_messages.len(), 1);
+        assert!(pending_messages[0].content.contains("done"));
     }
 
     #[tokio::test]

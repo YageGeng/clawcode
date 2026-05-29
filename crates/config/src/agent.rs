@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct MultiAgentConfig {
     /// Maximum number of concurrent sub-agent threads per session tree.
-    pub max_concurrent_threads_per_session: usize,
+    pub max_threads: usize,
     /// Maximum spawn depth (root = 0, its child = 1, etc.).
     pub max_spawn_depth: i32,
     /// Minimum time in milliseconds that wait_agent should block before
@@ -21,7 +21,7 @@ pub struct MultiAgentConfig {
 impl Default for MultiAgentConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_threads_per_session: 8,
+            max_threads: 8,
             max_spawn_depth: 8,
             min_wait_timeout_ms: 1000,
             hide_spawn_metadata: false,

@@ -9,6 +9,9 @@ approval = "yolo"
 [tui]
 theme = "light"
 
+[multi_agent]
+max_threads = 100
+
 [[providers]]
 id = "openai"
 display_name = "OpenAI"
