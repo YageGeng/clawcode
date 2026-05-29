@@ -100,32 +100,31 @@ fn render_composer(
     // No explicit background; lets the terminal background show through.
     let text = composer.text();
     let composer_style = Style::default().bg(theme.composer_bg());
-    let vertical_padding = area
-        .height
-        .saturating_sub(text.lines().count().max(1) as u16)
-        / 2;
-    let input_area = Rect {
-        y: area.y.saturating_add(vertical_padding),
-        height: area.height.saturating_sub(vertical_padding * 2),
-        ..area
-    };
-
+    // Use the full allocated area so that ratatui's Paragraph::wrap can
+    // flow long single-line prompts across multiple visual rows.  Shrinking
+    // the input area with vertical-padding based on newline count would
+    // clip wrapped content to a single row.
+    // When the text has more visual lines than the available area, scroll
+    // the paragraph content so the cursor line remains visible.
+    let (cursor_column, cursor_row) =
+        composer.cursor_cell_offset(area.width, 2);
+    let scroll_row = cursor_row.saturating_sub(area.height.saturating_sub(1));
     frame.render_widget(Paragraph::new("").style(composer_style), area);
     frame.render_widget(
         Paragraph::new(format!("> {text}"))
             .wrap(Wrap { trim: false })
+            .scroll((scroll_row, 0))
             .style(composer_style),
-        input_area,
+        area,
     );
-
-    let (cursor_column, cursor_row) =
-        composer.cursor_cell_offset(input_area.width, 2);
-    let cursor_x = input_area
+    let cursor_x = area
         .x
-        .saturating_add(cursor_column.min(input_area.width.saturating_sub(1)));
-    let cursor_y = input_area
-        .y
-        .saturating_add(cursor_row.min(input_area.height.saturating_sub(1)));
+        .saturating_add(cursor_column.min(area.width.saturating_sub(1)));
+    let cursor_y = area.y.saturating_add(
+        cursor_row
+            .saturating_sub(scroll_row)
+            .min(area.height.saturating_sub(1)),
+    );
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
 
@@ -706,6 +705,78 @@ mod tests {
         );
         assert!(screen.iter().any(|line| line.contains("stdout:")));
         assert!(screen.iter().any(|line| line.contains("full shell output")));
+    }
+
+    /// Verifies the composer input area allows multi-line visual wrapping
+    /// when a single logical line exceeds the available width.
+    #[test]
+    fn composer_wraps_long_single_line_content() {
+        // Narrow terminal so a long prompt must wrap.
+        let backend = TestBackend::new(24, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &ViewState::default(),
+                    &composer("abcdefghijklmnopqrstuvwxyz"),
+                )
+            })
+            .expect("draw");
+        // The long prompt should wrap across multiple visual rows.
+        let screen = rendered_screen(&terminal);
+        // With "> " prefix + 26-char text in a 24-column terminal, the text
+        // wraps: the prefix occupies the first line, then content flows.
+        assert!(screen.iter().any(|line| line.contains("> ")));
+        assert!(
+            screen
+                .iter()
+                .any(|line| line.contains("abcdefghijklmnopqrstuvwx"))
+        );
+        assert!(screen.iter().any(|line| line.contains("yz")));
+    }
+
+    /// Verifies multiline composer input keeps the cursor line visible
+    /// when explicit newlines push content beyond the composer area.
+    #[test]
+    fn composer_scrolls_to_keep_cursor_visible_in_multiline_input() {
+        // Small terminal so the composer area is limited.
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let state = AppState::new(
+            sid("s1"),
+            "/tmp/project".into(),
+            "deepseek/model".to_string(),
+        );
+
+        // Simulate typing several lines; cursor is at the end of the last line.
+        let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8";
+        let composer = composer(text);
+
+        // The composer area is at most 6 rows (clamped by layout), but text
+        // has 5 logical lines.  If the cursor is on line 5 and only 3-6 rows
+        // are visible, the last line should still appear on screen.
+        terminal
+            .draw(|frame| {
+                render(frame, &state, &ViewState::default(), &composer)
+            })
+            .expect("draw");
+
+        let screen = rendered_screen(&terminal);
+        // The composer area height maxes at 6 rows (layout clamp).
+        // With 8 logical lines, scrolling must reveal the last line where
+        // the cursor sits.
+        assert!(
+            screen.iter().any(|line| line.contains("line8")),
+            "last line should be visible in composer area"
+        );
     }
 
     /// Verifies shell tool calls use Codex-style headers and five-line output previews.

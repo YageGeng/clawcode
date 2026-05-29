@@ -6,7 +6,10 @@ use std::io::{self, Stdout};
 use anyhow::Result;
 use crossterm::{
     Command,
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
@@ -88,6 +91,21 @@ pub fn enter(use_alt_screen: bool) -> Result<(TuiTerminal, TerminalGuard)> {
         return Err(error.into());
     }
 
+    // Enable kitty keyboard protocol so that Shift+Enter and other modified
+    // key combinations are distinguishable from their unmodified forms.
+    // The protocol is best-effort: terminals that do not support it will
+    // still work, but Shift+Enter will not be distinguishable from Enter.
+    if let Err(error) = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        ),
+    ) {
+        tracing::warn!(
+            "kitty keyboard protocol not supported, Shift+Enter will not be distinguishable: {error}"
+        );
+    }
+
     // Enter alternate screen only when requested and roll back immediately on failure.
     let alt_screen = if use_alt_screen {
         match execute!(stdout, EnterAlternateScreen) {
@@ -96,6 +114,7 @@ pub fn enter(use_alt_screen: bool) -> Result<(TuiTerminal, TerminalGuard)> {
                 // many terminals translate wheel input into Up/Down key events.
                 if let Err(error) = execute!(stdout, EnableAlternateScroll) {
                     let _ = execute!(stdout, LeaveAlternateScreen);
+                    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
                     let _ = execute!(stdout, DisableBracketedPaste);
                     let _ = disable_raw_mode();
                     return Err(error.into());
@@ -103,6 +122,7 @@ pub fn enter(use_alt_screen: bool) -> Result<(TuiTerminal, TerminalGuard)> {
                 true
             }
             Err(error) => {
+                let _ = execute!(stdout, PopKeyboardEnhancementFlags);
                 let _ = execute!(stdout, DisableBracketedPaste);
                 let _ = disable_raw_mode();
                 return Err(error.into());
@@ -120,6 +140,7 @@ pub fn enter(use_alt_screen: bool) -> Result<(TuiTerminal, TerminalGuard)> {
                 let _ = execute!(stdout, DisableAlternateScroll);
                 let _ = execute!(stdout, LeaveAlternateScreen);
             }
+            let _ = execute!(stdout, PopKeyboardEnhancementFlags);
             let _ = execute!(stdout, DisableBracketedPaste);
             let _ = disable_raw_mode();
             return Err(error.into());
@@ -149,6 +170,9 @@ impl TerminalGuard {
             if let Err(error) = execute!(stdout, LeaveAlternateScreen) {
                 errors.push(error.into());
             }
+        }
+        if let Err(error) = execute!(stdout, PopKeyboardEnhancementFlags) {
+            errors.push(error.into());
         }
         if let Err(error) = execute!(stdout, DisableBracketedPaste) {
             errors.push(error.into());

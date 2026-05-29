@@ -107,6 +107,10 @@ impl Composer {
                 self.clear();
                 ComposerAction::Submit(submitted)
             }
+            (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                self.insert_str("\n");
+                ComposerAction::Redraw
+            }
             (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                 self.insert_str("\n");
                 ComposerAction::Redraw
@@ -319,6 +323,18 @@ mod tests {
             KeyCode::Char('j'),
             KeyModifiers::CONTROL,
         ));
+
+        assert_eq!(action, ComposerAction::Redraw);
+        assert_eq!(composer.text(), "a\n");
+    }
+
+    #[test]
+    fn composer_shift_enter_inserts_newline() {
+        let mut composer = Composer::default();
+        composer.insert_str("a");
+
+        let action = composer
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
 
         assert_eq!(action, ComposerAction::Redraw);
         assert_eq!(composer.text(), "a\n");
