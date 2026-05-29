@@ -234,6 +234,10 @@ pub(crate) async fn execute_turn(
 
         // Track whether the assistant content has final text that can complete the turn
         let mut is_answer = false;
+        // Track whether the provider has signalled end-of-stream via Final.
+        // The turn must not be considered complete until Final is observed,
+        // even if is_answer is true and no tool calls were made.
+        let mut final_received = false;
 
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| {
@@ -357,18 +361,18 @@ pub(crate) async fn execute_turn(
                         content,
                     ));
                 }
-                LlmStreamEvent::Final {
-                    usage: Some(usage), ..
-                } => {
-                    response_usage = Some(usage);
-                    turn_usage += usage;
-                    let _ = tx_event.send(Event::usage_update(
-                        sid.clone(),
-                        usage.input_tokens,
-                        usage.output_tokens,
-                    ));
+                LlmStreamEvent::Final { usage, .. } => {
+                    final_received = true;
+                    if let Some(usage) = usage {
+                        response_usage = Some(usage);
+                        turn_usage += usage;
+                        let _ = tx_event.send(Event::usage_update(
+                            sid.clone(),
+                            usage.input_tokens,
+                            usage.output_tokens,
+                        ));
+                    }
                 }
-                _ => {}
             }
         }
 
@@ -384,8 +388,9 @@ pub(crate) async fn execute_turn(
             ctx.persist_message(assistant_message, response_usage).await;
         }
 
-        // If no tool calls were made, the turn is done
-        if tool_outputs.is_empty() && is_answer {
+        // If no tool calls were made and the provider has signalled the
+        // stream is finished, the turn is done.
+        if tool_outputs.is_empty() && is_answer && final_received {
             return Ok(turn_usage);
         }
 
