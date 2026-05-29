@@ -7,7 +7,7 @@ registry of built-in and MCP-backed tools.
 clawcode ships two binaries:
 
 - **`acp`** — ACP stdio agent for any ACP-compatible client.
-- **`claw`** — Interactive terminal client with session resume and streaming
+- **`claw-tui`** — Interactive terminal client with session resume and streaming
   responses.
 
 ## Architecture
@@ -61,7 +61,7 @@ Create `~/.config/clawcode/config.toml`. For repo-local experiments, create `./c
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-approval = "yolo"  # or "on_request"
+approval = "yolo"  # or "request_approval"
 
 [tui]
 theme = "dark"  # or "light"
@@ -72,8 +72,7 @@ display_name = "DeepSeek"
 provider_type = "openai-completions"
 base_url = "https://api.deepseek.com"
 
-[providers.api_key]
-env = "DEEPSEEK_API_KEY"
+api_key = { env = "DEEPSEEK_API_KEY" }
 
 [[providers.models]]
 id = "deepseek-v4-pro"
@@ -94,8 +93,8 @@ Run the TUI with:
 ```sh
 # Interactive terminal UI
 cargo run -p tui
-
-# Or build and launch the ACP agent 
+# Or run by binary name
+cargo run --bin claw-tui
 cargo run --bin acp
 ```
 

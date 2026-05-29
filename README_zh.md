@@ -5,7 +5,7 @@
 clawcode 包含两个二进制文件：
 
 - **`acp`** — ACP stdio 代理，可接入任意 ACP 兼容客户端。
-- **`claw`** — 交互式终端客户端，支持会话恢复和流式响应。
+- **`claw-tui`** — 交互式终端客户端，支持会话恢复和流式响应。
 
 ## 架构
 
@@ -57,7 +57,10 @@ clawcode 包含两个二进制文件：
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-approval = "yolo"  # 或 "on_request"
+approval = "yolo"  # 或 "request_approval"
+
+[tui]
+theme = "dark"  # 或 "light"
 
 [[providers]]
 id = "deepseek"
@@ -65,8 +68,7 @@ display_name = "DeepSeek"
 provider_type = "openai-completions"
 base_url = "https://api.deepseek.com"
 
-[providers.api_key]
-env = "DEEPSEEK_API_KEY"
+api_key = { env = "DEEPSEEK_API_KEY" }
 
 [[providers.models]]
 id = "deepseek-v4-pro"
@@ -87,7 +89,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
 ```sh
 # 交互式终端 UI
 cargo run -p tui
-
+# 或通过二进制名称运行
+cargo run --bin claw-tui
 # 构建并启动 ACP 代理
 cargo run --bin acp
 ```

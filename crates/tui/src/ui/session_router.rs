@@ -193,6 +193,7 @@ impl SessionRouterState {
     ) {
         if let Some(patch) = Self::subagent_metadata_patch(&notification.update)
         {
+            self.apply_agent_statuses(&patch);
             // Snapshots describe the root session tree. Lazy-loading a child session can also
             // emit a child-rooted snapshot, which must not replace the global picker metadata.
             let is_child_snapshot = patch.event
@@ -210,6 +211,22 @@ impl SessionRouterState {
         self.ensure_state(session_id.clone());
         if let Some(state) = self.states.get_mut(&session_id) {
             state.apply_session_update(notification);
+        }
+    }
+
+    /// Mirror non-root lifecycle metadata into per-session status state.
+    fn apply_agent_statuses(&mut self, patch: &protocol::AgentUiMetadataPatch) {
+        for metadata in &patch.agents {
+            let session_id = SessionId::from(&metadata.session_id);
+            // Root metadata defaults to running for picker availability, so only child sessions
+            // should drive the status line through metadata.
+            if self.agent_navigation.is_root_session(&session_id) {
+                continue;
+            }
+            self.ensure_state(session_id.clone());
+            if let Some(state) = self.states.get_mut(&session_id) {
+                state.apply_agent_status(metadata.status.clone());
+            }
         }
     }
 
@@ -530,5 +547,33 @@ mod tests {
         ));
 
         assert_eq!(router.active_agent_label(), "finder [worker]");
+    }
+
+    /// Verifies running subagent metadata drives the active child status line.
+    #[test]
+    fn running_subagent_metadata_updates_active_child_status_line() {
+        let root = SessionId::new("root-session");
+        let child = SessionId::new("child-session");
+        let mut router = SessionRouterState::new(
+            root.clone(),
+            "/tmp/project".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        let update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router.apply_session_notification(SessionNotification::new(
+            root.clone(),
+            update,
+        ));
+        router
+            .select_agent_session(
+                child,
+                &mut ViewState::default(),
+                &mut Composer::default(),
+            )
+            .expect("select child");
+
+        assert_eq!(router.active_state().top_status_line(), "running");
     }
 }

@@ -9,6 +9,7 @@ use agent_client_protocol::schema::{
     ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
     UsageUpdate,
 };
+use protocol::AgentStatus;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::approval::PendingApproval;
@@ -138,6 +139,9 @@ pub struct AppState {
     /// Last runtime error message shown to the user.
     #[builder(default, setter(strip_option))]
     last_error: Option<String>,
+    /// Latest externally reported lifecycle status for an agent-backed session.
+    #[builder(default, setter(strip_option))]
+    agent_status: Option<AgentStatus>,
 }
 
 impl AppState {
@@ -248,6 +252,7 @@ impl AppState {
         self.last_error = None;
         self.last_stop_reason = None;
         self.pending_approval = None;
+        self.agent_status = None;
     }
 
     /// Records a prompt completion returned by ACP.
@@ -262,6 +267,12 @@ impl AppState {
         self.running_prompt = false;
         self.last_stop_reason = Some(stop_reason);
         self.pending_approval = None;
+        self.agent_status = None;
+    }
+
+    /// Records externally reported lifecycle status for this agent session.
+    pub fn apply_agent_status(&mut self, status: AgentStatus) {
+        self.agent_status = Some(status);
     }
 
     /// Records an ACP permission request in renderable form.
@@ -293,6 +304,9 @@ impl AppState {
         }
         if self.running_prompt {
             return "running".to_string();
+        }
+        if let Some(status_line) = self.agent_status_line() {
+            return status_line;
         }
         if let Some(stop_reason) = self.last_stop_reason {
             return format!("stopped: {stop_reason:?}");
@@ -343,6 +357,10 @@ impl AppState {
     /// Returns whether the last submitted user prompt is still running.
     pub fn is_running_prompt(&self) -> bool {
         self.running_prompt
+            || matches!(
+                self.agent_status,
+                Some(AgentStatus::PendingInit | AgentStatus::Running)
+            )
     }
 
     /// Returns the stop reason from the last completed turn.
@@ -353,6 +371,20 @@ impl AppState {
     /// Returns the last recorded runtime error.
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// Returns a status-line label for externally reported lifecycle status.
+    fn agent_status_line(&self) -> Option<String> {
+        let status = self.agent_status.as_ref()?;
+        match status {
+            AgentStatus::PendingInit => Some("pending".to_string()),
+            AgentStatus::Running => Some("running".to_string()),
+            AgentStatus::Interrupted => Some("interrupted".to_string()),
+            AgentStatus::Completed { .. } => Some("completed".to_string()),
+            AgentStatus::Errored { reason } => Some(format!("error: {reason}")),
+            AgentStatus::Shutdown => Some("shutdown".to_string()),
+            AgentStatus::NotFound => Some("not found".to_string()),
+        }
     }
 
     /// Applies a full ACP tool-call snapshot.
