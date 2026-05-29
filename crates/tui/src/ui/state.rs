@@ -357,10 +357,6 @@ impl AppState {
     /// Returns whether the last submitted user prompt is still running.
     pub fn is_running_prompt(&self) -> bool {
         self.running_prompt
-            || matches!(
-                self.agent_status,
-                Some(AgentStatus::PendingInit | AgentStatus::Running)
-            )
     }
 
     /// Returns the stop reason from the last completed turn.
@@ -1205,5 +1201,17 @@ mod tests {
 
         assert!(state.pending_approval().is_none());
         assert!(state.is_running_prompt());
+    }
+
+    /// Verifies agent lifecycle status does not block local prompt submission.
+    #[test]
+    fn state_agent_running_status_does_not_mark_prompt_running() {
+        let mut state =
+            AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
+
+        state.apply_agent_status(AgentStatus::Running);
+
+        assert_eq!(state.top_status_line(), "running");
+        assert!(!state.is_running_prompt());
     }
 }

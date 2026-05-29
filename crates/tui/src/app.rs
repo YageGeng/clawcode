@@ -363,7 +363,7 @@ async fn ensure_loaded_agent_session(
     router: &mut SessionRouterState,
     target_session_id: &SessionId,
 ) -> bool {
-    if router.has_state(target_session_id) {
+    if router.is_session_loaded(target_session_id) {
         return true;
     }
     if let Err(error) = client
@@ -375,6 +375,7 @@ async fn ensure_loaded_agent_session(
             .set_error(format!("failed to load agent session: {error}"));
         return false;
     }
+    router.mark_session_loaded(target_session_id.clone());
     true
 }
 

@@ -1,6 +1,6 @@
 //! Multi-session routing above the single-session AppState reducer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::{
@@ -46,6 +46,9 @@ pub(crate) struct SessionRouterState {
     theme: Theme,
     /// Per-session transcript reducers.
     states: HashMap<SessionId, AppState>,
+    /// Sessions whose persisted history has been loaded or replayed.
+    #[builder(default)]
+    loaded_sessions: HashSet<SessionId>,
     /// Per-session viewport state.
     #[builder(default)]
     view_snapshots: HashMap<SessionId, ViewState>,
@@ -75,12 +78,15 @@ impl SessionRouterState {
         );
         let mut states = HashMap::new();
         states.insert(root_session_id.clone(), root_state);
+        let mut loaded_sessions = HashSet::new();
+        loaded_sessions.insert(root_session_id.clone());
         SessionRouterState::builder()
             .active_session_id(root_session_id.clone())
             .cwd(cwd)
             .model_label(model_label)
             .theme(theme)
             .states(states)
+            .loaded_sessions(loaded_sessions)
             .agent_navigation(AgentNavigationState::new(root_session_id))
             .build()
     }
@@ -119,8 +125,19 @@ impl SessionRouterState {
     }
 
     /// Return whether a session state has already been created.
+    #[cfg(test)]
     pub(crate) fn has_state(&self, session_id: &SessionId) -> bool {
         self.states.contains_key(session_id)
+    }
+
+    /// Return whether a session's persisted history has already been loaded.
+    pub(crate) fn is_session_loaded(&self, session_id: &SessionId) -> bool {
+        self.loaded_sessions.contains(session_id)
+    }
+
+    /// Mark a session as loaded after ACP load-session replay completes.
+    pub(crate) fn mark_session_loaded(&mut self, session_id: SessionId) {
+        self.loaded_sessions.insert(session_id);
     }
 
     /// Return immutable agent navigation state.
@@ -217,6 +234,15 @@ impl SessionRouterState {
     /// Mirror non-root lifecycle metadata into per-session status state.
     fn apply_agent_statuses(&mut self, patch: &protocol::AgentUiMetadataPatch) {
         for metadata in &patch.agents {
+            if patch.event == protocol::AgentUiEventKind::Snapshot
+                && matches!(
+                    metadata.status,
+                    protocol::AgentStatus::PendingInit
+                        | protocol::AgentStatus::Running
+                )
+            {
+                continue;
+            }
             let session_id = SessionId::from(&metadata.session_id);
             // Root metadata defaults to running for picker availability, so only child sessions
             // should drive the status line through metadata.
@@ -374,6 +400,37 @@ mod tests {
         )
     }
 
+    /// Build a snapshot metadata update for one child agent.
+    fn snapshot_update_for_child(session_id: &str) -> SessionUpdate {
+        let metadata = protocol::AgentUiMetadata::builder()
+            .session_id(protocol::SessionId::from(session_id.to_string()))
+            .parent_session_id(protocol::SessionId::from("root-session"))
+            .agent_path(protocol::AgentPath::root().join("inspect"))
+            .status(protocol::AgentStatus::Running)
+            .is_root(false)
+            .build();
+        let patch = protocol::AgentUiMetadataPatch::builder()
+            .version(1)
+            .event(protocol::AgentUiEventKind::Snapshot)
+            .agents(vec![metadata])
+            .build();
+        let meta = serde_json::json!({
+            "clawcode": {
+                "subagents": patch,
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("metadata root should be an object");
+        SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new(
+                ToolCallId::new("clawcode-subagents"),
+                ToolCallUpdateFields::default(),
+            )
+            .meta(meta),
+        )
+    }
+
     /// Verifies inactive session notifications are retained instead of ignored.
     #[test]
     fn router_keeps_inactive_session_notifications() {
@@ -407,6 +464,7 @@ mod tests {
     #[test]
     fn router_consumes_subagent_metadata_without_tool_cell() {
         let root = SessionId::new("root-session");
+        let child = SessionId::new("child-session");
         let mut router = SessionRouterState::new(
             root.clone(),
             "/tmp/project".into(),
@@ -421,6 +479,60 @@ mod tests {
 
         assert_eq!(router.active_state().transcript().len(), 0);
         assert_eq!(router.agent_navigation().ordered_entries().len(), 2);
+        assert!(router.has_state(&child));
+        assert!(!router.is_session_loaded(&child));
+    }
+
+    /// Verifies explicit load completion marks a metadata-created child as hydrated.
+    #[test]
+    fn router_tracks_loaded_sessions_separately_from_created_state() {
+        let root = SessionId::new("root-session");
+        let child = SessionId::new("child-session");
+        let mut router = SessionRouterState::new(
+            root,
+            "/tmp/project".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        let update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router.apply_session_notification(SessionNotification::new(
+            SessionId::new("root-session"),
+            update,
+        ));
+
+        router.mark_session_loaded(child.clone());
+
+        assert!(router.is_session_loaded(&child));
+    }
+
+    /// Verifies restored snapshots do not mark an idle child context as running.
+    #[test]
+    fn restored_running_snapshot_does_not_drive_child_status_line() {
+        let root = SessionId::new("root-session");
+        let child = SessionId::new("child-session");
+        let mut router = SessionRouterState::new(
+            root.clone(),
+            "/tmp/project".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        let update = snapshot_update_for_child("child-session");
+        router.apply_session_notification(SessionNotification::new(
+            root.clone(),
+            update,
+        ));
+        router.mark_session_loaded(child.clone());
+
+        router
+            .select_agent_session(
+                child,
+                &mut ViewState::default(),
+                &mut Composer::default(),
+            )
+            .expect("select child");
+
+        assert_eq!(router.active_state().top_status_line(), "idle");
     }
 
     /// Verifies selecting an unseen child preserves root draft and activates the child state.
