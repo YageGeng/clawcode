@@ -10,6 +10,7 @@ use crate::permission::PermissionRequest;
 use crate::plan::PlanEntry;
 use crate::session::SessionId;
 use crate::tool::ToolCallStatus;
+use crate::usage::{ContextWindowUsage, Usage};
 
 /// The content of a streamed tool-call delta.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,13 +108,13 @@ pub enum Event {
         /// Complete list of plan entries (replaces previous plan).
         entries: Vec<PlanEntry>,
     },
-    /// Token usage information for the current turn.
+    /// Token usage information for the current request context.
     UsageUpdate {
         session_id: SessionId,
-        /// Number of input (prompt) tokens consumed.
-        input_tokens: u64,
-        /// Number of output (completion) tokens produced.
-        output_tokens: u64,
+        /// Current estimated context-window occupancy for the outgoing request.
+        context_window: ContextWindowUsage,
+        /// Provider-reported usage increment for one model response, if available.
+        usage: Option<Usage>,
     },
     /// The kernel is requesting user permission for a tool execution.
     PermissionRequested {
@@ -292,17 +293,17 @@ impl Event {
         }
     }
 
-    /// Create a `UsageUpdate` event with token consumption info.
+    /// Create a `UsageUpdate` event with context and optional provider usage.
     #[inline(always)]
     pub fn usage_update(
         session_id: impl Into<SessionId>,
-        input_tokens: u64,
-        output_tokens: u64,
+        context_window: ContextWindowUsage,
+        usage: Option<Usage>,
     ) -> Self {
         Event::UsageUpdate {
             session_id: session_id.into(),
-            input_tokens,
-            output_tokens,
+            context_window,
+            usage,
         }
     }
 

@@ -3579,6 +3579,7 @@ dependencies = [
  "protocol",
  "provider",
  "ratatui",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

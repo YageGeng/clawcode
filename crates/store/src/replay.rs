@@ -1,7 +1,6 @@
 use std::io;
 use std::path::Path;
 
-use protocol::Usage;
 use protocol::message::Message;
 
 use super::record::{
@@ -17,9 +16,6 @@ pub struct ReplayedSession {
     pub messages: Vec<Message>,
     /// Live model history materialized from the latest compaction checkpoint.
     pub live_messages: Vec<Message>,
-    /// Accumulated provider-reported usage from replayed message records.
-    #[builder(default, setter(strip_option))]
-    pub usage: Option<Usage>,
     /// Agent edges collected during replay for subagent tree restoration.
     #[builder(default)]
     pub agent_edges: Vec<AgentEdgeRecord>,
@@ -32,7 +28,6 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
     let mut messages = Vec::new();
     let mut live_messages = Vec::new();
     let mut agent_edges = Vec::new();
-    let mut usage: Option<Usage> = None;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -42,7 +37,6 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
             tracing::warn!(path = %path.display(), "skipping corrupt session record");
             continue;
         };
-        let record_usage = record.usage;
         match record.payload {
             PersistedPayload::SessionMeta(record) if meta.is_none() => {
                 meta = Some(record)
@@ -50,10 +44,6 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
             PersistedPayload::Message(record) => {
                 messages.push(record.message.clone());
                 live_messages.push(record.message);
-                if let Some(record_usage) = record_usage {
-                    // Usage is accumulated from real provider-reported snapshots only.
-                    *usage.get_or_insert_with(Usage::default) += record_usage;
-                }
             }
             PersistedPayload::AgentEdge(record) => agent_edges.push(record),
             PersistedPayload::Compaction(record) => {
@@ -69,23 +59,12 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
     let meta = meta.ok_or_else(|| {
         io::Error::other("session file missing session_meta record")
     })?;
-    let replayed = if let Some(usage) = usage {
-        ReplayedSession::builder()
-            .meta(meta)
-            .messages(messages)
-            .live_messages(live_messages)
-            .usage(usage)
-            .agent_edges(agent_edges)
-            .build()
-    } else {
-        ReplayedSession::builder()
-            .meta(meta)
-            .messages(messages)
-            .live_messages(live_messages)
-            .agent_edges(agent_edges)
-            .build()
-    };
-    Ok(replayed)
+    Ok(ReplayedSession::builder()
+        .meta(meta)
+        .messages(messages)
+        .live_messages(live_messages)
+        .agent_edges(agent_edges)
+        .build())
 }
 
 #[cfg(test)]

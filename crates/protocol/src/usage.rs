@@ -4,7 +4,26 @@ use std::ops::{Add, AddAssign};
 
 use serde::{Deserialize, Serialize};
 
-/// Provider-reported token usage for one model response or an accumulated replay total.
+/// Current model context-window occupancy for an outgoing request.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+pub struct ContextWindowUsage {
+    /// Estimated tokens currently sent as model context.
+    pub used_tokens: u64,
+    /// Total model context window size in tokens.
+    pub context_tokens: u64,
+}
+
+impl ContextWindowUsage {
+    /// Creates a context-window usage snapshot.
+    pub fn new(used_tokens: u64, context_tokens: u64) -> Self {
+        Self {
+            used_tokens,
+            context_tokens,
+        }
+    }
+}
+
+/// Provider-reported token usage for one model response.
 /// If tokens used are `0`, then the provider failed to supply token usage metrics.
 #[derive(
     Debug,

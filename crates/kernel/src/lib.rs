@@ -21,10 +21,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use config::ConfigHandle;
 use futures::Stream;
+use protocol::message::Message;
 use protocol::{
-    AgentKernel, AgentPath, Event, KernelError, ModelInfo, Op, ReviewDecision,
-    SessionCreated, SessionId, SessionInfo, SessionLaunchOptions,
-    SessionListPage, SessionMode,
+    AgentKernel, AgentPath, ContextWindowUsage, Event, KernelError, ModelInfo,
+    Op, ReviewDecision, SessionCreated, SessionId, SessionInfo,
+    SessionLaunchOptions, SessionListPage, SessionMode,
 };
 use provider::factory::LlmFactory;
 
@@ -263,6 +264,71 @@ impl Kernel {
         models
     }
 
+    /// Estimate context-window usage for restored live history and a model id.
+    fn context_window_usage_for_history(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+        cwd: &Path,
+        history: &[Message],
+    ) -> ContextWindowUsage {
+        let preamble = self.render_base_system_prompt(
+            cwd,
+            model_id,
+            &self.config.current(),
+        );
+        let estimated_tokens = Self::message_history_token_count(history)
+            .saturating_add(preamble.len() / 4);
+        let used_tokens = u64::try_from(estimated_tokens).unwrap_or(u64::MAX);
+        let context_tokens = self.model_context_tokens(provider_id, model_id);
+        ContextWindowUsage::new(used_tokens, context_tokens)
+    }
+
+    /// Estimate context-window usage from a `provider/model` display id.
+    fn context_window_usage_for_model_label(
+        &self,
+        model_label: &str,
+        cwd: &Path,
+        history: &[Message],
+    ) -> ContextWindowUsage {
+        if let Some((provider_id, model_id)) = model_label.split_once('/') {
+            self.context_window_usage_for_history(
+                provider_id,
+                model_id,
+                cwd,
+                history,
+            )
+        } else {
+            let used_tokens =
+                u64::try_from(Self::message_history_token_count(history))
+                    .unwrap_or(u64::MAX);
+            ContextWindowUsage::new(used_tokens, 0)
+        }
+    }
+
+    /// Estimate token count for borrowed messages without cloning history.
+    fn message_history_token_count(history: &[Message]) -> usize {
+        // Keep this formula aligned with InMemoryContext::token_count.
+        history
+            .iter()
+            .map(|message| format!("{message:?}").len() / 4)
+            .sum()
+    }
+
+    /// Return configured context window size for a provider/model pair.
+    fn model_context_tokens(&self, provider_id: &str, model_id: &str) -> u64 {
+        self.config
+            .current()
+            .providers
+            .iter()
+            .find(|provider| provider.id.as_str() == provider_id)
+            .and_then(|provider| {
+                provider.models.iter().find(|model| model.id == model_id)
+            })
+            .and_then(|model| model.context_tokens)
+            .unwrap_or(0)
+    }
+
     /// Register frontend-injected MCP servers for a live thread and refresh exposed tools.
     async fn register_external_mcp_servers_for_thread(
         &self,
@@ -473,23 +539,33 @@ impl AgentKernel for Kernel {
                 .load_session(session_id)
                 .map_err(|error| KernelError::Internal(error.into()))?
                 .map(|(replayed, _)| replayed);
-            let history = replayed
+            let current_model = handle.current_model().await;
+            let context_window_usage = replayed
                 .as_ref()
-                .map(|replayed| replayed.messages.clone())
+                .map(|replayed| {
+                    self.context_window_usage_for_model_label(
+                        &current_model,
+                        &handle.cwd,
+                        &replayed.live_messages,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    self.context_window_usage_for_model_label(
+                        &current_model,
+                        &handle.cwd,
+                        &[],
+                    )
+                });
+            let history = replayed
+                .map(|replayed| replayed.messages)
                 .unwrap_or_default();
-            let runtime_usage = handle.current_usage().await;
-            let history_usage = if runtime_usage.display_tokens() > 0 {
-                Some(runtime_usage)
-            } else {
-                replayed.and_then(|replayed| replayed.usage)
-            };
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
-                .current_model(handle.current_model().await)
+                .current_model(current_model)
                 .modes(self.build_modes())
                 .models(self.build_models())
                 .history(history)
-                .history_usage(history_usage)
+                .context_window_usage(context_window_usage)
                 .build());
         }
 
@@ -501,7 +577,6 @@ impl AgentKernel for Kernel {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         };
         let app_cfg = self.config.current();
-        let history_usage = replayed.usage;
         let history = replayed.messages;
         let live_history = replayed.live_messages;
         let recorder: Arc<dyn SessionRecorder> = Arc::from(recorder);
@@ -512,6 +587,12 @@ impl AgentKernel for Kernel {
                  add a [[providers]] section to your config file"
             ))
         })?;
+        let context_window_usage = self.context_window_usage_for_history(
+            llm.provider_id(),
+            llm.model_id(),
+            &replayed.meta.cwd,
+            &live_history,
+        );
         let handle = self
             .thread_manager
             .load_thread(
@@ -527,7 +608,6 @@ impl AgentKernel for Kernel {
                     .approval(Arc::new(ApprovalPolicy::new(app_cfg.approval)))
                     .app_config(Arc::clone(&app_cfg))
                     .recorder(Arc::clone(&recorder))
-                    .initial_usage(history_usage.unwrap_or_default())
                     .build(),
             )
             .await?;
@@ -550,7 +630,7 @@ impl AgentKernel for Kernel {
             .modes(self.build_modes())
             .models(self.build_models())
             .history(history)
-            .history_usage(history_usage)
+            .context_window_usage(context_window_usage)
             .build())
     }
 
@@ -1319,6 +1399,63 @@ mod tests {
             .expect("active load should succeed");
 
         assert_eq!(active_load.history, vec![Message::user("child history")]);
+    }
+
+    /// Verifies restored sessions report estimated live context usage for the UI.
+    #[tokio::test]
+    async fn load_session_returns_context_usage_for_replayed_live_history() {
+        let temp = tempfile::tempdir().expect("temp data home");
+        let data_home = temp.path().to_string_lossy().to_string();
+        let mut app_config = app_config_with_provider();
+        app_config.session_persistence.data_home = Some(data_home.clone());
+        app_config
+            .providers
+            .first_mut()
+            .expect("test provider")
+            .models
+            .first_mut()
+            .expect("test model")
+            .context_tokens = Some(1_000_000);
+        let session_id = SessionId::from("resume-session");
+        let store = FileSessionStore::new(Some(&data_home));
+        let recorder = store
+            .create_session(persisted_session_params(
+                session_id.clone(),
+                AgentPath::root(),
+                temp.path().to_path_buf(),
+                None,
+            ))
+            .await
+            .expect("create persisted session");
+        recorder
+            .append(&[PersistedPayload::Message(
+                MessageRecord::builder()
+                    .turn_id("turn-1".to_string())
+                    .message(Message::user("restored history"))
+                    .build(),
+            )])
+            .await
+            .expect("append restored history");
+        let kernel = kernel_with_config(app_config);
+
+        let loaded = kernel
+            .load_session(
+                &session_id,
+                temp.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
+            .await
+            .expect("load session should succeed");
+        let usage = loaded
+            .context_window_usage
+            .expect("load should include context usage");
+        let live_history_tokens =
+            Kernel::message_history_token_count(&[Message::user(
+                "restored history",
+            )]);
+
+        assert!(usage.used_tokens > live_history_tokens as u64);
+        assert_eq!(usage.context_tokens, 1_000_000);
     }
 
     /// Builds minimal session creation parameters for restore tests.

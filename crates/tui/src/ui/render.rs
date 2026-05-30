@@ -394,7 +394,7 @@ mod tests {
             .expect("input index");
         let status_index = screen
             .iter()
-            .position(|line| line.contains("tokens:"))
+            .position(|line| line.contains("ctx:"))
             .expect("status index");
 
         assert!(status_index >= input_index + 2);
@@ -572,7 +572,7 @@ mod tests {
 
         let screen = rendered_screen(&terminal);
         assert!(screen.iter().any(|line| line.contains("> resize")));
-        assert!(screen.iter().any(|line| line.contains("tokens:")));
+        assert!(screen.iter().any(|line| line.contains("ctx:")));
     }
 
     /// Verifies the transcript follows the newest assistant output when content overflows.

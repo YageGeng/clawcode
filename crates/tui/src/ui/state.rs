@@ -9,7 +9,8 @@ use agent_client_protocol::schema::{
     ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
     UsageUpdate,
 };
-use protocol::AgentStatus;
+use protocol::{AgentStatus, Usage};
+use serde::Deserialize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ui::approval::PendingApproval;
@@ -19,87 +20,111 @@ use crate::ui::transcript::entry::{
     TranscriptEntry, TranscriptEntryId, TranscriptEntryState,
 };
 
-/// Token usage totals for the current turn.
+/// Token usage state for the current model context window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UsageView {
-    /// Prompt/input tokens used by the current turn.
-    input_tokens: u64,
-    /// Completion/output tokens used by the current turn.
-    output_tokens: u64,
-    /// Combined prompt and completion token count.
-    total_tokens: u64,
+    /// Tokens currently estimated in the model context.
+    used_tokens: u64,
+    /// Total model context window size when ACP provides it.
+    context_tokens: u64,
+    /// Provider usage for the last completed model response.
+    provider_usage: Option<Usage>,
 }
 
 impl UsageView {
-    /// Builds a usage view and precomputes the total for status rendering.
+    /// Builds a usage view from provider usage for legacy tests and callers.
     pub fn new(input_tokens: u64, output_tokens: u64) -> Self {
-        Self {
+        let usage = Usage {
             input_tokens,
             output_tokens,
             total_tokens: input_tokens + output_tokens,
-        }
-    }
-
-    /// Builds a usage view when ACP only provides a total token count.
-    pub fn from_total(total_tokens: u64) -> Self {
+            cached_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
         Self {
-            input_tokens: 0,
-            output_tokens: 0,
-            total_tokens,
+            used_tokens: usage.display_tokens(),
+            context_tokens: 0,
+            provider_usage: Some(usage),
         }
     }
 
-    /// Builds a usage view from ACP metadata when Clawcode provides split totals.
+    /// Builds a usage view when ACP only provides context counters.
+    pub fn from_context(used_tokens: u64, context_tokens: u64) -> Self {
+        Self {
+            used_tokens,
+            context_tokens,
+            provider_usage: None,
+        }
+    }
+
+    /// Builds a usage view from ACP context counters and optional Clawcode metadata.
     pub fn from_acp_update(update: &UsageUpdate) -> Self {
-        if let Some(meta) = &update.meta
+        let provider_usage = if let Some(meta) = &update.meta
             && let Some(usage) =
                 meta.get("clawcode").and_then(|value| value.get("usage"))
+            && let Ok(usage) = Usage::deserialize(usage)
         {
-            let input_tokens = usage
-                .get("input_tokens")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let output_tokens = usage
-                .get("output_tokens")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let total_tokens = usage
-                .get("total_tokens")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(input_tokens + output_tokens);
-            return Self {
-                input_tokens,
-                output_tokens,
-                total_tokens,
-            };
+            Some(usage)
+        } else {
+            None
+        };
+        Self {
+            used_tokens: update.used,
+            context_tokens: update.size,
+            provider_usage,
         }
-        Self::from_total(update.used)
     }
 
     /// Returns the compact status text for token usage.
     pub fn status_text(&self) -> String {
-        if self.input_tokens == 0 && self.output_tokens == 0 {
-            return format!("tokens: {}", self.total_tokens);
+        if self.context_tokens > 0 {
+            let percent = self.used_tokens.saturating_mul(100)
+                / self.context_tokens.max(1);
+            format!(
+                "ctx: {}/{} ({}%)",
+                self.used_tokens, self.context_tokens, percent
+            )
+        } else {
+            format!("ctx: {}", self.used_tokens)
         }
-        format!(
-            "tokens: {} (in {} / out {})",
-            self.total_tokens, self.input_tokens, self.output_tokens
-        )
+    }
+
+    /// Returns tokens currently estimated in the model context.
+    pub fn used_tokens(&self) -> u64 {
+        self.used_tokens
+    }
+
+    /// Returns the configured model context window size.
+    pub fn context_tokens(&self) -> u64 {
+        self.context_tokens
     }
 
     /// Returns prompt/input tokens.
     pub fn input_tokens(&self) -> u64 {
-        self.input_tokens
+        self.provider_usage
+            .map(|usage| usage.input_tokens)
+            .unwrap_or(0)
     }
 
     /// Returns completion/output tokens.
     pub fn output_tokens(&self) -> u64 {
-        self.output_tokens
+        self.provider_usage
+            .map(|usage| usage.output_tokens)
+            .unwrap_or(0)
     }
 
-    /// Returns total token usage.
-    pub fn total_tokens(&self) -> u64 {
-        self.total_tokens
+    /// Returns prompt/input tokens served from provider cache.
+    pub fn cached_input_tokens(&self) -> u64 {
+        self.provider_usage
+            .map(|usage| usage.cached_input_tokens)
+            .unwrap_or(0)
+    }
+
+    /// Returns prompt/input tokens written into provider cache.
+    pub fn cache_creation_input_tokens(&self) -> u64 {
+        self.provider_usage
+            .map(|usage| usage.cache_creation_input_tokens)
+            .unwrap_or(0)
     }
 }
 
@@ -444,11 +469,7 @@ impl AppState {
 
     /// Applies an ACP token usage update.
     fn apply_usage_update(&mut self, update: UsageUpdate) {
-        if update.meta.is_some() {
-            self.usage = UsageView::from_acp_update(&update);
-        } else {
-            self.usage = UsageView::from_total(update.used);
-        }
+        self.usage = UsageView::from_acp_update(&update);
     }
 
     /// Allocates the next stable transcript entry id.
@@ -1001,9 +1022,9 @@ mod tests {
         assert!(state.transcript().is_empty());
     }
 
-    /// Verifies ACP usage updates accumulate and preserve input/output breakdowns.
+    /// Verifies ACP usage updates display only context counters.
     #[test]
-    fn state_acp_usage_update_accumulates_input_and_output_tokens() {
+    fn state_acp_usage_update_status_text_omits_response_usage() {
         let session_id = sid("s1");
         let mut state = AppState::new(
             session_id.clone(),
@@ -1011,14 +1032,17 @@ mod tests {
             "model".to_string(),
         );
 
-        let usage_update = UsageUpdate::new(15, 0).meta(
+        let usage = Usage {
+            input_tokens: 12,
+            output_tokens: 3,
+            total_tokens: 15,
+            cached_input_tokens: 9,
+            cache_creation_input_tokens: 2,
+        };
+        let usage_update = UsageUpdate::new(88, 100).meta(
             serde_json::json!({
                 "clawcode": {
-                    "usage": {
-                        "input_tokens": 12,
-                        "output_tokens": 3,
-                        "total_tokens": 15
-                    }
+                    "usage": serde_json::to_value(usage).expect("usage json")
                 }
             })
             .as_object()
@@ -1030,14 +1054,18 @@ mod tests {
             SessionUpdate::UsageUpdate(usage_update),
         ));
 
+        assert_eq!(state.usage().used_tokens(), 88);
+        assert_eq!(state.usage().context_tokens(), 100);
         assert_eq!(state.usage().input_tokens(), 12);
         assert_eq!(state.usage().output_tokens(), 3);
-        assert_eq!(state.usage().total_tokens(), 15);
+        assert_eq!(state.usage().cached_input_tokens(), 9);
+        assert_eq!(state.usage().cache_creation_input_tokens(), 2);
+        assert_eq!(state.usage().status_text(), "ctx: 88/100 (88%)");
     }
 
-    /// Verifies ACP usage updates without metadata are treated as cumulative totals.
+    /// Verifies ACP usage updates without metadata still update context usage.
     #[test]
-    fn state_acp_usage_update_without_metadata_sets_total_tokens() {
+    fn state_acp_usage_update_without_metadata_sets_context_tokens() {
         let session_id = sid("s1");
         let mut state = AppState::new(
             session_id.clone(),
@@ -1047,14 +1075,15 @@ mod tests {
 
         state.apply_session_update(notification(
             session_id.clone(),
-            SessionUpdate::UsageUpdate(UsageUpdate::new(10, 0)),
+            SessionUpdate::UsageUpdate(UsageUpdate::new(10, 100)),
         ));
         state.apply_session_update(notification(
             session_id,
-            SessionUpdate::UsageUpdate(UsageUpdate::new(20, 0)),
+            SessionUpdate::UsageUpdate(UsageUpdate::new(20, 100)),
         ));
 
-        assert_eq!(state.usage().total_tokens(), 20);
+        assert_eq!(state.usage().used_tokens(), 20);
+        assert_eq!(state.usage().context_tokens(), 100);
     }
 
     /// Verifies the bottom status line includes runtime identity and total usage.
@@ -1065,15 +1094,13 @@ mod tests {
             "/tmp/project".into(),
             "deepseek/model".to_string(),
         );
-        state.usage = UsageView::new(10, 20);
+        state.usage = UsageView::from_context(30, 100);
 
         let status = state.bottom_status_line(80);
 
         assert!(status.contains("deepseek/model"));
         assert!(status.contains("/tmp/project"));
-        assert!(status.contains("tokens: 30"));
-        assert!(status.contains("in 10"));
-        assert!(status.contains("out 20"));
+        assert!(status.contains("ctx: 30/100"));
     }
 
     /// Verifies the bottom status line never exceeds narrow terminal display width.
@@ -1084,7 +1111,7 @@ mod tests {
             "/tmp/very-long-project-directory-name".into(),
             "very-long-provider/very-long-model-name".to_string(),
         );
-        state.usage = UsageView::new(12345, 67890);
+        state.usage = UsageView::from_context(80235, 100000);
 
         let status = state.bottom_status_line(20);
 
@@ -1099,11 +1126,11 @@ mod tests {
             "/tmp/very-long-project-directory-name".into(),
             "very-long-provider/very-long-model-name".to_string(),
         );
-        state.usage = UsageView::new(12, 34);
+        state.usage = UsageView::from_context(46, 100);
 
         let status = state.bottom_status_line(36);
 
-        assert!(status.contains("tokens: 46"));
+        assert!(status.contains("ctx: 46"));
         assert!(UnicodeWidthStr::width(status.as_str()) <= 36);
     }
 
@@ -1115,7 +1142,7 @@ mod tests {
             "/tmp/very-long-project-directory-name".into(),
             "very-long-provider/very-long-model-name".to_string(),
         );
-        state.usage = UsageView::new(12345, 67890);
+        state.usage = UsageView::from_context(80235, 100000);
 
         for width in [0usize, 1, 2, 3] {
             let status = state.bottom_status_line(width);

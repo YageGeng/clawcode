@@ -827,7 +827,6 @@ mod tests {
     use crate::session::Thread;
     use async_trait::async_trait;
     use config::{AppConfig, ConfigHandle};
-    use protocol::Usage;
     use provider::factory::LlmFactory;
     use store::{
         AgentEdgeStatus, AgentGraphStore, CreateSessionParams,
@@ -898,7 +897,6 @@ mod tests {
             .current_model(Arc::new(tokio::sync::RwLock::new(
                 "test/provider-model".to_string(),
             )))
-            .current_usage(Arc::new(tokio::sync::RwLock::new(Usage::default())))
             .cwd(PathBuf::from("/tmp/project"))
             .tx_op(tx_op)
             .tx_event(Arc::new(tokio::sync::Mutex::new(tx_event)))

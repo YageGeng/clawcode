@@ -14,9 +14,9 @@ use protocol::message::{
 };
 use protocol::one_or_many::OneOrMany;
 use protocol::{
-    AgentPath, Event, ExecCommandStatus, FileChangeStatus, KernelError,
-    McpToolCallStatus, ReviewDecision, SessionId, ToolStreamItem, TurnId,
-    TurnItem, Usage,
+    AgentPath, ContextWindowUsage, Event, ExecCommandStatus, FileChangeStatus,
+    KernelError, McpToolCallStatus, ReviewDecision, SessionId, ToolStreamItem,
+    TurnId, TurnItem, Usage,
 };
 use provider::completion::request::CompletionRequest;
 use provider::factory::{ArcLlm, LlmStreamEvent};
@@ -26,14 +26,14 @@ use config::AppConfig;
 use skills::SkillRegistry;
 
 use crate::approval::{ApprovalMode, ApprovalPolicy};
-use crate::context::ContextManager;
+use crate::context::{CompactionOptions, CompactionOutput, ContextManager};
 use crate::input_queue::InputQueue;
 use crate::prompt::environment::EnvironmentInfo;
 use crate::prompt::{Instructions, SystemPrompt};
 use crate::session::Session;
 use store::{
-    MessageRecord, PersistedPayload, SessionRecorder, TurnContextRecord,
-    TurnKindRecord,
+    CompactionRecord, MessageRecord, PersistedPayload, SessionRecorder,
+    TurnContextRecord, TurnKindRecord,
 };
 use tools::{ToolArgumentsConsumer, ToolContext, ToolRegistry};
 
@@ -152,6 +152,184 @@ impl TurnContext {
             .input_queue(Arc::clone(&rt.input_queue))
             .build()
     }
+
+    /// Return the configured context window for this turn's current model.
+    fn model_context_tokens(&self) -> Option<u64> {
+        self.app_config
+            .providers
+            .iter()
+            .find(|provider| provider.id.as_str() == self.provider_id)
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == self.llm.model_id())
+            })
+            .and_then(|model| model.context_tokens)
+    }
+
+    /// Estimate request tokens from live history plus the rendered system preamble.
+    fn estimated_request_tokens(
+        &self,
+        context: &dyn ContextManager,
+        preamble: &str,
+    ) -> usize {
+        context.token_count().saturating_add(preamble.len() / 4)
+    }
+
+    /// Build the ACP-facing context-window usage snapshot for this request.
+    fn context_window_usage(
+        &self,
+        context: &dyn ContextManager,
+        preamble: &str,
+    ) -> ContextWindowUsage {
+        ContextWindowUsage::new(
+            Self::usize_to_u64(
+                self.estimated_request_tokens(context, preamble),
+            ),
+            self.model_context_tokens().unwrap_or(0),
+        )
+    }
+
+    /// Convert local token estimates into protocol-safe counters.
+    fn usize_to_u64(value: usize) -> u64 {
+        u64::try_from(value).unwrap_or(u64::MAX)
+    }
+
+    /// Persist an automatic compaction checkpoint before replacing live history.
+    async fn persist_compaction_checkpoint(
+        &self,
+        output: &CompactionOutput,
+    ) -> anyhow::Result<()> {
+        let record = CompactionRecord::builder()
+            .turn_id(String::from(&self.turn_id))
+            .summary(output.summary.clone())
+            .replacement_history(output.replacement_history.clone())
+            .retained_message_count(output.retained_message_count)
+            .build();
+        self.recorder
+            .append(&[PersistedPayload::Compaction(record)])
+            .await
+            .map_err(anyhow::Error::from)
+    }
+
+    /// Automatically compact context when the current request estimate exceeds policy.
+    async fn auto_compact_if_needed(
+        &self,
+        context: &mut Box<dyn ContextManager>,
+        preamble: &str,
+    ) -> AutoCompactionOutcome {
+        let Some(policy) = AutoCompactionPolicy::from_turn_context(self) else {
+            return AutoCompactionOutcome::Continue;
+        };
+
+        let before_tokens = self.estimated_request_tokens(&**context, preamble);
+        if !policy.should_compact(before_tokens) {
+            return AutoCompactionOutcome::Continue;
+        }
+
+        let options = CompactionOptions {
+            retained_turns: self.app_config.compaction.retained_turns,
+        };
+        match context.compact(self.llm.as_ref(), options).await {
+            Ok(Some(output)) => {
+                if let Err(error) =
+                    self.persist_compaction_checkpoint(&output).await
+                {
+                    tracing::warn!(
+                        %error,
+                        "automatic context compaction checkpoint persist failed"
+                    );
+                    return AutoCompactionOutcome::SuspendForTurn;
+                }
+
+                context.replace(output.replacement_history);
+                let after_tokens =
+                    self.estimated_request_tokens(&**context, preamble);
+                if policy.should_compact(after_tokens) {
+                    tracing::warn!(
+                        before_tokens,
+                        after_tokens,
+                        "automatic context compaction left request above threshold"
+                    );
+                    AutoCompactionOutcome::SuspendForTurn
+                } else {
+                    AutoCompactionOutcome::Continue
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    before_tokens,
+                    "automatic context compaction skipped because there is no summarizable history"
+                );
+                AutoCompactionOutcome::SuspendForTurn
+            }
+            Err(error) => {
+                tracing::warn!(
+                    before_tokens,
+                    %error,
+                    "automatic context compaction failed; continuing turn"
+                );
+                AutoCompactionOutcome::SuspendForTurn
+            }
+        }
+    }
+}
+
+/// Automatic compaction policy derived from model metadata and user config.
+#[derive(Debug, Clone, Copy)]
+struct AutoCompactionPolicy {
+    /// Model context window in tokens.
+    context_tokens: u64,
+    /// Fraction of the context window that triggers compaction.
+    trigger_ratio: f64,
+}
+
+impl AutoCompactionPolicy {
+    /// Build a policy for the turn, returning `None` when auto compaction is disabled.
+    fn from_turn_context(ctx: &TurnContext) -> Option<Self> {
+        let cfg = &ctx.app_config.compaction;
+        if !cfg.auto {
+            return None;
+        }
+        if !Self::is_valid_ratio(cfg.trigger_ratio) {
+            tracing::warn!(
+                trigger_ratio = cfg.trigger_ratio,
+                "automatic context compaction trigger ratio is invalid"
+            );
+            return None;
+        }
+
+        let context_tokens = ctx.model_context_tokens()?;
+        if context_tokens == 0 {
+            return None;
+        }
+
+        Some(Self {
+            context_tokens,
+            trigger_ratio: cfg.trigger_ratio,
+        })
+    }
+
+    /// Return true when the configured ratio can be applied safely.
+    fn is_valid_ratio(trigger_ratio: f64) -> bool {
+        trigger_ratio.is_finite() && trigger_ratio > 0.0 && trigger_ratio <= 1.0
+    }
+
+    /// Return whether estimated tokens are at or above the configured threshold.
+    fn should_compact(&self, estimated_tokens: usize) -> bool {
+        (estimated_tokens as f64)
+            >= (self.context_tokens as f64 * self.trigger_ratio).ceil()
+    }
+}
+
+/// Result of one automatic compaction check inside a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoCompactionOutcome {
+    /// Continue normal request execution and allow future checks in this turn.
+    Continue,
+    /// Continue normal request execution but skip future automatic checks this turn.
+    SuspendForTurn,
 }
 
 /// Execute a single turn with multi-turn tool loop support:
@@ -201,6 +379,7 @@ pub(crate) async fn execute_turn(
     let tool_defs = ctx.tools.definitions();
     let sid = &ctx.session_id;
     let mut turn_usage = Usage::default();
+    let mut auto_compaction_suspended = false;
 
     let tool_ctx = ToolContext::builder()
         .session_id(ctx.session_id.clone())
@@ -211,9 +390,22 @@ pub(crate) async fn execute_turn(
 
     loop {
         drain_inter_agent_inputs_for_turn(ctx, &mut **context).await;
+        if !auto_compaction_suspended
+            && ctx.auto_compact_if_needed(context, &preamble).await
+                == AutoCompactionOutcome::SuspendForTurn
+        {
+            auto_compaction_suspended = true;
+        }
         let history = context.history().to_vec();
         let history = OneOrMany::many(history)
             .map_err(|e| KernelError::Internal(e.into()))?;
+        let request_context_window =
+            ctx.context_window_usage(&**context, &preamble);
+        let _ = tx_event.send(Event::usage_update(
+            sid.clone(),
+            request_context_window,
+            None,
+        ));
 
         let request = CompletionRequest::builder()
             .model(Some(ctx.llm.model_id().to_string()))
@@ -368,8 +560,8 @@ pub(crate) async fn execute_turn(
                         turn_usage += usage;
                         let _ = tx_event.send(Event::usage_update(
                             sid.clone(),
-                            usage.input_tokens,
-                            usage.output_tokens,
+                            request_context_window,
+                            Some(usage),
                         ));
                     }
                 }
@@ -812,6 +1004,7 @@ mod tests {
     use provider::completion::CompletionError;
     use provider::message::Text;
     use provider::wasm_compat::WasmBoxedFuture;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tools::Tool;
 
@@ -985,6 +1178,80 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AutoCompactionLlm {
+        completion_calls: Arc<AtomicUsize>,
+        fail_completion: bool,
+        stream_histories: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl provider::factory::Llm for AutoCompactionLlm {
+        /// Return the fixed provider id used by automatic compaction tests.
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        /// Return the fixed model id used by automatic compaction tests.
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        /// Return a stable summary or fail to exercise automatic compaction fallback.
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::LlmCompletion, CompletionError>,
+        > {
+            self.completion_calls.fetch_add(1, Ordering::SeqCst);
+            let fail_completion = self.fail_completion;
+            Box::pin(async move {
+                if fail_completion {
+                    return Err(CompletionError::ProviderError(
+                        "summary failed".to_string(),
+                    ));
+                }
+
+                Ok(provider::factory::LlmCompletion {
+                    choice: OneOrMany::one(AssistantContent::text("summary")),
+                    usage: Usage::default(),
+                    raw_response: serde_json::json!({}),
+                    message_id: None,
+                })
+            })
+        }
+
+        /// Capture the actual stream request history after automatic compaction has run.
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::DynLlmStream, CompletionError>,
+        > {
+            let stream_histories = Arc::clone(&self.stream_histories);
+            Box::pin(async move {
+                stream_histories
+                    .lock()
+                    .expect("stream histories lock")
+                    .push(request.chat_history.into_iter().collect());
+                let events: Vec<Result<LlmStreamEvent, CompletionError>> = vec![
+                    Ok(LlmStreamEvent::Text(Text {
+                        text: "answer".to_string(),
+                    })),
+                    Ok(LlmStreamEvent::Final {
+                        raw: serde_json::json!({}),
+                        usage: None,
+                    }),
+                ];
+                let stream: provider::factory::DynLlmStream =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
+            })
+        }
+    }
+
     struct FailingTool;
 
     #[async_trait]
@@ -1128,6 +1395,71 @@ mod tests {
             .build()
     }
 
+    /// Build a turn context with automatic compaction enabled for threshold tests.
+    fn auto_compaction_turn_context(
+        llm: ArcLlm,
+        recorder: Arc<dyn SessionRecorder>,
+    ) -> TurnContext {
+        auto_compaction_turn_context_with_context_tokens(
+            llm,
+            recorder,
+            Some(10),
+        )
+    }
+
+    /// Build an automatic compaction turn context with optional model context metadata.
+    fn auto_compaction_turn_context_with_context_tokens(
+        llm: ArcLlm,
+        recorder: Arc<dyn SessionRecorder>,
+        context_tokens: Option<u64>,
+    ) -> TurnContext {
+        let model = match context_tokens {
+            Some(context_tokens) => serde_json::json!({
+                "id": "test-model",
+                "context_tokens": context_tokens
+            }),
+            None => serde_json::json!({
+                "id": "test-model"
+            }),
+        };
+        let app_config: AppConfig = serde_json::from_value(serde_json::json!({
+            "active_model": "test/test-model",
+            "providers": [
+                {
+                    "id": "test",
+                    "display_name": "Test",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [model]
+                }
+            ],
+            "compaction": {
+                "retained_turns": 1,
+                "auto": true,
+                "trigger_ratio": 0.5
+            }
+        }))
+        .expect("valid app config");
+
+        TurnContext::builder()
+            .session_id(SessionId::from("session-1"))
+            .turn_id(TurnId("turn-1".to_string()))
+            .turn_kind(TurnKindRecord::Prompt)
+            .llm(llm)
+            .tools(Arc::new(ToolRegistry::default()))
+            .cwd(PathBuf::from("/tmp"))
+            .provider_id("test".to_string())
+            .approval(Arc::new(ApprovalPolicy::new(ApprovalMode::Yolo)))
+            .app_config(Arc::new(app_config))
+            .skill_registry(Arc::new(SkillRegistry::default()))
+            .recorder(recorder)
+            .input_queue(Arc::new(tokio::sync::Mutex::new(
+                InputQueue::default(),
+            )))
+            .build()
+    }
+
     /// Build a real recorder for turn tests.
     fn test_recorder() -> Arc<dyn SessionRecorder> {
         Arc::new(store::FileSessionRecorder::new(
@@ -1178,6 +1510,175 @@ mod tests {
         assert_eq!(usage_records.len(), 1);
         assert_eq!(usage_records[0]["usage"]["input_tokens"], 11);
         assert_eq!(usage_records[0]["usage"]["output_tokens"], 4);
+    }
+
+    /// Verifies turn execution emits context usage separately from provider usage.
+    #[tokio::test]
+    async fn execute_turn_emits_context_usage_with_provider_metadata() {
+        let recorder: Arc<dyn SessionRecorder> =
+            Arc::new(store::FileSessionRecorder::new(
+                std::env::temp_dir().join(format!(
+                    "clawcode-turn-context-usage-{}.jsonl",
+                    uuid::Uuid::new_v4()
+                )),
+            ));
+        let ctx = test_turn_context_with_recorder(
+            Arc::new(ToolRegistry::default()),
+            Arc::new(UsageLlm),
+            recorder,
+        );
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should complete");
+
+        let events =
+            std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        let usage_events = events
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::UsageUpdate {
+                    context_window,
+                    usage,
+                    ..
+                } => Some((context_window, usage)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(usage_events.len(), 2);
+        assert!(usage_events[0].0.used_tokens > 0);
+        assert_eq!(usage_events[0].0.context_tokens, 0);
+        assert_eq!(usage_events[0].1, None);
+        assert_eq!(
+            usage_events[1].1,
+            Some(Usage {
+                input_tokens: 11,
+                output_tokens: 4,
+                total_tokens: 15,
+                cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        );
+    }
+
+    /// Verifies automatic compaction replaces live history before the model stream request.
+    #[tokio::test]
+    async fn execute_turn_auto_compacts_before_stream_request_when_threshold_is_reached()
+     {
+        let completion_calls = Arc::new(AtomicUsize::new(0));
+        let stream_histories = Arc::new(Mutex::new(Vec::new()));
+        let llm = Arc::new(AutoCompactionLlm {
+            completion_calls: Arc::clone(&completion_calls),
+            fail_completion: false,
+            stream_histories: Arc::clone(&stream_histories),
+        });
+        let path = std::env::temp_dir().join(format!(
+            "clawcode-auto-compact-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let recorder: Arc<dyn SessionRecorder> =
+            Arc::new(store::FileSessionRecorder::new(path.clone()));
+        let ctx = auto_compaction_turn_context(llm, recorder);
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        context.push(Message::user("old context ".repeat(32)));
+        context.push(Message::assistant("old answer"));
+        context.push(Message::user("tail context ".repeat(32)));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "new request".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should continue after auto compaction");
+
+        assert_eq!(completion_calls.load(Ordering::SeqCst), 1);
+        let histories = stream_histories.lock().expect("stream histories lock");
+        let first_history = histories.first().expect("stream request history");
+        let rendered_history = format!("{first_history:?}");
+        assert!(rendered_history.contains("previously summarized"));
+        assert!(!rendered_history.contains("old context old context"));
+
+        let text = std::fs::read_to_string(path).expect("read persisted turn");
+        assert!(text.contains("\"type\":\"compaction\""));
+    }
+
+    /// Verifies a failed automatic compaction does not block the current model request.
+    #[tokio::test]
+    async fn execute_turn_continues_when_auto_compaction_fails() {
+        let completion_calls = Arc::new(AtomicUsize::new(0));
+        let stream_histories = Arc::new(Mutex::new(Vec::new()));
+        let llm = Arc::new(AutoCompactionLlm {
+            completion_calls: Arc::clone(&completion_calls),
+            fail_completion: true,
+            stream_histories: Arc::clone(&stream_histories),
+        });
+        let recorder: Arc<dyn SessionRecorder> =
+            Arc::new(store::FileSessionRecorder::new(
+                std::env::temp_dir().join(format!(
+                    "clawcode-auto-compact-fail-{}.jsonl",
+                    uuid::Uuid::new_v4()
+                )),
+            ));
+        let ctx = auto_compaction_turn_context(llm, recorder);
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        context.push(Message::user("old context ".repeat(32)));
+        context.push(Message::assistant("old answer"));
+        context.push(Message::user("tail context ".repeat(32)));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "new request".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should continue after auto compaction failure");
+
+        assert_eq!(completion_calls.load(Ordering::SeqCst), 4);
+        let histories = stream_histories.lock().expect("stream histories lock");
+        let first_history = histories.first().expect("stream request history");
+        let rendered_history = format!("{first_history:?}");
+        assert!(rendered_history.contains("old context old context"));
+        assert!(!rendered_history.contains("previously summarized"));
+    }
+
+    /// Verifies automatic compaction is skipped when the active model has no context window.
+    #[tokio::test]
+    async fn execute_turn_skips_auto_compaction_without_context_tokens() {
+        let completion_calls = Arc::new(AtomicUsize::new(0));
+        let stream_histories = Arc::new(Mutex::new(Vec::new()));
+        let llm = Arc::new(AutoCompactionLlm {
+            completion_calls: Arc::clone(&completion_calls),
+            fail_completion: false,
+            stream_histories: Arc::clone(&stream_histories),
+        });
+        let recorder: Arc<dyn SessionRecorder> =
+            Arc::new(store::FileSessionRecorder::new(
+                std::env::temp_dir().join(format!(
+                    "clawcode-auto-compact-no-context-{}.jsonl",
+                    uuid::Uuid::new_v4()
+                )),
+            ));
+        let ctx = auto_compaction_turn_context_with_context_tokens(
+            llm, recorder, None,
+        );
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        context.push(Message::user("old context ".repeat(32)));
+        context.push(Message::assistant("old answer"));
+        context.push(Message::user("tail context ".repeat(32)));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "new request".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should continue without context window metadata");
+
+        assert_eq!(completion_calls.load(Ordering::SeqCst), 0);
+        let histories = stream_histories.lock().expect("stream histories lock");
+        let first_history = histories.first().expect("stream request history");
+        let rendered_history = format!("{first_history:?}");
+        assert!(rendered_history.contains("old context old context"));
+        assert!(!rendered_history.contains("previously summarized"));
     }
 
     /// Verifies that thought-only provider iterations do not complete a turn prematurely.

@@ -10,7 +10,7 @@ use futures::Stream;
 use protocol::message::Message;
 use protocol::{
     AgentPath, AgentStatus, Event, InterAgentMessage, KernelError, Op,
-    ReviewDecision, SessionId, StopReason, TurnId, Usage,
+    ReviewDecision, SessionId, StopReason, TurnId,
 };
 use provider::factory::{ArcLlm, LlmFactory};
 use skills::SkillRegistry;
@@ -37,8 +37,6 @@ pub struct Thread {
     pub agent_path: AgentPath,
     /// Current model id in `provider_id/model_id` form for frontend state.
     pub(crate) current_model: Arc<tokio::sync::RwLock<String>>,
-    /// Accumulated provider-reported usage for this live session.
-    pub(crate) current_usage: Arc<tokio::sync::RwLock<Usage>>,
     /// Send operations to the background task.
     pub(crate) tx_op: mpsc::UnboundedSender<Op>,
     /// Shared sender for per-turn events.
@@ -82,11 +80,6 @@ impl Thread {
     pub(crate) async fn current_model(&self) -> String {
         self.current_model.read().await.clone()
     }
-
-    /// Return the accumulated runtime usage for this live session.
-    pub(crate) async fn current_usage(&self) -> Usage {
-        *self.current_usage.read().await
-    }
 }
 
 /// Runtime state owned by the background task of a single session.
@@ -109,8 +102,6 @@ pub(crate) struct Session {
     pub agent_prompt: Option<String>,
     /// Current model id in `provider_id/model_id` form for session-state responses.
     pub current_model: Arc<tokio::sync::RwLock<String>>,
-    /// Accumulated provider-reported usage for this live session.
-    pub usage: Arc<tokio::sync::RwLock<Usage>>,
     /// Factory used by internal model-switch operations.
     pub llm_factory: Arc<LlmFactory>,
     /// Tool registry available to this session.
@@ -157,7 +148,6 @@ pub(crate) fn spawn_thread(
     approval: Arc<crate::approval::ApprovalPolicy>,
     app_config: Arc<AppConfig>,
     recorder: Arc<dyn SessionRecorder>,
-    initial_usage: Usage,
 ) -> Thread {
     let (tx_op, rx_op) = mpsc::unbounded_channel();
     let (initial_tx, initial_rx) = mpsc::unbounded_channel();
@@ -167,7 +157,6 @@ pub(crate) fn spawn_thread(
         llm.provider_id(),
         llm.model_id()
     )));
-    let current_usage = Arc::new(tokio::sync::RwLock::new(initial_usage));
 
     let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
     tools.register_skill_tools(Arc::clone(&skill_registry));
@@ -221,7 +210,6 @@ pub(crate) fn spawn_thread(
         .context(context)
         .llm(llm)
         .current_model(Arc::clone(&current_model))
-        .usage(Arc::clone(&current_usage))
         .llm_factory(llm_factory)
         .tools(Arc::clone(&tools))
         .pending_approvals(Arc::clone(&pending_approvals))
@@ -242,7 +230,6 @@ pub(crate) fn spawn_thread(
         .cwd(thread_cwd)
         .agent_path(agent_path)
         .current_model(current_model)
-        .current_usage(current_usage)
         .tx_op(tx_op)
         .tx_event(tx_event)
         .initial_rx_event(initial_rx_event)
@@ -421,11 +408,7 @@ async fn run_turn_select_loop(
                         );
                         TurnStepOutcome::Finished(AgentStatus::Errored { reason })
                     }
-                    Ok(usage) => {
-                        // Store the turn total after execute_turn finishes; live usage events
-                        // are emitted as provider-level increments while the turn is running.
-                        *rt.usage.write().await += usage;
-
+                    Ok(_usage) => {
                         // Persist the turn complete record after the turn finishes.
                         persist_turn_complete(
                             rt.recorder.as_ref(),

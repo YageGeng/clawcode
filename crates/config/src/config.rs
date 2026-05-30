@@ -19,11 +19,17 @@ pub struct SessionPersistenceConfig {
 }
 
 /// Manual context compaction settings.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CompactionConfig {
     /// Number of recent user turns to keep verbatim after compaction.
     #[serde(default = "default_compaction_retained_turns")]
     pub retained_turns: usize,
+    /// Whether context compaction should run automatically before model requests.
+    #[serde(default)]
+    pub auto: bool,
+    /// Fraction of the current model context window that triggers automatic compaction.
+    #[serde(default = "default_compaction_trigger_ratio")]
+    pub trigger_ratio: f64,
 }
 
 impl Default for CompactionConfig {
@@ -31,6 +37,8 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             retained_turns: default_compaction_retained_turns(),
+            auto: false,
+            trigger_ratio: default_compaction_trigger_ratio(),
         }
     }
 }
@@ -40,8 +48,13 @@ fn default_compaction_retained_turns() -> usize {
     2
 }
 
+/// Default context window fraction that triggers automatic compaction.
+fn default_compaction_trigger_ratio() -> f64 {
+    0.9
+}
+
 /// Top-level application configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AppConfig {
     /// Configured LLM providers.
     #[serde(default)]
@@ -144,6 +157,15 @@ theme = "light"
         assert_eq!(cfg.compaction.retained_turns, 2);
     }
 
+    /// AppConfig defaults automatic compaction to disabled with a 90% trigger ratio.
+    #[test]
+    fn app_config_default_auto_compaction_is_disabled_at_ninety_percent() {
+        let cfg = AppConfig::default();
+
+        assert!(!cfg.compaction.auto);
+        assert!((cfg.compaction.trigger_ratio - 0.9).abs() < f64::EPSILON);
+    }
+
     /// AppConfig reads the compaction retained turn count from TOML.
     #[test]
     fn app_config_reads_compaction_retained_turns() {
@@ -156,6 +178,22 @@ retained_turns = 0
         .expect("parse app config");
 
         assert_eq!(cfg.compaction.retained_turns, 0);
+    }
+
+    /// AppConfig reads automatic compaction settings from TOML.
+    #[test]
+    fn app_config_reads_auto_compaction_settings() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[compaction]
+auto = true
+trigger_ratio = 0.75
+"#,
+        )
+        .expect("parse app config");
+
+        assert!(cfg.compaction.auto);
+        assert!((cfg.compaction.trigger_ratio - 0.75).abs() < f64::EPSILON);
     }
 
     /// AppConfig extracts the provider id from the active model setting.

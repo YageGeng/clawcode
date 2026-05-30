@@ -399,7 +399,7 @@ mod store_tests {
     }
 
     #[tokio::test]
-    async fn message_usage_is_written_top_level_and_replayed_as_total() {
+    async fn message_usage_is_written_top_level_without_replay_total() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(Some(
             temp.path().to_str().expect("temp path"),
@@ -478,14 +478,8 @@ mod store_tests {
             .expect("load result")
             .expect("loaded session");
         assert_eq!(
-            replayed.usage,
-            Some(Usage {
-                input_tokens: 17,
-                output_tokens: 5,
-                total_tokens: 22,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
+            replayed.messages,
+            vec![Message::assistant("one"), Message::assistant("two")]
         );
     }
 
