@@ -18,6 +18,28 @@ pub struct SessionPersistenceConfig {
     pub data_home: Option<String>,
 }
 
+/// Manual context compaction settings.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CompactionConfig {
+    /// Number of recent user turns to keep verbatim after compaction.
+    #[serde(default = "default_compaction_retained_turns")]
+    pub retained_turns: usize,
+}
+
+impl Default for CompactionConfig {
+    /// Return the default manual compaction policy.
+    fn default() -> Self {
+        Self {
+            retained_turns: default_compaction_retained_turns(),
+        }
+    }
+}
+
+/// Default number of recent user turns retained after manual compaction.
+fn default_compaction_retained_turns() -> usize {
+    2
+}
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AppConfig {
@@ -42,6 +64,9 @@ pub struct AppConfig {
     /// File-backed session persistence configuration.
     #[serde(default)]
     pub session_persistence: SessionPersistenceConfig,
+    /// Manual context compaction configuration.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
     /// Local terminal UI configuration.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -61,6 +86,7 @@ impl Default for AppConfig {
             skills: SkillsConfig::default(),
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
+            compaction: CompactionConfig::default(),
             tui: TuiConfig::default(),
         }
     }
@@ -108,6 +134,28 @@ theme = "light"
         .expect("parse app config");
 
         assert_eq!(cfg.tui.theme, crate::tui::TuiTheme::Light);
+    }
+
+    /// AppConfig defaults manual compaction to retaining two recent user turns.
+    #[test]
+    fn app_config_default_compaction_retained_turns_is_two() {
+        let cfg = AppConfig::default();
+
+        assert_eq!(cfg.compaction.retained_turns, 2);
+    }
+
+    /// AppConfig reads the compaction retained turn count from TOML.
+    #[test]
+    fn app_config_reads_compaction_retained_turns() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[compaction]
+retained_turns = 0
+"#,
+        )
+        .expect("parse app config");
+
+        assert_eq!(cfg.compaction.retained_turns, 0);
     }
 
     /// AppConfig extracts the provider id from the active model setting.

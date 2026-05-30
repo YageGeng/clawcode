@@ -64,6 +64,8 @@ pub enum PersistedPayload {
     TurnAborted(TurnAbortedRecord),
     /// Parent-child edge used for future subagent discovery.
     AgentEdge(AgentEdgeRecord),
+    /// Materialized live-history checkpoint produced by manual compaction.
+    Compaction(CompactionRecord),
 }
 
 /// Immutable metadata captured when a session rollout is created.
@@ -146,9 +148,23 @@ impl PersistedPayload {
             | PersistedPayload::TurnContext(_)
             | PersistedPayload::TurnComplete(_)
             | PersistedPayload::TurnAborted(_)
-            | PersistedPayload::AgentEdge(_) => None,
+            | PersistedPayload::AgentEdge(_)
+            | PersistedPayload::Compaction(_) => None,
         }
     }
+}
+
+/// Durable checkpoint that replaces live model history during replay.
+#[derive(Clone, Debug, Serialize, Deserialize, typed_builder::TypedBuilder)]
+pub struct CompactionRecord {
+    /// Stable id for the compaction operation.
+    pub turn_id: String,
+    /// Summary text generated for older conversation turns.
+    pub summary: String,
+    /// Materialized context used for future model requests after this checkpoint.
+    pub replacement_history: Vec<Message>,
+    /// Number of messages retained verbatim in `replacement_history`.
+    pub retained_message_count: usize,
 }
 
 /// Marks a turn as durably completed.

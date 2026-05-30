@@ -9,7 +9,7 @@ pub mod skills;
 pub mod tui;
 
 pub use agent::MultiAgentConfig;
-pub use config::{AppConfig, SessionPersistenceConfig};
+pub use config::{AppConfig, CompactionConfig, SessionPersistenceConfig};
 pub use llm::{
     ApiKeyConfig, LlmModel, LlmProvider, ProviderAuthConfig, ProviderId,
     ProviderType,

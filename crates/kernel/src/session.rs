@@ -17,12 +17,12 @@ use skills::SkillRegistry;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::agent::control::AgentControl;
-use crate::context::ContextManager;
+use crate::context::{CompactionOptions, ContextManager};
 use crate::input_queue::InputQueue;
 use crate::turn::{TurnContext, execute_turn};
 use store::{
-    MessageRecord, PersistedPayload, SessionRecorder, TurnAbortedRecord,
-    TurnCompleteRecord, TurnKindRecord,
+    CompactionRecord, MessageRecord, PersistedPayload, SessionRecorder,
+    TurnAbortedRecord, TurnCompleteRecord, TurnKindRecord,
 };
 use tools::ToolRegistry;
 
@@ -368,6 +368,10 @@ async fn run_loop(mut rt: Session) {
                     );
                 }
             },
+            Some(Op::Compact { .. }) => {
+                let tx = { rt.tx_event.lock().await.clone() };
+                run_compaction(&mut rt, &tx).await;
+            }
             Some(Op::Cancel { .. } | Op::CloseSession { .. }) | None => break,
             _ => {}
         }
@@ -452,6 +456,9 @@ async fn run_turn_select_loop(
                 Some(Op::SetModel { .. }) => {
                     tracing::warn!("Ignoring model switch while a turn is running");
                 }
+                Some(Op::Compact { .. }) => {
+                    tracing::debug!("Ignoring context compaction while a turn is running");
+                }
                 Some(Op::Cancel { .. } | Op::CloseSession { .. }) | None => {
                     return TurnStepOutcome::Shutdown;
                 }
@@ -465,6 +472,72 @@ async fn run_turn_select_loop(
                     tracing::debug!("Ignoring operation while turn is running");
                 }
             }
+        }
+    }
+}
+
+/// Run manual compaction for an idle session and emit a synthetic command turn.
+async fn run_compaction(rt: &mut Session, tx: &mpsc::UnboundedSender<Event>) {
+    let turn_id = TurnId(uuid::Uuid::new_v4().to_string());
+    let options = CompactionOptions {
+        retained_turns: rt.app_config.compaction.retained_turns,
+    };
+
+    match rt.context.compact(rt.llm.as_ref(), options).await {
+        Ok(Some(output)) => {
+            let record = CompactionRecord::builder()
+                .turn_id(String::from(&turn_id))
+                .summary(output.summary)
+                .replacement_history(output.replacement_history.clone())
+                .retained_message_count(output.retained_message_count)
+                .build();
+            if let Err(error) = rt
+                .recorder
+                .append(&[PersistedPayload::Compaction(record)])
+                .await
+            {
+                tracing::warn!(%error, "failed to persist compaction checkpoint");
+                let _ = tx.send(Event::message_chunk(
+                    rt.session_id.clone(),
+                    format!("Context compaction failed: {error}"),
+                ));
+                let _ = tx.send(Event::turn_complete(
+                    rt.session_id.clone(),
+                    StopReason::Error,
+                ));
+                return;
+            }
+
+            rt.context.replace(output.replacement_history);
+            let _ = tx.send(Event::message_chunk(
+                rt.session_id.clone(),
+                "Context compacted.".to_string(),
+            ));
+            let _ = tx.send(Event::turn_complete(
+                rt.session_id.clone(),
+                StopReason::EndTurn,
+            ));
+        }
+        Ok(None) => {
+            let _ = tx.send(Event::message_chunk(
+                rt.session_id.clone(),
+                "Not enough history to compact.".to_string(),
+            ));
+            let _ = tx.send(Event::turn_complete(
+                rt.session_id.clone(),
+                StopReason::EndTurn,
+            ));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "context compaction failed");
+            let _ = tx.send(Event::message_chunk(
+                rt.session_id.clone(),
+                format!("Context compaction failed: {error}"),
+            ));
+            let _ = tx.send(Event::turn_complete(
+                rt.session_id.clone(),
+                StopReason::Error,
+            ));
         }
     }
 }

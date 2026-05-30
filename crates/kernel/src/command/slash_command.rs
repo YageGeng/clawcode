@@ -21,6 +21,7 @@ pub enum SlashCommand {
     Sessions,
     Agent,
     Model,
+    Compact,
 }
 
 impl SlashCommand {
@@ -38,6 +39,7 @@ impl SlashCommand {
             Self::Sessions => "list recent sessions",
             Self::Agent => "switch between main agent and subagents",
             Self::Model => "list or switch available models",
+            Self::Compact => "compact older context into a persisted summary",
         }
     }
 
@@ -74,6 +76,10 @@ mod tests {
         );
         assert_eq!(SlashCommand::from_str("agent"), Ok(SlashCommand::Agent));
         assert_eq!(SlashCommand::from_str("model"), Ok(SlashCommand::Model));
+        assert_eq!(
+            SlashCommand::from_str("compact"),
+            Ok(SlashCommand::Compact)
+        );
     }
 
     #[test]
@@ -99,6 +105,10 @@ mod tests {
             SlashCommand::parse_from_text("/model x/y"),
             Some(SlashCommand::Model)
         );
+        assert_eq!(
+            SlashCommand::parse_from_text("/compact"),
+            Some(SlashCommand::Compact)
+        );
     }
 
     #[test]
@@ -112,6 +122,7 @@ mod tests {
         assert_eq!(SlashCommand::Sessions.command(), "sessions");
         assert_eq!(SlashCommand::Agent.command(), "agent");
         assert_eq!(SlashCommand::Model.command(), "model");
+        assert_eq!(SlashCommand::Compact.command(), "compact");
     }
 
     #[test]
@@ -120,17 +131,19 @@ mod tests {
         assert!(SlashCommand::Sessions.description().contains("session"));
         assert!(SlashCommand::Agent.description().contains("agent"));
         assert!(SlashCommand::Model.description().contains("model"));
+        assert!(SlashCommand::Compact.description().contains("compact"));
     }
 
     #[test]
     fn built_in_commands_contains_all() {
         let commands = built_in_slash_commands();
-        assert_eq!(commands.len(), 4);
+        assert_eq!(commands.len(), 5);
         let names: Vec<&str> = commands.iter().map(|(name, _)| *name).collect();
         assert!(names.contains(&"raw"));
         assert!(names.contains(&"sessions"));
         assert!(names.contains(&"agent"));
         assert!(names.contains(&"model"));
+        assert!(names.contains(&"compact"));
     }
 
     #[test]
@@ -139,5 +152,6 @@ mod tests {
         assert!(SlashCommand::Sessions.supports_inline_args());
         assert!(SlashCommand::Model.supports_inline_args());
         assert!(!SlashCommand::Agent.supports_inline_args());
+        assert!(!SlashCommand::Compact.supports_inline_args());
     }
 }

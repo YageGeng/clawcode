@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod approval;
 pub mod command;
+pub(crate) mod compaction;
 pub mod context;
 pub(crate) mod input_queue;
 pub(crate) mod prompt;
@@ -334,7 +335,7 @@ impl Kernel {
                     LoadThreadParams::builder()
                         .session_id(edge.child_session_id.clone())
                         .cwd(child_replayed.meta.cwd.clone())
-                        .history(child_replayed.messages.clone())
+                        .history(child_replayed.live_messages.clone())
                         .llm(llm)
                         .llm_factory(Arc::clone(&self.llm_factory))
                         .tools(Arc::clone(&self.tools))
@@ -502,6 +503,7 @@ impl AgentKernel for Kernel {
         let app_cfg = self.config.current();
         let history_usage = replayed.usage;
         let history = replayed.messages;
+        let live_history = replayed.live_messages;
         let recorder: Arc<dyn SessionRecorder> = Arc::from(recorder);
         let llm = self.default_llm().ok_or_else(|| {
             let active = &self.config.current().active_model;
@@ -516,7 +518,7 @@ impl AgentKernel for Kernel {
                 LoadThreadParams::builder()
                     .session_id(session_id.clone())
                     .cwd(replayed.meta.cwd.clone())
-                    .history(history.clone())
+                    .history(live_history)
                     .llm(llm)
                     .llm_factory(Arc::clone(&self.llm_factory))
                     .tools(Arc::clone(&self.tools))
@@ -615,6 +617,11 @@ impl AgentKernel for Kernel {
             SlashCommand::parse_from_text(&text)
         {
             return self.prompt_sessions_command(session_id, &text).await;
+        }
+        if let Some(SlashCommand::Compact) =
+            SlashCommand::parse_from_text(&text)
+        {
+            return self.prompt_compact_command(session_id).await;
         }
 
         if let Some(title) = Self::session_title_from_prompt_text(&text)
@@ -821,6 +828,30 @@ impl Kernel {
             )),
         ];
         Ok(Box::pin(futures::stream::iter(events)))
+    }
+
+    /// Handle `/compact` by asking the idle session runtime to compact live history.
+    async fn prompt_compact_command(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Pin<
+            Box<dyn Stream<Item = Result<Event, KernelError>> + Send + 'static>,
+        >,
+        KernelError,
+    > {
+        let rx_event = self.thread_manager.take_rx(session_id).await?;
+        let cancel_rx = self.thread_manager.cancel_rx(session_id).await?;
+        self.thread_manager
+            .send_op(
+                session_id,
+                Op::Compact {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await?;
+
+        Ok(event_stream(rx_event, cancel_rx))
     }
 
     /// Parse the optional offset cursor from `/sessions` prompt text.

@@ -14,6 +14,7 @@ pub use manifest::SessionManifestRecord;
 pub use manifest::SessionManifestStatus;
 pub use record::AgentEdgeRecord;
 pub use record::AgentEdgeStatusRecord;
+pub use record::CompactionRecord;
 pub use record::CreateSessionParams;
 pub use record::MessageRecord;
 pub use record::PersistedPayload;

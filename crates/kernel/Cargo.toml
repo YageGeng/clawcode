@@ -16,7 +16,7 @@ skills = { path = "../skills" }
 mcp = { path = "../mcp" }
 store = { path = "../store" }
 
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

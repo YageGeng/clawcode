@@ -39,6 +39,8 @@ pub enum Op {
         provider_id: String,
         model_id: String,
     },
+    /// Manually compact older context for a session.
+    Compact { session_id: SessionId },
     /// Close a session and release its resources.
     CloseSession { session_id: SessionId },
     /// Spawn a sub-agent from a parent session.
@@ -86,5 +88,21 @@ mod tests {
             panic!("expected inter-agent message op");
         };
         assert!(message.trigger_turn);
+    }
+
+    /// Compact operations preserve their target session id through JSON.
+    #[test]
+    fn compact_op_roundtrips_json() {
+        let op = Op::Compact {
+            session_id: SessionId::from("session"),
+        };
+
+        let encoded = serde_json::to_string(&op).expect("serialize op");
+        let decoded: Op =
+            serde_json::from_str(&encoded).expect("deserialize op");
+
+        assert!(
+            matches!(decoded, Op::Compact { session_id } if session_id == SessionId::from("session"))
+        );
     }
 }

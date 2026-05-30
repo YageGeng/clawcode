@@ -4,11 +4,31 @@ use futures::future::BoxFuture;
 use protocol::message::{AssistantContent, Message};
 use provider::factory::Llm;
 
+use crate::compaction::ContextCompactor;
+
+/// Options used when compacting a context history snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionOptions {
+    /// Number of recent user turns to keep verbatim after compaction.
+    pub retained_turns: usize,
+}
+
+/// Result of a successful manual context compaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionOutput {
+    /// Summary text returned by the model.
+    pub summary: String,
+    /// Replacement live history to persist in the checkpoint.
+    pub replacement_history: Vec<Message>,
+    /// Count of original messages retained verbatim in replacement history.
+    pub retained_message_count: usize,
+}
+
 /// Manages conversation history for a session.
 ///
-/// Implementations range from in-memory `Vec<Message>` to persistent storage
-/// with automatic compaction. The compaction interface is reserved for
-/// future implementation.
+/// Implementations range from in-memory `Vec<Message>` to persistent storage.
+/// Compaction methods compute replacement history but do not apply it; callers
+/// must persist any checkpoint before replacing the live history.
 pub trait ContextManager: Send + Sync {
     /// Append a message to the conversation history.
     fn push(&mut self, msg: Message);
@@ -21,6 +41,9 @@ pub trait ContextManager: Send + Sync {
 
     /// Clear all history.
     fn clear(&mut self);
+
+    /// Replace all history with the provided messages.
+    fn replace(&mut self, messages: Vec<Message>);
 
     /// Extract the latest displayable assistant text from the conversation history.
     fn last_assistant_text(&self) -> Option<String> {
@@ -41,21 +64,23 @@ pub trait ContextManager: Send + Sync {
         })
     }
 
-    // ── Reserved for future compaction ──
-
     /// Returns `true` when compaction is recommended for this history.
     /// Default implementation returns `false`.
     fn should_compact(&self) -> bool {
         false
     }
 
-    /// Compact the history by summarizing older messages.
+    /// Compute a compaction output without mutating the current history.
+    ///
+    /// Callers are responsible for persisting the returned checkpoint data
+    /// before applying `replacement_history` via [`ContextManager::replace`].
     /// Default implementation is a no-op.
-    fn compact(
-        &mut self,
-        _llm: &dyn Llm,
-    ) -> BoxFuture<'_, Result<(), anyhow::Error>> {
-        Box::pin(std::future::ready(Ok(())))
+    fn compact<'a>(
+        &'a self,
+        _llm: &'a dyn Llm,
+        _options: CompactionOptions,
+    ) -> BoxFuture<'a, Result<Option<CompactionOutput>, anyhow::Error>> {
+        Box::pin(std::future::ready(Ok(None)))
     }
 }
 
@@ -106,11 +131,75 @@ impl ContextManager for InMemoryContext {
     fn clear(&mut self) {
         self.messages.clear();
     }
+
+    fn replace(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
+    fn compact<'a>(
+        &'a self,
+        llm: &'a dyn Llm,
+        options: CompactionOptions,
+    ) -> BoxFuture<'a, Result<Option<CompactionOutput>, anyhow::Error>> {
+        Box::pin(async move {
+            ContextCompactor::new(options.retained_turns)
+                .compact_history(llm, self.history())
+                .await
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::one_or_many::OneOrMany;
+    use provider::completion::CompletionError;
+    use provider::completion::request::CompletionRequest;
+    use provider::factory::{DynLlmStream, LlmCompletion};
+    use provider::message::AssistantContent;
+    use provider::wasm_compat::WasmBoxedFuture;
+
+    #[derive(Debug)]
+    struct SummaryLlm;
+
+    impl Llm for SummaryLlm {
+        /// Return a stable provider id for context compaction tests.
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        /// Return a stable model id for context compaction tests.
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        /// Return a fixed summary for non-streaming compaction requests.
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<'_, Result<LlmCompletion, CompletionError>>
+        {
+            Box::pin(async {
+                Ok(LlmCompletion {
+                    choice: OneOrMany::one(AssistantContent::text("summary")),
+                    usage: Default::default(),
+                    raw_response: serde_json::json!({}),
+                    message_id: None,
+                })
+            })
+        }
+
+        /// Streaming is not used by context compaction tests.
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<'_, Result<DynLlmStream, CompletionError>>
+        {
+            Box::pin(async {
+                Err(CompletionError::ProviderError("stream unused".to_string()))
+            })
+        }
+    }
 
     #[test]
     fn in_memory_context_push_and_history() {
@@ -158,6 +247,49 @@ mod tests {
         assert_eq!(
             ctx.last_assistant_text(),
             Some("latest reasoning".to_string())
+        );
+    }
+
+    /// Replacing an in-memory context swaps all previously stored messages.
+    #[test]
+    fn in_memory_context_replace_swaps_history() {
+        let mut ctx = InMemoryContext::new();
+        ctx.push(Message::user("old"));
+
+        ctx.replace(vec![Message::user("summary"), Message::assistant("tail")]);
+
+        assert_eq!(
+            ctx.history(),
+            &[Message::user("summary"), Message::assistant("tail")]
+        );
+    }
+
+    /// InMemoryContext compaction returns replacement history without mutating live history.
+    #[tokio::test]
+    async fn in_memory_context_compact_returns_output_without_replacing_history()
+     {
+        let mut ctx = InMemoryContext::new();
+        ctx.push(Message::user("old"));
+        ctx.push(Message::assistant("old answer"));
+        ctx.push(Message::user("tail"));
+        let llm = SummaryLlm;
+
+        let output = ctx
+            .compact(&llm, CompactionOptions { retained_turns: 1 })
+            .await
+            .expect("compact should succeed")
+            .expect("history should compact");
+
+        assert_eq!(ctx.history().len(), 3);
+        assert_eq!(output.summary, "summary");
+        assert_eq!(
+            output.replacement_history,
+            vec![
+                Message::user(
+                    "Another model previously summarized the conversation. Use this summary as authoritative context for older turns:\n\nsummary"
+                ),
+                Message::user("tail"),
+            ]
         );
     }
 }
