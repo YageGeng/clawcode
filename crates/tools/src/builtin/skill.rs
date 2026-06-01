@@ -68,12 +68,12 @@ impl Tool for SkillTool {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _arguments: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(

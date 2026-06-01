@@ -11,18 +11,49 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::{StreamExt, stream::Stream};
 use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::{
-    LocalTerminalBackend, RunningTerminal, TerminalBackend,
-    TerminalCreateParams, TerminalEnvVariable, TerminalOutputSnapshot, Tool,
-    ToolContext,
+    ExecApprovalRequirement, LocalTerminalBackend, RunningTerminal,
+    TerminalBackend, TerminalCreateParams, TerminalEnvVariable,
+    TerminalOutputSnapshot, Tool, ToolContext, ToolInvocation,
+    ToolInvocationError,
 };
 
 const OUTPUT_MAX_LEN: usize = 4096;
 const DEFAULT_YIELD_TIME_MS: u64 = 10_000;
 const DEFAULT_POLL_YIELD_TIME_MS: u64 = 5_000;
 const POLL_INTERVAL_MS: u64 = 50;
+
+/// Shell approval metadata.
+#[derive(Debug, Clone, Serialize)]
+struct ShellApprovalInvocation {
+    /// Canonical command tokens.
+    command: Vec<String>,
+}
+
+impl crate::ToolApprovalInvocation for ShellApprovalInvocation {
+    /// Return the shell command key used for session approval reuse.
+    fn cache_keys(&self, cwd: &Path) -> Vec<crate::ApprovalCacheKey> {
+        vec![crate::ApprovalCacheKey::new(
+            "shell",
+            cwd.to_path_buf(),
+            serde_json::json!({ "command": self.command.clone() }),
+        )]
+    }
+
+    /// Return a command-prefix amendment candidate for shell approvals.
+    fn proposed_execpolicy_amendment(
+        &self,
+    ) -> Option<protocol::ExecPolicyAmendment> {
+        if self.command.is_empty() {
+            None
+        } else {
+            Some(protocol::ExecPolicyAmendment::new(self.command.clone()))
+        }
+    }
+}
 
 /// Shared runtime for shell-like tools.
 pub struct ShellRuntime {
@@ -144,7 +175,7 @@ impl ShellCommand {
         }
     }
 
-    /// Create a Codex-compatible `exec_command` tool with a shared shell runtime.
+    /// Create a exec-compatible `exec_command` tool with a shared shell runtime.
     #[must_use]
     pub fn exec_command(runtime: Arc<ShellRuntime>) -> Self {
         Self {
@@ -180,7 +211,7 @@ impl Tool for ShellCommand {
                 },
                 "cmd": {
                     "type": "string",
-                    "description": "Alias for command, matching Codex exec_command"
+                    "description": "Alias for command, matching exec_command"
                 },
                 "shell": {
                     "type": ["string", "null"],
@@ -192,7 +223,7 @@ impl Tool for ShellCommand {
                 },
                 "workdir": {
                     "type": ["string", "null"],
-                    "description": "Alias for cwd, matching Codex exec_command"
+                    "description": "Alias for cwd, matching exec_command"
                 },
                 "env": {
                     "type": ["array", "null"],
@@ -239,12 +270,36 @@ impl Tool for ShellCommand {
         }
     }
 
-    fn needs_approval(
+    fn invocation(
         &self,
-        _: &serde_json::Value,
+        call_id: &str,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<crate::ToolInvocation, crate::ToolInvocationError> {
+        let args = ShellArgs::parse(arguments.clone(), ctx)
+            .map_err(ToolInvocationError::InvalidArguments)?;
+        let command = args.approval_command_tokens();
+
+        Ok(ToolInvocation::builder()
+            .call_id(call_id.to_string())
+            .tool_name(self.name().to_string())
+            .raw_arguments(arguments)
+            .cwd(args.cwd)
+            .approval(Arc::new(ShellApprovalInvocation { command }))
+            .build())
+    }
+
+    fn exec_approval_requirement(
+        &self,
+        invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        true
+    ) -> crate::ExecApprovalRequirement {
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: invocation
+                .approval
+                .proposed_execpolicy_amendment(),
+        }
     }
 
     async fn execute(
@@ -453,12 +508,12 @@ impl Tool for WriteStdin {
         }
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(
@@ -615,16 +670,28 @@ impl ShellArgs {
         self.max_output_tokens
             .map_or(OUTPUT_MAX_LEN, |tokens| tokens.saturating_mul(4))
     }
+
+    /// Return shell command tokens used by approval and execpolicy prompts.
+    fn approval_command_tokens(&self) -> Vec<String> {
+        // `shlex` handles common shell quoting. If parsing fails, fall back to
+        // whitespace splitting so malformed commands still get a stable key.
+        shlex::split(&self.command).unwrap_or_else(|| {
+            self.command
+                .split_whitespace()
+                .map(ToString::to_string)
+                .collect()
+        })
+    }
 }
 
-/// Deserialized shell command request with Codex-compatible aliases.
+/// Deserialized shell command request with exec-compatible aliases.
 #[derive(Debug, Deserialize, typed_builder::TypedBuilder)]
 struct ShellArgsInput {
     /// Preferred command field.
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     command: Option<String>,
-    /// Codex-compatible command alias.
+    /// exec-compatible command alias.
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     cmd: Option<String>,
@@ -636,7 +703,7 @@ struct ShellArgsInput {
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     cwd: Option<PathBuf>,
-    /// Codex-compatible working directory alias.
+    /// exec-compatible working directory alias.
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     workdir: Option<PathBuf>,
@@ -797,14 +864,14 @@ impl WriteStdinArgs {
     }
 }
 
-/// Deserialized write_stdin request with Codex-compatible aliases.
+/// Deserialized write_stdin request with exec-compatible aliases.
 #[derive(Debug, Deserialize, typed_builder::TypedBuilder)]
 struct WriteStdinArgsInput {
     /// Preferred logical process id field.
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     session_id: Option<i64>,
-    /// Codex-compatible logical process id alias.
+    /// exec-compatible logical process id alias.
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     process_id: Option<i64>,
@@ -1238,13 +1305,53 @@ mod tests {
         result.expect_err("missing command should fail");
     }
 
-    #[tokio::test]
-    async fn shell_needs_approval() {
+    #[test]
+    fn shell_requires_approval() {
         let tool = ShellCommand::new();
-        assert!(tool.needs_approval(
-            &serde_json::json!({"command": "ls"}),
-            &test_ctx()
+        let invocation = tool
+            .invocation(
+                "call-shell",
+                serde_json::json!({"command": "ls"}),
+                &test_ctx(),
+            )
+            .expect("shell invocation");
+
+        assert!(matches!(
+            tool.exec_approval_requirement(&invocation, &test_ctx()),
+            crate::ExecApprovalRequirement::NeedsApproval { .. }
         ));
+    }
+
+    /// Verifies shell invocations expose command tokens for approval.
+    #[test]
+    fn shell_invocation_exposes_command_tokens() {
+        let tool = ShellCommand::default();
+        let ctx = ToolContext::builder()
+            .session_id(protocol::SessionId::from("s1"))
+            .cwd(PathBuf::from("/repo"))
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::RequestApproval)
+            .approval_policy(protocol::AskForApproval::OnRequest)
+            .build();
+
+        let invocation = tool
+            .invocation(
+                "call-1",
+                serde_json::json!({ "command": "cargo test -p tools" }),
+                &ctx,
+            )
+            .expect("shell invocation");
+
+        assert_eq!(
+            invocation.approval.cache_keys(&invocation.cwd),
+            vec![crate::ApprovalCacheKey::new(
+                "shell",
+                PathBuf::from("/repo"),
+                serde_json::json!({
+                    "command": ["cargo", "test", "-p", "tools"]
+                }),
+            )]
+        );
     }
 
     #[test]
@@ -1309,7 +1416,7 @@ mod tests {
         assert_eq!(args.shell, "/bin/sh");
     }
 
-    /// Verifies Codex-compatible shell argument aliases are normalized.
+    /// Verifies exec-compatible shell argument aliases are normalized.
     #[test]
     fn parse_args_accepts_command_and_workdir_aliases() {
         let args = ShellArgs::parse(
@@ -1341,7 +1448,7 @@ mod tests {
         assert!(error.contains("yield_time_ms"));
     }
 
-    /// Verifies Codex-compatible write_stdin process id alias is normalized.
+    /// Verifies exec-compatible write_stdin process id alias is normalized.
     #[test]
     fn parse_write_stdin_args_accepts_process_id_alias() {
         let args = WriteStdinArgs::parse(serde_json::json!({

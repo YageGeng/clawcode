@@ -52,15 +52,6 @@ impl Tool for WriteFile {
             "required": ["path", "content"]
         })
     }
-
-    fn needs_approval(
-        &self,
-        _: &serde_json::Value,
-        _ctx: &crate::ToolContext,
-    ) -> bool {
-        true
-    }
-
     async fn execute(
         &self,
         arguments: serde_json::Value,
@@ -228,13 +219,18 @@ mod tests {
     #[tokio::test]
     async fn write_file_always_requires_approval() {
         let tool = WriteFile::new();
-        assert!(tool.needs_approval(
-            &serde_json::json!({"path": "test.txt"}),
-            &test_context(Path::new("."))
-        ));
-        assert!(tool.needs_approval(
-            &serde_json::json!({"path": "../escape.txt"}),
-            &test_context(Path::new("."))
-        ));
+        let ctx = test_context(Path::new("."));
+        for arguments in [
+            serde_json::json!({"path": "test.txt"}),
+            serde_json::json!({"path": "../escape.txt"}),
+        ] {
+            let invocation = tool
+                .invocation("call-write", arguments, &ctx)
+                .expect("write invocation");
+            assert!(matches!(
+                tool.exec_approval_requirement(&invocation, &ctx),
+                crate::ExecApprovalRequirement::NeedsApproval { .. }
+            ));
+        }
     }
 }

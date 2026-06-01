@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod builtin;
+pub mod invocation;
 pub mod mcp;
 
 use async_trait::async_trait;
@@ -18,6 +19,10 @@ pub use backend::terminal::{
     LocalTerminalBackend, RunningTerminal, TerminalBackend,
     TerminalBackendError, TerminalCreateParams, TerminalEnvVariable,
     TerminalExitResult, TerminalOutputSnapshot,
+};
+pub use invocation::{
+    ApprovalCacheKey, ExecApprovalRequirement, GenericApprovalInvocation,
+    ToolApprovalInvocation, ToolExecution, ToolInvocation, ToolInvocationError,
 };
 pub use protocol::ToolContext;
 
@@ -60,14 +65,28 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// Whether this specific invocation requires user approval.
-    /// Default: `true` (safe-by-default).
-    fn needs_approval(
+    /// Build a unified invocation envelope for this tool call.
+    fn invocation(
         &self,
-        _arguments: &serde_json::Value,
+        call_id: &str,
+        arguments: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolInvocation, ToolInvocationError> {
+        Ok(ToolInvocation::generic(
+            call_id,
+            self.name(),
+            arguments,
+            ctx,
+        ))
+    }
+
+    /// Return the approval requirement for a built invocation.
+    fn exec_approval_requirement(
+        &self,
+        _invocation: &ToolInvocation,
         _ctx: &ToolContext,
-    ) -> bool {
-        true
+    ) -> ExecApprovalRequirement {
+        ExecApprovalRequirement::approval_required()
     }
 
     /// Execute the tool with the given JSON arguments and turn context.
@@ -108,6 +127,15 @@ pub trait Tool: Send + Sync {
                 Ok(Box::pin(futures::stream::once(async move { item })))
             }
         }
+    }
+
+    /// Execute a previously built invocation.
+    async fn execute_invocation(
+        &self,
+        invocation: ToolInvocation,
+        ctx: &ToolContext,
+    ) -> Result<ToolExecution, String> {
+        self.execute_streaming(invocation.raw_arguments, ctx).await
     }
 }
 

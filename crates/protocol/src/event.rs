@@ -133,6 +133,9 @@ pub enum Event {
         arguments: serde_json::Value,
         /// Working directory for the tool execution.
         cwd: PathBuf,
+        /// Optional command-prefix policy amendment the user can persist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposed_execpolicy_amendment: Option<crate::ExecPolicyAmendment>,
     },
     /// A sub-agent's runtime status changed.
     AgentStatusChange {
@@ -327,6 +330,7 @@ impl Event {
         tool_name: impl Into<String>,
         arguments: impl Into<serde_json::Value>,
         cwd: impl Into<PathBuf>,
+        proposed_execpolicy_amendment: Option<crate::ExecPolicyAmendment>,
     ) -> Self {
         Event::ExecApprovalRequested {
             session_id: session_id.into(),
@@ -334,6 +338,7 @@ impl Event {
             tool_name: tool_name.into(),
             arguments: arguments.into(),
             cwd: cwd.into(),
+            proposed_execpolicy_amendment,
         }
     }
 

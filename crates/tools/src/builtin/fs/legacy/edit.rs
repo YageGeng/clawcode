@@ -65,15 +65,6 @@ impl Tool for EditFile {
             supports_streaming: true,
         }
     }
-
-    fn needs_approval(
-        &self,
-        _: &serde_json::Value,
-        _ctx: &crate::ToolContext,
-    ) -> bool {
-        true
-    }
-
     async fn execute(
         &self,
         arguments: serde_json::Value,
@@ -861,13 +852,21 @@ mod tests {
     #[tokio::test]
     async fn edit_file_always_requires_approval() {
         let tool = EditFile::new();
-        assert!(tool.needs_approval(
-            &serde_json::json!({
-                "filePath": "test.txt",
-                "oldString": "t",
-                "newString": "r"
-            }),
-            &test_context(Path::new(".")),
+        let ctx = test_context(Path::new("."));
+        let invocation = tool
+            .invocation(
+                "call-edit",
+                serde_json::json!({
+                    "filePath": "test.txt",
+                    "oldString": "t",
+                    "newString": "r"
+                }),
+                &ctx,
+            )
+            .expect("edit invocation");
+        assert!(matches!(
+            tool.exec_approval_requirement(&invocation, &ctx),
+            crate::ExecApprovalRequirement::NeedsApproval { .. }
         ));
     }
 

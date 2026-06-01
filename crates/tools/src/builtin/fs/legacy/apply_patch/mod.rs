@@ -4,9 +4,11 @@ mod stream_parser;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use protocol::FileChange;
+use serde::Serialize;
 use tokio::fs;
 use typed_builder::TypedBuilder;
 
@@ -46,6 +48,24 @@ It is important to remember:
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
 "#;
+
+/// Apply-patch approval metadata.
+#[derive(Debug, Clone, Serialize)]
+struct ApplyPatchApprovalInvocation {
+    /// Paths touched by the patch.
+    paths: Vec<PathBuf>,
+}
+
+impl crate::ToolApprovalInvocation for ApplyPatchApprovalInvocation {
+    /// Return touched paths as the session approval key.
+    fn cache_keys(&self, cwd: &Path) -> Vec<crate::ApprovalCacheKey> {
+        vec![crate::ApprovalCacheKey::new(
+            "apply_patch",
+            cwd.to_path_buf(),
+            serde_json::json!({ "paths": self.paths.clone() }),
+        )]
+    }
+}
 
 /// Captures one update chunk from an `Update File` hunk.
 #[derive(Debug, Clone, TypedBuilder)]
@@ -95,6 +115,20 @@ impl ApplyPatch {
     pub fn new() -> Self {
         Self
     }
+
+    /// Extract touched file paths from a patch text for approval keys.
+    fn approval_paths(patch_text: &str) -> Vec<PathBuf> {
+        patch_text
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("*** Add File: ")
+                    .or_else(|| line.strip_prefix("*** Update File: "))
+                    .or_else(|| line.strip_prefix("*** Delete File: "))
+                    .or_else(|| line.strip_prefix("*** Move to: "))
+            })
+            .map(PathBuf::from)
+            .collect()
+    }
 }
 
 impl Default for ApplyPatch {
@@ -137,13 +171,40 @@ impl Tool for ApplyPatch {
     ) -> Option<Box<dyn crate::ToolArgumentsConsumer>> {
         Some(Box::new(stream_parser::ApplyPatchArgumentsConsumer::new()))
     }
-
-    fn needs_approval(
+    fn invocation(
         &self,
-        _: &serde_json::Value,
+        call_id: &str,
+        arguments: serde_json::Value,
+        ctx: &crate::ToolContext,
+    ) -> Result<crate::ToolInvocation, crate::ToolInvocationError> {
+        let patch_text = arguments
+            .get("patchText")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                crate::ToolInvocationError::InvalidArguments(
+                    "missing patchText".to_string(),
+                )
+            })?;
+        let paths = Self::approval_paths(patch_text);
+
+        Ok(crate::ToolInvocation::builder()
+            .call_id(call_id.to_string())
+            .tool_name(self.name().to_string())
+            .raw_arguments(arguments)
+            .cwd(ctx.cwd.clone())
+            .approval(Arc::new(ApplyPatchApprovalInvocation { paths }))
+            .build())
+    }
+
+    fn exec_approval_requirement(
+        &self,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        true
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        }
     }
 
     async fn execute(
@@ -1672,12 +1733,52 @@ mod tests {
     #[tokio::test]
     async fn apply_patch_always_requires_approval() {
         let tool = ApplyPatch::new();
-        assert!(tool.needs_approval(
-            &serde_json::json!({
-                "patchText": "*** Begin Patch\n*** End Patch"
-            }),
-            &test_context(Path::new(".")),
+        let ctx = test_context(Path::new("."));
+        let invocation = tool
+            .invocation(
+                "call-patch",
+                serde_json::json!({
+                    "patchText": "*** Begin Patch\n*** End Patch"
+                }),
+                &ctx,
+            )
+            .expect("patch invocation");
+        assert!(matches!(
+            tool.exec_approval_requirement(&invocation, &ctx),
+            crate::ExecApprovalRequirement::NeedsApproval { .. }
         ));
+    }
+
+    /// Verifies apply_patch invocations expose touched paths for session approval.
+    #[test]
+    fn apply_patch_invocation_exposes_paths() {
+        let tool = ApplyPatch::new();
+        let ctx = protocol::ToolContext::builder()
+            .session_id(protocol::SessionId::from("s1"))
+            .cwd(std::path::PathBuf::from("/repo"))
+            .agent_path(protocol::AgentPath::root())
+            .approval_mode(protocol::ApprovalMode::RequestApproval)
+            .approval_policy(protocol::AskForApproval::OnRequest)
+            .build();
+
+        let invocation = tool
+            .invocation(
+                "call-1",
+                serde_json::json!({
+                    "patchText": "*** Begin Patch\n*** Add File: src/a.rs\n+fn main() {}\n*** End Patch"
+                }),
+                &ctx,
+            )
+            .expect("patch invocation");
+
+        assert_eq!(
+            invocation.approval.cache_keys(&invocation.cwd),
+            vec![crate::ApprovalCacheKey::new(
+                "apply_patch",
+                std::path::PathBuf::from("/repo"),
+                serde_json::json!({ "paths": ["src/a.rs"] }),
+            )]
+        );
     }
 
     /// Verifies that apply_patch opts into argument streaming previews.

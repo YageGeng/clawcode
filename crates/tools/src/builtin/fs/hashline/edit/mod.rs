@@ -123,15 +123,6 @@ impl Tool for HashlineEditFile {
             "required": ["path", "edits"]
         })
     }
-
-    fn needs_approval(
-        &self,
-        _: &serde_json::Value,
-        _ctx: &crate::ToolContext,
-    ) -> bool {
-        true
-    }
-
     async fn execute(
         &self,
         arguments: serde_json::Value,

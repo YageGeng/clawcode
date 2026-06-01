@@ -55,15 +55,22 @@ impl Tool for ReadFile {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        arguments: &serde_json::Value,
+        invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
+    ) -> crate::ExecApprovalRequirement {
         // Require approval only when the path escapes cwd.
-        arguments["path"]
-            .as_str()
+        if invocation
+            .raw_arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
             .is_some_and(|p| Path::new(p).is_absolute() || p.contains(".."))
+        {
+            crate::ExecApprovalRequirement::approval_required()
+        } else {
+            crate::ExecApprovalRequirement::skip()
+        }
     }
 
     async fn execute(
@@ -242,9 +249,13 @@ mod tests {
     #[tokio::test]
     async fn read_file_needs_no_approval() {
         let tool = ReadFile::new();
-        assert!(!tool.needs_approval(
-            &serde_json::json!({"path": "x"}),
-            &test_context(Path::new("."))
+        let ctx = test_context(Path::new("."));
+        let invocation = tool
+            .invocation("call-read", serde_json::json!({"path": "x"}), &ctx)
+            .expect("read invocation");
+        assert!(matches!(
+            tool.exec_approval_requirement(&invocation, &ctx),
+            crate::ExecApprovalRequirement::Skip { .. }
         ));
     }
 
@@ -252,9 +263,17 @@ mod tests {
     #[tokio::test]
     async fn read_file_requires_approval_for_absolute_path() {
         let tool = ReadFile::new();
-        assert!(tool.needs_approval(
-            &serde_json::json!({"path": "/etc/passwd"}),
-            &test_context(Path::new("."))
+        let ctx = test_context(Path::new("."));
+        let invocation = tool
+            .invocation(
+                "call-read",
+                serde_json::json!({"path": "/etc/passwd"}),
+                &ctx,
+            )
+            .expect("read invocation");
+        assert!(matches!(
+            tool.exec_approval_requirement(&invocation, &ctx),
+            crate::ExecApprovalRequirement::NeedsApproval { .. }
         ));
         let result = tool
             .execute(
@@ -269,9 +288,17 @@ mod tests {
     #[tokio::test]
     async fn read_file_requires_approval_for_parent_escape() {
         let tool = ReadFile::new();
-        assert!(tool.needs_approval(
-            &serde_json::json!({"path": "../secret"}),
-            &test_context(Path::new("."))
+        let ctx = test_context(Path::new("."));
+        let invocation = tool
+            .invocation(
+                "call-read",
+                serde_json::json!({"path": "../secret"}),
+                &ctx,
+            )
+            .expect("read invocation");
+        assert!(matches!(
+            tool.exec_approval_requirement(&invocation, &ctx),
+            crate::ExecApprovalRequirement::NeedsApproval { .. }
         ));
     }
 }

@@ -66,18 +66,24 @@ impl Tool for HashlineGrep {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        arguments: &serde_json::Value,
+        invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
+    ) -> crate::ExecApprovalRequirement {
         // Require approval only when the target path escapes cwd.
-        arguments
+        if invocation
+            .raw_arguments
             .get("path")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|path| {
                 Path::new(path).is_absolute() || path.contains("..")
             })
+        {
+            crate::ExecApprovalRequirement::approval_required()
+        } else {
+            crate::ExecApprovalRequirement::skip()
+        }
     }
 
     async fn execute(

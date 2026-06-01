@@ -160,3 +160,52 @@ fn load_falls_back_to_cwd_claw_conf() {
         Ok(())
     });
 }
+
+/// Legacy request_approval config resolves to enhanced OnRequest policy.
+#[test]
+fn legacy_request_approval_effective_policy_is_on_request() {
+    let toml = r#"
+active_model = "test/model"
+approval = "request_approval"
+"#;
+
+    let config: config::AppConfig = toml::from_str(toml).expect("parse config");
+
+    assert_eq!(
+        config.effective_approval_policy(),
+        protocol::AskForApproval::OnRequest
+    );
+}
+
+/// Legacy yolo config preserves current no-prompt compatibility mode.
+#[test]
+fn legacy_yolo_effective_policy_is_never() {
+    let toml = r#"
+active_model = "test/model"
+approval = "yolo"
+"#;
+
+    let config: config::AppConfig = toml::from_str(toml).expect("parse config");
+
+    assert_eq!(
+        config.effective_approval_policy(),
+        protocol::AskForApproval::Never
+    );
+}
+
+/// enhanced approval_policy overrides the legacy approval field.
+#[test]
+fn explicit_approval_policy_overrides_legacy_approval() {
+    let toml = r#"
+active_model = "test/model"
+approval = "yolo"
+approval_policy = "on-request"
+"#;
+
+    let config: config::AppConfig = toml::from_str(toml).expect("parse config");
+
+    assert_eq!(
+        config.effective_approval_policy(),
+        protocol::AskForApproval::OnRequest
+    );
+}

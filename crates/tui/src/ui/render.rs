@@ -37,6 +37,7 @@ pub fn render(
             Paragraph::new(approval::approval_lines(
                 approval.title(),
                 approval.body(),
+                approval.available_decisions(),
             ))
             .block(Block::default().borders(Borders::ALL)),
             overlay,
@@ -83,6 +84,7 @@ pub(crate) fn render_router(
             Paragraph::new(approval::approval_lines(
                 approval.title(),
                 approval.body(),
+                approval.available_decisions(),
             ))
             .block(Block::default().borders(Borders::ALL)),
             overlay,
@@ -328,7 +330,7 @@ mod tests {
             .assert_cursor_position(Position::new(4, input_y));
     }
 
-    /// Verifies the composer follows the Codex-style borderless input treatment.
+    /// Verifies the composer follows the enhanced borderless input treatment.
     #[test]
     fn composer_area_is_borderless() {
         let backend = TestBackend::new(50, 10);
@@ -422,7 +424,7 @@ mod tests {
         assert!(!screen.contains("Ctrl+J newline"));
     }
 
-    /// Verifies assistant output uses the same borderless treatment as Codex.
+    /// Verifies assistant output uses the same borderless treatment as the reference design.
     #[test]
     fn transcript_area_is_borderless() {
         let backend = TestBackend::new(50, 10);
@@ -781,9 +783,9 @@ mod tests {
         );
     }
 
-    /// Verifies shell tool calls use Codex-style headers and five-line output previews.
+    /// Verifies shell tool calls use enhanced headers and five-line output previews.
     #[test]
-    fn render_tool_call_shell_preview_uses_codex_style() {
+    fn render_tool_call_shell_preview_uses_enhanced() {
         let backend = TestBackend::new(90, 18);
         let mut terminal = Terminal::new(backend).expect("terminal");
         let mut state = AppState::new(

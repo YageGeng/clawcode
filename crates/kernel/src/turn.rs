@@ -60,12 +60,20 @@ pub(crate) struct TurnContext {
     /// Approval policy — controls whether tools require user confirmation.
     #[builder(default)]
     pub approval: Arc<ApprovalPolicy>,
+    /// Project-level execpolicy manager.
+    #[builder(default = Arc::new(crate::exec_policy::ExecPolicyManager::new(
+        std::env::temp_dir().join(".clawcode")
+    )))]
+    pub exec_policy: Arc<crate::exec_policy::ExecPolicyManager>,
     /// Pending approval channels. execute_turn inserts a oneshot sender;
     /// the session background task resolves it when the user responds.
     #[builder(default)]
     pub pending_approvals: Arc<
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
     >,
+    /// Session-scoped approval cache for reusable approvals.
+    #[builder(default)]
+    pub approval_store: Arc<tokio::sync::Mutex<crate::approval::ApprovalStore>>,
     /// ① Agent-specific system prompt. `None` means use the default.
     #[builder(default)]
     pub agent_prompt: Option<String>,
@@ -137,14 +145,178 @@ impl TurnContext {
             .provider_id(rt.llm.provider_id().to_string())
             .agent_prompt(rt.agent_prompt.clone())
             .pending_approvals(Arc::clone(&rt.pending_approvals))
+            .approval_store(Arc::clone(&rt.approval_store))
             .agent_path(rt.agent_path.clone())
             .approval(Arc::clone(&rt.approval))
+            .exec_policy(Arc::clone(&rt.exec_policy))
             .user_system_prompt(user_system_prompt)
             .app_config(Arc::clone(&rt.app_config))
             .skill_registry(Arc::clone(&rt.skill_registry))
             .recorder(Arc::clone(&rt.recorder))
             .input_queue(Arc::clone(&rt.input_queue))
             .build()
+    }
+
+    /// Resolve whether a tool invocation may execute under the current approval policy.
+    async fn resolve_tool_approval(
+        &self,
+        tx_event: &mpsc::UnboundedSender<Event>,
+        invocation: &tools::ToolInvocation,
+        approval_requirement: tools::ExecApprovalRequirement,
+    ) -> Result<ToolApprovalResolution, KernelError> {
+        if self.approval.mode() == ApprovalMode::Yolo {
+            return Ok(ToolApprovalResolution::Approved {
+                decision: ReviewDecision::Approved,
+                prompted: false,
+            });
+        }
+
+        match approval_requirement {
+            tools::ExecApprovalRequirement::Skip { .. } => {
+                Ok(ToolApprovalResolution::Approved {
+                    decision: ReviewDecision::Approved,
+                    prompted: false,
+                })
+            }
+            tools::ExecApprovalRequirement::Forbidden { reason } => {
+                let _ = tx_event.send(Event::tool_call_update(
+                    self.session_id.clone(),
+                    &invocation.call_id,
+                    Some(reason.clone()),
+                    Some(protocol::ToolCallStatus::Failed),
+                ));
+                Ok(ToolApprovalResolution::Forbidden { reason })
+            }
+            tools::ExecApprovalRequirement::NeedsApproval { .. }
+                if self.approval.policy()
+                    == protocol::AskForApproval::Never =>
+            {
+                Ok(ToolApprovalResolution::Approved {
+                    decision: ReviewDecision::Denied,
+                    prompted: false,
+                })
+            }
+            tools::ExecApprovalRequirement::NeedsApproval {
+                proposed_execpolicy_amendment,
+                ..
+            } => {
+                if let Some(amendment) = &proposed_execpolicy_amendment {
+                    match self
+                        .exec_policy
+                        .allows_command(amendment.command())
+                        .await
+                    {
+                        Ok(true) => {
+                            return Ok(ToolApprovalResolution::Approved {
+                                decision: ReviewDecision::Approved,
+                                prompted: false,
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                "failed to evaluate execpolicy rules: {error}"
+                            );
+                        }
+                    }
+                }
+
+                if let Some(reason) = self.granular_forbidden_reason(
+                    invocation,
+                    proposed_execpolicy_amendment.as_ref(),
+                ) {
+                    let _ = tx_event.send(Event::tool_call_update(
+                        self.session_id.clone(),
+                        &invocation.call_id,
+                        Some(reason.clone()),
+                        Some(protocol::ToolCallStatus::Failed),
+                    ));
+                    return Ok(ToolApprovalResolution::Forbidden { reason });
+                }
+
+                let approval_cache_keys =
+                    invocation.approval.cache_keys(&invocation.cwd);
+                let cached_for_session = if approval_cache_keys.is_empty() {
+                    false
+                } else {
+                    let store = self.approval_store.lock().await;
+                    approval_cache_keys.iter().all(|key| {
+                        matches!(
+                            store.get(key),
+                            Some(ReviewDecision::ApprovedForSession)
+                        )
+                    })
+                };
+
+                if cached_for_session {
+                    return Ok(ToolApprovalResolution::Approved {
+                        decision: ReviewDecision::ApprovedForSession,
+                        prompted: false,
+                    });
+                }
+
+                // Approval-required tools need an explicit pending event first so the
+                // frontend can show the confirm action before execution starts.
+                let _ = tx_event.send(Event::tool_call(
+                    self.session_id.clone(),
+                    self.agent_path.clone(),
+                    &invocation.call_id,
+                    &invocation.tool_name,
+                    invocation.raw_arguments.clone(),
+                    protocol::ToolCallStatus::Pending,
+                ));
+                let decision = request_tool_approval(
+                    self,
+                    tx_event,
+                    &invocation.call_id,
+                    &invocation.tool_name,
+                    invocation.raw_arguments.clone(),
+                    proposed_execpolicy_amendment,
+                )
+                .await?;
+
+                if matches!(decision, ReviewDecision::ApprovedForSession) {
+                    let mut store = self.approval_store.lock().await;
+                    for key in approval_cache_keys {
+                        store.put(key, ReviewDecision::ApprovedForSession);
+                    }
+                }
+
+                Ok(ToolApprovalResolution::Approved {
+                    decision,
+                    prompted: true,
+                })
+            }
+        }
+    }
+
+    /// Return a model-facing rejection reason when granular policy disables a prompt class.
+    fn granular_forbidden_reason(
+        &self,
+        invocation: &tools::ToolInvocation,
+        proposed_execpolicy_amendment: Option<&protocol::ExecPolicyAmendment>,
+    ) -> Option<String> {
+        let protocol::AskForApproval::Granular(config) = self.approval.policy()
+        else {
+            return None;
+        };
+
+        let allowed = if proposed_execpolicy_amendment.is_some() {
+            config.rules
+        } else if invocation.tool_name == "skill" {
+            config.skill_approval
+        } else if invocation.tool_name.starts_with("mcp__") {
+            config.mcp_elicitations
+        } else {
+            config.sandbox_approval
+        };
+
+        (!allowed).then(|| {
+            format!(
+                "approval prompt for tool `{}` is disabled by policy",
+                invocation.tool_name
+            )
+        })
     }
 
     /// Return the configured context window for this turn's current model.
@@ -326,6 +498,23 @@ enum AutoCompactionOutcome {
     SuspendForTurn,
 }
 
+/// Approval result needed by tool dispatch before execution starts.
+#[derive(Debug)]
+enum ToolApprovalResolution {
+    /// The invocation may continue with the resolved review decision.
+    Approved {
+        /// Final approval decision returned by policy, cache, or frontend review.
+        decision: ReviewDecision,
+        /// Whether the frontend was prompted before this decision was resolved.
+        prompted: bool,
+    },
+    /// The invocation is blocked before user review by an execution policy.
+    Forbidden {
+        /// Model-facing reason explaining why the invocation cannot run.
+        reason: String,
+    },
+}
+
 /// Execute a single turn with multi-turn tool loop support:
 /// - Push the user message to context
 /// - Loop: call LLM → collect response → execute any tool calls → feed results back
@@ -380,6 +569,7 @@ pub(crate) async fn execute_turn(
         .cwd(ctx.cwd.clone())
         .agent_path(ctx.agent_path.clone())
         .approval_mode(ctx.approval.mode())
+        .approval_policy(ctx.approval.policy())
         .build();
 
     loop {
@@ -813,41 +1003,57 @@ async fn dispatch_tool(
         return Ok((msg, false));
     };
 
-    let needs_approval = tool.needs_approval(arguments, tool_ctx);
+    // Resolve the tool invocation and approval requirement.
+    let invocation = tool
+        .invocation(call_id, arguments.clone(), tool_ctx)
+        .map_err(|error| KernelError::Internal(anyhow::anyhow!(error)))?;
+    let approval_requirement =
+        tool.exec_approval_requirement(&invocation, tool_ctx);
 
-    if needs_approval && ctx.approval.mode() != ApprovalMode::Yolo {
-        // Approval-required tools need an explicit pending event first so the
-        // frontend can show the confirm action before execution starts.
-        let _ = tx_event.send(Event::tool_call(
-            ctx.session_id.clone(),
-            ctx.agent_path.clone(),
-            call_id,
-            tool_name,
-            arguments.clone(),
-            ToolCallStatus::Pending,
-        ));
-        match request_tool_approval(
-            ctx,
-            tx_event,
-            call_id,
-            tool_name,
-            arguments.clone(),
-        )
-        .await?
-        {
-            ReviewDecision::Abort => return Err(KernelError::Cancelled),
-            ReviewDecision::AllowOnce | ReviewDecision::AllowAlways => {}
-            _ => {
-                let msg = "rejected by user".to_string();
-                let _ = tx_event.send(Event::tool_call_update(
-                    ctx.session_id.clone(),
-                    call_id,
-                    Some(msg.clone()),
-                    Some(ToolCallStatus::Failed),
-                ));
-                return Ok((msg, false));
-            }
+    // Resolve the tool approval.
+    let approval_resolution = ctx
+        .resolve_tool_approval(tx_event, &invocation, approval_requirement)
+        .await?;
+
+    let (approval_decision, approval_prompted) = match approval_resolution {
+        ToolApprovalResolution::Approved { decision, prompted } => {
+            (decision, prompted)
         }
+        ToolApprovalResolution::Forbidden { reason } => {
+            return Ok((reason, false));
+        }
+    };
+
+    match approval_decision {
+        ReviewDecision::Abort => return Err(KernelError::Cancelled),
+        ReviewDecision::Denied | ReviewDecision::TimedOut => {
+            let msg = "rejected by user".to_string();
+            let _ = tx_event.send(Event::tool_call_update(
+                ctx.session_id.clone(),
+                call_id,
+                Some(msg.clone()),
+                Some(ToolCallStatus::Failed),
+            ));
+            return Ok((msg, false));
+        }
+        ReviewDecision::Approved
+        | ReviewDecision::ApprovedForSession
+        | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+        | ReviewDecision::NetworkPolicyAmendment { .. } => {}
+    }
+
+    if let ReviewDecision::ApprovedExecpolicyAmendment {
+        proposed_execpolicy_amendment,
+    } = &approval_decision
+        && let Err(error) = ctx
+            .exec_policy
+            .append_amendment_and_update(proposed_execpolicy_amendment)
+            .await
+    {
+        tracing::warn!("failed to persist execpolicy amendment: {error}");
+    }
+
+    if approval_prompted {
         // Once approved, convert the call to InProgress so UI keeps a stable
         // tool-call anchor while the execution stream is running.
         let _ = tx_event.send(Event::tool_call_update(
@@ -870,21 +1076,20 @@ async fn dispatch_tool(
         ));
     }
 
-    let mut stream =
-        match tool.execute_streaming(arguments.clone(), tool_ctx).await {
-            Ok(result) => result,
-            Err(err) => {
-                // Tool-level failures are model-visible results, not kernel failures.
-                // This lets the model repair bad tool inputs such as non-matching patches.
-                let _ = tx_event.send(Event::tool_call_update(
-                    ctx.session_id.clone(),
-                    call_id,
-                    Some(err.clone()),
-                    Some(ToolCallStatus::Failed),
-                ));
-                return Ok((err, false));
-            }
-        };
+    let mut stream = match tool.execute_invocation(invocation, tool_ctx).await {
+        Ok(result) => result,
+        Err(err) => {
+            // Tool-level failures are model-visible results, not kernel failures.
+            // This lets the model repair bad tool inputs such as non-matching patches.
+            let _ = tx_event.send(Event::tool_call_update(
+                ctx.session_id.clone(),
+                call_id,
+                Some(err.clone()),
+                Some(ToolCallStatus::Failed),
+            ));
+            return Ok((err, false));
+        }
+    };
 
     let mut succeeded = true;
     let mut output_text = String::new();
@@ -967,6 +1172,7 @@ async fn request_tool_approval(
     call_id: &str,
     tool_name: &str,
     arguments: serde_json::Value,
+    proposed_execpolicy_amendment: Option<protocol::ExecPolicyAmendment>,
 ) -> Result<ReviewDecision, KernelError> {
     let (tx_approve, rx_approve) = oneshot::channel();
     {
@@ -980,6 +1186,7 @@ async fn request_tool_approval(
         tool_name,
         arguments,
         &ctx.cwd,
+        proposed_execpolicy_amendment,
     );
 
     if tx_event.send(event).is_err() {
@@ -1006,6 +1213,39 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tools::Tool;
+
+    /// Verifies ApprovedForSession skips the second identical shell approval.
+    #[tokio::test]
+    async fn dispatch_tool_uses_session_approval_cache() {
+        let approval_store = Arc::new(tokio::sync::Mutex::new(
+            crate::approval::ApprovalStore::default(),
+        ));
+        approval_store.lock().await.put(
+            ShellApprovalCacheTestKey {
+                command: vec!["pwd".to_string()],
+                cwd: PathBuf::from("/repo"),
+            },
+            ReviewDecision::ApprovedForSession,
+        );
+
+        let decision = crate::approval::with_cached_approval(
+            &approval_store,
+            vec![ShellApprovalCacheTestKey {
+                command: vec!["pwd".to_string()],
+                cwd: PathBuf::from("/repo"),
+            }],
+            || async { ReviewDecision::Denied },
+        )
+        .await;
+
+        assert_eq!(decision, ReviewDecision::ApprovedForSession);
+    }
+
+    #[derive(serde::Serialize)]
+    struct ShellApprovalCacheTestKey {
+        command: Vec<String>,
+        cwd: PathBuf,
+    }
 
     #[derive(Debug)]
     struct TestLlm;
@@ -1361,12 +1601,12 @@ mod tests {
             serde_json::json!({ "type": "object" })
         }
 
-        fn needs_approval(
+        fn exec_approval_requirement(
             &self,
-            _: &serde_json::Value,
-            _: &ToolContext,
-        ) -> bool {
-            false
+            _invocation: &tools::ToolInvocation,
+            _ctx: &ToolContext,
+        ) -> tools::ExecApprovalRequirement {
+            tools::ExecApprovalRequirement::skip()
         }
 
         async fn execute(
@@ -1410,12 +1650,12 @@ mod tests {
             serde_json::json!({ "type": "object" })
         }
 
-        fn needs_approval(
+        fn exec_approval_requirement(
             &self,
-            _: &serde_json::Value,
-            _: &ToolContext,
-        ) -> bool {
-            false
+            _invocation: &tools::ToolInvocation,
+            _ctx: &ToolContext,
+        ) -> tools::ExecApprovalRequirement {
+            tools::ExecApprovalRequirement::skip()
         }
 
         async fn execute(
@@ -1463,6 +1703,65 @@ mod tests {
                 InputQueue::default(),
             )))
             .build()
+    }
+
+    /// Build a minimal invocation with a shell-style approval key.
+    fn test_invocation() -> tools::ToolInvocation {
+        tools::ToolInvocation::generic(
+            "call-1",
+            "exec_command",
+            serde_json::json!({ "command": "cargo test" }),
+            &ToolContext::builder()
+                .session_id(SessionId::from("session-1"))
+                .cwd(PathBuf::from("/tmp"))
+                .agent_path(AgentPath::root())
+                .approval_mode(ApprovalMode::RequestApproval)
+                .build(),
+        )
+    }
+
+    /// Verifies granular policy can forbid execpolicy rule prompts before UI review.
+    #[tokio::test]
+    async fn granular_rules_false_forbids_execpolicy_prompt() {
+        let tools = Arc::new(ToolRegistry::new());
+        let mut ctx = test_turn_context(tools);
+        ctx.approval = Arc::new(ApprovalPolicy::new_with_policy(
+            ApprovalMode::RequestApproval,
+            protocol::AskForApproval::Granular(
+                protocol::GranularApprovalConfig::builder()
+                    .sandbox_approval(true)
+                    .rules(false)
+                    .skill_approval(true)
+                    .request_permissions(true)
+                    .mcp_elicitations(true)
+                    .build(),
+            ),
+        ));
+        let (tx_event, _rx_event) = mpsc::unbounded_channel();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            ctx.resolve_tool_approval(
+                &tx_event,
+                &test_invocation(),
+                tools::ExecApprovalRequirement::NeedsApproval {
+                    reason: None,
+                    proposed_execpolicy_amendment: Some(
+                        protocol::ExecPolicyAmendment::new(vec![
+                            "cargo".to_string(),
+                            "test".to_string(),
+                        ]),
+                    ),
+                },
+            ),
+        )
+        .await
+        .expect("granular policy should not wait for frontend");
+
+        assert!(matches!(
+            result.expect("approval resolution"),
+            ToolApprovalResolution::Forbidden { .. }
+        ));
     }
 
     /// Build a turn context that writes to the provided recorder path.

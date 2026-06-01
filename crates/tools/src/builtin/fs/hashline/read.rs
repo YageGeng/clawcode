@@ -60,15 +60,22 @@ impl Tool for HashlineReadFile {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        arguments: &serde_json::Value,
+        invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
+    ) -> crate::ExecApprovalRequirement {
         // Require approval only when the path escapes cwd.
-        arguments["path"]
-            .as_str()
+        if invocation
+            .raw_arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
             .is_some_and(|p| Path::new(p).is_absolute() || p.contains(".."))
+        {
+            crate::ExecApprovalRequirement::approval_required()
+        } else {
+            crate::ExecApprovalRequirement::skip()
+        }
     }
 
     async fn execute(

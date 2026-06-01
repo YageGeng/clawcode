@@ -1,6 +1,6 @@
 //! Session-scoped input queue for inter-agent mailbox delivery.
 //!
-//! This mirrors Codex's separation between incoming mailbox communication and
+//! This mirrors the reference design's separation between incoming mailbox communication and
 //! turn execution: messages can be queued while a turn is active, trigger-turn
 //! items are selected at turn boundaries, and queue-only items are injected
 //! without starting a new turn.
@@ -31,7 +31,7 @@ impl InputQueue {
     /// Subscribe to mailbox delivery notifications.
     ///
     /// Marking the receiver as changed when mail is already pending mirrors
-    /// Codex V2 and lets wait_agent complete for queued-but-undelivered mail.
+    /// agent protocol and lets wait_agent complete for queued-but-undelivered mail.
     pub(crate) fn subscribe_mailbox(&self) -> watch::Receiver<()> {
         let mut mailbox_rx = self.mailbox_tx.subscribe();
         if self.has_pending_mailbox_items() {

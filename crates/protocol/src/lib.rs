@@ -10,6 +10,7 @@
 pub mod acp_conv;
 pub mod agent;
 pub mod agent_ui;
+pub mod approvals;
 pub mod config;
 pub mod event;
 pub mod item;
@@ -26,6 +27,11 @@ pub mod usage;
 
 pub use agent::*;
 pub use agent_ui::*;
+pub use approvals::{
+    AdditionalPermissionProfile, ExecApprovalRequestEvent, ExecPolicyAmendment,
+    NetworkApprovalContext, NetworkApprovalProtocol, NetworkPolicyAmendment,
+    NetworkPolicyRuleAction, ParsedCommand,
+};
 pub use config::*;
 pub use event::*;
 pub use item::*;

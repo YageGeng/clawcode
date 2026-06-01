@@ -330,6 +330,15 @@ mod tests {
     use crate::mcp::McpTransportConfig;
     use crate::session::{SessionCreated, SessionId};
 
+    /// Verifies ACP allow-always maps to session approval.
+    #[test]
+    fn acp_allow_always_maps_to_approved_for_session() {
+        let legacy = crate::permission::PermissionOptionKind::AllowAlways;
+        let decision = crate::ReviewDecision::from(legacy);
+
+        assert_eq!(decision, crate::ReviewDecision::ApprovedForSession);
+    }
+
     /// Verifies that ACP model state uses SessionCreated.current_model explicitly.
     #[test]
     fn session_created_model_state_uses_current_model_not_first_available_model()

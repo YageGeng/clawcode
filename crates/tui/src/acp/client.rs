@@ -146,8 +146,12 @@ impl AcpClient {
         request_id: u64,
         decision: ApprovalDecision,
     ) -> anyhow::Result<()> {
-        self.permissions
-            .respond_selected(request_id, decision.option_id())
+        if matches!(decision, ApprovalDecision::Abort) {
+            self.permissions.respond_cancelled(request_id)
+        } else {
+            self.permissions
+                .respond_selected(request_id, decision.option_id())
+        }
     }
 
     /// Rejects every pending ACP permission request before shutting down.
@@ -205,6 +209,24 @@ impl PendingPermissions {
                 ),
             ))
             .context("respond to ACP permission request")
+    }
+
+    /// Sends ACP cancellation for a pending permission request.
+    fn respond_cancelled(&self, request_id: u64) -> anyhow::Result<()> {
+        let responder = {
+            let mut inner =
+                self.inner.lock().expect("permission mutex poisoned");
+            inner.remove(&request_id)
+        }
+        .ok_or_else(|| {
+            anyhow!("permission request {request_id} is no longer pending")
+        })?;
+
+        responder
+            .respond(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ))
+            .context("cancel ACP permission request")
     }
 
     /// Cancels all pending permission requests during shutdown.
@@ -283,7 +305,7 @@ where
                     {
                         let _ = pending.respond_selected(
                             request_id,
-                            ApprovalDecision::RejectOnce.option_id(),
+                            ApprovalDecision::Denied.option_id(),
                         );
                     }
                     Ok(())

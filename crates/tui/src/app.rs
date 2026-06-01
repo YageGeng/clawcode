@@ -15,7 +15,6 @@ use tokio::{select, task::JoinHandle};
 use crate::acp::client::{self as acp_client, AcpClient, AppEvent};
 use crate::event::{TuiEvent, map_crossterm_event};
 use crate::terminal::enter;
-use crate::ui::approval::decision_for_key;
 use crate::ui::composer::{Composer, ComposerAction};
 use crate::ui::picker;
 use crate::ui::render::render_router;
@@ -302,8 +301,8 @@ async fn handle_key_event(
     prompt_task: &mut Option<JoinHandle<()>>,
 ) -> anyhow::Result<bool> {
     if let Some(approval) = ui.router.active_state().pending_approval() {
-        let request_id = approval.request_id();
-        return handle_approval_key(client, ui.router, request_id, key_event);
+        let approval = approval.clone();
+        return handle_approval_key(client, ui.router, approval, key_event);
     }
 
     if ui.router.is_agent_picker_focused() {
@@ -399,11 +398,13 @@ struct UiRuntime<'a> {
 fn handle_approval_key(
     client: &AcpClient,
     router: &mut SessionRouterState,
-    request_id: u64,
+    approval: crate::ui::approval::PendingApproval,
     key_event: KeyEvent,
 ) -> anyhow::Result<bool> {
-    if let Some(decision) = decision_for_key(key_event) {
-        if let Err(error) = client.resolve_permission(request_id, decision) {
+    if let Some(decision) = approval.decision_for_key(key_event) {
+        if let Err(error) =
+            client.resolve_permission(approval.request_id(), decision)
+        {
             router
                 .active_state_mut()
                 .set_error(format!("failed to resolve approval: {error}"));

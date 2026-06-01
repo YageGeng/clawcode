@@ -70,7 +70,7 @@ pub(super) fn frame_rows_with_picker(
 /// Calculates the input composer height based on multiline content and UI budget.
 pub(super) fn composer_height(text: &str) -> u16 {
     let line_count = text.lines().count().max(1) as u16;
-    // The composer is intentionally borderless, matching Codex-style input
+    // The composer is intentionally borderless, matching enhanced input
     // chrome while still reserving enough rows for multiline prompts.
     line_count.clamp(3, 6)
 }

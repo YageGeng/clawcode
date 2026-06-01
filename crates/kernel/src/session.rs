@@ -111,10 +111,14 @@ pub(crate) struct Session {
     pub pending_approvals: Arc<
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
     >,
+    /// Session-scoped approval cache for reusable approvals.
+    pub approval_store: Arc<tokio::sync::Mutex<crate::approval::ApprovalStore>>,
     /// Agent path for this session.
     pub agent_path: AgentPath,
     /// Approval policy — controls tool confirmation behaviour.
     pub approval: Arc<crate::approval::ApprovalPolicy>,
+    /// Project-level execpolicy manager.
+    pub exec_policy: Arc<crate::exec_policy::ExecPolicyManager>,
     /// AgentControl shared across session tree.
     pub agent_control: Arc<AgentControl>,
     /// Application configuration.
@@ -199,6 +203,12 @@ pub(crate) fn spawn_thread(
     let pending_approvals: Arc<
         tokio::sync::Mutex<HashMap<String, oneshot::Sender<ReviewDecision>>>,
     > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let approval_store = Arc::new(tokio::sync::Mutex::new(
+        crate::approval::ApprovalStore::default(),
+    ));
+    let exec_policy = Arc::new(crate::exec_policy::ExecPolicyManager::new(
+        crate::exec_policy::default_exec_policy_home(&cwd),
+    ));
     let input_queue = Arc::new(tokio::sync::Mutex::new(InputQueue::default()));
 
     let thread_cwd = cwd.clone();
@@ -213,8 +223,10 @@ pub(crate) fn spawn_thread(
         .llm_factory(llm_factory)
         .tools(Arc::clone(&tools))
         .pending_approvals(Arc::clone(&pending_approvals))
+        .approval_store(Arc::clone(&approval_store))
         .agent_path(agent_path.clone())
         .approval(approval)
+        .exec_policy(Arc::clone(&exec_policy))
         .agent_control(Arc::clone(&agent_control))
         .app_config(app_config)
         .skill_registry(skill_registry)

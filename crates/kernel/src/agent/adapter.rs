@@ -28,7 +28,7 @@ impl AgentControlAdapter {
 
 #[async_trait]
 impl AgentControlRef for AgentControlAdapter {
-    /// Delegates to [`AgentControl::spawn`] and returns the Codex V2 JSON summary.
+    /// Delegates to [`AgentControl::spawn`] and returns the agent protocol JSON summary.
     async fn spawn_agent(
         &self,
         request: SpawnAgentRequest,

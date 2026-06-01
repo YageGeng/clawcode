@@ -20,6 +20,63 @@ pub enum ApprovalMode {
     Yolo,
 }
 
+/// enhanced approval policy for tool execution.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskForApproval {
+    /// Ask for commands unless they are trusted by policy.
+    UnlessTrusted,
+    /// Run sandboxed first and ask only after sandbox failure.
+    OnFailure,
+    /// Let tools request approval when needed.
+    #[default]
+    OnRequest,
+    /// Fine-grained prompt enablement for approval categories.
+    Granular(GranularApprovalConfig),
+    /// Never ask the user for approval.
+    Never,
+}
+
+impl From<ApprovalMode> for AskForApproval {
+    /// Convert legacy approval modes into enhanced approval policy.
+    fn from(value: ApprovalMode) -> Self {
+        match value {
+            ApprovalMode::RequestApproval => AskForApproval::OnRequest,
+            ApprovalMode::Yolo => AskForApproval::Never,
+        }
+    }
+}
+
+/// Fine-grained approval prompt enablement.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+pub struct GranularApprovalConfig {
+    /// Whether sandbox/escalation approval prompts are allowed.
+    pub sandbox_approval: bool,
+    /// Whether execpolicy rule prompts are allowed.
+    pub rules: bool,
+    /// Whether skill script approval prompts are allowed.
+    #[builder(default)]
+    #[serde(default)]
+    pub skill_approval: bool,
+    /// Whether request_permissions prompts are allowed.
+    #[builder(default)]
+    #[serde(default)]
+    pub request_permissions: bool,
+    /// Whether MCP elicitation prompts are allowed.
+    pub mcp_elicitations: bool,
+}
+
 /// Per-turn context passed to every tool execution.
 #[derive(Clone, Debug, typed_builder::TypedBuilder)]
 pub struct ToolContext {
@@ -31,6 +88,9 @@ pub struct ToolContext {
     pub agent_path: AgentPath,
     /// Current tool-approval mode for the session.
     pub approval_mode: ApprovalMode,
+    /// Current enhanced approval policy for the session.
+    #[builder(default)]
+    pub approval_policy: AskForApproval,
 }
 
 /// A session mode preset (e.g. read-only, auto, full-access).

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use protocol::ApprovalMode;
+pub use protocol::{ApprovalMode, AskForApproval};
 
 use crate::agent::MultiAgentConfig;
 use crate::llm::LlmProvider;
@@ -65,6 +65,9 @@ pub struct AppConfig {
     /// Tool-approval behaviour.
     #[serde(default)]
     pub approval: ApprovalMode,
+    /// enhanced tool approval policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<AskForApproval>,
     /// Multi-agent subsystem configuration.
     #[serde(default)]
     pub multi_agent: MultiAgentConfig,
@@ -95,6 +98,7 @@ impl Default for AppConfig {
             providers: Vec::new(),
             active_model: default_active_model(),
             approval: ApprovalMode::default(),
+            approval_policy: None,
             multi_agent: MultiAgentConfig::default(),
             skills: SkillsConfig::default(),
             mcp_servers: Vec::new(),
@@ -112,6 +116,13 @@ impl AppConfig {
             .split_once('/')
             .map(|(provider_id, _)| provider_id.to_string())
             .unwrap_or_default()
+    }
+
+    /// Return the enhanced approval policy after applying legacy compatibility.
+    #[must_use]
+    pub fn effective_approval_policy(&self) -> AskForApproval {
+        self.approval_policy
+            .unwrap_or_else(|| AskForApproval::from(self.approval))
     }
 
     /// Validate cross-field invariants that serde cannot express directly.

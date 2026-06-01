@@ -8,6 +8,7 @@ pub mod approval;
 pub mod command;
 pub(crate) mod compaction;
 pub mod context;
+pub mod exec_policy;
 pub(crate) mod input_queue;
 pub(crate) mod prompt;
 pub mod session;
@@ -183,7 +184,10 @@ impl Kernel {
                  add a [[providers]] section to your config file"
             ))
         })?;
-        let approval = Arc::new(ApprovalPolicy::new(app_cfg.approval));
+        let approval = Arc::new(ApprovalPolicy::new_with_policy(
+            app_cfg.approval,
+            app_cfg.effective_approval_policy(),
+        ));
         let params = SpawnThreadParams::builder()
             .session_id(session_id)
             .cwd(cwd)
@@ -407,8 +411,9 @@ impl Kernel {
                         .tools(Arc::clone(&self.tools))
                         .agent_path(edge.child_agent_path.clone())
                         .agent_control(Arc::clone(agent_control))
-                        .approval(Arc::new(ApprovalPolicy::new(
+                        .approval(Arc::new(ApprovalPolicy::new_with_policy(
                             app_cfg.approval,
+                            app_cfg.effective_approval_policy(),
                         )))
                         .app_config(Arc::clone(app_cfg))
                         .recorder(Arc::clone(&child_recorder))
@@ -605,7 +610,10 @@ impl AgentKernel for Kernel {
                     .tools(Arc::clone(&self.tools))
                     .agent_path(AgentPath::root())
                     .agent_control(Arc::clone(&self.agent_control))
-                    .approval(Arc::new(ApprovalPolicy::new(app_cfg.approval)))
+                    .approval(Arc::new(ApprovalPolicy::new_with_policy(
+                        app_cfg.approval,
+                        app_cfg.effective_approval_policy(),
+                    )))
                     .app_config(Arc::clone(&app_cfg))
                     .recorder(Arc::clone(&recorder))
                     .build(),
@@ -1245,8 +1253,8 @@ mod tests {
                     "id": "chatgpt",
                     "display_name": "ChatGPT",
                     "provider_type": "responses",
-                    "base_url": "https://chatgpt.com/backend-api/codex",
-                    "auth": { "type": "codex" },
+                    "base_url": "https://example.invalid/chatgpt",
+                    "api_key": "sk-test",
                     "models": [{ "id": "gpt-5.4" }]
                 }
             ],

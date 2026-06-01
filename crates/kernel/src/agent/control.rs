@@ -259,7 +259,10 @@ impl AgentControl {
 
         let child_cwd = request.cwd.clone();
         let app_config = self.config_handle.current();
-        let approval = Arc::new(ApprovalPolicy::new(app_config.approval));
+        let approval = Arc::new(ApprovalPolicy::new_with_policy(
+            app_config.approval,
+            app_config.effective_approval_policy(),
+        ));
         let store = self.session_store.as_ref().ok_or_else(|| {
             "cannot spawn subagent without session store".to_string()
         })?;
@@ -503,7 +506,7 @@ impl AgentControl {
 
     /// List active sub-agents, optionally filtered by path prefix.
     ///
-    /// Uses the canonical agent path string for Codex V2 output.
+    /// Uses the canonical agent path string for agent protocol output.
     pub(crate) fn list_agents(
         &self,
         prefix: Option<&AgentPath>,
@@ -796,7 +799,7 @@ fn is_descendant_path(path: &AgentPath, prefix: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-/// Render a terminal child update in a structured, Codex-style notification envelope.
+/// Render a terminal child update in a structured, enhanced notification envelope.
 fn render_subagent_notification(
     child_path: &AgentPath,
     child_name: &str,

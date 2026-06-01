@@ -110,7 +110,7 @@ impl InterAgentMessage {
         self.format_model_visible_envelope()
     }
 
-    /// Render this message in a structured, Codex-style envelope.
+    /// Render this message in a structured, enhanced envelope.
     fn format_model_visible_envelope(&self) -> String {
         let payload = serde_json::json!({
             "from": &self.from,

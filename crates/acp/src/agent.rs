@@ -28,6 +28,10 @@ use crate::backend::fs::AcpClientFsRouter;
 use crate::backend::terminal::AcpClientTerminalRouter;
 
 const SUBAGENT_METADATA_TOOL_CALL_ID: &str = "clawcode-subagents";
+const APPROVAL_ALLOW_ONCE: &str = "allow_once";
+const APPROVAL_ALLOW_ALWAYS: &str = "allow_always";
+const APPROVAL_ALLOW_EXECPOLICY_AMENDMENT: &str = "allow_execpolicy_amendment";
+const APPROVAL_REJECT_ONCE: &str = "reject_once";
 
 /// ACP Agent bridging the clawcode kernel to the ACP protocol.
 #[derive(Clone)]
@@ -94,6 +98,72 @@ impl ClawcodeAgent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Build ACP permission options for an execution approval request.
+    fn exec_approval_permission_options(
+        proposed_execpolicy_amendment: Option<&protocol::ExecPolicyAmendment>,
+    ) -> Vec<PermissionOption> {
+        let mut options = vec![
+            PermissionOption::new(
+                APPROVAL_ALLOW_ONCE,
+                "Allow Once",
+                PermissionOptionKind::AllowOnce,
+            ),
+            PermissionOption::new(
+                APPROVAL_ALLOW_ALWAYS,
+                "Allow for Session",
+                PermissionOptionKind::AllowAlways,
+            ),
+        ];
+
+        if proposed_execpolicy_amendment.is_some() {
+            options.push(PermissionOption::new(
+                APPROVAL_ALLOW_EXECPOLICY_AMENDMENT,
+                "Allow Command Prefix",
+                PermissionOptionKind::AllowAlways,
+            ));
+        }
+
+        options.push(PermissionOption::new(
+            APPROVAL_REJECT_ONCE,
+            "Reject",
+            PermissionOptionKind::RejectOnce,
+        ));
+
+        options
+    }
+
+    /// Convert an ACP permission response into an internal review decision.
+    fn review_decision_from_permission_response(
+        response: &RequestPermissionResponse,
+        proposed_execpolicy_amendment: Option<&protocol::ExecPolicyAmendment>,
+    ) -> protocol::ReviewDecision {
+        match &response.outcome {
+            RequestPermissionOutcome::Cancelled => {
+                protocol::ReviewDecision::Abort
+            }
+            RequestPermissionOutcome::Selected(selection) => {
+                match selection.option_id.0.as_ref() {
+                    APPROVAL_ALLOW_ONCE => protocol::ReviewDecision::Approved,
+                    APPROVAL_ALLOW_ALWAYS => {
+                        protocol::ReviewDecision::ApprovedForSession
+                    }
+                    APPROVAL_ALLOW_EXECPOLICY_AMENDMENT => {
+                        proposed_execpolicy_amendment.map_or(
+                            protocol::ReviewDecision::ApprovedForSession,
+                            |amendment| {
+                                protocol::ReviewDecision::ApprovedExecpolicyAmendment {
+                                    proposed_execpolicy_amendment: amendment.clone(),
+                                }
+                            },
+                        )
+                    }
+                    _ => protocol::ReviewDecision::Denied,
+                }
+            }
+            _ => protocol::ReviewDecision::Denied,
+        }
     }
 
     /// Build a metadata-only ACP update for the TUI agent picker.
@@ -918,6 +988,7 @@ impl ClawcodeAgent {
                 call_id,
                 tool_name,
                 arguments,
+                proposed_execpolicy_amendment,
                 ..
             } => {
                 // Build a minimal ToolCallUpdate to describe the permission request
@@ -938,34 +1009,18 @@ impl ClawcodeAgent {
                 let perm_req = RequestPermissionRequest::new(
                     &session_id,
                     tc_update,
-                    vec![
-                        PermissionOption::new(
-                            "allow_once",
-                            "Allow Once",
-                            PermissionOptionKind::AllowOnce,
-                        ),
-                        PermissionOption::new(
-                            "reject_once",
-                            "Reject",
-                            PermissionOptionKind::RejectOnce,
-                        ),
-                    ],
+                    Self::exec_approval_permission_options(
+                        proposed_execpolicy_amendment.as_ref(),
+                    ),
                 );
 
                 let resp: RequestPermissionResponse =
                     cx.send_request(perm_req).block_task().await?;
 
-                let decision = match &resp.outcome {
-                    RequestPermissionOutcome::Selected(sel) => {
-                        match sel.option_id.0.as_ref() {
-                            "allow_once" | "allow_always" => {
-                                protocol::ReviewDecision::AllowOnce
-                            }
-                            _ => protocol::ReviewDecision::RejectOnce,
-                        }
-                    }
-                    _ => protocol::ReviewDecision::RejectOnce,
-                };
+                let decision = Self::review_decision_from_permission_response(
+                    &resp,
+                    proposed_execpolicy_amendment.as_ref(),
+                );
 
                 let _ = self
                     .kernel
@@ -2848,6 +2903,87 @@ mod tests {
         assert_eq!(
             tool_call.raw_input,
             Some(serde_json::json!({"cmd": "printf 'one\\ntwo\\n'"}))
+        );
+    }
+
+    /// Verifies exec approval options expose one-shot, session, amendment, and reject choices.
+    #[test]
+    fn exec_approval_permission_options_include_enhanced_choices() {
+        let amendment = protocol::ExecPolicyAmendment::new(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+        ]);
+
+        let options =
+            ClawcodeAgent::exec_approval_permission_options(Some(&amendment));
+        let option_ids = options
+            .iter()
+            .map(|option| option.option_id.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            option_ids,
+            vec![
+                "allow_once",
+                "allow_always",
+                "allow_execpolicy_amendment",
+                "reject_once",
+            ]
+        );
+    }
+
+    /// Verifies ACP allow-always permission responses become session approvals.
+    #[test]
+    fn permission_response_allow_always_maps_to_session_approval() {
+        let response = RequestPermissionResponse::new(
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                PermissionOptionId::new("allow_always"),
+            )),
+        );
+
+        let decision = ClawcodeAgent::review_decision_from_permission_response(
+            &response, None,
+        );
+
+        assert_eq!(decision, protocol::ReviewDecision::ApprovedForSession);
+    }
+
+    /// Verifies ACP cancellation responses abort the current turn.
+    #[test]
+    fn permission_response_cancelled_maps_to_abort() {
+        let response =
+            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled);
+
+        let decision = ClawcodeAgent::review_decision_from_permission_response(
+            &response, None,
+        );
+
+        assert_eq!(decision, protocol::ReviewDecision::Abort);
+    }
+
+    /// Verifies ACP execpolicy option responses preserve the proposed amendment.
+    #[test]
+    fn permission_response_execpolicy_option_maps_to_amendment_decision() {
+        let amendment = protocol::ExecPolicyAmendment::new(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+        ]);
+        let response = RequestPermissionResponse::new(
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                PermissionOptionId::new("allow_execpolicy_amendment"),
+            )),
+        );
+
+        let decision = ClawcodeAgent::review_decision_from_permission_response(
+            &response,
+            Some(&amendment),
+        );
+
+        assert_eq!(
+            decision,
+            protocol::ReviewDecision::ApprovedExecpolicyAmendment {
+                proposed_execpolicy_amendment: amendment,
+            }
         );
     }
 

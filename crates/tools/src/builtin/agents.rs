@@ -137,7 +137,7 @@ impl SpawnAgent {
         "Optional type name for the new agent. If omitted, `default` is used.\nAvailable roles:\ndefault: No role-specific behavior; inherit the parent model and system prompt.\nexplorer: Use for specific, well-scoped codebase exploration questions. Explorer agents should inspect and report; they should not modify files.\nworker: Use for implementation, bug fixing, tests, and production code changes."
     }
 
-    /// Return the Codex V2 spawn-agent tool description.
+    /// Return the agent protocol spawn-agent tool description.
     fn tool_description() -> &'static str {
         r#"
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
@@ -191,12 +191,12 @@ impl Tool for SpawnAgent {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _args: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(
@@ -265,12 +265,12 @@ impl Tool for SendMessage {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _args: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(
@@ -326,12 +326,12 @@ impl Tool for FollowupTask {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _args: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(
@@ -426,12 +426,12 @@ impl Tool for WaitAgent {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _args: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(
@@ -502,7 +502,7 @@ async fn wait_for_session_mailbox_update(
     }
 }
 
-/// Return the Codex V2 wait summary text for the timeout outcome.
+/// Return the agent protocol wait summary text for the timeout outcome.
 fn wait_agent_message(timed_out: bool) -> String {
     if timed_out {
         "Wait timed out.".to_string()
@@ -570,12 +570,12 @@ impl Tool for ListAgents {
         })
     }
 
-    fn needs_approval(
+    fn exec_approval_requirement(
         &self,
-        _args: &serde_json::Value,
+        _invocation: &crate::ToolInvocation,
         _ctx: &crate::ToolContext,
-    ) -> bool {
-        false
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::skip()
     }
 
     async fn execute(
@@ -633,15 +633,6 @@ impl Tool for CloseAgent {
             "additionalProperties": false
         })
     }
-
-    fn needs_approval(
-        &self,
-        _args: &serde_json::Value,
-        _ctx: &crate::ToolContext,
-    ) -> bool {
-        true
-    }
-
     async fn execute(
         &self,
         arguments: serde_json::Value,
@@ -1057,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn send_message_uses_codex_v2_target_message_parameters() {
+    fn send_message_uses_agent_protocol_target_message_parameters() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SendMessage::new(control);
         let parameters = tool.parameters();
@@ -1081,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn followup_task_uses_codex_v2_target_message_parameters() {
+    fn followup_task_uses_agent_protocol_target_message_parameters() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = FollowupTask::new(control);
         let parameters = tool.parameters();
@@ -1105,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_agent_uses_codex_v2_timeout_only_parameters() {
+    fn wait_agent_uses_agent_protocol_timeout_only_parameters() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = WaitAgent::new(control);
         let parameters = tool.parameters();
@@ -1128,7 +1119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_agent_returns_codex_v2_task_name_output() {
+    async fn spawn_agent_returns_agent_protocol_task_name_output() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SpawnAgent::new(control);
         let ctx = test_context(Path::new("."));
@@ -1155,7 +1146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_agent_accepts_codex_v2_agent_type_parameter() {
+    async fn spawn_agent_accepts_agent_protocol_agent_type_parameter() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = SpawnAgent::new(control);
         let ctx = test_context(Path::new("."));
@@ -1196,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_tool_parameters_match_codex_v2_descriptions() {
+    fn agent_tool_parameters_match_agent_protocol_descriptions() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let spawn = SpawnAgent::new(control.clone());
         let wait = WaitAgent::new(control.clone());
@@ -1425,7 +1416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_agents_returns_codex_v2_object() {
+    async fn list_agents_returns_agent_protocol_object() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = ListAgents::new(control);
         let ctx = test_context(Path::new("."));
@@ -1476,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn close_agent_uses_codex_v2_target_parameter() {
+    fn close_agent_uses_agent_protocol_target_parameter() {
         let (control, _status_tx) = FakeAgentControl::with_running_child();
         let tool = CloseAgent::new(control);
         let parameters = tool.parameters();

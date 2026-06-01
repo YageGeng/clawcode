@@ -138,3 +138,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 strum = { version = "0.27", features = ["derive"] }
 strum_macros = "0.27"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
+shlex = "1.3"
