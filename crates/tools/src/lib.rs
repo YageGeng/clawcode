@@ -149,7 +149,8 @@ impl ToolRegistry {
     /// Build tool definitions for the LLM completion request.
     #[must_use]
     pub fn definitions(&self) -> Vec<protocol::ToolDefinition> {
-        self.tools
+        let mut definitions: Vec<_> = self
+            .tools
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
@@ -158,7 +159,11 @@ impl ToolRegistry {
                 description: t.description().to_string(),
                 parameters: t.parameters(),
             })
-            .collect()
+            .collect();
+
+        // Keep provider request bodies stable regardless of HashMap iteration order.
+        definitions.sort_by(|a, b| a.name.cmp(&b.name));
+        definitions
     }
 
     /// Execute a tool call by name.
@@ -201,12 +206,14 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
 
-    struct NoArgumentsConsumerTool;
+    struct TestTool {
+        name: &'static str,
+    }
 
     #[async_trait]
-    impl Tool for NoArgumentsConsumerTool {
+    impl Tool for TestTool {
         fn name(&self) -> &str {
-            "no_arguments_consumer"
+            self.name
         }
 
         fn description(&self) -> &str {
@@ -229,8 +236,35 @@ mod tests {
     /// Verifies that tools do not consume streamed arguments unless they opt in.
     #[test]
     fn tool_arguments_consumer_defaults_to_none() {
-        let tool = NoArgumentsConsumerTool;
+        let tool = TestTool {
+            name: "no_arguments_consumer",
+        };
 
         assert!(tool.arguments_consumer().is_none());
+    }
+
+    /// Verifies that completion request tool definitions have a stable order.
+    #[test]
+    fn definitions_are_sorted_by_tool_name() {
+        let registry = ToolRegistry::new();
+        for name in [
+            "zeta", "alpha", "tool", "beta", "read", "edit", "write", "apply",
+        ] {
+            registry.register(Arc::new(TestTool { name }));
+        }
+
+        let names: Vec<_> = registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "alpha", "apply", "beta", "edit", "read", "tool", "write",
+                "zeta"
+            ]
+        );
     }
 }

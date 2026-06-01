@@ -401,10 +401,15 @@ pub(crate) async fn execute_turn(
             .map_err(|e| KernelError::Internal(e.into()))?;
         let request_context_window =
             ctx.context_window_usage(&**context, &preamble);
+
+        // Preserve already-observed provider usage while refreshing context counters
+        // between tool-loop model requests.
+        let request_usage =
+            (turn_usage != Usage::default()).then_some(turn_usage);
         let _ = tx_event.send(Event::usage_update(
             sid.clone(),
             request_context_window,
-            None,
+            request_usage,
         ));
 
         let request = CompletionRequest::builder()
@@ -1107,6 +1112,100 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct ToolLoopUsageLlm {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl provider::factory::Llm for ToolLoopUsageLlm {
+        /// Return the fixed provider id used by tool-loop usage tests.
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        /// Return the fixed model id used by tool-loop usage tests.
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        /// Reject non-streaming completion because this test only exercises streaming turns.
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::LlmCompletion, CompletionError>,
+        > {
+            Box::pin(async {
+                Err(CompletionError::ProviderError(
+                    "test llm completion is unused".to_string(),
+                ))
+            })
+        }
+
+        /// Return a tool call first, then final text on the second loop iteration.
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::DynLlmStream, CompletionError>,
+        > {
+            let call_index = self.call_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let usage = if call_index == 0 {
+                    Usage {
+                        input_tokens: 20,
+                        output_tokens: 5,
+                        total_tokens: 25,
+                        cached_input_tokens: 15,
+                        cache_creation_input_tokens: 0,
+                    }
+                } else {
+                    Usage {
+                        input_tokens: 8,
+                        output_tokens: 4,
+                        total_tokens: 12,
+                        cached_input_tokens: 4,
+                        cache_creation_input_tokens: 0,
+                    }
+                };
+                let events: Vec<Result<LlmStreamEvent, CompletionError>> =
+                    if call_index == 0 {
+                        vec![
+                            Ok(LlmStreamEvent::ToolCall {
+                                tool_call: protocol::message::ToolCall::new(
+                                    "tool-1".to_string(),
+                                    protocol::message::ToolFunction::new(
+                                        "streaming_text_tool".to_string(),
+                                        serde_json::json!({}),
+                                    ),
+                                ),
+                                internal_call_id: "tool-1".to_string(),
+                            }),
+                            Ok(LlmStreamEvent::Final {
+                                raw: serde_json::json!({}),
+                                usage: Some(usage),
+                            }),
+                        ]
+                    } else {
+                        vec![
+                            Ok(LlmStreamEvent::Text(Text {
+                                text: "done".to_string(),
+                            })),
+                            Ok(LlmStreamEvent::Final {
+                                raw: serde_json::json!({}),
+                                usage: Some(usage),
+                            }),
+                        ]
+                    };
+                let stream: provider::factory::DynLlmStream =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct ReasoningOnlyThenTextLlm {
         call_count: Arc<AtomicUsize>,
     }
@@ -1563,6 +1662,55 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         );
+    }
+
+    /// Verifies tool-loop context updates keep prior provider usage visible.
+    #[tokio::test]
+    async fn execute_turn_preserves_usage_during_tool_loop_context_update() {
+        let recorder: Arc<dyn SessionRecorder> =
+            Arc::new(store::FileSessionRecorder::new(
+                std::env::temp_dir().join(format!(
+                    "clawcode-turn-loop-usage-{}.jsonl",
+                    uuid::Uuid::new_v4()
+                )),
+            ));
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(StreamingTextTool));
+        let ctx = test_turn_context_with_recorder(
+            tools,
+            Arc::new(ToolLoopUsageLlm {
+                call_count: Arc::new(AtomicUsize::new(0)),
+            }),
+            recorder,
+        );
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should complete");
+
+        let usage_events = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::UsageUpdate { usage, .. } => usage,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(usage_events.len(), 3);
+        assert_eq!(usage_events[0].cached_input_tokens, 15);
+        assert_eq!(
+            usage_events[1],
+            Usage {
+                input_tokens: 20,
+                output_tokens: 5,
+                total_tokens: 25,
+                cached_input_tokens: 15,
+                cache_creation_input_tokens: 0,
+            }
+        );
+        assert_eq!(usage_events[2].cached_input_tokens, 4);
     }
 
     /// Verifies automatic compaction replaces live history before the model stream request.

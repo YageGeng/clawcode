@@ -190,12 +190,23 @@ impl GetTokenUsage for Usage {
             self.prompt_tokens as u64,
             self.completion_tokens as u64,
             self.total_tokens as u64,
-            self.prompt_tokens_details
-                .as_ref()
-                .and_then(|details| details.cached_tokens)
-                .map(u64::from)
-                .unwrap_or(0),
+            self.cached_input_tokens(),
         ))
+    }
+}
+
+impl Usage {
+    /// Return DeepSeek prompt cache hits, falling back to OpenAI-compatible details.
+    fn cached_input_tokens(&self) -> u64 {
+        if self.prompt_cache_hit_tokens > 0 {
+            return self.prompt_cache_hit_tokens as u64;
+        }
+
+        self.prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            .map(u64::from)
+            .unwrap_or(0)
     }
 }
 
@@ -477,13 +488,7 @@ impl TryFrom<CompletionResponse>
             input_tokens: response.usage.prompt_tokens as u64,
             output_tokens: response.usage.completion_tokens as u64,
             total_tokens: response.usage.total_tokens as u64,
-            cached_input_tokens: response
-                .usage
-                .prompt_tokens_details
-                .as_ref()
-                .and_then(|d| d.cached_tokens)
-                .map(|c| c as u64)
-                .unwrap_or(0),
+            cached_input_tokens: response.usage.cached_input_tokens(),
             cache_creation_input_tokens: 0,
         };
 
@@ -652,12 +657,7 @@ where
                         );
                         span.record(
                             "gen_ai.usage.cache_read.input_tokens",
-                            response
-                                .usage
-                                .prompt_tokens_details
-                                .as_ref()
-                                .and_then(|d| d.cached_tokens)
-                                .unwrap_or(0),
+                            response.usage.cached_input_tokens(),
                         );
                         if enabled!(Level::TRACE) {
                             tracing::trace!(target: "clawcode::completions",
@@ -937,3 +937,29 @@ where
 // ================================================================
 pub const DEEPSEEK_V4_FLASH: &str = "deepseek-v4-flash";
 pub const DEEPSEEK_V4_PRO: &str = "deepseek-v4-pro";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies DeepSeek-native cache-hit tokens are exposed as cached input tokens.
+    #[test]
+    fn usage_maps_prompt_cache_hit_tokens_to_cached_input_tokens() {
+        let usage = Usage {
+            completion_tokens: 7,
+            prompt_tokens: 20,
+            prompt_cache_hit_tokens: 15,
+            prompt_cache_miss_tokens: 5,
+            total_tokens: 27,
+            completion_tokens_details: None,
+            prompt_tokens_details: None,
+        };
+
+        let mapped = usage.token_usage().expect("token usage");
+
+        assert_eq!(mapped.input_tokens, 20);
+        assert_eq!(mapped.output_tokens, 7);
+        assert_eq!(mapped.total_tokens, 27);
+        assert_eq!(mapped.cached_input_tokens, 15);
+    }
+}

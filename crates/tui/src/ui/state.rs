@@ -77,7 +77,7 @@ impl UsageView {
 
     /// Returns the compact status text for token usage.
     pub fn status_text(&self) -> String {
-        if self.context_tokens > 0 {
+        let mut text = if self.context_tokens > 0 {
             let percent = self.used_tokens.saturating_mul(100)
                 / self.context_tokens.max(1);
             format!(
@@ -86,7 +86,21 @@ impl UsageView {
             )
         } else {
             format!("ctx: {}", self.used_tokens)
+        };
+
+        if let Some(percent) = self.cache_hit_rate_percent() {
+            text.push_str(&format!(" | cache: {percent}%"));
         }
+        text
+    }
+
+    /// Returns the provider cache hit rate as an integer percentage.
+    fn cache_hit_rate_percent(&self) -> Option<u64> {
+        let usage = self.provider_usage?;
+        if usage.input_tokens == 0 {
+            return None;
+        }
+        Some(usage.cached_input_tokens.saturating_mul(100) / usage.input_tokens)
     }
 
     /// Returns tokens currently estimated in the model context.
@@ -1022,9 +1036,9 @@ mod tests {
         assert!(state.transcript().is_empty());
     }
 
-    /// Verifies ACP usage updates display only context counters.
+    /// Verifies ACP usage updates include provider cache hit rate when present.
     #[test]
-    fn state_acp_usage_update_status_text_omits_response_usage() {
+    fn state_acp_usage_update_status_text_includes_cache_hit_rate() {
         let session_id = sid("s1");
         let mut state = AppState::new(
             session_id.clone(),
@@ -1060,7 +1074,10 @@ mod tests {
         assert_eq!(state.usage().output_tokens(), 3);
         assert_eq!(state.usage().cached_input_tokens(), 9);
         assert_eq!(state.usage().cache_creation_input_tokens(), 2);
-        assert_eq!(state.usage().status_text(), "ctx: 88/100 (88%)");
+        assert_eq!(
+            state.usage().status_text(),
+            "ctx: 88/100 (88%) | cache: 75%"
+        );
     }
 
     /// Verifies ACP usage updates without metadata still update context usage.
