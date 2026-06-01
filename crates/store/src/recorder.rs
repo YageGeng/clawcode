@@ -53,20 +53,12 @@ impl SessionRecorder for FileSessionRecorder {
             // Usage lives on the JSONL envelope so replay can aggregate it without
             // changing the canonical message payload shape.
             let usage = payload.usage();
-            let record = if let Some(usage) = usage {
-                PersistedRecord::builder()
-                    .timestamp(timestamp_now())
-                    .schema_version(SCHEMA_VERSION)
-                    .payload(payload.clone())
-                    .usage(usage)
-                    .build()
-            } else {
-                PersistedRecord::builder()
-                    .timestamp(timestamp_now())
-                    .schema_version(SCHEMA_VERSION)
-                    .payload(payload.clone())
-                    .build()
-            };
+            let record = PersistedRecord::builder()
+                .timestamp(timestamp_now())
+                .schema_version(SCHEMA_VERSION)
+                .payload(payload.clone())
+                .usage(usage)
+                .build();
             let mut line =
                 serde_json::to_string(&record).map_err(io::Error::other)?;
             line.push('\n');

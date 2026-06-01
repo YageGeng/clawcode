@@ -6,7 +6,7 @@
 2. Do not run `git commit` without the user's explicit permission.
 3. Before running `git commit`, run and check the relevant `pre-commit` hooks.
 4. Before every `git commit`, read `.gitmessage` and apply its template exactly.
-5. Structs with more than 3 fields must use `typed-builder` and be constructed via the builder pattern. `Option` fields must be annotated with `#[builder(default, setter(strip_option))]` so callers pass `value` instead of `Some(value)`.
+5. Structs with more than 3 fields must use `typed-builder` and be constructed via the builder pattern. `Option` fields must be annotated with `#[builder(default)]`. Prefer `setter(strip_option)` when most call sites hold a concrete value, but omit it when callers already hold `Option<T>` and would need to wrap/unwrap.
 6. When cloning a field wrapped in `Arc<T>`, use the explicit form `Arc::clone(&self.field)` instead of `self.field.clone()`. This makes it obvious at the call site that only the reference count is being incremented, not a deep copy.
 
 @RTK.md

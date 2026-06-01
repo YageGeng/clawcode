@@ -43,7 +43,7 @@ pub struct PersistedRecord {
     /// Typed payload for session replay.
     pub payload: PersistedPayload,
     /// Provider-reported usage associated with a message payload, when available.
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     #[serde(default)]
     pub usage: Option<Usage>,
 }
@@ -134,7 +134,7 @@ pub struct MessageRecord {
     /// Message persisted after it is accepted into ContextManager.
     pub message: Message,
     /// Runtime-only usage copied to the top-level persisted record field.
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     #[serde(default, skip_serializing)]
     pub usage: Option<Usage>,
 }

@@ -425,26 +425,26 @@ mod store_tests {
                     MessageRecord::builder()
                         .turn_id("turn-1".to_string())
                         .message(Message::assistant("one"))
-                        .usage(Usage {
+                        .usage(Some(Usage {
                             input_tokens: 10,
                             output_tokens: 2,
                             total_tokens: 12,
                             cached_input_tokens: 0,
                             cache_creation_input_tokens: 0,
-                        })
+                        }))
                         .build(),
                 ),
                 PersistedPayload::Message(
                     MessageRecord::builder()
                         .turn_id("turn-2".to_string())
                         .message(Message::assistant("two"))
-                        .usage(Usage {
+                        .usage(Some(Usage {
                             input_tokens: 7,
                             output_tokens: 3,
                             total_tokens: 10,
                             cached_input_tokens: 0,
                             cache_creation_input_tokens: 0,
-                        })
+                        }))
                         .build(),
                 ),
             ])

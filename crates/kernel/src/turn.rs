@@ -105,18 +105,12 @@ impl TurnContext {
 
     /// Persist one canonical message after it has been accepted into context history.
     async fn persist_message(&self, message: Message, usage: Option<Usage>) {
-        let record = if let Some(usage) = usage {
-            MessageRecord::builder()
-                .turn_id(String::from(&self.turn_id))
-                .message(message)
-                .usage(usage)
-                .build()
-        } else {
-            MessageRecord::builder()
-                .turn_id(String::from(&self.turn_id))
-                .message(message)
-                .build()
-        };
+        let record = MessageRecord::builder()
+            .turn_id(String::from(&self.turn_id))
+            .message(message)
+            .usage(usage)
+            .build();
+
         if let Err(error) = self
             .recorder
             .append(&[PersistedPayload::Message(record)])
