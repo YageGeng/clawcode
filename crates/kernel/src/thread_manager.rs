@@ -195,19 +195,6 @@ impl ThreadManager {
             })
     }
 
-    /// Signal cancellation for a live thread while keeping it registered.
-    pub(crate) async fn cancel_thread(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), KernelError> {
-        let thread = self
-            .get_thread(session_id)
-            .await
-            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
-        let _ = thread.cancel_tx.send(true);
-        Ok(())
-    }
-
     /// Close and remove a live thread.
     pub(crate) async fn close_thread(
         &self,
@@ -335,7 +322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_thread_keeps_operation_channel_open_for_future_prompts() {
+    async fn send_op_routes_cancel_to_session_runtime() {
         let manager = ThreadManager::new();
         let session_id = SessionId::from("session");
         let (tx_op, mut rx_op) = mpsc::unbounded_channel();
@@ -343,23 +330,19 @@ mod tests {
         manager.insert_thread(thread).await;
 
         manager
-            .cancel_thread(&session_id)
-            .await
-            .expect("cancel thread");
-        manager
             .send_op(
                 &session_id,
-                Op::Prompt {
+                Op::Cancel {
                     session_id: session_id.clone(),
-                    text: "still alive".to_string(),
-                    system: None,
                 },
             )
             .await
-            .expect("send prompt after cancel");
+            .expect("send cancel op");
 
-        let op = rx_op.recv().await.expect("prompt op");
-        assert!(matches!(op, Op::Prompt { .. }));
+        let op = rx_op.recv().await.expect("cancel op");
+        assert!(
+            matches!(op, Op::Cancel { session_id: id } if id == session_id)
+        );
     }
 
     #[tokio::test]

@@ -28,6 +28,11 @@ impl AgentPickerStatus {
             Self::Unknown => "?",
         }
     }
+
+    /// Return whether the session can receive a user cancellation request.
+    pub(crate) fn is_cancelable(self) -> bool {
+        matches!(self, Self::Pending | Self::Running)
+    }
 }
 
 /// One selectable agent row in the picker.
@@ -227,6 +232,13 @@ impl AgentNavigationState {
     /// Return whether the session owns the root-scoped navigation snapshot.
     pub(crate) fn is_root_session(&self, session_id: &SessionId) -> bool {
         session_id == &self.root_session_id
+    }
+
+    /// Return whether a non-root session is currently cancelable by picker metadata.
+    pub(crate) fn is_session_cancelable(&self, session_id: &SessionId) -> bool {
+        self.agents
+            .get(session_id)
+            .is_some_and(|entry| entry.status().is_cancelable())
     }
 
     /// Return the number of displayable picker entries.

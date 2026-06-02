@@ -190,11 +190,12 @@ impl From<MessageEvent> for Event {
     }
 }
 
-impl<HttpClient, RequestBody> Stream
-    for GenericEventSource<HttpClient, RequestBody>
+impl<HttpClient, RequestBody, Retry> Stream
+    for GenericEventSource<HttpClient, RequestBody, Retry>
 where
     HttpClient: HttpClientExt + Clone + 'static,
     RequestBody: Into<Bytes> + Clone + WasmCompatSend + 'static,
+    Retry: RetryPolicy,
 {
     type Item = Result<Event, super::Error>;
 

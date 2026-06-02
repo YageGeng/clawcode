@@ -27,6 +27,8 @@ type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 /// Number of transcript rows moved for one wheel-equivalent scroll input.
 const SCROLL_LINES: u16 = 3;
+/// Maximum interval between two Escape presses that confirms cancellation.
+const ESC_CANCEL_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
 
 /// Runs a full interactive loop for one ACP session.
 pub async fn run(
@@ -188,6 +190,7 @@ async fn run_loop(
     let mut terminal_events = EventStream::new().fuse();
     let mut redraw = time::interval(Duration::from_millis(100));
     let mut prompt_task: Option<JoinHandle<()>> = None;
+    let mut esc_cancel = EscCancelState::default();
 
     loop {
         let mut should_exit = false;
@@ -209,6 +212,7 @@ async fn run_loop(
                                         ui,
                                         key_event,
                                         &mut prompt_task,
+                                        &mut esc_cancel,
                                     ).await?
                                 }
                                 TuiEvent::Paste(text) => {
@@ -255,6 +259,29 @@ async fn run_loop(
     Ok(())
 }
 
+/// Tracks the two-step Escape confirmation for cancelling a running session.
+#[derive(Debug, Default)]
+struct EscCancelState {
+    /// Last Escape press while the active session was cancelable.
+    last_escape: Option<time::Instant>,
+}
+
+impl EscCancelState {
+    /// Returns true when an Escape press confirms cancellation.
+    fn register_escape(&mut self, now: time::Instant) -> bool {
+        let confirmed = self.last_escape.is_some_and(|last| {
+            now.duration_since(last) <= ESC_CANCEL_CONFIRM_WINDOW
+        });
+        self.last_escape = if confirmed { None } else { Some(now) };
+        confirmed
+    }
+
+    /// Clears any pending Escape confirmation.
+    fn clear(&mut self) {
+        self.last_escape = None;
+    }
+}
+
 /// Applies one ACP app event to renderable state.
 async fn handle_app_event(
     router: &mut SessionRouterState,
@@ -299,7 +326,12 @@ async fn handle_key_event(
     ui: &mut UiRuntime<'_>,
     key_event: KeyEvent,
     prompt_task: &mut Option<JoinHandle<()>>,
+    esc_cancel: &mut EscCancelState,
 ) -> anyhow::Result<bool> {
+    if key_event.code != KeyCode::Esc {
+        esc_cancel.clear();
+    }
+
     if let Some(approval) = ui.router.active_state().pending_approval() {
         let approval = approval.clone();
         return handle_approval_key(client, ui.router, approval, key_event);
@@ -349,6 +381,7 @@ async fn handle_key_event(
             Ok(false)
         }
         KeyCode::Char('c') if key_event.modifiers == KeyModifiers::CONTROL => {
+            esc_cancel.clear();
             if ui.router.active_state().is_running_prompt() {
                 if let Err(error) =
                     client.cancel(ui.router.active_session_id().clone())
@@ -360,10 +393,20 @@ async fn handle_key_event(
             }
             Ok(false)
         }
-        KeyCode::Esc if !ui.router.active_state().is_running_prompt() => {
-            Ok(true)
+        KeyCode::Esc => {
+            if handle_escape_cancel_state(
+                ui.router.active_session_is_cancelable(),
+                esc_cancel,
+                time::Instant::now(),
+            ) && let Err(error) =
+                client.cancel(ui.router.active_session_id().clone())
+            {
+                ui.router.active_state_mut().set_error(error.to_string());
+            }
+            Ok(false)
         }
         _ => {
+            esc_cancel.clear();
             let action = ui.composer.handle_key(key_event);
             if let ComposerAction::Submit(text) = action
                 && !text.trim().is_empty()
@@ -415,6 +458,20 @@ fn handle_approval_key(
     }
 
     Ok(false)
+}
+
+/// Updates Escape cancellation state and returns whether cancellation is confirmed.
+fn handle_escape_cancel_state(
+    is_cancelable: bool,
+    esc_cancel: &mut EscCancelState,
+    now: time::Instant,
+) -> bool {
+    if is_cancelable {
+        return esc_cancel.register_escape(now);
+    }
+    // Escape is reserved for overlays and double-press cancellation; Ctrl-C remains exit.
+    esc_cancel.clear();
+    false
 }
 
 /// Handles local TUI slash commands before they reach the ACP prompt path.
@@ -615,6 +672,53 @@ mod tests {
             "provider/model".to_string(),
             Theme::dark(),
         )
+    }
+
+    /// Verifies two Escape presses inside the confirmation window confirm cancellation.
+    #[test]
+    fn esc_cancel_state_confirms_second_escape_inside_window() {
+        let mut state = EscCancelState::default();
+        let first = time::Instant::now();
+
+        assert!(!state.register_escape(first));
+        assert!(
+            state.register_escape(first + Duration::from_millis(500)),
+            "second escape inside the window should confirm cancellation"
+        );
+    }
+
+    /// Verifies Escape confirmation expires after the configured window.
+    #[test]
+    fn esc_cancel_state_restarts_after_window_expires() {
+        let mut state = EscCancelState::default();
+        let first = time::Instant::now();
+
+        assert!(!state.register_escape(first));
+        assert!(!state.register_escape(first + Duration::from_secs(2)));
+    }
+
+    /// Verifies Escape is consumed instead of exiting when nothing is cancelable.
+    #[test]
+    fn escape_without_cancelable_session_does_not_confirm_cancel() {
+        let mut state = EscCancelState::default();
+        let now = time::Instant::now();
+
+        assert!(!handle_escape_cancel_state(false, &mut state, now));
+        assert!(!handle_escape_cancel_state(false, &mut state, now));
+    }
+
+    /// Verifies Escape confirms cancellation only after two cancelable presses.
+    #[test]
+    fn escape_with_cancelable_session_confirms_on_second_press() {
+        let mut state = EscCancelState::default();
+        let now = time::Instant::now();
+
+        assert!(!handle_escape_cancel_state(true, &mut state, now));
+        assert!(handle_escape_cancel_state(
+            true,
+            &mut state,
+            now + Duration::from_millis(100)
+        ));
     }
 
     /// Verifies slash command parsing via handle_raw_command.

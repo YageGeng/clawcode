@@ -5,10 +5,18 @@ use std::path::{Path, PathBuf};
 use protocol::ExecPolicyAmendment;
 use tokio::sync::Semaphore;
 
-/// Manages project-level execpolicy rules.
+/// Cached set of parsed prefix rules, invalidated after every amendment write.
+struct CachedRules {
+    /// Parsed command prefixes (each inner Vec is one prefix_rule).
+    prefixes: Vec<Vec<String>>,
+}
+
+/// Manages project-level execpolicy rules with in-memory rule caching.
+/// Rules are read once and cached until an amendment write invalidates the cache.
 pub struct ExecPolicyManager {
     claw_home: PathBuf,
     update_lock: Semaphore,
+    cached_rules: tokio::sync::Mutex<Option<CachedRules>>,
 }
 
 impl ExecPolicyManager {
@@ -18,10 +26,11 @@ impl ExecPolicyManager {
         Self {
             claw_home,
             update_lock: Semaphore::new(1),
+            cached_rules: tokio::sync::Mutex::new(None),
         }
     }
 
-    /// Append an allow-prefix amendment and refresh in-memory policy.
+    /// Append an allow-prefix amendment and invalidate the rule cache.
     pub async fn append_amendment_and_update(
         &self,
         amendment: &ExecPolicyAmendment,
@@ -38,32 +47,62 @@ impl ExecPolicyManager {
         })
         .await??;
 
+        // Invalidate after the file write so future policy checks observe the
+        // persisted rule set without depending on watch receiver state.
+        *self.cached_rules.lock().await = None;
+
         Ok(())
     }
 
     /// Return whether a command is allowed by project-level prefix rules.
+    ///
+    /// Parsed rules are cached in memory and re-read only when the cache is
+    /// invalidated by an amendment write (see [`append_amendment_and_update`]).
     pub async fn allows_command(
         &self,
         command: &[String],
     ) -> anyhow::Result<bool> {
-        let policy_path = self.claw_home.join("rules").join("default.rules");
-        let contents = match tokio::fs::read_to_string(policy_path).await {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let mut cache = self.cached_rules.lock().await;
 
-        for line in contents.lines() {
-            if let Some(prefix) = Self::parse_allow_prefix_rule(line)?
-                && Self::command_starts_with(command, &prefix)
-            {
-                return Ok(true);
+        // Load lazily so a fresh manager observes rules that already exist on
+        // disk before the first amendment is written in this process.
+        if cache.is_none() {
+            let policy_path =
+                self.claw_home.join("rules").join("default.rules");
+            let contents = tokio::task::spawn_blocking(move || {
+                let path = policy_path;
+                match std::fs::read_to_string(&path) {
+                    Ok(contents) => Ok(contents),
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        Ok(String::new())
+                    }
+                    Err(error) => Err(error),
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("join error: {e}"))??;
+
+            let mut prefixes = Vec::new();
+            if !contents.is_empty() {
+                for line in contents.lines() {
+                    if let Some(prefix) = Self::parse_allow_prefix_rule(line)? {
+                        prefixes.push(prefix);
+                    }
+                }
             }
+            *cache = Some(CachedRules { prefixes });
         }
 
-        Ok(false)
+        let Some(ref rules) = *cache else {
+            return Ok(false);
+        };
+
+        Ok(rules
+            .prefixes
+            .iter()
+            .any(|prefix| Self::command_starts_with(command, prefix)))
     }
 
     /// Format a prefix_rule line with JSON-escaped command tokens.
@@ -216,6 +255,27 @@ mod tests {
                     "-p".to_string(),
                     "kernel".to_string(),
                 ])
+                .await
+                .expect("evaluate policy")
+        );
+    }
+
+    /// Verifies persisted rules are loaded on the first policy evaluation.
+    #[tokio::test]
+    async fn existing_rules_file_is_loaded_on_first_allows_command() {
+        let dir = tempdir().expect("tempdir");
+        let rules_dir = dir.path().join("rules");
+        std::fs::create_dir_all(&rules_dir).expect("rules dir");
+        std::fs::write(
+            rules_dir.join("default.rules"),
+            "prefix_rule(pattern=[\"cargo\", \"fmt\"], decision=\"allow\")\n",
+        )
+        .expect("write rules");
+        let manager = ExecPolicyManager::new(dir.path().to_path_buf());
+
+        assert!(
+            manager
+                .allows_command(&["cargo".to_string(), "fmt".to_string()])
                 .await
                 .expect("evaluate policy")
         );

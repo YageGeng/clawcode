@@ -506,7 +506,7 @@ impl AgentControl {
 
     /// List active sub-agents, optionally filtered by path prefix.
     ///
-    /// Uses the canonical agent path string for agent protocol output.
+    /// Uses the canonical agent path string for Codex V2 output.
     pub(crate) fn list_agents(
         &self,
         prefix: Option<&AgentPath>,
@@ -799,7 +799,7 @@ fn is_descendant_path(path: &AgentPath, prefix: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-/// Render a terminal child update in a structured, enhanced notification envelope.
+/// Render a terminal child update in a structured, Codex-style notification envelope.
 fn render_subagent_notification(
     child_path: &AgentPath,
     child_name: &str,
@@ -1545,6 +1545,61 @@ mod tests {
             parent_queue.lock().await.drain_mailbox_input_items();
         assert_eq!(pending_messages.len(), 1);
         assert!(pending_messages[0].content.contains("done"));
+    }
+
+    /// Verifies interrupted child turns still wake parent wait_agent mailbox subscriptions.
+    #[tokio::test]
+    async fn interrupted_child_terminal_turn_marks_parent_mailbox_pending() {
+        let app_config = app_config_with_provider();
+        let config_handle = ConfigHandle::from_config(app_config.clone());
+        let llm_factory = Arc::new(LlmFactory::new(config_handle.clone()));
+        let tools = Arc::new(ToolRegistry::new());
+        let thread_manager = Arc::new(ThreadManager::new());
+        let control = AgentControl::new(
+            llm_factory,
+            config_handle,
+            tools,
+            app_config.multi_agent.clone(),
+            Arc::clone(&thread_manager),
+            None,
+            None,
+        );
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
+        let child_path = AgentPath::root().join("child");
+        let (tx_op, _rx_op) = mpsc::unbounded_channel();
+        let parent_thread = test_thread(parent_id.clone(), tx_op);
+        let parent_queue = Arc::clone(&parent_thread.input_queue);
+        thread_manager.insert_thread(parent_thread).await;
+        control.registry.register_root_thread(parent_id.clone());
+        control
+            .registry
+            .restore_agent(
+                child_id.clone(),
+                child_path,
+                Some("kid".to_string()),
+                Some("default".to_string()),
+                Some(parent_id.clone()),
+            )
+            .expect("restore child");
+
+        control
+            .notify_child_terminal_turn(&child_id, AgentStatus::Interrupted)
+            .await
+            .expect("notify interrupted child");
+
+        let pending_rx = control
+            .subscribe_session_mailbox_activity(&parent_id)
+            .await
+            .expect("parent mailbox subscription");
+        assert!(
+            pending_rx.has_changed().expect("mailbox watcher open"),
+            "wait_agent must observe interrupted child terminal notification"
+        );
+        let pending_messages =
+            parent_queue.lock().await.drain_mailbox_input_items();
+        assert_eq!(pending_messages.len(), 1);
+        assert!(pending_messages[0].content.contains("interrupted"));
     }
 
     #[tokio::test]

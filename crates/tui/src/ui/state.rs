@@ -403,6 +403,15 @@ impl AppState {
         self.running_prompt
     }
 
+    /// Returns whether the current session can receive a user cancellation request.
+    pub fn is_cancelable(&self) -> bool {
+        self.running_prompt
+            || matches!(
+                self.agent_status,
+                Some(AgentStatus::PendingInit | AgentStatus::Running)
+            )
+    }
+
     /// Returns the stop reason from the last completed turn.
     pub fn last_stop_reason(&self) -> Option<StopReason> {
         self.last_stop_reason
@@ -1250,6 +1259,20 @@ mod tests {
 
         assert!(state.pending_approval().is_none());
         assert!(state.is_running_prompt());
+    }
+
+    /// Verifies root prompts and running agent sessions are both cancelable.
+    #[test]
+    fn state_is_cancelable_for_running_prompt_or_agent_status() {
+        let mut prompt_state =
+            AppState::new(sid("s1"), "/tmp".into(), "model".to_string());
+        prompt_state.append_user_message("next prompt");
+        assert!(prompt_state.is_cancelable());
+
+        let mut agent_state =
+            AppState::new(sid("s2"), "/tmp".into(), "model".to_string());
+        agent_state.apply_agent_status(AgentStatus::Running);
+        assert!(agent_state.is_cancelable());
     }
 
     /// Verifies agent lifecycle status does not block local prompt submission.

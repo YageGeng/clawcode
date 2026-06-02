@@ -633,6 +633,14 @@ impl Tool for CloseAgent {
             "additionalProperties": false
         })
     }
+
+    fn exec_approval_requirement(
+        &self,
+        _invocation: &crate::ToolInvocation,
+        _ctx: &crate::ToolContext,
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::approval_required()
+    }
     async fn execute(
         &self,
         arguments: serde_json::Value,

@@ -24,19 +24,19 @@ pub enum ApprovalDecision {
 
 impl ApprovalDecision {
     /// Returns the ACP permission option id used by the local ACP server.
-    pub fn option_id(&self) -> PermissionOptionId {
-        match self {
-            ApprovalDecision::Approved => PermissionOptionId::new("allow_once"),
-            ApprovalDecision::ApprovedForSession => {
-                PermissionOptionId::new("allow_always")
-            }
+    pub fn option_id(&self) -> Option<PermissionOptionId> {
+        let option_id = match self {
+            ApprovalDecision::Approved => "allow_once",
+            ApprovalDecision::ApprovedForSession => "allow_always",
             ApprovalDecision::ApprovedExecpolicyAmendment(_) => {
-                PermissionOptionId::new("allow_execpolicy_amendment")
+                "allow_execpolicy_amendment"
             }
-            ApprovalDecision::Denied | ApprovalDecision::Abort => {
-                PermissionOptionId::new("reject_once")
-            }
-        }
+            ApprovalDecision::Denied => "reject_once",
+            // Abort resolves through the ACP cancellation path, not a selected
+            // permission option.
+            ApprovalDecision::Abort => return None,
+        };
+        Some(PermissionOptionId::new(option_id))
     }
 }
 
@@ -143,6 +143,11 @@ impl PendingApproval {
                     decisions.push(ApprovalDecision::ApprovedForSession)
                 }
                 "allow_execpolicy_amendment" => decisions.push(
+                    // The amendment content is not embedded in ACP PermissionOption —
+                    // it is stored server-side (ACP agent) and reconstructed from the
+                    // original kernel ExecApprovalRequirement when the selected option_id
+                    // is received back. The empty Vec here is a kind-marker only; it is
+                    // preserved by same_kind() matching and never used directly.
                     ApprovalDecision::ApprovedExecpolicyAmendment(
                         protocol::ExecPolicyAmendment::new(Vec::new()),
                     ),
@@ -153,6 +158,7 @@ impl PendingApproval {
                 _ => {}
             }
         }
+
         decisions.push(ApprovalDecision::Abort);
         decisions
     }
@@ -218,10 +224,14 @@ pub fn decision_for_key(key: KeyEvent) -> Option<ApprovalDecision> {
             Some(ApprovalDecision::ApprovedForSession)
         }
         (KeyCode::Char('p'), KeyModifiers::NONE) => {
+            // The amendment content is supplied by the ACP server from the stored
+            // kernel ExecApprovalRequirement; the empty Vec here is a kind-marker
+            // that same_kind() uses to match against the available decision.
             Some(ApprovalDecision::ApprovedExecpolicyAmendment(
                 protocol::ExecPolicyAmendment::new(Vec::new()),
             ))
         }
+
         (KeyCode::Char('r' | 'n'), KeyModifiers::NONE) => {
             Some(ApprovalDecision::Denied)
         }

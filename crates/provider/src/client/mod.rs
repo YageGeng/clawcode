@@ -7,7 +7,7 @@ pub mod verify;
 
 use bytes::Bytes;
 pub use completion::CompletionClient;
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 pub use model_listing::{ModelLister, ModelListingClient};
 use std::{env::VarError, fmt::Debug, marker::PhantomData, sync::Arc};
 use thiserror::Error;
@@ -723,7 +723,47 @@ where
     ) -> http_client::Result<
         Client<ExtBuilder::Extension<reqwest::Client>, reqwest::Client>,
     > {
-        self.http_client(reqwest::Client::default()).build()
+        let http_client = self.build_retrying_reqwest_client()?;
+        self.http_client(http_client).build()
+    }
+
+    /// Builds the default reqwest backend with provider-scoped retry rules.
+    fn build_retrying_reqwest_client(
+        &self,
+    ) -> http_client::Result<reqwest::Client> {
+        let Some(host) = url::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+        else {
+            return reqwest::Client::builder()
+                .build()
+                .map_err(http_client::instance_error);
+        };
+
+        let retry_policy = reqwest::retry::for_host(host)
+            .max_retries_per_request(2)
+            .classify_fn(|request| {
+                // Retry transport failures and common transient provider statuses.
+                if request.error().is_some() {
+                    return request.retryable();
+                }
+
+                match request.status() {
+                    Some(
+                        StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::TOO_MANY_REQUESTS,
+                    ) => request.retryable(),
+                    Some(status) if status.is_server_error() => {
+                        request.retryable()
+                    }
+                    _ => request.success(),
+                }
+            });
+
+        reqwest::Client::builder()
+            .retry(retry_policy)
+            .build()
+            .map_err(http_client::instance_error)
     }
 }
 
@@ -900,6 +940,14 @@ mod wasm_model_listing_compile_checks {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::http_client::HttpClientExt;
     use crate::providers::anthropic;
 
     /// Type-level test that `Client::builder()` methods do not require annotation to determine
@@ -912,5 +960,50 @@ mod tests {
             .api_key("Foo")
             .build()
             .unwrap();
+    }
+
+    /// Verifies the default HTTP backend retries transient provider responses.
+    #[tokio::test]
+    async fn default_backend_retries_transient_provider_status()
+    -> anyhow::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&attempts);
+
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await?;
+                let attempt =
+                    server_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut buffer = [0_u8; 1024];
+                let _ = socket.read(&mut buffer).await?;
+                let response = if attempt == 1 {
+                    "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
+                };
+                socket.write_all(response.as_bytes()).await?;
+            }
+            anyhow::Ok(())
+        });
+
+        let client = anthropic::Client::builder()
+            .base_url(format!("http://{addr}"))
+            .api_key("dummy-key")
+            .build()?;
+        let request = client
+            .post("/retry-test")?
+            .body(Vec::from("payload"))
+            .map_err(crate::http_client::Error::from)?;
+
+        let response = client.send::<_, Bytes>(request).await?;
+        let body = response.into_body().await?;
+        server.await??;
+
+        anyhow::ensure!(body == Bytes::from_static(b"ok"));
+        anyhow::ensure!(attempts.load(Ordering::SeqCst) == 2);
+
+        Ok(())
     }
 }

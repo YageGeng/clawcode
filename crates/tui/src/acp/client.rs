@@ -146,11 +146,15 @@ impl AcpClient {
         request_id: u64,
         decision: ApprovalDecision,
     ) -> anyhow::Result<()> {
-        if matches!(decision, ApprovalDecision::Abort) {
-            self.permissions.respond_cancelled(request_id)
-        } else {
-            self.permissions
-                .respond_selected(request_id, decision.option_id())
+        match decision.option_id() {
+            Some(option_id) => {
+                self.permissions.respond_selected(request_id, option_id)
+            }
+            None => {
+                // Abort is represented by cancelling the pending ACP permission
+                // request instead of selecting an approval option.
+                self.permissions.respond_cancelled(request_id)
+            }
         }
     }
 
@@ -305,7 +309,7 @@ where
                     {
                         let _ = pending.respond_selected(
                             request_id,
-                            ApprovalDecision::Denied.option_id(),
+                            PermissionOptionId::new("reject_once"),
                         );
                     }
                     Ok(())

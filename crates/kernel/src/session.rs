@@ -309,6 +309,9 @@ async fn run_loop(mut rt: Session) {
 
                 match run_turn_select_loop(&mut rt, &ctx, text, &tx).await {
                     TurnStepOutcome::Shutdown => return,
+                    TurnStepOutcome::Cancelled => {
+                        notify_cancelled_turn(&mut rt, &ctx, &tx).await;
+                    }
                     TurnStepOutcome::Finished(status) => {
                         let status = with_final_message(status, &*rt.context);
                         notify_terminal_turn(
@@ -371,7 +374,10 @@ async fn run_loop(mut rt: Session) {
                 let tx = { rt.tx_event.lock().await.clone() };
                 run_compaction(&mut rt, &tx).await;
             }
-            Some(Op::Cancel { .. } | Op::CloseSession { .. }) | None => break,
+            Some(Op::Cancel { .. }) => {
+                // Idle cancellation is a no-op so the session can accept future turns.
+            }
+            Some(Op::CloseSession { .. }) | None => break,
             _ => {}
         }
     }
@@ -381,7 +387,9 @@ async fn run_loop(mut rt: Session) {
 enum TurnStepOutcome {
     /// Turn finished executing (success or error).
     Finished(AgentStatus),
-    /// Session should shut down (cancel/close received).
+    /// Current turn was cancelled by the user.
+    Cancelled,
+    /// Session should shut down after close or channel termination.
     Shutdown,
 }
 
@@ -454,7 +462,10 @@ async fn run_turn_select_loop(
                 Some(Op::Compact { .. }) => {
                     tracing::debug!("Ignoring context compaction while a turn is running");
                 }
-                Some(Op::Cancel { .. } | Op::CloseSession { .. }) | None => {
+                Some(Op::Cancel { .. }) => {
+                    return TurnStepOutcome::Cancelled;
+                }
+                Some(Op::CloseSession { .. }) | None => {
                     return TurnStepOutcome::Shutdown;
                 }
                 Some(Op::InterAgentMessage { message }) => {
@@ -560,6 +571,10 @@ async fn run_inter_agent_turn(
     match run_turn_select_loop(rt, &ctx, message.render_turn_input(), &tx).await
     {
         TurnStepOutcome::Shutdown => false,
+        TurnStepOutcome::Cancelled => {
+            notify_cancelled_turn(rt, &ctx, &tx).await;
+            true
+        }
         TurnStepOutcome::Finished(status) => {
             let status = with_final_message(status, &*rt.context);
             notify_terminal_turn(&rt.agent_control, &rt.session_id, status)
@@ -613,6 +628,51 @@ async fn persist_message(
     {
         tracing::warn!(%error, "failed to persist session message");
     }
+}
+
+/// Record and emit the terminal events for a user-cancelled turn.
+async fn notify_cancelled_turn(
+    rt: &mut Session,
+    ctx: &TurnContext,
+    tx: &mpsc::UnboundedSender<Event>,
+) {
+    // Persist the abort record before notifying frontends so replay sees the same terminal state.
+    persist_turn_aborted(
+        rt.recorder.as_ref(),
+        &ctx.turn_id,
+        KernelError::Cancelled.to_string(),
+    )
+    .await;
+    if let Some(event) =
+        cancelled_turn_status_event(&rt.session_id, &rt.agent_path)
+    {
+        let _ = tx.send(event);
+    }
+    let _ = tx.send(Event::turn_complete(
+        rt.session_id.clone(),
+        StopReason::Cancelled,
+    ));
+    notify_terminal_turn(
+        &rt.agent_control,
+        &rt.session_id,
+        AgentStatus::Interrupted,
+    )
+    .await;
+}
+
+/// Build the status event needed to update sub-agent UI state before turn completion.
+fn cancelled_turn_status_event(
+    session_id: &SessionId,
+    agent_path: &AgentPath,
+) -> Option<Event> {
+    if agent_path.is_root() {
+        return None;
+    }
+    Some(Event::agent_status_change(
+        session_id.clone(),
+        agent_path.clone(),
+        AgentStatus::Interrupted,
+    ))
 }
 
 /// Notify agent control when this session reaches a terminal turn state.
@@ -742,6 +802,28 @@ mod tests {
         assert!(pending.has_changed().expect("mailbox receiver open"));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "queued");
+    }
+
+    #[test]
+    fn cancelled_turn_status_event_is_only_emitted_for_subagents() {
+        let root_id = SessionId::from("root");
+        let child_id = SessionId::from("child");
+        let child_path = AgentPath::root().join("child");
+
+        assert!(
+            cancelled_turn_status_event(&root_id, &AgentPath::root()).is_none()
+        );
+
+        let event = cancelled_turn_status_event(&child_id, &child_path)
+            .expect("child cancellation should emit status event");
+        assert!(matches!(
+            event,
+            Event::AgentStatusChange {
+                session_id,
+                agent_path,
+                status: AgentStatus::Interrupted,
+            } if session_id == child_id && agent_path == child_path
+        ));
     }
 
     /// Build an inter-agent message for session queue tests.

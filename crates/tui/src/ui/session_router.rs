@@ -336,6 +336,15 @@ impl SessionRouterState {
             .is_root_session(&self.active_session_id)
     }
 
+    /// Return whether the active session can receive a user cancellation request.
+    pub(crate) fn active_session_is_cancelable(&self) -> bool {
+        self.active_state().is_cancelable()
+            || (!self.is_active_root_session()
+                && self
+                    .agent_navigation
+                    .is_session_cancelable(&self.active_session_id))
+    }
+
     /// Render available models for the local `/model` command.
     pub(crate) fn model_list_message(&self) -> String {
         if self.available_models.is_empty() {
@@ -542,6 +551,40 @@ mod tests {
         let patch = protocol::AgentUiMetadataPatch::builder()
             .version(1)
             .event(protocol::AgentUiEventKind::Upsert)
+            .agents(vec![metadata])
+            .build();
+        let meta = serde_json::json!({
+            "clawcode": {
+                "subagents": patch,
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("metadata root should be an object");
+        SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new(
+                ToolCallId::new("clawcode-subagents"),
+                ToolCallUpdateFields::default(),
+            )
+            .meta(meta),
+        )
+    }
+
+    /// Build a status metadata update for one child agent.
+    fn status_update_for_child(
+        session_id: &str,
+        status: protocol::AgentStatus,
+    ) -> SessionUpdate {
+        let metadata = protocol::AgentUiMetadata::builder()
+            .session_id(protocol::SessionId::from(session_id.to_string()))
+            .parent_session_id(protocol::SessionId::from("root-session"))
+            .agent_path(protocol::AgentPath::root().join("inspect"))
+            .status(status)
+            .is_root(false)
+            .build();
+        let patch = protocol::AgentUiMetadataPatch::builder()
+            .version(1)
+            .event(protocol::AgentUiEventKind::Status)
             .agents(vec![metadata])
             .build();
         let meta = serde_json::json!({
@@ -848,6 +891,70 @@ mod tests {
             .expect("select child");
 
         assert_eq!(router.active_state().top_status_line(), "running");
+    }
+
+    /// Verifies active child cancellation can use picker metadata even without a prompt flag.
+    #[test]
+    fn active_running_subagent_is_cancelable_from_navigation_status() {
+        let root = SessionId::new("root-session");
+        let child = SessionId::new("child-session");
+        let mut router = SessionRouterState::new(
+            root.clone(),
+            "/tmp/project".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        let update =
+            metadata_update_for_child("child-session", "finder", "worker");
+        router.apply_session_notification(SessionNotification::new(
+            root.clone(),
+            update,
+        ));
+        router
+            .select_agent_session(
+                child,
+                &mut ViewState::default(),
+                &mut Composer::default(),
+            )
+            .expect("select child");
+
+        assert!(!router.active_state().is_running_prompt());
+        assert!(router.active_session_is_cancelable());
+    }
+
+    /// Verifies interrupted metadata updates the visible active child status immediately.
+    #[test]
+    fn interrupted_subagent_metadata_updates_active_child_status_line() {
+        let root = SessionId::new("root-session");
+        let child = SessionId::new("child-session");
+        let mut router = SessionRouterState::new(
+            root.clone(),
+            "/tmp/project".into(),
+            "provider/model".to_string(),
+            Theme::dark(),
+        );
+        router.apply_session_notification(SessionNotification::new(
+            root.clone(),
+            metadata_update_for_child("child-session", "finder", "worker"),
+        ));
+        router
+            .select_agent_session(
+                child.clone(),
+                &mut ViewState::default(),
+                &mut Composer::default(),
+            )
+            .expect("select child");
+
+        router.apply_session_notification(SessionNotification::new(
+            root,
+            status_update_for_child(
+                "child-session",
+                protocol::AgentStatus::Interrupted,
+            ),
+        ));
+
+        assert_eq!(router.active_session_id(), &child);
+        assert_eq!(router.active_state().top_status_line(), "interrupted");
     }
 
     /// Verifies the model list marks the active root model.

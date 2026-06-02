@@ -751,7 +751,14 @@ impl AgentKernel for Kernel {
     }
 
     async fn cancel(&self, session_id: &SessionId) -> Result<(), KernelError> {
-        self.thread_manager.cancel_thread(session_id).await
+        self.thread_manager
+            .send_op(
+                session_id,
+                Op::Cancel {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
     }
 
     async fn set_mode(

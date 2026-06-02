@@ -123,6 +123,14 @@ impl Tool for HashlineEditFile {
             "required": ["path", "edits"]
         })
     }
+
+    fn exec_approval_requirement(
+        &self,
+        _invocation: &crate::ToolInvocation,
+        _ctx: &crate::ToolContext,
+    ) -> crate::ExecApprovalRequirement {
+        crate::ExecApprovalRequirement::approval_required()
+    }
     async fn execute(
         &self,
         arguments: serde_json::Value,
