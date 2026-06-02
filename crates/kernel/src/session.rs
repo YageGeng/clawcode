@@ -799,7 +799,7 @@ mod tests {
         let pending = queue.subscribe_mailbox();
         let messages = queue.drain_mailbox_input_items();
 
-        assert!(pending.has_changed().expect("mailbox receiver open"));
+        assert!(pending.has_unobserved_activity());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "queued");
     }

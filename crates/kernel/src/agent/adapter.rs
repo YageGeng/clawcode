@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use protocol::{AgentPath, AgentStatus};
 use tokio::sync::watch;
 use tools::builtin::agents::{
-    AgentControlRef, AgentToolSummary, SpawnAgentRequest,
+    AgentControlRef, AgentToolSummary, MailboxActivitySubscription,
+    SpawnAgentRequest,
 };
 
 use super::control::{AgentControl, AgentSpawnRequest};
@@ -109,7 +110,7 @@ impl AgentControlRef for AgentControlAdapter {
     async fn subscribe_mailbox_activity(
         &self,
         agent_path: &AgentPath,
-    ) -> Result<watch::Receiver<()>, String> {
+    ) -> Result<MailboxActivitySubscription, String> {
         self.inner.subscribe_mailbox_activity(agent_path).await
     }
 
@@ -117,9 +118,20 @@ impl AgentControlRef for AgentControlAdapter {
     async fn subscribe_session_mailbox_activity(
         &self,
         session_id: &protocol::SessionId,
-    ) -> Result<watch::Receiver<()>, String> {
+    ) -> Result<MailboxActivitySubscription, String> {
         self.inner
             .subscribe_session_mailbox_activity(session_id)
+            .await
+    }
+
+    /// Delegates wait_agent observation cursor updates to [`AgentControl`].
+    async fn observe_session_mailbox_activity(
+        &self,
+        session_id: &protocol::SessionId,
+        epoch: u64,
+    ) -> Result<(), String> {
+        self.inner
+            .observe_session_mailbox_activity(session_id, epoch)
             .await
     }
 

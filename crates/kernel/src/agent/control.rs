@@ -22,6 +22,7 @@ use store::{
     SessionStore,
 };
 use tools::ToolRegistry;
+use tools::builtin::agents::MailboxActivitySubscription;
 
 /// Fork mode for sub-agent history (reserved for future).
 #[allow(dead_code)]
@@ -682,7 +683,7 @@ impl AgentControl {
     pub(crate) async fn subscribe_mailbox_activity(
         &self,
         agent_path: &AgentPath,
-    ) -> Result<watch::Receiver<()>, String> {
+    ) -> Result<MailboxActivitySubscription, String> {
         let thread_id = self
             .registry
             .agent_id_for_path(agent_path)
@@ -694,13 +695,28 @@ impl AgentControl {
     pub(crate) async fn subscribe_session_mailbox_activity(
         &self,
         session_id: &SessionId,
-    ) -> Result<watch::Receiver<()>, String> {
+    ) -> Result<MailboxActivitySubscription, String> {
         let thread = self
             .thread_manager
             .get_thread(session_id)
             .await
             .ok_or_else(|| format!("session not found: {session_id}"))?;
         Ok(thread.input_queue.lock().await.subscribe_mailbox())
+    }
+
+    /// Mark mailbox activity up to `epoch` as observed for a live session.
+    pub(crate) async fn observe_session_mailbox_activity(
+        &self,
+        session_id: &SessionId,
+        epoch: u64,
+    ) -> Result<(), String> {
+        let thread = self
+            .thread_manager
+            .get_thread(session_id)
+            .await
+            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        thread.input_queue.lock().await.mark_mailbox_observed(epoch);
+        Ok(())
     }
 
     /// Resolve the LLM for a role and optional model override.
@@ -1538,7 +1554,7 @@ mod tests {
             .await
             .expect("parent mailbox subscription");
         assert!(
-            pending_rx.has_changed().expect("mailbox watcher open"),
+            pending_rx.has_unobserved_activity(),
             "wait_agent must observe pending terminal notification mail"
         );
         let pending_messages =
@@ -1593,7 +1609,7 @@ mod tests {
             .await
             .expect("parent mailbox subscription");
         assert!(
-            pending_rx.has_changed().expect("mailbox watcher open"),
+            pending_rx.has_unobserved_activity(),
             "wait_agent must observe interrupted child terminal notification"
         );
         let pending_messages =
@@ -1724,8 +1740,9 @@ mod tests {
             .build()
     }
 
+    /// Verifies mailbox subscriptions observe pending and newly delivered mail once.
     #[tokio::test]
-    async fn session_mailbox_subscription_reflects_pending_queue_only() {
+    async fn session_mailbox_subscription_reflects_pending_or_delivered_mail() {
         let control = agent_control_no_persistence();
         let root_id = SessionId::from("root");
         control.registry.register_root_thread(root_id.clone());
@@ -1742,16 +1759,29 @@ mod tests {
             .subscribe_session_mailbox_activity(&root_id)
             .await
             .expect("mailbox subscription");
-        assert!(pending_rx.has_changed().expect("mailbox watcher open"));
+        assert!(pending_rx.has_unobserved_activity());
 
         let drained = input_queue.lock().await.drain_mailbox_input_items();
+        let delivered_rx = control
+            .subscribe_session_mailbox_activity(&root_id)
+            .await
+            .expect("delivered mailbox subscription");
+
+        assert_eq!(drained.len(), 1);
+        assert!(delivered_rx.has_unobserved_activity());
+        control
+            .observe_session_mailbox_activity(
+                &root_id,
+                delivered_rx.current_epoch(),
+            )
+            .await
+            .expect("observe delivered mailbox activity");
+
         let fresh_rx = control
             .subscribe_session_mailbox_activity(&root_id)
             .await
             .expect("fresh mailbox subscription");
-
-        assert_eq!(drained.len(), 1);
-        assert!(!fresh_rx.has_changed().expect("mailbox watcher open"));
+        assert!(!fresh_rx.has_unobserved_activity());
     }
 
     #[tokio::test]

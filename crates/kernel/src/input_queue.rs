@@ -9,19 +9,61 @@ use std::collections::VecDeque;
 
 use protocol::InterAgentMessage;
 use tokio::sync::watch;
+use tools::builtin::agents::MailboxActivitySubscription;
+
+/// Tracks mailbox activity independently from message delivery into context.
+struct MailboxActivity {
+    tx: watch::Sender<u64>,
+    current_epoch: u64,
+    observed_epoch: u64,
+}
+
+impl Default for MailboxActivity {
+    /// Create a mailbox activity cursor with no observed or pending activity.
+    fn default() -> Self {
+        let (tx, _) = watch::channel(0);
+        Self {
+            tx,
+            current_epoch: 0,
+            observed_epoch: 0,
+        }
+    }
+}
+
+impl MailboxActivity {
+    /// Record one new mailbox activity and notify live waiters.
+    fn record(&mut self) {
+        self.current_epoch = self.current_epoch.saturating_add(1);
+        self.tx.send_replace(self.current_epoch);
+    }
+
+    /// Build a subscription over the current activity cursor state.
+    fn subscribe(&self) -> MailboxActivitySubscription {
+        MailboxActivitySubscription::new(
+            self.tx.subscribe(),
+            self.current_epoch,
+            self.observed_epoch,
+        )
+    }
+
+    /// Mark activity up to `epoch` as observed by wait_agent.
+    fn mark_observed(&mut self, epoch: u64) {
+        self.observed_epoch =
+            self.observed_epoch.max(epoch.min(self.current_epoch));
+    }
+}
 
 /// Stores inter-agent messages waiting for model-visible delivery.
 pub(crate) struct InputQueue {
-    mailbox_tx: watch::Sender<()>,
+    mailbox_activity: MailboxActivity,
     mailbox_pending_mails: VecDeque<InterAgentMessage>,
 }
 
 impl Default for InputQueue {
     /// Create an empty input queue with a mailbox notification channel.
     fn default() -> Self {
-        let (mailbox_tx, _) = watch::channel(());
         Self {
-            mailbox_tx,
+            mailbox_activity: MailboxActivity::default(),
             mailbox_pending_mails: VecDeque::new(),
         }
     }
@@ -30,14 +72,15 @@ impl Default for InputQueue {
 impl InputQueue {
     /// Subscribe to mailbox delivery notifications.
     ///
-    /// Marking the receiver as changed when mail is already pending mirrors
-    /// agent protocol and lets wait_agent complete for queued-but-undelivered mail.
-    pub(crate) fn subscribe_mailbox(&self) -> watch::Receiver<()> {
-        let mut mailbox_rx = self.mailbox_tx.subscribe();
-        if self.has_pending_mailbox_items() {
-            mailbox_rx.mark_changed();
-        }
-        mailbox_rx
+    /// The returned cursor can complete immediately when activity is already
+    /// pending or has already been delivered into model context but not observed.
+    pub(crate) fn subscribe_mailbox(&self) -> MailboxActivitySubscription {
+        self.mailbox_activity.subscribe()
+    }
+
+    /// Mark mailbox activity up to `epoch` as observed by wait_agent.
+    pub(crate) fn mark_mailbox_observed(&mut self, epoch: u64) {
+        self.mailbox_activity.mark_observed(epoch);
     }
 
     /// Queue an inter-agent message for the next eligible delivery phase.
@@ -46,12 +89,7 @@ impl InputQueue {
         message: InterAgentMessage,
     ) {
         self.mailbox_pending_mails.push_back(message);
-        self.mailbox_tx.send_replace(());
-    }
-
-    /// Return whether any mailbox messages are waiting for model-visible delivery.
-    pub(crate) fn has_pending_mailbox_items(&self) -> bool {
-        !self.mailbox_pending_mails.is_empty()
+        self.mailbox_activity.record();
     }
 
     /// Remove the next queued message that requested a follow-up turn.
@@ -120,12 +158,44 @@ mod tests {
     }
 
     #[test]
+    fn input_queue_tracks_each_mailbox_activity_epoch() {
+        let mut queue = InputQueue::default();
+
+        assert_eq!(queue.subscribe_mailbox().current_epoch(), 0);
+        queue.enqueue_mailbox_communication(test_message("first", false));
+        queue.enqueue_mailbox_communication(test_message("second", false));
+
+        assert_eq!(queue.subscribe_mailbox().current_epoch(), 2);
+    }
+
+    #[test]
+    fn input_queue_marks_delivered_activity_observed_once_for_wait_agent() {
+        let mut queue = InputQueue::default();
+        queue.enqueue_mailbox_communication(test_message("delivered", false));
+
+        let messages = queue.drain_mailbox_input_items();
+        assert_eq!(messages.len(), 1);
+
+        let delivered_rx = queue.subscribe_mailbox();
+        assert!(
+            delivered_rx.has_unobserved_activity(),
+            "wait_agent should complete once for mail that was just delivered into context"
+        );
+        queue.mark_mailbox_observed(delivered_rx.current_epoch());
+        let fresh_rx = queue.subscribe_mailbox();
+        assert!(
+            !fresh_rx.has_unobserved_activity(),
+            "observed mail should not complete unrelated future waits"
+        );
+    }
+
+    #[test]
     fn input_queue_marks_subscriber_changed_for_pending_mail() {
         let mut queue = InputQueue::default();
         queue.enqueue_mailbox_communication(test_message("pending", false));
 
         let mailbox_rx = queue.subscribe_mailbox();
 
-        assert!(mailbox_rx.has_changed().expect("mailbox watch open"));
+        assert!(mailbox_rx.has_unobserved_activity());
     }
 }

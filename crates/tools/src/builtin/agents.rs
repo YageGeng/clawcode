@@ -32,6 +32,65 @@ pub struct AgentToolSummary {
     pub last_task_message: Option<String>,
 }
 
+/// Subscription state for one session mailbox activity cursor.
+pub struct MailboxActivitySubscription {
+    receiver: watch::Receiver<u64>,
+    current_epoch: u64,
+    observed_epoch: u64,
+}
+
+impl MailboxActivitySubscription {
+    /// Build a subscription from the queue's current and observed activity epochs.
+    pub fn new(
+        mut receiver: watch::Receiver<u64>,
+        current_epoch: u64,
+        observed_epoch: u64,
+    ) -> Self {
+        if current_epoch > observed_epoch {
+            receiver.mark_changed();
+        }
+        Self {
+            receiver,
+            current_epoch,
+            observed_epoch,
+        }
+    }
+
+    /// Return true when the subscription has activity not yet observed by wait_agent.
+    #[must_use]
+    pub fn has_unobserved_activity(&self) -> bool {
+        self.current_epoch > self.observed_epoch
+    }
+
+    /// Return the newest activity epoch known when the subscription was created or updated.
+    #[must_use]
+    pub fn current_epoch(&self) -> u64 {
+        self.current_epoch
+    }
+
+    /// Return a ready changed epoch without waiting, if one is available.
+    pub fn take_changed_epoch(
+        &mut self,
+    ) -> Result<Option<u64>, watch::error::RecvError> {
+        if !self.receiver.has_changed()? {
+            return Ok(None);
+        }
+        let epoch = *self.receiver.borrow_and_update();
+        self.current_epoch = epoch;
+        Ok(Some(epoch))
+    }
+
+    /// Wait for the next mailbox activity epoch.
+    pub async fn changed_epoch(
+        &mut self,
+    ) -> Result<u64, watch::error::RecvError> {
+        self.receiver.changed().await?;
+        let epoch = *self.receiver.borrow_and_update();
+        self.current_epoch = epoch;
+        Ok(epoch)
+    }
+}
+
 /// Request payload used by the tool layer to spawn a sub-agent.
 #[derive(Clone, Debug, typed_builder::TypedBuilder)]
 pub struct SpawnAgentRequest {
@@ -91,13 +150,20 @@ pub trait AgentControlRef: Send + Sync {
     async fn subscribe_mailbox_activity(
         &self,
         agent_path: &protocol::AgentPath,
-    ) -> Result<watch::Receiver<()>, String>;
+    ) -> Result<MailboxActivitySubscription, String>;
 
     /// Subscribe to mailbox activity for the current executing session.
     async fn subscribe_session_mailbox_activity(
         &self,
         session_id: &protocol::SessionId,
-    ) -> Result<watch::Receiver<()>, String>;
+    ) -> Result<MailboxActivitySubscription, String>;
+
+    /// Mark a session mailbox activity epoch as observed by wait_agent.
+    async fn observe_session_mailbox_activity(
+        &self,
+        session_id: &protocol::SessionId,
+        epoch: u64,
+    ) -> Result<(), String>;
 
     /// Close an agent and its descendants, returning its previous status.
     async fn close_agent(
@@ -395,6 +461,40 @@ impl WaitAgentArgs {
 }
 
 impl WaitAgent {
+    /// Observe one mailbox activity epoch and return the standard wait completion payload.
+    async fn observe_mailbox_update(
+        &self,
+        session_id: &protocol::SessionId,
+        epoch: u64,
+    ) -> Result<WaitAgentResult, String> {
+        self.agent_control
+            .observe_session_mailbox_activity(session_id, epoch)
+            .await?;
+        Ok(WaitAgentResult {
+            message: wait_agent_message(false),
+            timed_out: false,
+        })
+    }
+
+    /// Wait for the current session mailbox to receive a model-visible update.
+    async fn wait_for_session_mailbox_update(
+        &self,
+        session_id: &protocol::SessionId,
+        mut mailbox: MailboxActivitySubscription,
+        timeout_ms: u64,
+    ) -> Result<WaitAgentResult, String> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        match timeout_at(deadline, mailbox.changed_epoch()).await {
+            Ok(Ok(epoch)) => {
+                self.observe_mailbox_update(session_id, epoch).await
+            }
+            Ok(Err(_)) | Err(_) => Ok(WaitAgentResult {
+                message: wait_agent_message(true),
+                timed_out: true,
+            }),
+        }
+    }
+
     pub fn new(ctrl: Arc<dyn AgentControlRef>) -> Self {
         Self {
             agent_control: ctrl,
@@ -443,15 +543,24 @@ impl Tool for WaitAgent {
             .map_err(|e| format!("invalid arguments: {e}"))?
             .timeout_ms()?;
 
-        let mailbox_rx = self
+        let mut mailbox = self
             .agent_control
             .subscribe_session_mailbox_activity(&ctx.session_id)
             .await?;
+        if mailbox.has_unobserved_activity() {
+            let result = self
+                .observe_mailbox_update(
+                    &ctx.session_id,
+                    mailbox.current_epoch(),
+                )
+                .await?;
+            return serde_json::to_string(&result).map_err(|e| e.to_string());
+        }
         // If there are no pending mailbox items and no live sub-agents,
         // return immediately to avoid blocking for the full timeout when
         // there is nothing to wait for.
-        if !mailbox_rx.has_changed().unwrap_or(false) {
-            let agents = self.agent_control.list_agents(None);
+        let agents = self.agent_control.list_agents(None);
+        if !mailbox.has_unobserved_activity() {
             let has_live = agents
                 .iter()
                 .any(|a| a.agent_name != "/root" && !a.agent_status.is_final());
@@ -459,10 +568,13 @@ impl Tool for WaitAgent {
             if !has_live {
                 // A terminal notification can arrive between the initial mailbox check
                 // and list_agents observing that every child is final.
-                if mailbox_rx.has_changed().unwrap_or(false) {
-                    let result =
-                        wait_for_session_mailbox_update(mailbox_rx, timeout_ms)
-                            .await;
+                if let Some(epoch) = mailbox
+                    .take_changed_epoch()
+                    .map_err(|error| error.to_string())?
+                {
+                    let result = self
+                        .observe_mailbox_update(&ctx.session_id, epoch)
+                        .await?;
                     return serde_json::to_string(&result)
                         .map_err(|e| e.to_string());
                 }
@@ -475,8 +587,13 @@ impl Tool for WaitAgent {
             }
         }
 
-        let result =
-            wait_for_session_mailbox_update(mailbox_rx, timeout_ms).await;
+        let result = self
+            .wait_for_session_mailbox_update(
+                &ctx.session_id,
+                mailbox,
+                timeout_ms,
+            )
+            .await?;
 
         serde_json::to_string(&result).map_err(|error| error.to_string())
     }
@@ -486,20 +603,6 @@ impl Tool for WaitAgent {
 struct WaitAgentResult {
     message: String,
     timed_out: bool,
-}
-
-/// Wait for the current session mailbox to receive a model-visible update.
-async fn wait_for_session_mailbox_update(
-    mut mailbox_rx: watch::Receiver<()>,
-    timeout_ms: u64,
-) -> WaitAgentResult {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let timed_out =
-        !matches!(timeout_at(deadline, mailbox_rx.changed()).await, Ok(Ok(())));
-    WaitAgentResult {
-        message: wait_agent_message(timed_out),
-        timed_out,
-    }
 }
 
 /// Return the agent protocol wait summary text for the timeout outcome.
@@ -666,7 +769,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use protocol::{AgentPath, AgentStatus, ToolContext};
@@ -674,6 +777,45 @@ mod tests {
 
     use super::*;
     use crate::ToolRegistry;
+
+    /// Test mailbox activity cursor used by fake agent controls.
+    struct FakeMailboxActivity {
+        tx: watch::Sender<u64>,
+        current_epoch: AtomicU64,
+        observed_epoch: AtomicU64,
+    }
+
+    impl FakeMailboxActivity {
+        /// Create an activity cursor with no mailbox activity.
+        fn new() -> Self {
+            let (tx, _rx) = watch::channel(0);
+            Self {
+                tx,
+                current_epoch: AtomicU64::new(0),
+                observed_epoch: AtomicU64::new(0),
+            }
+        }
+
+        /// Record one mailbox activity and wake subscribers.
+        fn notify(&self) {
+            let epoch = self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            self.tx.send_replace(epoch);
+        }
+
+        /// Subscribe to the current cursor state.
+        fn subscribe(&self) -> MailboxActivitySubscription {
+            MailboxActivitySubscription::new(
+                self.tx.subscribe(),
+                self.current_epoch.load(Ordering::SeqCst),
+                self.observed_epoch.load(Ordering::SeqCst),
+            )
+        }
+
+        /// Mark activity up to `epoch` as observed.
+        fn observe(&self, epoch: u64) {
+            self.observed_epoch.fetch_max(epoch, Ordering::SeqCst);
+        }
+    }
 
     /// Build a test tool context rooted at `cwd`.
     fn test_context(cwd: impl Into<std::path::PathBuf>) -> ToolContext {
@@ -689,8 +831,8 @@ mod tests {
     struct FakeAgentControl {
         paths: HashMap<String, AgentPath>,
         statuses: Mutex<HashMap<String, watch::Sender<AgentStatus>>>,
-        mailbox_activity: Mutex<HashMap<String, watch::Sender<()>>>,
-        session_mailbox_activity: watch::Sender<()>,
+        mailbox_activity: Mutex<HashMap<String, watch::Sender<u64>>>,
+        session_mailbox_activity: FakeMailboxActivity,
         last_list_prefix: Mutex<Option<AgentPath>>,
         last_spawn_model: Mutex<Option<String>>,
         _status_rx: watch::Receiver<AgentStatus>,
@@ -704,17 +846,15 @@ mod tests {
             paths.insert("child".to_string(), AgentPath::root().join("child"));
             let mut statuses = HashMap::new();
             statuses.insert("/root/child".to_string(), tx.clone());
-            let (mailbox_tx, _mailbox_rx) = watch::channel(());
+            let (mailbox_tx, _mailbox_rx) = watch::channel(0);
             let mut mailbox_activity = HashMap::new();
             mailbox_activity.insert("/root/child".to_string(), mailbox_tx);
-            let (session_mailbox_activity, _session_mailbox_rx) =
-                watch::channel(());
             (
                 Arc::new(Self {
                     paths,
                     statuses: Mutex::new(statuses),
                     mailbox_activity: Mutex::new(mailbox_activity),
-                    session_mailbox_activity,
+                    session_mailbox_activity: FakeMailboxActivity::new(),
                     last_list_prefix: Mutex::new(None),
                     last_spawn_model: Mutex::new(None),
                     _status_rx: status_rx,
@@ -725,7 +865,7 @@ mod tests {
 
         /// Signals a fake mailbox update for the current session.
         fn notify_session_mailbox(&self) {
-            self.session_mailbox_activity.send_replace(());
+            self.session_mailbox_activity.notify();
         }
 
         /// Return the most recent prefix passed to list_agents.
@@ -747,16 +887,15 @@ mod tests {
 
     /// Minimal control that emits mailbox activity while wait_agent checks live agents.
     struct RacingNoLiveControl {
-        mailbox_tx: watch::Sender<()>,
+        mailbox_activity: FakeMailboxActivity,
         list_calls: AtomicUsize,
     }
 
     impl RacingNoLiveControl {
         /// Create a control whose mailbox starts unchanged for fresh subscribers.
         fn new() -> Arc<Self> {
-            let (mailbox_tx, _mailbox_rx) = watch::channel(());
             Arc::new(Self {
-                mailbox_tx,
+                mailbox_activity: FakeMailboxActivity::new(),
                 list_calls: AtomicUsize::new(0),
             })
         }
@@ -797,7 +936,7 @@ mod tests {
             _prefix: Option<&AgentPath>,
         ) -> Vec<AgentToolSummary> {
             self.list_calls.fetch_add(1, Ordering::SeqCst);
-            self.mailbox_tx.send_replace(());
+            self.mailbox_activity.notify();
             Vec::new()
         }
 
@@ -813,7 +952,7 @@ mod tests {
         async fn subscribe_mailbox_activity(
             &self,
             _agent_path: &AgentPath,
-        ) -> Result<watch::Receiver<()>, String> {
+        ) -> Result<MailboxActivitySubscription, String> {
             Err("mailbox not used".to_string())
         }
 
@@ -821,8 +960,18 @@ mod tests {
         async fn subscribe_session_mailbox_activity(
             &self,
             _session_id: &protocol::SessionId,
-        ) -> Result<watch::Receiver<()>, String> {
-            Ok(self.mailbox_tx.subscribe())
+        ) -> Result<MailboxActivitySubscription, String> {
+            Ok(self.mailbox_activity.subscribe())
+        }
+
+        /// Mark the fake race mailbox activity as observed.
+        async fn observe_session_mailbox_activity(
+            &self,
+            _session_id: &protocol::SessionId,
+            epoch: u64,
+        ) -> Result<(), String> {
+            self.mailbox_activity.observe(epoch);
+            Ok(())
         }
 
         /// Test stub: close is not used by this wait-agent race test.
@@ -936,12 +1085,18 @@ mod tests {
         async fn subscribe_mailbox_activity(
             &self,
             agent_path: &AgentPath,
-        ) -> Result<watch::Receiver<()>, String> {
+        ) -> Result<MailboxActivitySubscription, String> {
             self.mailbox_activity
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(agent_path.as_str())
-                .map(watch::Sender::subscribe)
+                .map(|sender| {
+                    MailboxActivitySubscription::new(
+                        sender.subscribe(),
+                        *sender.borrow(),
+                        0,
+                    )
+                })
                 .ok_or_else(|| format!("agent not found: {agent_path}"))
         }
 
@@ -949,8 +1104,18 @@ mod tests {
         async fn subscribe_session_mailbox_activity(
             &self,
             _session_id: &protocol::SessionId,
-        ) -> Result<watch::Receiver<()>, String> {
+        ) -> Result<MailboxActivitySubscription, String> {
             Ok(self.session_mailbox_activity.subscribe())
+        }
+
+        /// Mark the fake session mailbox activity as observed.
+        async fn observe_session_mailbox_activity(
+            &self,
+            _session_id: &protocol::SessionId,
+            epoch: u64,
+        ) -> Result<(), String> {
+            self.session_mailbox_activity.observe(epoch);
+            Ok(())
         }
     }
 
@@ -1045,6 +1210,43 @@ mod tests {
             output.contains("\"message\":\"Wait completed.\""),
             "{output}"
         );
+    }
+
+    /// Verifies wait_agent observes each mailbox epoch once even when no agents remain live.
+    #[tokio::test]
+    async fn wait_agent_observes_each_mailbox_epoch_once_without_live_agents() {
+        let (control, status_tx) = FakeAgentControl::with_running_child();
+        status_tx
+            .send(AgentStatus::Completed {
+                message: Some("done".to_string()),
+            })
+            .expect("send completed status");
+        control.notify_session_mailbox();
+        control.notify_session_mailbox();
+        let tool = WaitAgent::new(control.clone());
+        let ctx = test_context(Path::new("."));
+
+        let first = tool
+            .execute(serde_json::json!({ "timeout_ms": 20000 }), &ctx)
+            .await
+            .expect("first wait output");
+        assert!(first.contains("\"message\":\"Wait completed.\""), "{first}");
+
+        let second = tool
+            .execute(serde_json::json!({ "timeout_ms": 20000 }), &ctx)
+            .await
+            .expect("second wait output");
+        assert!(
+            second.contains("\"message\":\"No live agents to wait for.\""),
+            "{second}"
+        );
+
+        control.notify_session_mailbox();
+        let third = tool
+            .execute(serde_json::json!({ "timeout_ms": 20000 }), &ctx)
+            .await
+            .expect("third wait output");
+        assert!(third.contains("\"message\":\"Wait completed.\""), "{third}");
     }
 
     /// Verifies wait_agent uses the expected timeout bounds.
