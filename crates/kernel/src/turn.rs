@@ -23,6 +23,7 @@ use provider::factory::{ArcLlm, LlmStreamEvent};
 use provider::message::ToolCall;
 
 use config::AppConfig;
+use hook::{HookEngine, PostToolUseRequest, PreToolUseRequest};
 use skills::SkillRegistry;
 
 use crate::approval::{ApprovalMode, ApprovalPolicy};
@@ -50,6 +51,9 @@ pub(crate) struct TurnContext {
     pub llm: ArcLlm,
     /// Shared tool registry for resolving and executing tool calls.
     pub tools: Arc<ToolRegistry>,
+    /// Shared hook engine for lifecycle command hooks.
+    #[builder(default)]
+    pub hooks: Arc<HookEngine>,
     /// Working directory for the session.
     pub cwd: PathBuf,
     /// Provider id used by this turn.
@@ -128,6 +132,17 @@ impl TurnContext {
         }
     }
 
+    /// Append hook-provided context to live history and persist it for replay.
+    async fn record_hook_additional_context(
+        &self,
+        context: &mut dyn ContextManager,
+        text: String,
+    ) {
+        let user_message = Message::user(text);
+        context.push(user_message.clone());
+        self.persist_message(user_message, None).await;
+    }
+
     /// Build a turn context from session state for a prompt or inter-agent turn.
     pub(crate) fn from_session(
         rt: &Session,
@@ -141,6 +156,7 @@ impl TurnContext {
             .turn_kind(turn_kind)
             .llm(Arc::clone(&rt.llm))
             .tools(Arc::clone(&rt.tools))
+            .hooks(Arc::clone(&rt.hooks))
             .cwd(rt.cwd.clone())
             .provider_id(rt.llm.provider_id().to_string())
             .agent_prompt(rt.agent_prompt.clone())
@@ -609,6 +625,7 @@ pub(crate) async fn execute_turn(
 
         let mut assistant_content: Vec<AssistantContent> = Vec::new();
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
+        let mut hook_additional_contexts: Vec<String> = Vec::new();
         let mut streamed_reasoning_preview = String::new();
         let mut argument_consumers = ArgumentsConsumers::default();
         let mut response_usage = None;
@@ -656,7 +673,7 @@ pub(crate) async fn execute_turn(
                         let _ = tx_event.send(preview_event);
                     }
 
-                    let (text, _succeeded) = dispatch_tool(
+                    let dispatch_result = dispatch_tool(
                         ctx,
                         tx_event,
                         &event_call_id,
@@ -667,11 +684,14 @@ pub(crate) async fn execute_turn(
 
                     assistant_content
                         .push(AssistantContent::ToolCall(tool_call.clone()));
+                    let _succeeded = dispatch_result.succeeded;
+                    hook_additional_contexts
+                        .extend(dispatch_result.additional_contexts);
 
                     tool_outputs.push(ToolOutput {
                         id: tool_call.id,
                         call_id: tool_call.call_id,
-                        output: text,
+                        output: dispatch_result.output_text,
                     });
                 }
                 LlmStreamEvent::Reasoning(reasoning) => {
@@ -792,6 +812,10 @@ pub(crate) async fn execute_turn(
             };
             context.push(tool_message.clone());
             ctx.persist_message(tool_message, None).await;
+        }
+        for context_text in hook_additional_contexts {
+            ctx.record_hook_additional_context(&mut **context, context_text)
+                .await;
         }
     }
 }
@@ -962,6 +986,16 @@ impl ArgumentsConsumers {
     }
 }
 
+/// Result from dispatching a tool call and any hook context it produced.
+struct DispatchToolResult {
+    /// Text returned to the model as the tool result.
+    output_text: String,
+    /// Whether the tool completed successfully.
+    succeeded: bool,
+    /// Additional model-visible context emitted by matching hooks.
+    additional_contexts: Vec<String>,
+}
+
 /// Dispatch a tool call, driving the unified `execute_streaming` path.
 ///
 /// Streaming tools (`supports_streaming == true`) produce `Begin`/`End`
@@ -976,10 +1010,10 @@ async fn dispatch_tool(
     call_id: &str,
     tool_call: &ToolCall,
     tool_ctx: &ToolContext,
-) -> Result<(String, bool), KernelError> {
+) -> Result<DispatchToolResult, KernelError> {
     use protocol::ToolCallStatus;
     let tool_name = &tool_call.function.name;
-    let arguments = &tool_call.function.arguments;
+    let mut arguments = tool_call.function.arguments.clone();
 
     let Some(tool) = ctx.tools.get(tool_name) else {
         // Unknown tools can be hallucinated by the model or removed by config.
@@ -1000,10 +1034,59 @@ async fn dispatch_tool(
             Some(ToolCallStatus::Failed),
         ));
 
-        return Ok((msg, false));
+        return Ok(DispatchToolResult {
+            output_text: msg,
+            succeeded: false,
+            additional_contexts: Vec::new(),
+        });
     };
 
-    // Resolve the tool invocation and approval requirement.
+    let pre_tool_use_outcome = ctx
+        .hooks
+        .run_pre_tool_use(
+            PreToolUseRequest::builder()
+                .session_id(ctx.session_id.clone())
+                .turn_id(ctx.turn_id.clone())
+                .cwd(ctx.cwd.clone())
+                .model(ctx.llm.model_id().to_string())
+                .permission_mode(hook_permission_mode(ctx))
+                .tool_name(tool_name.clone())
+                .tool_use_id(call_id.to_string())
+                .tool_input(arguments.clone())
+                .build(),
+        )
+        .await;
+    emit_hook_completed_events(ctx, tx_event, pre_tool_use_outcome.hook_events);
+    let hook_additional_contexts = pre_tool_use_outcome.additional_contexts;
+    if pre_tool_use_outcome.should_block {
+        let reason = pre_tool_use_outcome
+            .block_reason
+            .unwrap_or_else(|| "blocked by PreToolUse hook".to_string());
+        let _ = tx_event.send(Event::tool_call(
+            ctx.session_id.clone(),
+            ctx.agent_path.clone(),
+            call_id,
+            tool_name,
+            arguments.clone(),
+            ToolCallStatus::Failed,
+        ));
+        let _ = tx_event.send(Event::tool_call_update(
+            ctx.session_id.clone(),
+            call_id,
+            Some(reason.clone()),
+            Some(ToolCallStatus::Failed),
+        ));
+        return Ok(DispatchToolResult {
+            output_text: reason,
+            succeeded: false,
+            additional_contexts: hook_additional_contexts,
+        });
+    }
+    if let Some(updated_input) = pre_tool_use_outcome.updated_input {
+        arguments = updated_input;
+    }
+
+    // Resolve the tool invocation and approval requirement after hooks may have rewritten input.
     let invocation = tool
         .invocation(call_id, arguments.clone(), tool_ctx)
         .map_err(|error| KernelError::Internal(anyhow::anyhow!(error)))?;
@@ -1020,7 +1103,11 @@ async fn dispatch_tool(
             (decision, prompted)
         }
         ToolApprovalResolution::Forbidden { reason } => {
-            return Ok((reason, false));
+            return Ok(DispatchToolResult {
+                output_text: reason,
+                succeeded: false,
+                additional_contexts: hook_additional_contexts,
+            });
         }
     };
 
@@ -1034,7 +1121,11 @@ async fn dispatch_tool(
                 Some(msg.clone()),
                 Some(ToolCallStatus::Failed),
             ));
-            return Ok((msg, false));
+            return Ok(DispatchToolResult {
+                output_text: msg,
+                succeeded: false,
+                additional_contexts: hook_additional_contexts,
+            });
         }
         ReviewDecision::Approved
         | ReviewDecision::ApprovedForSession
@@ -1087,7 +1178,16 @@ async fn dispatch_tool(
                 Some(err.clone()),
                 Some(ToolCallStatus::Failed),
             ));
-            return Ok((err, false));
+            return PostToolUseCall::builder()
+                .call_id(call_id.to_string())
+                .tool_name(tool_name.to_string())
+                .tool_input(arguments)
+                .output_text(err)
+                .succeeded(false)
+                .additional_contexts(hook_additional_contexts)
+                .build()
+                .run(ctx, tx_event)
+                .await;
         }
     };
 
@@ -1160,7 +1260,99 @@ async fn dispatch_tool(
         }
     }
 
-    Ok((output_text, succeeded))
+    PostToolUseCall::builder()
+        .call_id(call_id.to_string())
+        .tool_name(tool_name.to_string())
+        .tool_input(arguments)
+        .output_text(output_text)
+        .succeeded(succeeded)
+        .additional_contexts(hook_additional_contexts)
+        .build()
+        .run(ctx, tx_event)
+        .await
+}
+
+/// PostToolUse input captured after the tool stream finishes.
+#[derive(typed_builder::TypedBuilder)]
+struct PostToolUseCall {
+    /// Stable tool call id from the provider response.
+    call_id: String,
+    /// Registry tool name used to match hook patterns.
+    tool_name: String,
+    /// Final tool input after PreToolUse rewrites.
+    tool_input: serde_json::Value,
+    /// Model-visible tool output before PostToolUse feedback.
+    output_text: String,
+    /// Whether the tool execution completed successfully.
+    succeeded: bool,
+    /// Additional contexts gathered before PostToolUse runs.
+    #[builder(default)]
+    additional_contexts: Vec<String>,
+}
+
+impl PostToolUseCall {
+    /// Run PostToolUse hooks after a tool result and return the model-visible output.
+    async fn run(
+        self,
+        ctx: &TurnContext,
+        tx_event: &mpsc::UnboundedSender<Event>,
+    ) -> Result<DispatchToolResult, KernelError> {
+        let outcome = ctx
+            .hooks
+            .run_post_tool_use(
+                PostToolUseRequest::builder()
+                    .session_id(ctx.session_id.clone())
+                    .turn_id(ctx.turn_id.clone())
+                    .cwd(ctx.cwd.clone())
+                    .model(ctx.llm.model_id().to_string())
+                    .permission_mode(hook_permission_mode(ctx))
+                    .tool_name(self.tool_name)
+                    .tool_use_id(self.call_id)
+                    .tool_input(self.tool_input)
+                    .tool_response(serde_json::json!({
+                        "content": self.output_text,
+                        "is_error": !self.succeeded,
+                    }))
+                    .build(),
+            )
+            .await;
+        emit_hook_completed_events(ctx, tx_event, outcome.hook_events);
+        let output_text = outcome
+            .feedback_message
+            .or(outcome.stop_reason)
+            .unwrap_or(self.output_text);
+        let mut additional_contexts = self.additional_contexts;
+        additional_contexts.extend(outcome.additional_contexts);
+
+        Ok(DispatchToolResult {
+            output_text,
+            succeeded: self.succeeded && !outcome.should_stop,
+            additional_contexts,
+        })
+    }
+}
+
+/// Emit completed hook events for the active session.
+fn emit_hook_completed_events(
+    ctx: &TurnContext,
+    tx_event: &mpsc::UnboundedSender<Event>,
+    completed_events: Vec<protocol::HookCompletedEvent>,
+) {
+    for completed in completed_events {
+        let _ = tx_event.send(Event::HookCompleted {
+            session_id: ctx.session_id.clone(),
+            completed,
+        });
+    }
+}
+
+/// Return the hook permission mode string for the current turn.
+fn hook_permission_mode(ctx: &TurnContext) -> String {
+    match ctx.approval.policy() {
+        protocol::AskForApproval::Never => "bypassPermissions",
+        _ => "default",
+    }
+    .to_string()
 }
 
 /// Request approval for a tool call and return the frontend decision.
@@ -1440,6 +1632,89 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct PostToolUseContextLlm {
+        call_count: Arc<AtomicUsize>,
+        stream_histories: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl provider::factory::Llm for PostToolUseContextLlm {
+        /// Return the fixed provider id used by PostToolUse context tests.
+        fn provider_id(&self) -> &str {
+            "test"
+        }
+
+        /// Return the fixed model id used by PostToolUse context tests.
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        /// Reject non-streaming completion because this test only exercises streaming turns.
+        fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::LlmCompletion, CompletionError>,
+        > {
+            Box::pin(async {
+                Err(CompletionError::ProviderError(
+                    "test llm completion is unused".to_string(),
+                ))
+            })
+        }
+
+        /// Return a tool call first, then final text while recording each request history.
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> WasmBoxedFuture<
+            '_,
+            Result<provider::factory::DynLlmStream, CompletionError>,
+        > {
+            let call_index = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let stream_histories = Arc::clone(&self.stream_histories);
+            Box::pin(async move {
+                stream_histories
+                    .lock()
+                    .expect("stream histories lock")
+                    .push(request.chat_history.into_iter().collect());
+                let events: Vec<Result<LlmStreamEvent, CompletionError>> =
+                    if call_index == 0 {
+                        vec![
+                            Ok(LlmStreamEvent::ToolCall {
+                                tool_call: protocol::message::ToolCall::new(
+                                    "tool-1".to_string(),
+                                    protocol::message::ToolFunction::new(
+                                        "argument_echo_tool".to_string(),
+                                        serde_json::json!({ "message": "tool output" }),
+                                    ),
+                                ),
+                                internal_call_id: "tool-1".to_string(),
+                            }),
+                            Ok(LlmStreamEvent::Final {
+                                raw: serde_json::json!({}),
+                                usage: None,
+                            }),
+                        ]
+                    } else {
+                        vec![
+                            Ok(LlmStreamEvent::Text(Text {
+                                text: "done".to_string(),
+                            })),
+                            Ok(LlmStreamEvent::Final {
+                                raw: serde_json::json!({}),
+                                usage: None,
+                            }),
+                        ]
+                    };
+                let stream: provider::factory::DynLlmStream =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct ReasoningOnlyThenTextLlm {
         call_count: Arc<AtomicUsize>,
     }
@@ -1684,6 +1959,43 @@ mod tests {
                 is_error: false,
             }];
             Ok(Box::pin(futures::stream::iter(items)))
+        }
+    }
+
+    struct ArgumentEchoTool;
+
+    #[async_trait]
+    impl Tool for ArgumentEchoTool {
+        fn name(&self) -> &str {
+            "argument_echo_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test argument echo tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn exec_approval_requirement(
+            &self,
+            _invocation: &tools::ToolInvocation,
+            _ctx: &ToolContext,
+        ) -> tools::ExecApprovalRequirement {
+            tools::ExecApprovalRequirement::skip()
+        }
+
+        async fn execute(
+            &self,
+            arguments: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<String, String> {
+            Ok(arguments
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string())
         }
     }
 
@@ -2006,6 +2318,51 @@ mod tests {
         assert_eq!(usage_events[2].cached_input_tokens, 4);
     }
 
+    /// Verifies PostToolUse additionalContext is injected before the next model request.
+    #[tokio::test]
+    async fn execute_turn_injects_post_tool_use_additional_context() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let stream_histories = Arc::new(Mutex::new(Vec::new()));
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ArgumentEchoTool));
+        let recorder: Arc<dyn SessionRecorder> = Arc::new(
+            store::FileSessionRecorder::new(temp.path().join("session.jsonl")),
+        );
+        let mut ctx = test_turn_context_with_recorder(
+            tools,
+            Arc::new(PostToolUseContextLlm {
+                call_count: Arc::new(AtomicUsize::new(0)),
+                stream_histories: Arc::clone(&stream_histories),
+            }),
+            recorder,
+        );
+        ctx.cwd = temp.path().to_path_buf();
+        ctx.hooks = Arc::new(hook_engine_for_project(
+            temp.path(),
+            "PostToolUse",
+            hook_json_command(
+                r#"{"hookSpecificOutput":{"additionalContext":"hook context for next request"}}"#,
+            ),
+        ));
+        let mut context: Box<dyn ContextManager> =
+            Box::new(crate::context::InMemoryContext::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        execute_turn(&ctx, "hi".to_string(), &mut context, &tx)
+            .await
+            .expect("turn should complete");
+
+        let histories = stream_histories.lock().expect("stream histories lock");
+        let second_history =
+            histories.get(1).expect("second model request history");
+        let rendered_history = format!("{second_history:?}");
+        assert!(rendered_history.contains("hook context for next request"));
+        let persisted =
+            std::fs::read_to_string(temp.path().join("session.jsonl"))
+                .expect("read persisted session");
+        assert!(persisted.contains("hook context for next request"));
+    }
+
     /// Verifies automatic compaction replaces live history before the model stream request.
     #[tokio::test]
     async fn execute_turn_auto_compacts_before_stream_request_when_threshold_is_reached()
@@ -2287,7 +2644,8 @@ mod tests {
             .await
             .expect("tool failure should not abort the turn");
 
-        assert_eq!(result, ("tool failed normally".to_string(), false));
+        assert_eq!(result.output_text, "tool failed normally");
+        assert!(!result.succeeded);
         assert!(matches!(rx.recv().await, Some(Event::ToolCall { .. })));
         assert!(matches!(
             rx.recv().await,
@@ -2297,6 +2655,91 @@ mod tests {
                 ..
             }) if output == "tool failed normally"
         ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_runs_post_tool_use_after_tool_level_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(FailingTool));
+        let mut ctx = test_turn_context(Arc::clone(&tools));
+        ctx.cwd = temp.path().to_path_buf();
+        ctx.hooks = Arc::new(hook_engine_for_project(
+            temp.path(),
+            "PostToolUse",
+            hook_json_command(
+                r#"{"decision":"block","reason":"hook feedback"}"#,
+            ),
+        ));
+        let tool_ctx = ToolContext::builder()
+            .session_id(ctx.session_id.clone())
+            .cwd(ctx.cwd.clone())
+            .agent_path(ctx.agent_path.clone())
+            .approval_mode(ctx.approval.mode())
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tool_call = ToolCall::new(
+            "call-1".to_string(),
+            protocol::ToolFunction::new(
+                "failing_tool".to_string(),
+                serde_json::json!({}),
+            ),
+        );
+
+        let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+            .await
+            .expect("tool failure should not abort the turn");
+
+        assert_eq!(result.output_text, "hook feedback");
+        assert!(!result.succeeded);
+        assert!(matches!(rx.recv().await, Some(Event::ToolCall { .. })));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::ToolCallUpdate { .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(Event::HookCompleted { completed, .. })
+                if completed.run.event_name == protocol::HookEventName::PostToolUse
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_applies_pre_tool_use_updated_input_before_invocation()
+     {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ArgumentEchoTool));
+        let mut ctx = test_turn_context(Arc::clone(&tools));
+        ctx.cwd = temp.path().to_path_buf();
+        ctx.hooks = Arc::new(hook_engine_for_project(
+            temp.path(),
+            "PreToolUse",
+            hook_json_command(
+                r#"{"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":{"message":"rewritten"}}}"#,
+            ),
+        ));
+        let tool_ctx = ToolContext::builder()
+            .session_id(ctx.session_id.clone())
+            .cwd(ctx.cwd.clone())
+            .agent_path(ctx.agent_path.clone())
+            .approval_mode(ctx.approval.mode())
+            .build();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let tool_call = ToolCall::new(
+            "call-1".to_string(),
+            protocol::ToolFunction::new(
+                "argument_echo_tool".to_string(),
+                serde_json::json!({ "message": "original" }),
+            ),
+        );
+
+        let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+            .await
+            .expect("tool dispatch");
+
+        assert_eq!(result.output_text, "rewritten");
+        assert!(result.succeeded);
     }
 
     /// Verifies that hallucinated or unavailable tools are returned to the model as failed tool results.
@@ -2324,7 +2767,8 @@ mod tests {
                 .await
                 .expect("unknown tool should not abort the turn");
 
-        assert_eq!(result, ("unknown tool `task`".to_string(), false));
+        assert_eq!(result.output_text, "unknown tool `task`");
+        assert!(!result.succeeded);
         assert!(matches!(
             rx.recv().await,
             Some(Event::ToolCall {
@@ -2340,6 +2784,53 @@ mod tests {
                 ..
             }) if output == "unknown tool `task`"
         ));
+    }
+
+    /// Build a project hook engine with one command hook.
+    fn hook_engine_for_project(
+        project: &std::path::Path,
+        event_name: &str,
+        command: String,
+    ) -> hook::HookEngine {
+        std::fs::create_dir_all(project.join(".claw"))
+            .expect("create hook dir");
+        std::fs::write(
+            project.join(".claw/hooks.json"),
+            serde_json::json!({
+                "hooks": {
+                    event_name: [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": command,
+                            "timeout": 5,
+                        }]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write hooks");
+        hook::HookEngine::discover(
+            hook::DiscoveryConfig::builder()
+                .project_cwd(project.to_path_buf())
+                .build(),
+        )
+    }
+
+    /// Build a shell command that prints one JSON hook response.
+    fn hook_json_command(json: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!(
+                "powershell -NoProfile -Command \"Write-Output '{}'\"",
+                json.replace('\'', "''")
+            )
+        }
+
+        #[cfg(not(windows))]
+        {
+            format!("printf '%s' '{}'", json.replace('\'', "'\\''"))
+        }
     }
 
     #[tokio::test]
@@ -2366,7 +2857,8 @@ mod tests {
             .await
             .expect("streaming tool dispatch");
 
-        assert_eq!(result, ("final streamed text".to_string(), true));
+        assert_eq!(result.output_text, "final streamed text");
+        assert!(result.succeeded);
         assert!(matches!(rx.recv().await, Some(Event::ToolCall { .. })));
         assert!(matches!(
             rx.recv().await,
@@ -2409,14 +2901,15 @@ mod tests {
             ),
         );
 
-        let (output, succeeded) =
-            dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
-                .await
-                .expect("apply_patch failure should not abort the turn");
+        let result = dispatch_tool(&ctx, &tx, "call-1", &tool_call, &tool_ctx)
+            .await
+            .expect("apply_patch failure should not abort the turn");
 
-        assert!(!succeeded);
+        assert!(!result.succeeded);
         assert!(
-            output.contains("Could not find matching lines for update chunk")
+            result
+                .output_text
+                .contains("Could not find matching lines for update chunk")
         );
     }
 }

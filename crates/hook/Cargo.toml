@@ -1,0 +1,24 @@
+[package]
+name = "hook"
+edition.workspace = true
+version.workspace = true
+description = "Configurable lifecycle command hooks"
+
+[lints]
+workspace = true
+
+[dependencies]
+config = { path = "../config" }
+protocol = { path = "../protocol" }
+
+chrono = { workspace = true, features = ["clock"] }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "time"] }
+typed-builder = { workspace = true }
+regex = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

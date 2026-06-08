@@ -13,6 +13,7 @@ pub mod agent_ui;
 pub mod approvals;
 pub mod config;
 pub mod event;
+pub mod hook;
 pub mod item;
 pub mod kernel;
 pub mod mcp;
@@ -34,6 +35,7 @@ pub use approvals::{
 };
 pub use config::*;
 pub use event::*;
+pub use hook::*;
 pub use item::*;
 pub use kernel::*;
 pub use message::*;

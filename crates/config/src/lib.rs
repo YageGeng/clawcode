@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod hook;
 pub mod llm;
 pub mod loader;
 pub mod mcp;
@@ -10,6 +11,7 @@ pub mod tui;
 
 pub use agent::MultiAgentConfig;
 pub use config::{AppConfig, CompactionConfig, SessionPersistenceConfig};
+pub use hook::{HookEventsToml, HookHandlerConfig, HooksFile, MatcherGroup};
 pub use llm::{
     ApiKeyConfig, LlmModel, LlmProvider, ProviderAuthConfig, ProviderId,
     ProviderType,

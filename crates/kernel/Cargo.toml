@@ -12,6 +12,7 @@ protocol = { path = "../protocol" }
 provider = { path = "../provider" }
 config = { path = "../config" }
 tools = { path = "../tools" }
+hook = { path = "../hook" }
 skills = { path = "../skills" }
 mcp = { path = "../mcp" }
 store = { path = "../store" }
@@ -32,3 +33,4 @@ typed-builder = { workspace = true }
 async-stream = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
+dirs = { workspace = true }

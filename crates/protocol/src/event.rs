@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentPath, AgentStatus};
+use crate::hook::HookCompletedEvent;
 use crate::item::{PatchPreviewChange, TurnId, TurnItem};
 use crate::permission::PermissionRequest;
 use crate::plan::PlanEntry;
@@ -176,6 +177,12 @@ pub enum Event {
         call_id: String,
         /// Partial patch changes parsed from the argument stream.
         changes: Vec<PatchPreviewChange>,
+    },
+    /// A lifecycle hook completed execution.
+    HookCompleted {
+        session_id: SessionId,
+        /// Completed hook run details.
+        completed: HookCompletedEvent,
     },
 }
 

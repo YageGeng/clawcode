@@ -20,6 +20,7 @@ use crate::agent::control::AgentControl;
 use crate::context::{CompactionOptions, ContextManager};
 use crate::input_queue::InputQueue;
 use crate::turn::{TurnContext, execute_turn};
+use hook::{DiscoveryConfig, HookEngine};
 use store::{
     CompactionRecord, MessageRecord, PersistedPayload, SessionRecorder,
     TurnAbortedRecord, TurnCompleteRecord, TurnKindRecord,
@@ -129,6 +130,9 @@ pub(crate) struct Session {
     pub skill_registry: Arc<SkillRegistry>,
     /// Recorder for canonical session history.
     pub recorder: Arc<dyn SessionRecorder>,
+    /// Hook engine available to this session.
+    #[builder(default)]
+    pub hooks: Arc<HookEngine>,
     /// Session-scoped queue for model-visible inter-agent mailbox delivery.
     #[builder(default = Arc::new(tokio::sync::Mutex::new(InputQueue::default())))]
     pub input_queue: Arc<tokio::sync::Mutex<InputQueue>>,
@@ -210,8 +214,14 @@ pub(crate) fn spawn_thread(
         crate::exec_policy::default_exec_policy_home(&cwd),
     ));
     let input_queue = Arc::new(tokio::sync::Mutex::new(InputQueue::default()));
-
     let thread_cwd = cwd.clone();
+    let hooks = Arc::new(HookEngine::discover(
+        DiscoveryConfig::builder()
+            .project_cwd(thread_cwd.clone())
+            .user_home(dirs::home_dir())
+            .build(),
+    ));
+
     let mut runtime = Session::builder()
         .session_id(session_id.clone())
         .cwd(cwd)
@@ -231,6 +241,7 @@ pub(crate) fn spawn_thread(
         .app_config(app_config)
         .skill_registry(skill_registry)
         .recorder(Arc::clone(&recorder))
+        .hooks(hooks)
         .input_queue(Arc::clone(&input_queue))
         .build();
     runtime.agent_prompt = agent_prompt;
