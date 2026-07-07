@@ -7,7 +7,7 @@ use agent_client_protocol::schema::v1 as schema;
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
-use crate::usage::ContextWindowUsage;
+use crate::usage::{ContextWindowUsage, Usage};
 
 /// Unique session identifier generated when a new session is created.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -54,6 +54,9 @@ pub struct SessionCreated {
     /// Estimated live context-window usage when restoring a session.
     #[builder(default, setter(strip_option))]
     pub context_window_usage: Option<ContextWindowUsage>,
+    /// Provider-reported usage accumulated from replayed persisted messages.
+    #[builder(default)]
+    pub accumulated_usage: Option<Usage>,
 }
 
 /// Paginated session list result.

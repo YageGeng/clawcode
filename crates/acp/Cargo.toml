@@ -15,7 +15,10 @@ config = { path = "../config" }
 tools = { path = "../tools" }
 
 agent-client-protocol = { workspace = true, features = ["unstable"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+agent-client-protocol-http = { workspace = true, features = ["server"] }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "net"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = { workspace = true }
 futures = { workspace = true }

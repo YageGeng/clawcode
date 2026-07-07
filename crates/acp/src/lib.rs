@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod backend;
+pub mod http;
 pub mod log;
 
 use std::sync::Arc;

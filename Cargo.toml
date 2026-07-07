@@ -76,8 +76,11 @@ rayon = "1"
 # http
 bytes = "1"
 http = "1"
+axum = "0.8"
 url = "2.5"
 hyper-util = "0.1"
+agent-client-protocol-http = { version = "1.2", default-features = false }
+tower-http = { version = "0.7", features = ["cors"] }
 reqwest-retry = "0.9"
 eventsource-stream = "0.2"
 reqwest = { version = "0.13", default-features = false }

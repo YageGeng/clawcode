@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use protocol::message::Message;
+use protocol::{Usage, message::Message};
 
 use super::record::{
     AgentEdgeRecord, PersistedPayload, PersistedRecord, SessionMetaRecord,
@@ -19,6 +19,9 @@ pub struct ReplayedSession {
     /// Agent edges collected during replay for subagent tree restoration.
     #[builder(default)]
     pub agent_edges: Vec<AgentEdgeRecord>,
+    /// Provider-reported usage accumulated from replayed message envelopes.
+    #[builder(default)]
+    pub accumulated_usage: Option<Usage>,
 }
 
 /// Replay a session JSONL file into metadata and canonical messages.
@@ -28,6 +31,8 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
     let mut messages = Vec::new();
     let mut live_messages = Vec::new();
     let mut agent_edges = Vec::new();
+    let mut accumulated_usage = Usage::default();
+    let mut saw_usage = false;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
@@ -37,11 +42,16 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
             tracing::warn!(path = %path.display(), "skipping corrupt session record");
             continue;
         };
+        let usage = record.usage;
         match record.payload {
             PersistedPayload::SessionMeta(record) if meta.is_none() => {
                 meta = Some(record)
             }
             PersistedPayload::Message(record) => {
+                if let Some(usage) = usage {
+                    accumulated_usage += usage;
+                    saw_usage = true;
+                }
                 messages.push(record.message.clone());
                 live_messages.push(record.message);
             }
@@ -64,6 +74,7 @@ pub fn replay_session_file(path: &Path) -> io::Result<ReplayedSession> {
         .messages(messages)
         .live_messages(live_messages)
         .agent_edges(agent_edges)
+        .accumulated_usage(saw_usage.then_some(accumulated_usage))
         .build())
 }
 

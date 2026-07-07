@@ -15,9 +15,11 @@
 .agents/
 .claude/
 .codex/
+.superpowers/
 
 # OS and temporary files
 .DS_Store
 *.log
 *.tmp
 *.swp
+.superpowers/brainstorm/62366-1783431529/

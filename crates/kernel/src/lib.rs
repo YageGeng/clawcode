@@ -561,8 +561,8 @@ impl AgentKernel for Kernel {
                         &[],
                     )
                 });
-            let history = replayed
-                .map(|replayed| replayed.messages)
+            let (history, accumulated_usage) = replayed
+                .map(|replayed| (replayed.messages, replayed.accumulated_usage))
                 .unwrap_or_default();
             return Ok(SessionCreated::builder()
                 .session_id(session_id.clone())
@@ -571,6 +571,7 @@ impl AgentKernel for Kernel {
                 .models(self.build_models())
                 .history(history)
                 .context_window_usage(context_window_usage)
+                .accumulated_usage(accumulated_usage)
                 .build());
         }
 
@@ -582,6 +583,7 @@ impl AgentKernel for Kernel {
             return Err(KernelError::SessionNotFound(session_id.clone()));
         };
         let app_cfg = self.config.current();
+        let accumulated_usage = replayed.accumulated_usage;
         let history = replayed.messages;
         let live_history = replayed.live_messages;
         let recorder: Arc<dyn SessionRecorder> = Arc::from(recorder);
@@ -639,6 +641,7 @@ impl AgentKernel for Kernel {
             .models(self.build_models())
             .history(history)
             .context_window_usage(context_window_usage)
+            .accumulated_usage(accumulated_usage)
             .build())
     }
 
@@ -1447,6 +1450,13 @@ mod tests {
                 MessageRecord::builder()
                     .turn_id("turn-1".to_string())
                     .message(Message::user("restored history"))
+                    .usage(Some(protocol::Usage {
+                        input_tokens: 21,
+                        output_tokens: 8,
+                        total_tokens: 29,
+                        cached_input_tokens: 13,
+                        cache_creation_input_tokens: 2,
+                    }))
                     .build(),
             )])
             .await
@@ -1471,6 +1481,16 @@ mod tests {
 
         assert!(usage.used_tokens > live_history_tokens as u64);
         assert_eq!(usage.context_tokens, 1_000_000);
+        assert_eq!(
+            loaded.accumulated_usage,
+            Some(protocol::Usage {
+                input_tokens: 21,
+                output_tokens: 8,
+                total_tokens: 29,
+                cached_input_tokens: 13,
+                cache_creation_input_tokens: 2,
+            })
+        );
     }
 
     /// Builds minimal session creation parameters for restore tests.

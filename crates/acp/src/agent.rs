@@ -524,16 +524,14 @@ impl ClawcodeAgent {
     fn user_content_update(content: &UserContent) -> Option<SessionUpdate> {
         match content {
             UserContent::Text(text) => {
-                Some(Self::agent_message_update(format!("\n> {}\n", text.text)))
+                Some(Self::user_message_update(text.text.clone()))
             }
             UserContent::ToolResult(result) => {
                 Some(Self::tool_result_update(result))
             }
-            UserContent::Image(_) => {
-                Some(Self::agent_message_update("\n> [image]\n"))
-            }
+            UserContent::Image(_) => Some(Self::user_message_update("[image]")),
             UserContent::Document(_) => {
-                Some(Self::agent_message_update("\n> [document]\n"))
+                Some(Self::user_message_update("[document]"))
             }
         }
     }
@@ -591,6 +589,13 @@ impl ClawcodeAgent {
     /// Build an ACP assistant message chunk for replay text.
     fn agent_message_update(text: impl Into<String>) -> SessionUpdate {
         SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new(text.into()),
+        )))
+    }
+
+    /// Build an ACP user message chunk for replay text.
+    fn user_message_update(text: impl Into<String>) -> SessionUpdate {
+        SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
             TextContent::new(text.into()),
         )))
     }
@@ -1115,169 +1120,9 @@ impl ClawcodeAgent {
         self: Arc<Self>,
         transport: impl ConnectTo<Agent> + 'static,
     ) -> acp::Result<()> {
-        let agent = self;
-        Agent
-            .builder()
-            .name("claw-acp")
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: InitializeRequest, responder, _cx| {
-                        responder.respond_with_result(
-                            agent.handle_initialize(request).await,
-                        )
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: NewSessionRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        let cx2 = cx.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_new_session(request, cx2).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: LoadSessionRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        let cx2 = cx.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_load_session(request, cx2).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: ListSessionsRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_list_sessions(request).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: PromptRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        let cx2 = cx.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_prompt(request, cx2).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_notification(
-                {
-                    let agent = agent.clone();
-                    async move |notification: CancelNotification,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            if let Err(e) =
-                                agent.handle_cancel(notification).await
-                            {
-                                tracing::error!(
-                                    "Error handling cancel: {:?}",
-                                    e
-                                );
-                            }
-                            Ok(())
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_notification!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: SetSessionModeRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_set_mode(request).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: SetSessionConfigOptionRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent
-                                    .handle_set_session_config_option(request)
-                                    .await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
-                    async move |request: CloseSessionRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_close_session(request).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .connect_to(transport)
-            .await
+        // Reuse the ConnectTo implementation so stdio and HTTP transports
+        // share the same ACP handler registration.
+        self.as_ref().clone().connect_to(transport).await
     }
 
     // ── Handler implementations ──
@@ -1411,13 +1256,23 @@ impl ClawcodeAgent {
             &created.models,
         );
         let context_window_usage = created.context_window_usage;
+        let accumulated_usage = created.accumulated_usage;
         Self::replay_history(&acp_session_id, &created.history, &cx).await?;
-        if let Some(context_window_usage) = context_window_usage {
+        if context_window_usage.is_some() || accumulated_usage.is_some() {
+            let context_window_usage =
+                context_window_usage.unwrap_or_else(|| {
+                    ContextWindowUsage::new(
+                        accumulated_usage
+                            .map(Usage::display_tokens)
+                            .unwrap_or_default(),
+                        0,
+                    )
+                });
             cx.send_notification(SessionNotification::new(
                 acp_session_id.clone(),
                 SessionUpdate::UsageUpdate(Self::usage_update_from_context(
                     context_window_usage,
-                    None,
+                    accumulated_usage,
                 )),
             ))?;
         }
@@ -1721,6 +1576,178 @@ impl ClawcodeAgent {
     }
 }
 
+impl ConnectTo<Client> for ClawcodeAgent {
+    /// Connect the clawcode ACP agent to an ACP client transport.
+    async fn connect_to(
+        self,
+        transport: impl ConnectTo<Agent>,
+    ) -> acp::Result<()> {
+        let agent = Arc::new(self);
+        Agent
+            .builder()
+            .name("claw-acp")
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: InitializeRequest, responder, _cx| {
+                        responder.respond_with_result(
+                            agent.handle_initialize(request).await,
+                        )
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: NewSessionRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        let cx2 = cx.clone();
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_new_session(request, cx2).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: LoadSessionRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        let cx2 = cx.clone();
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_load_session(request, cx2).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: ListSessionsRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_list_sessions(request).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: PromptRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        let cx2 = cx.clone();
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_prompt(request, cx2).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_notification(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |notification: CancelNotification,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        cx.spawn(async move {
+                            if let Err(e) =
+                                agent.handle_cancel(notification).await
+                            {
+                                tracing::error!(
+                                    "Error handling cancel: {:?}",
+                                    e
+                                );
+                            }
+                            Ok(())
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_notification!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: SetSessionModeRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_set_mode(request).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: SetSessionConfigOptionRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent
+                                    .handle_set_session_config_option(request)
+                                    .await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let agent = Arc::clone(&agent);
+                    async move |request: CloseSessionRequest,
+                                responder,
+                                cx: ConnectionTo<Client>| {
+                        let agent = Arc::clone(&agent);
+                        cx.spawn(async move {
+                            responder.respond_with_result(
+                                agent.handle_close_session(request).await,
+                            )
+                        })?;
+                        Ok(())
+                    }
+                },
+                acp::on_receive_request!(),
+            )
+            .connect_to(transport)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1737,6 +1764,14 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use tools::{FsBackend, FsReadRequest};
+
+    /// Verifies the ACP agent can be returned by HTTP transport factories.
+    #[test]
+    fn clawcode_agent_implements_connect_to_client() {
+        fn assert_connect_to_client<T: ConnectTo<Client>>() {}
+
+        assert_connect_to_client::<ClawcodeAgent>();
+    }
 
     #[derive(Default, typed_builder::TypedBuilder)]
     struct RecordingKernel {
@@ -2898,6 +2933,13 @@ mod tests {
             .models(default_config_models())
             .history(vec![Message::assistant("restored history")])
             .context_window_usage(ContextWindowUsage::new(42, 1_000_000))
+            .accumulated_usage(Some(Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                total_tokens: 14,
+                cached_input_tokens: 6,
+                cache_creation_input_tokens: 1,
+            }))
             .build();
         let kernel = Arc::new(
             RecordingKernel::builder()
@@ -2944,7 +2986,16 @@ mod tests {
         assert!(saw_replayed_message);
         assert_eq!(update.used, 42);
         assert_eq!(update.size, 1_000_000);
-        assert!(update.meta.is_none());
+        assert_eq!(
+            update.meta.expect("resume usage metadata")["clawcode"]["usage"],
+            serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "total_tokens": 14,
+                "cached_input_tokens": 6,
+                "cache_creation_input_tokens": 1,
+            })
+        );
     }
 
     #[test]
@@ -3060,7 +3111,7 @@ mod tests {
             .expect("history replay should send notifications");
 
         let first = notifications.recv().await.expect("message notification");
-        assert!(matches!(first.update, SessionUpdate::AgentMessageChunk(_)));
+        assert!(matches!(first.update, SessionUpdate::UserMessageChunk(_)));
         match notifications.try_recv() {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
             other => {
@@ -3228,14 +3279,14 @@ mod tests {
         let updates = ClawcodeAgent::history_replay_updates(&message);
         assert_eq!(updates.len(), 1);
 
-        let SessionUpdate::AgentMessageChunk(chunk) = &updates[0] else {
-            panic!("expected regular user text to replay as transcript text");
+        let SessionUpdate::UserMessageChunk(chunk) = &updates[0] else {
+            panic!("expected regular user text to replay as user text");
         };
         let ContentBlock::Text(text) = &chunk.content else {
             panic!("expected text user content");
         };
 
-        assert_eq!(text.text, "\n> hello\n");
+        assert_eq!(text.text, "hello");
     }
 
     #[test]
