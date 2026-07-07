@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::{
-    ClientCapabilities, CreateTerminalRequest, KillTerminalRequest,
-    ReleaseTerminalRequest, SessionId as AcpSessionId, TerminalId,
-    TerminalOutputRequest, WaitForTerminalExitRequest,
+use agent_client_protocol::schema::v1::{
+    ClientCapabilities, CreateTerminalRequest, EnvVariable,
+    KillTerminalRequest, ReleaseTerminalRequest, SessionId as AcpSessionId,
+    TerminalId, TerminalOutputRequest, WaitForTerminalExitRequest,
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use async_trait::async_trait;
@@ -107,9 +107,8 @@ impl TerminalBackend for AcpTerminalBackend {
         let acp_env: Vec<_> = params
             .env
             .into_iter()
-            .map(|e| {
-                agent_client_protocol::schema::EnvVariable::new(e.name, e.value)
-            })
+            // ACP v1 types are no longer re-exported from the schema root.
+            .map(|e| EnvVariable::new(e.name, e.value))
             .collect();
         let response = route
             .client

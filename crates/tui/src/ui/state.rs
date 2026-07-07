@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, SessionId, SessionNotification, SessionUpdate, StopReason,
     ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
     UsageUpdate,
@@ -679,7 +679,7 @@ fn json_to_display(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         Content, ContentBlock, ContentChunk, RequestPermissionRequest,
         TextContent, ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate,
         ToolCallUpdateFields, UsageUpdate,
@@ -890,7 +890,7 @@ mod tests {
                 ToolCallUpdateFields::new()
                     .title("apply_patch")
                     .content(vec![ToolCallContent::Diff(
-                        agent_client_protocol::schema::Diff::new(
+                        agent_client_protocol::schema::v1::Diff::new(
                             "src/main.rs",
                             "fn new() {}\n",
                         )
@@ -932,7 +932,7 @@ mod tests {
                 ToolCallUpdateFields::new()
                     .title("apply_patch")
                     .content(vec![ToolCallContent::Diff(
-                        agent_client_protocol::schema::Diff::new(
+                        agent_client_protocol::schema::v1::Diff::new(
                             "src/main.rs",
                             "fn v1() {}\n",
                         )
@@ -946,7 +946,7 @@ mod tests {
                 ToolCallId::new("call-1"),
                 ToolCallUpdateFields::new().content(vec![
                     ToolCallContent::Diff(
-                        agent_client_protocol::schema::Diff::new(
+                        agent_client_protocol::schema::v1::Diff::new(
                             "src/main.rs",
                             "fn v2() {}\n",
                         )

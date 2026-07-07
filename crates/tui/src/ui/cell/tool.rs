@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::ToolCallStatus;
+use agent_client_protocol::schema::v1::ToolCallStatus;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 

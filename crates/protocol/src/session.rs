@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_client_protocol::schema;
+use agent_client_protocol::schema::v1 as schema;
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;

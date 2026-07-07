@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ClientCapabilities, ReadTextFileRequest, SessionId as AcpSessionId,
     WriteTextFileRequest,
 };
@@ -196,8 +196,8 @@ impl FsBackend for AcpFsBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
-        ReadTextFileResponse, WriteTextFileResponse,
+    use agent_client_protocol::schema::v1::{
+        FileSystemCapabilities, ReadTextFileResponse, WriteTextFileResponse,
     };
     use agent_client_protocol::{Agent, Channel, Client, Responder};
     use tokio::sync::{mpsc, oneshot};
@@ -281,7 +281,8 @@ mod tests {
             session_id.clone(),
             client,
             ClientCapabilities::new().fs(
-                agent_client_protocol::schema::FileSystemCapabilities::new()
+                // ACP v1 types are no longer re-exported from the schema root.
+                FileSystemCapabilities::new()
                     .read_text_file(true)
                     .write_text_file(true),
             ),

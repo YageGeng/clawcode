@@ -12,8 +12,9 @@ fn extract_text(result: rmcp::model::CallToolResult) -> String {
     result
         .content
         .into_iter()
-        .filter_map(|c| match c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text),
+        // rmcp 2.x exposes tool content as enum variants instead of a raw wrapper field.
+        .filter_map(|c| match c {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text),
             _ => None,
         })
         .collect::<Vec<_>>()

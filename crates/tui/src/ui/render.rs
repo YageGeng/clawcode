@@ -133,7 +133,7 @@ fn render_composer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         Content, ContentBlock, ContentChunk, SessionId, SessionNotification,
         SessionUpdate, TextContent, ToolCall, ToolCallId, ToolCallStatus,
         ToolCallUpdate, ToolCallUpdateFields,
@@ -215,7 +215,7 @@ mod tests {
                 ToolCallId::new("call-1"),
                 ToolCallUpdateFields::new()
                     .content(vec![
-                        agent_client_protocol::schema::ToolCallContent::Content(
+                        agent_client_protocol::schema::v1::ToolCallContent::Content(
                             Content::new(text(output)),
                         ),
                     ])
@@ -807,7 +807,7 @@ mod tests {
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("shell-1"),
                 ToolCallUpdateFields::new().content(vec![
-                    agent_client_protocol::schema::ToolCallContent::Content(
+                    agent_client_protocol::schema::v1::ToolCallContent::Content(
                         Content::new(text(
                             "line1\nline2\nline3\nline4\nline5\nline6",
                         )),

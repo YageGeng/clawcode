@@ -1,6 +1,6 @@
 //! ACP client-side filesystem request handlers for the local TUI.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
     WriteTextFileResponse,
 };
@@ -96,7 +96,7 @@ pub(crate) async fn handle_write_text_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::SessionId;
+    use agent_client_protocol::schema::v1::SessionId;
 
     #[tokio::test]
     async fn read_text_file_request_reads_requested_line_window() {

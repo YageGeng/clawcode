@@ -166,7 +166,7 @@ fn truncate_to_display_width(text: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::SessionId;
+    use agent_client_protocol::schema::v1::SessionId;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

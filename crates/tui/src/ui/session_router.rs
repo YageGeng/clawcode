@@ -3,9 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::{
-    ModelInfo as AcpModelInfo, SessionId, SessionNotification, SessionUpdate,
-    StopReason, ToolCallUpdate,
+use agent_client_protocol::schema::v1::{
+    SessionId, SessionNotification, SessionUpdate, StopReason, ToolCallUpdate,
 };
 use crossterm::event::KeyCode;
 
@@ -85,16 +84,6 @@ impl ModelOption {
             id: id.into(),
             name: name.into(),
         }
-    }
-
-    /// Create a local model option from an ACP model entry.
-    pub(crate) fn from_acp(info: &AcpModelInfo) -> Self {
-        Self::new(info.model_id.0.to_string(), info.name.clone())
-    }
-
-    /// Convert ACP model entries into local model options.
-    pub(crate) fn from_acp_slice(models: &[AcpModelInfo]) -> Vec<Self> {
-        models.iter().map(Self::from_acp).collect()
     }
 
     /// Returns the stable provider/model identifier.
@@ -528,7 +517,7 @@ impl SessionRouterState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, TextContent, ToolCallId,
         ToolCallUpdateFields,
     };

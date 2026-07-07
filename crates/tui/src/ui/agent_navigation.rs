@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::SessionId;
+use agent_client_protocol::schema::v1::SessionId;
 
 /// Display status used by the TUI agent picker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

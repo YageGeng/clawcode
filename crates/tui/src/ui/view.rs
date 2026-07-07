@@ -15,7 +15,8 @@ pub struct ViewState {
     #[builder(default = true)]
     follow_tail: bool,
     /// Per-entry transcript render cache reset on cloned view state.
-    #[builder(default = RefCell::new(TranscriptRenderCache::new()))]
+    // The cache is internal runtime state and must not be exposed through the generated builder.
+    #[builder(default = RefCell::new(TranscriptRenderCache::new()), setter(skip))]
     transcript_render_cache: RefCell<TranscriptRenderCache>,
     /// Whether transcript cells render plain copy-friendly rows.
     #[builder(default)]

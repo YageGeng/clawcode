@@ -5,7 +5,7 @@
 //! foreign to the acp crate, these impls live here where the
 //! protocol types are local (satisfying the orphan rule).
 
-use acp::schema;
+use acp::schema::v1 as schema;
 use agent_client_protocol as acp;
 
 use crate::event::StopReason;
@@ -200,29 +200,6 @@ impl SessionCreated {
 
         schema::SessionModeState::new(first_mode_id, acp_modes)
     }
-
-    /// Convert the available kernel model metadata into ACP model state.
-    pub fn acp_model_state(&self) -> schema::SessionModelState {
-        let acp_models: Vec<schema::ModelInfo> = self
-            .models
-            .iter()
-            .map(|model| {
-                let mut info = schema::ModelInfo::new(
-                    schema::ModelId::new(model.id.clone()),
-                    model.display_name.clone(),
-                );
-                if let Some(description) = &model.description {
-                    info = info.description(description.clone());
-                }
-                info
-            })
-            .collect();
-
-        schema::SessionModelState::new(
-            schema::ModelId::new(self.current_model.clone()),
-            acp_models,
-        )
-    }
 }
 
 /// Converts structured turn-item lifecycle stages into ACP session updates.
@@ -325,10 +302,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::ModelInfo;
     use crate::item::{FileChange, FileChangeItem};
     use crate::mcp::McpTransportConfig;
-    use crate::session::{SessionCreated, SessionId};
 
     /// Verifies ACP allow-always maps to session approval.
     #[test]
@@ -337,31 +312,6 @@ mod tests {
         let decision = crate::ReviewDecision::from(legacy);
 
         assert_eq!(decision, crate::ReviewDecision::ApprovedForSession);
-    }
-
-    /// Verifies that ACP model state uses SessionCreated.current_model explicitly.
-    #[test]
-    fn session_created_model_state_uses_current_model_not_first_available_model()
-     {
-        let created = SessionCreated::builder()
-            .session_id(SessionId::from("session"))
-            .current_model("chatgpt/gpt-5.4".to_string())
-            .modes(Vec::new())
-            .models(vec![
-                ModelInfo::builder()
-                    .id("openai/gpt-5.4".to_string())
-                    .display_name("OpenAI GPT-5.4".to_string())
-                    .build(),
-                ModelInfo::builder()
-                    .id("chatgpt/gpt-5.4".to_string())
-                    .display_name("ChatGPT GPT-5.4".to_string())
-                    .build(),
-            ])
-            .build();
-
-        let state = created.acp_model_state();
-
-        assert_eq!(state.current_model_id.0.as_ref(), "chatgpt/gpt-5.4");
     }
 
     /// Verifies that file-change start events update the ACP tool cell as an edit.

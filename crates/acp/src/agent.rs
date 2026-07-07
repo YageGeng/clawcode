@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use acp::schema::{
+use acp::schema::v1::{
     SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigSelectGroup, SessionConfigSelectOption,
     SessionConfigSelectOptions, SessionConfigValueId,
@@ -196,8 +196,8 @@ impl ClawcodeAgent {
     }
 
     /// Build ACP extension metadata with the provider usage payload.
-    fn usage_metadata(usage: Usage) -> acp::schema::Meta {
-        let mut map = acp::schema::Meta::with_capacity(4);
+    fn usage_metadata(usage: Usage) -> Meta {
+        let mut map = Meta::with_capacity(4);
         map.insert(
             "clawcode".to_owned(),
             serde_json::json!({
@@ -227,10 +227,12 @@ impl ClawcodeAgent {
     fn set_session_config_defaults(
         &self,
         session_id: protocol::SessionId,
+        current_model: &str,
         modes: &[protocol::config::SessionMode],
         models: &[protocol::ModelInfo],
     ) -> Vec<SessionConfigOption> {
-        let config_options = Self::build_session_config_options(modes, models);
+        let config_options =
+            Self::build_session_config_options(modes, models, current_model);
 
         self.session_configs
             .lock()
@@ -244,6 +246,7 @@ impl ClawcodeAgent {
     fn build_session_config_options(
         modes: &[protocol::config::SessionMode],
         models: &[protocol::ModelInfo],
+        current_model: &str,
     ) -> Vec<SessionConfigOption> {
         let mut options = Vec::new();
 
@@ -284,11 +287,18 @@ impl ClawcodeAgent {
                 })
                 .collect::<Vec<_>>();
 
+            // ACP v1.4 stores the selected model as the current select value, so preserve
+            // the session-specific model instead of assuming the first advertised model.
+            let current_model = if current_model.is_empty() {
+                default_model.id.clone()
+            } else {
+                current_model.to_string()
+            };
             options.push(
                 SessionConfigOption::select(
                     SessionConfigId::new("model"),
                     "Model",
-                    SessionConfigValueId::new(default_model.id.clone()),
+                    SessionConfigValueId::new(current_model),
                     select_options,
                 )
                 .category(SessionConfigOptionCategory::Model),
@@ -1233,23 +1243,6 @@ impl ClawcodeAgent {
             .on_receive_request(
                 {
                     let agent = agent.clone();
-                    async move |request: SetSessionModelRequest,
-                                responder,
-                                cx: ConnectionTo<Client>| {
-                        let agent = agent.clone();
-                        cx.spawn(async move {
-                            responder.respond_with_result(
-                                agent.handle_set_model(request).await,
-                            )
-                        })?;
-                        Ok(())
-                    }
-                },
-                acp::on_receive_request!(),
-            )
-            .on_receive_request(
-                {
-                    let agent = agent.clone();
                     async move |request: SetSessionConfigOptionRequest,
                                 responder,
                                 cx: ConnectionTo<Client>| {
@@ -1342,11 +1335,11 @@ impl ClawcodeAgent {
 
         let acp_session_id = created.acp_session_id();
         let mode_state = created.acp_mode_state();
-        let model_state = created.acp_model_state();
         let root_session_id = created.session_id.clone();
 
         let config_options = self.set_session_config_defaults(
             created.session_id.clone(),
+            &created.current_model,
             &created.modes,
             &created.models,
         );
@@ -1382,9 +1375,9 @@ impl ClawcodeAgent {
                 );
             }
         });
+        // ACP v1.4 carries model selection through config_options instead of a dedicated models field.
         Ok(NewSessionResponse::new(acp_session_id)
             .modes(mode_state)
-            .models(model_state)
             .config_options(config_options))
     }
 
@@ -1413,6 +1406,7 @@ impl ClawcodeAgent {
         let root_session_id = created.session_id.clone();
         let config_options = self.set_session_config_defaults(
             created.session_id.clone(),
+            &created.current_model,
             &created.modes,
             &created.models,
         );
@@ -1428,7 +1422,6 @@ impl ClawcodeAgent {
             ))?;
         }
 
-        let model_state = created.acp_model_state();
         let mode_state = created.acp_mode_state();
 
         self.fs_router.register_session(
@@ -1466,9 +1459,9 @@ impl ClawcodeAgent {
             }
         });
 
+        // ACP v1.4 carries model selection through config_options instead of a dedicated models field.
         Ok(LoadSessionResponse::new()
             .modes(mode_state)
-            .models(model_state)
             .config_options(config_options))
     }
 
@@ -1635,33 +1628,6 @@ impl ClawcodeAgent {
         Ok(SetSessionModeResponse::default())
     }
 
-    async fn handle_set_model(
-        &self,
-        request: SetSessionModelRequest,
-    ) -> Result<SetSessionModelResponse, Error> {
-        let session_id = SessionId::from(request.session_id);
-        let parts: Vec<&str> = request.model_id.0.splitn(2, '/').collect();
-        // SAFETY: splitn(2, '/') guarantees the Vec has at least 1 element.
-        // The len == 2 check ensures both parts[0] and parts[1] are valid.
-        #[allow(clippy::indexing_slicing)]
-        let (provider_id, model_id) = if parts.len() == 2 {
-            (parts[0], parts[1])
-        } else {
-            ("", parts[0])
-        };
-        self.kernel
-            .set_model(&session_id, provider_id, model_id)
-            .await
-            .map_err(|e| Error::internal_error().data(e.to_string()))?;
-
-        let _ = self.set_session_config_current_value(
-            &session_id,
-            "model",
-            &request.model_id.0,
-        );
-        Ok(SetSessionModelResponse::default())
-    }
-
     async fn handle_set_session_config_option(
         &self,
         request: SetSessionConfigOptionRequest,
@@ -1706,9 +1672,10 @@ impl ClawcodeAgent {
                     .map_err(|e| Error::internal_error().data(e.to_string()))?;
             }
             "model" => {
-                let mut parts = requested.splitn(2, '/');
-                let provider_id = parts.next().unwrap_or("");
-                let model_id = parts.next().unwrap_or(requested.as_str());
+                // Preserve the legacy model RPC behavior: bare model ids have no provider id.
+                let (provider_id, model_id) = requested
+                    .split_once('/')
+                    .unwrap_or(("", requested.as_str()));
 
                 self.kernel
                     .set_model(&session_id, provider_id, model_id)
@@ -1758,6 +1725,7 @@ impl ClawcodeAgent {
 mod tests {
     use super::*;
     use acp::Responder;
+    use agent_client_protocol::schema::ProtocolVersion;
     use async_trait::async_trait;
     use futures::stream;
     use protocol::mcp::McpTransportConfig;
@@ -2058,6 +2026,20 @@ mod tests {
         ]
     }
 
+    /// Build two fake models with the non-default model listed second.
+    fn two_config_models() -> Vec<ModelInfo> {
+        vec![
+            ModelInfo::builder()
+                .id("deepseek/deepseek-chat".to_string())
+                .display_name("DeepSeek Chat".to_string())
+                .build(),
+            ModelInfo::builder()
+                .id("openai/gpt-5".to_string())
+                .display_name("GPT-5".to_string())
+                .build(),
+        ]
+    }
+
     /// Build a session-created response for ACP handler tests.
     fn session_created(
         modes: Vec<SessionMode>,
@@ -2286,6 +2268,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_session_config_uses_created_current_model() {
+        let response = SessionCreated::builder()
+            .session_id(protocol::SessionId::from("session-1"))
+            .current_model("openai/gpt-5".to_string())
+            .modes(default_config_modes())
+            .models(two_config_models())
+            .build();
+        let kernel = Arc::new(
+            RecordingKernel::builder()
+                .load_session_response(response)
+                .build(),
+        );
+        let agent =
+            ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = LoadSessionRequest::new(
+            AcpSessionId::new("session-1"),
+            PathBuf::from("/tmp"),
+        );
+        let client = test_connection_to_client().await;
+
+        let response = agent
+            .handle_load_session(request, client)
+            .await
+            .expect("load session should include config options");
+
+        let config_options = response
+            .config_options
+            .expect("load session should return session config options");
+        let model = config_options
+            .iter()
+            .find(|option| option.id.0.as_ref() == "model")
+            .expect("model config should exist");
+        let SessionConfigKind::Select(model_select) = &model.kind else {
+            panic!("expected model to use select config kind");
+        };
+        assert_eq!(model_select.current_value.0.as_ref(), "openai/gpt-5");
+    }
+
+    #[tokio::test]
     async fn set_session_config_option_updates_mode_and_kernel() {
         let kernel = kernel_with_configs(
             default_config_modes(),
@@ -2328,6 +2349,46 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_slice(),
             ["auto"].as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_config_option_uses_empty_provider_for_bare_model_id() {
+        let kernel = kernel_with_configs(
+            default_config_modes(),
+            vec![
+                ModelInfo::builder()
+                    .id("gpt-5".to_string())
+                    .display_name("GPT-5".to_string())
+                    .build(),
+            ],
+        );
+        let agent =
+            ClawcodeAgent::new(Arc::clone(&kernel) as Arc<dyn AgentKernel>);
+        let request = NewSessionRequest::new(PathBuf::from("/tmp"));
+        let client = test_connection_to_client().await;
+        let response = agent
+            .handle_new_session(request, client)
+            .await
+            .expect("new session should succeed");
+
+        let set = SetSessionConfigOptionRequest::new(
+            response.session_id.clone(),
+            "model",
+            "gpt-5",
+        );
+        agent
+            .handle_set_session_config_option(set)
+            .await
+            .expect("set_session_config_option should succeed");
+
+        assert_eq!(
+            kernel
+                .set_model_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            [("".to_string(), "gpt-5".to_string())].as_ref()
         );
     }
 

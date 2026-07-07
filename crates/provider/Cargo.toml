@@ -68,7 +68,8 @@ wasm = [
   "dep:getrandom",
   "dep:wasm-bindgen-futures",
   "futures-timer/wasm-bindgen",
-  "getrandom/js",
+  # getrandom 0.4 renamed the JavaScript wasm backend feature from `js` to `wasm_js`.
+  "getrandom/wasm_js",
 ]
 reqwest = [
   "reqwest/charset",

@@ -2,8 +2,10 @@
 
 use std::path::PathBuf;
 
-use agent_client_protocol::schema::{
-    ListSessionsResponse, LoadSessionResponse, NewSessionResponse, SessionId,
+use agent_client_protocol::schema::v1::{
+    ListSessionsResponse, LoadSessionResponse, NewSessionResponse,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionId,
 };
 use crossterm::event::{EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -115,40 +117,92 @@ async fn open_session(
 
 /// Returns a compact model label from a new-session response.
 fn model_label_from_new(response: &NewSessionResponse) -> String {
-    response
-        .models
-        .as_ref()
-        .map(|models| models.current_model_id.0.to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| "model: unknown".to_string())
+    model_label_from_config_options(response.config_options.as_deref())
 }
 
 /// Returns a compact model label from a load-session response.
 fn model_label_from_load(response: &LoadSessionResponse) -> String {
-    response
-        .models
-        .as_ref()
-        .map(|models| models.current_model_id.0.to_string())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_else(|| "model: unknown".to_string())
+    model_label_from_config_options(response.config_options.as_deref())
 }
 
 /// Returns selectable models from a new-session response.
 fn model_options_from_new(response: &NewSessionResponse) -> Vec<ModelOption> {
-    response
-        .models
-        .as_ref()
-        .map(|models| ModelOption::from_acp_slice(&models.available_models))
-        .unwrap_or_default()
+    model_options_from_config_options(response.config_options.as_deref())
 }
 
 /// Returns selectable models from a load-session response.
 fn model_options_from_load(response: &LoadSessionResponse) -> Vec<ModelOption> {
-    response
-        .models
-        .as_ref()
-        .map(|models| ModelOption::from_acp_slice(&models.available_models))
-        .unwrap_or_default()
+    model_options_from_config_options(response.config_options.as_deref())
+}
+
+/// Finds the ACP session config option that represents model selection.
+fn model_config_option(
+    config_options: Option<&[SessionConfigOption]>,
+) -> Option<&SessionConfigOption> {
+    config_options?.iter().find(|option| {
+        option.id.0.as_ref() == "model"
+            || matches!(
+                option.category.as_ref(),
+                Some(SessionConfigOptionCategory::Model)
+            )
+    })
+}
+
+/// Returns a compact model label from ACP session config options.
+fn model_label_from_config_options(
+    config_options: Option<&[SessionConfigOption]>,
+) -> String {
+    let Some(option) = model_config_option(config_options) else {
+        return "model: unknown".to_string();
+    };
+    match &option.kind {
+        SessionConfigKind::Select(select) => {
+            let model = select.current_value.0.to_string();
+            if model.is_empty() {
+                "model: unknown".to_string()
+            } else {
+                model
+            }
+        }
+        _ => "model: unknown".to_string(),
+    }
+}
+
+/// Returns selectable models from ACP session config options.
+fn model_options_from_config_options(
+    config_options: Option<&[SessionConfigOption]>,
+) -> Vec<ModelOption> {
+    let Some(option) = model_config_option(config_options) else {
+        return Vec::new();
+    };
+    match &option.kind {
+        SessionConfigKind::Select(select) => {
+            model_options_from_select_options(&select.options)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Converts ACP select options into local model picker options.
+fn model_options_from_select_options(
+    options: &SessionConfigSelectOptions,
+) -> Vec<ModelOption> {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().map(model_option_from_select).collect()
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .map(model_option_from_select)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Converts one ACP select option into a local model picker option.
+fn model_option_from_select(option: &SessionConfigSelectOption) -> ModelOption {
+    ModelOption::new(option.value.0.to_string(), option.name.clone())
 }
 
 /// Prints persisted session metadata for `cwd` and exits.
@@ -667,7 +721,7 @@ mod tests {
     /// Build a router for local command tests.
     fn test_router() -> SessionRouterState {
         SessionRouterState::new(
-            agent_client_protocol::schema::SessionId::new("s1".to_string()),
+            agent_client_protocol::schema::v1::SessionId::new("s1".to_string()),
             std::path::PathBuf::from("."),
             "provider/model".to_string(),
             Theme::dark(),

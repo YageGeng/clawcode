@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::*;
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Agent, Client, ConnectionTo, Responder};
 use anyhow::{Context, anyhow};
 use tokio::sync::mpsc;
@@ -125,12 +126,18 @@ impl AcpClient {
         session_id: SessionId,
         model_id: String,
     ) -> anyhow::Result<()> {
+        // ACP v1.4 models are switched through the generic session config option API.
+        let request = SetSessionConfigOptionRequest::new(
+            session_id,
+            SessionConfigId::new("model"),
+            SessionConfigOptionValue::value_id(model_id),
+        );
         self.conn
-            .send_request(SetSessionModelRequest::new(session_id, model_id))
+            .send_request(request)
             .block_task()
             .await
             .context("set ACP session model")
-            .map(|_: SetSessionModelResponse| ())
+            .map(|_: SetSessionConfigOptionResponse| ())
     }
 
     /// Sends an ACP cancellation notification for the current prompt turn.

@@ -18,7 +18,8 @@ pub struct McpConnectionManager {
     #[builder(setter(transform = |configs: Vec<McpServerConfig>| Mutex::new(configs)))]
     configs: Mutex<Vec<McpServerConfig>>,
     auth_dir: PathBuf,
-    #[builder(default)]
+    // Runtime clients are internal state and must not be exposed through the generated builder.
+    #[builder(default, setter(skip))]
     clients: Mutex<HashMap<String, ManagedClient>>,
     #[builder(default)]
     startup_status: Mutex<HashMap<String, McpStartupStatus>>,
@@ -280,7 +281,6 @@ impl McpConnectionManager {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String, String> {
-        use rmcp::model::RawContent;
         use std::time::Duration;
         use tokio::time::timeout;
 
@@ -337,8 +337,9 @@ impl McpConnectionManager {
         let text = result
             .content
             .into_iter()
-            .filter_map(|c| match c.raw {
-                RawContent::Text(t) => Some(t.text),
+            // rmcp 2.x exposes tool content as enum variants instead of a raw wrapper field.
+            .filter_map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -376,7 +377,8 @@ mod tests {
 
     use rmcp::handler::server::wrapper::Parameters;
     use rmcp::model::{
-        CallToolResult, Content, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ServerCapabilities, ServerInfo,
+        TextContent,
     };
     use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
     use serde_json::json;
@@ -415,7 +417,10 @@ mod tests {
     impl ErrorServer {
         #[tool(description = "Always returns a tool-level error")]
         fn fail(&self) -> CallToolResult {
-            CallToolResult::error(vec![Content::text("boom")])
+            // rmcp 2.x represents returned content as typed content blocks.
+            CallToolResult::error(vec![ContentBlock::Text(TextContent::new(
+                "boom",
+            ))])
         }
     }
 

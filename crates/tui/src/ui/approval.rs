@@ -1,6 +1,6 @@
 //! Approval overlay state and key mapping.
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, PermissionOptionId, RequestPermissionRequest, ToolCallContent,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -133,7 +133,7 @@ impl PendingApproval {
 
     /// Convert ACP permission options into local approval decisions.
     fn decisions_from_options(
-        options: &[agent_client_protocol::schema::PermissionOption],
+        options: &[agent_client_protocol::schema::v1::PermissionOption],
     ) -> Vec<ApprovalDecision> {
         let mut decisions = Vec::new();
         for option in options {
@@ -299,7 +299,7 @@ fn approval_help_text(decisions: &[ApprovalDecision]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         Content, ContentBlock, PermissionOption, PermissionOptionKind,
         RequestPermissionRequest, TextContent, ToolCallId, ToolCallUpdate,
         ToolCallUpdateFields,
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn approval_from_acp_request_extracts_id_title_and_body() {
         let request = RequestPermissionRequest::new(
-            agent_client_protocol::schema::SessionId::new("s1".to_string()),
+            agent_client_protocol::schema::v1::SessionId::new("s1".to_string()),
             ToolCallUpdate::new(
                 ToolCallId::new("call-1"),
                 ToolCallUpdateFields::new().title("shell").content(vec![
