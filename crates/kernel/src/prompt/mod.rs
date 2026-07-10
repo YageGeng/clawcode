@@ -8,6 +8,7 @@
 pub(crate) mod environment;
 pub(crate) mod instruction;
 
+use config::{AppConfig, ToolsConfig};
 use environment::EnvironmentInfo;
 pub(crate) use instruction::Instructions;
 
@@ -41,6 +42,128 @@ checkout --, clean -f) unless the user explicitly requests them.
 - Respond concisely. Use Github-flavored markdown for formatting.
 - When referencing code, include file_path:line_number.";
 
+/// Runtime capability switches used to align the default prompt with registered tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PromptCapabilityConfig {
+    /// Built-in tool group switches.
+    pub tools: ToolsConfig,
+    /// Whether sub-agent tools are model-visible.
+    pub multi_agent_enabled: bool,
+}
+
+impl Default for PromptCapabilityConfig {
+    /// Return prompt capability switches matching the default tool configuration.
+    fn default() -> Self {
+        Self {
+            tools: ToolsConfig::default(),
+            multi_agent_enabled: true,
+        }
+    }
+}
+
+impl From<&AppConfig> for PromptCapabilityConfig {
+    /// Build prompt capability switches from the application configuration.
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            tools: config.tools,
+            multi_agent_enabled: config.multi_agent.enable,
+        }
+    }
+}
+
+impl PromptCapabilityConfig {
+    /// Render the default system prompt for the registered tool capabilities.
+    fn render_default_system_prompt(&self) -> String {
+        if self == &Self::default() {
+            return DEFAULT_SYSTEM_PROMPT.to_string();
+        }
+
+        let mut tasks = Vec::new();
+        if self.tools.enable_fs {
+            tasks.push("reading and editing code");
+            tasks.push("searching codebases");
+        }
+        if self.tools.enable_shell {
+            tasks.push("running shell commands");
+        }
+        if self.multi_agent_enabled {
+            tasks.push("managing multi-agent workflows");
+        }
+
+        let task_sentence = if tasks.is_empty() {
+            "software engineering tasks".to_string()
+        } else {
+            format!("software engineering tasks: {}", tasks.join(", "))
+        };
+
+        let mut sections = Vec::new();
+        sections.push(format!(
+            "You are an interactive coding agent. You help users with {task_sentence}."
+        ));
+
+        let mut tool_usage = vec![
+            "## Tool usage".to_string(),
+            "- Only use tools that are present in the current tool definitions."
+                .to_string(),
+            "- Do not claim or imply access to tools that are not available."
+                .to_string(),
+        ];
+        if self.tools.enable_fs {
+            tool_usage.push(
+                "- Use file tools for reading, writing, editing, and searching files."
+                    .to_string(),
+            );
+            tool_usage
+                .push("- Always read a file before editing it.".to_string());
+            tool_usage.push(
+                "- When editing, use exact string matches — verify indentation and context."
+                    .to_string(),
+            );
+        }
+        if self.tools.enable_shell {
+            tool_usage.push(
+                "- Use shell tools only when command execution is needed."
+                    .to_string(),
+            );
+        }
+        if self.multi_agent_enabled {
+            tool_usage.push(
+                "- Use sub-agent tools only for well-scoped parallel work."
+                    .to_string(),
+            );
+        }
+        tool_usage.push(
+            "- Do not create files the user did not ask for.".to_string(),
+        );
+        sections.push(tool_usage.join("\n"));
+
+        sections.push(
+            "## Coding conventions\n\
+             - Write concise, correct code. Do not add features or abstractions beyond the task.\n\
+             - Three similar lines is better than a premature abstraction. No half-finished implementations.\n\
+             - Default to no comments. Only add one when the WHY is non-obvious."
+                .to_string(),
+        );
+
+        sections.push(
+            "## Git safety\n\
+             - Never run destructive git commands (push --force, reset --hard, checkout --, clean -f) unless the user explicitly requests them.\n\
+             - Never skip hooks (--no-verify, --no-gpg-sign).\n\
+             - Do not commit unless the user explicitly asks."
+                .to_string(),
+        );
+
+        sections.push(
+            "## Response style\n\
+             - Respond concisely. Use Github-flavored markdown for formatting.\n\
+             - When referencing code, include file_path:line_number."
+                .to_string(),
+        );
+
+        sections.join("\n\n")
+    }
+}
+
 /// Layered system prompt whose [`render`](SystemPrompt::render) method
 /// produces the final string injected as the LLM request preamble.
 ///
@@ -60,6 +183,9 @@ pub(crate) struct SystemPrompt {
     /// permission and the registry is populated.
     #[builder(default)]
     pub skills_xml: Option<String>,
+    /// Capabilities used to render the default prompt when no agent prompt overrides it.
+    #[builder(default)]
+    pub capability_config: PromptCapabilityConfig,
     /// Temporary user-provided system prompt. Lowest priority.
     #[builder(default)]
     pub user_prompt: Option<String>,
@@ -73,11 +199,9 @@ impl SystemPrompt {
         let mut parts: Vec<String> = Vec::new();
 
         // Agent prompt (or default)
-        parts.push(
-            self.agent_prompt
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string()),
-        );
+        parts.push(self.agent_prompt.clone().unwrap_or_else(|| {
+            self.capability_config.render_default_system_prompt()
+        }));
 
         // Environment
         parts.push(self.environment.render_block());
@@ -158,5 +282,29 @@ mod tests {
             user_pos > env_pos,
             "user prompt must appear after environment"
         );
+    }
+
+    /// The capability renderer omits descriptions for disabled tool groups.
+    #[test]
+    fn default_prompt_omits_disabled_tool_capabilities() {
+        let capability_config = PromptCapabilityConfig {
+            tools: config::ToolsConfig {
+                enable_fs: false,
+                enable_shell: false,
+                enable_skill: false,
+            },
+            multi_agent_enabled: false,
+        };
+
+        let result = capability_config.render_default_system_prompt();
+
+        assert!(!result.contains("reading and editing code"));
+        assert!(!result.contains("running shell commands"));
+        assert!(!result.contains("searching codebases"));
+        assert!(!result.contains("multi-agent"));
+        assert!(!result.contains("read_file"));
+        assert!(!result.contains("edit_file"));
+        assert!(!result.contains("grep"));
+        assert!(!result.contains("shell"));
     }
 }

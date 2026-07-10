@@ -167,7 +167,9 @@ pub(crate) fn spawn_thread(
     )));
 
     let skill_registry = SkillRegistry::discover(&cwd, &app_config.skills);
-    tools.register_skill_tools(Arc::clone(&skill_registry));
+    if app_config.tools.enable_skill {
+        tools.register_skill_tools(Arc::clone(&skill_registry));
+    }
 
     let mcp_manager = {
         let configs: Vec<mcp::McpServerConfig> = app_config

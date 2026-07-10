@@ -8,7 +8,7 @@ use acp::backend::terminal::{AcpClientTerminalRouter, AcpTerminalBackend};
 use clap::Parser;
 use kernel::Kernel;
 use provider::factory::LlmFactory;
-use tools::builtin::fs::FsToolSet;
+use tools::builtin::{BuiltinToolConfig, fs::FsToolSet};
 use tools::{FsBackend, TerminalBackend, ToolRegistry};
 
 /// Command-line options for the ACP binary.
@@ -43,10 +43,15 @@ async fn main() -> anyhow::Result<()> {
     let terminal_backend: Arc<dyn TerminalBackend> =
         Arc::new(AcpTerminalBackend::new(Arc::clone(&terminal_router)));
     let tools = Arc::new(ToolRegistry::new());
-    tools.register_builtins_with_backends(
+    let tool_config = config.current().tools;
+    tools.register_builtins_with_backends_and_config(
         fs_backend,
         terminal_backend,
         FsToolSet::Hashline,
+        BuiltinToolConfig {
+            enable_fs: tool_config.enable_fs,
+            enable_shell: tool_config.enable_shell,
+        },
     );
 
     let kernel = Arc::new(Kernel::new(llm_factory, config, tools));

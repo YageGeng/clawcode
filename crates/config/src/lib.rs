@@ -7,6 +7,7 @@ pub mod llm;
 pub mod loader;
 pub mod mcp;
 pub mod skills;
+pub mod tools;
 pub mod tui;
 
 pub use agent::MultiAgentConfig;
@@ -19,4 +20,5 @@ pub use llm::{
 pub use loader::{ConfigError, ConfigHandle, load, load_from};
 pub use protocol::ApprovalMode;
 pub use skills::SkillsConfig;
+pub use tools::ToolsConfig;
 pub use tui::{TuiConfig, TuiTheme};

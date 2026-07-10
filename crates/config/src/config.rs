@@ -8,6 +8,7 @@ use crate::agent::MultiAgentConfig;
 use crate::llm::LlmProvider;
 use crate::mcp::McpServerConfig;
 use crate::skills::SkillsConfig;
+use crate::tools::ToolsConfig;
 use crate::tui::TuiConfig;
 
 /// File-backed session persistence settings.
@@ -74,6 +75,9 @@ pub struct AppConfig {
     /// Skill subsystem configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Built-in tool registration configuration.
+    #[serde(default)]
+    pub tools: ToolsConfig,
     /// MCP server configurations.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -101,6 +105,7 @@ impl Default for AppConfig {
             approval_policy: None,
             multi_agent: MultiAgentConfig::default(),
             skills: SkillsConfig::default(),
+            tools: ToolsConfig::default(),
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
             compaction: CompactionConfig::default(),
@@ -158,6 +163,34 @@ theme = "light"
         .expect("parse app config");
 
         assert_eq!(cfg.tui.theme, crate::tui::TuiTheme::Light);
+    }
+
+    /// AppConfig enables all built-in tool groups by default.
+    #[test]
+    fn app_config_default_tools_are_enabled() {
+        let cfg = AppConfig::default();
+
+        assert!(cfg.tools.enable_fs);
+        assert!(cfg.tools.enable_shell);
+        assert!(cfg.tools.enable_skill);
+    }
+
+    /// AppConfig reads built-in tool switches from the nested tools section.
+    #[test]
+    fn app_config_reads_tools_switches() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[tools]
+enable_fs = false
+enable_shell = false
+enable_skill = false
+"#,
+        )
+        .expect("parse app config");
+
+        assert!(!cfg.tools.enable_fs);
+        assert!(!cfg.tools.enable_shell);
+        assert!(!cfg.tools.enable_skill);
     }
 
     /// AppConfig defaults manual compaction to retaining two recent user turns.

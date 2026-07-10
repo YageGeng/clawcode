@@ -30,7 +30,7 @@ use crate::approval::{ApprovalMode, ApprovalPolicy};
 use crate::context::{CompactionOptions, CompactionOutput, ContextManager};
 use crate::input_queue::InputQueue;
 use crate::prompt::environment::EnvironmentInfo;
-use crate::prompt::{Instructions, SystemPrompt};
+use crate::prompt::{Instructions, PromptCapabilityConfig, SystemPrompt};
 use crate::session::Session;
 use store::{
     CompactionRecord, MessageRecord, PersistedPayload, SessionRecorder,
@@ -551,7 +551,9 @@ pub(crate) async fn execute_turn(
     let instructions = Instructions::load(&ctx.cwd);
 
     // Render skill catalog for system prompt injection.
-    let skills_xml = if ctx.app_config.skills.include_instructions {
+    let skills_xml = if ctx.app_config.tools.enable_skill
+        && ctx.app_config.skills.include_instructions
+    {
         ctx.skill_registry.render_catalog()
     } else {
         None
@@ -562,6 +564,9 @@ pub(crate) async fn execute_turn(
         .agent_prompt(ctx.agent_prompt.clone())
         .instructions(instructions)
         .skills_xml(skills_xml)
+        .capability_config(PromptCapabilityConfig::from(
+            ctx.app_config.as_ref(),
+        ))
         .user_prompt(ctx.user_system_prompt.clone())
         .build();
 

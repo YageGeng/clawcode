@@ -37,7 +37,7 @@ use crate::command::prompt_args::parse_slash_name;
 use crate::command::slash_command::SlashCommand;
 use crate::context::InMemoryContext;
 use crate::prompt::environment::EnvironmentInfo;
-use crate::prompt::{Instructions, SystemPrompt};
+use crate::prompt::{Instructions, PromptCapabilityConfig, SystemPrompt};
 use crate::session::{Thread, event_stream};
 use crate::thread_manager::{
     LoadThreadParams, SpawnThreadParams, ThreadManager,
@@ -122,6 +122,12 @@ impl Kernel {
     /// Internally creates an [`AgentControlAdapter`] and registers it with
     /// the tool registry.
     pub fn register_agent_tools(&self) {
+        if !self.config.current().multi_agent.enable {
+            // Keep AgentControl available for restored session metadata while
+            // removing sub-agent tools from model-facing tool definitions.
+            return;
+        }
+
         let adapter =
             Arc::new(AgentControlAdapter::new(Arc::clone(&self.agent_control)));
         self.tools.register_agent_tools(adapter);
@@ -152,7 +158,9 @@ impl Kernel {
     ) -> String {
         let skill_registry =
             skills::SkillRegistry::discover(cwd, &app_cfg.skills);
-        let skills_xml = if app_cfg.skills.include_instructions {
+        let skills_xml = if app_cfg.tools.enable_skill
+            && app_cfg.skills.include_instructions
+        {
             skill_registry.render_catalog()
         } else {
             None
@@ -164,6 +172,7 @@ impl Kernel {
             ))
             .instructions(Instructions::load(cwd))
             .skills_xml(skills_xml)
+            .capability_config(PromptCapabilityConfig::from(app_cfg))
             .build()
             .render()
     }
@@ -1140,6 +1149,60 @@ mod tests {
         .expect("valid app config")
     }
 
+    /// Builds an app config with sub-agent support explicitly disabled.
+    fn app_config_with_subagents_disabled() -> AppConfig {
+        serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "multi_agent": {
+                "enable": false
+            },
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "deepseek-chat" }]
+                }
+            ],
+        }))
+        .expect("valid app config")
+    }
+
+    /// Builds an app config with the skill tool explicitly disabled.
+    fn app_config_with_skill_tool_disabled() -> AppConfig {
+        serde_json::from_value(serde_json::json!({
+            "active_model": "deepseek/deepseek-chat",
+            "tools": {
+                "enable_skill": false
+            },
+            "providers": [
+                {
+                    "id": "deepseek",
+                    "display_name": "DeepSeek",
+                    "provider_type": "openai-completions",
+                    "base_url": "https://example.invalid",
+                    "api_key": "test-key",
+                    "models": [{ "id": "deepseek-chat" }]
+                }
+            ],
+        }))
+        .expect("valid app config")
+    }
+
+    /// Builds an app config with model-facing built-in tool groups disabled.
+    fn app_config_with_model_tools_disabled() -> AppConfig {
+        let mut app_config = app_config_with_provider();
+        app_config.multi_agent.enable = false;
+        app_config.tools = config::ToolsConfig {
+            enable_fs: false,
+            enable_shell: false,
+            enable_skill: false,
+        };
+        app_config
+    }
+
     /// Read the latest persisted turn context from a test data-home directory.
     fn latest_turn_context_record(
         data_home: &std::path::Path,
@@ -1243,6 +1306,87 @@ mod tests {
         assert_eq!(models[0].id, "deepseek/deepseek-chat");
         assert_eq!(models[1].id, "openai/gpt-5.4");
         assert_eq!(models[2].id, "deepseek/deepseek-v4-flash");
+    }
+
+    /// register_agent_tools skips sub-agent tools when multi-agent support is disabled.
+    #[test]
+    fn register_agent_tools_skips_subagent_tools_when_disabled() {
+        let kernel = kernel_with_config(app_config_with_subagents_disabled());
+
+        kernel.register_agent_tools();
+
+        assert!(kernel.tools.get("spawn_agent").is_none());
+        assert!(kernel.tools.get("send_message").is_none());
+        assert!(kernel.tools.get("followup_task").is_none());
+        assert!(kernel.tools.get("wait_agent").is_none());
+        assert!(kernel.tools.get("list_agents").is_none());
+        assert!(kernel.tools.get("close_agent").is_none());
+    }
+
+    /// register_agent_tools keeps sub-agent tools available under default configuration.
+    #[test]
+    fn register_agent_tools_registers_subagent_tools_by_default() {
+        let kernel = kernel_with_config(app_config_with_provider());
+
+        kernel.register_agent_tools();
+
+        assert!(kernel.tools.get("spawn_agent").is_some());
+        assert!(kernel.tools.get("send_message").is_some());
+        assert!(kernel.tools.get("followup_task").is_some());
+        assert!(kernel.tools.get("wait_agent").is_some());
+        assert!(kernel.tools.get("list_agents").is_some());
+        assert!(kernel.tools.get("close_agent").is_some());
+    }
+
+    /// new_session skips the skill tool when tools.enable_skill is false.
+    #[tokio::test]
+    async fn new_session_skips_skill_tool_when_disabled() {
+        let app_config = app_config_with_skill_tool_disabled();
+        let kernel = kernel_with_config(app_config);
+        let cwd = tempfile::tempdir().expect("temp cwd");
+
+        let created = kernel
+            .new_session(
+                cwd.path().to_path_buf(),
+                SessionLaunchOptions::default(),
+            )
+            .await
+            .expect("session should start");
+        let thread = kernel
+            .thread_manager
+            .get_thread(&created.session_id)
+            .await
+            .expect("live thread should exist");
+
+        assert!(thread.tools.get("skill").is_none());
+    }
+
+    /// Base system prompt follows disabled tool configuration and omits skill catalog.
+    #[test]
+    fn base_system_prompt_omits_disabled_tool_capabilities() {
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        let skill_dir = cwd.path().join(".agents").join("skills").join("demo");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n",
+        )
+        .expect("write skill");
+        let app_config = app_config_with_model_tools_disabled();
+        let kernel = kernel_with_config(app_config.clone());
+
+        let prompt = kernel.render_base_system_prompt(
+            cwd.path(),
+            "deepseek-chat",
+            &app_config,
+        );
+
+        assert!(!prompt.contains("reading and editing code"));
+        assert!(!prompt.contains("running shell commands"));
+        assert!(!prompt.contains("searching codebases"));
+        assert!(!prompt.contains("multi-agent"));
+        assert!(!prompt.contains("<available_skills>"));
+        assert!(!prompt.contains("Use the skill tool"));
     }
 
     /// Verifies unavailable provider/model pairs are not exposed to ACP clients.
