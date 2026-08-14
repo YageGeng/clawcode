@@ -7,17 +7,27 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
+# workspace crates
+protocol = { workspace = true }
 
-arc-swap = { workspace = true }
-dirs = { workspace = true }
+# error
+thiserror = { workspace = true }
+
+# serde
 figment = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
+
+# builder
 typed-builder = { workspace = true }
 
+# fs
+dirs = { workspace = true }
+
 [dev-dependencies]
+# serde
 figment = { workspace = true, features = ["test"] }
-tempfile = "3"
-toml = "0.8"
+toml = { workspace = true }
+
+# fs
+tempfile = { workspace = true }

@@ -2,19 +2,18 @@
 name = "protocol"
 edition.workspace = true
 version.workspace = true
-description = "Internal protocol types for clawcode agent-core / frontend communication"
+description = "Shared domain protocol for the agent runtime"
 
 [lints]
 workspace = true
 
 [dependencies]
+# error
+thiserror = { workspace = true }
+
+# serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-uuid = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
+
+# builder
 typed-builder = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-anyhow = { workspace = true }
-agent-client-protocol = { workspace = true, features = ["unstable"] }

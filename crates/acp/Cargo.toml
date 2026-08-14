@@ -2,34 +2,42 @@
 name = "acp"
 edition.workspace = true
 version.workspace = true
-description = "ACP bridge for clawcode - translates between internal protocol and Agent Client Protocol"
 
 [lints]
 workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-kernel = { path = "../kernel" }
-provider = { path = "../provider" }
-config = { path = "../config" }
-tools = { path = "../tools" }
+# workspace crates
+kernel = { workspace = true }
+protocol = { workspace = true }
 
-agent-client-protocol = { workspace = true, features = ["unstable"] }
-agent-client-protocol-http = { workspace = true, features = ["server"] }
-axum = { workspace = true }
-tower-http = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "net"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+# error
+thiserror = { workspace = true }
+
+# async
 async-trait = { workspace = true }
 futures = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "sync"] }
+
+# http
+agent-client-protocol-http = { workspace = true, features = ["server"] }
+axum = { workspace = true }
+
+# serde
+serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-anyhow = { workspace = true }
-uuid = { workspace = true }
-thiserror = { workspace = true }
-typed-builder = { workspace = true }
-clap = { workspace = true }
-chrono = { workspace = true, features = ["clock", "std"] }
-dirs = { workspace = true }
+
+# protocol
+agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] }
+
+[dev-dependencies]
+# workspace crates
+extension = { workspace = true }
+store = { workspace = true }
+tools = { workspace = true }
+
+# async
+tokio-util = { workspace = true }
+
+# fs
+tempfile = { workspace = true }

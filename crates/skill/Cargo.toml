@@ -1,0 +1,19 @@
+[package]
+name = "skill"
+edition.workspace = true
+version.workspace = true
+description = "Pi-compatible skill discovery and explicit invocation"
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+protocol = { workspace = true }
+
+# error
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# fs
+tempfile = { workspace = true }

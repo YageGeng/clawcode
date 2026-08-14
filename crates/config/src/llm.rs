@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ConfigValidationError;
+use protocol::ModelProfile;
+
 /// Stable provider identifier used by configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(from = "String", into = "String")]
@@ -115,6 +118,26 @@ impl ApiKeyConfig {
             Self::Env { env } => std::env::var(env),
         }
     }
+
+    /// Validates that an API key source resolves without exposing its value.
+    pub fn validate_source(
+        &self,
+        provider_id: &str,
+    ) -> Result<(), ConfigValidationError> {
+        let key_source = match self {
+            Self::Plaintext(value) if !value.trim().is_empty() => return Ok(()),
+            Self::Plaintext(_) => "plaintext".to_string(),
+            Self::Env { env } => match std::env::var(env) {
+                Ok(value) if !value.trim().is_empty() => return Ok(()),
+                Ok(_) | Err(_) => env.clone(),
+            },
+        };
+
+        Err(ConfigValidationError::AuthResolution {
+            provider_id: provider_id.to_string(),
+            key_source,
+        })
+    }
 }
 
 /// Provider auth configuration for specialized auth workflows.
@@ -168,6 +191,86 @@ pub struct LlmProvider {
     /// Models available through this provider.
     #[serde(default)]
     pub models: Vec<LlmModel>,
+}
+
+impl LlmModel {
+    /// Converts validated model metadata into the stable runtime profile.
+    pub fn to_profile(
+        &self,
+        provider: &LlmProvider,
+    ) -> Result<ModelProfile, ConfigValidationError> {
+        let provider_id = provider.id.as_str();
+        let context_tokens = self.context_tokens.ok_or_else(|| {
+            ConfigValidationError::MissingModelLimit {
+                provider_id: provider_id.to_string(),
+                model_id: self.id.clone(),
+                field: "context_tokens",
+            }
+        })?;
+        if context_tokens == 0 {
+            return Err(ConfigValidationError::ZeroModelLimit {
+                provider_id: provider_id.to_string(),
+                model_id: self.id.clone(),
+                field: "context_tokens",
+            });
+        }
+        let max_output_tokens = self.max_output_tokens.ok_or_else(|| {
+            ConfigValidationError::MissingModelLimit {
+                provider_id: provider_id.to_string(),
+                model_id: self.id.clone(),
+                field: "max_output_tokens",
+            }
+        })?;
+        if max_output_tokens == 0 {
+            return Err(ConfigValidationError::ZeroModelLimit {
+                provider_id: provider_id.to_string(),
+                model_id: self.id.clone(),
+                field: "max_output_tokens",
+            });
+        }
+
+        Ok(ModelProfile::builder()
+            .provider_id(provider_id.to_string())
+            .model_id(self.id.clone())
+            .display_name(
+                self.display_name.clone().unwrap_or_else(|| self.id.clone()),
+            )
+            .context_tokens(context_tokens)
+            .max_output_tokens(max_output_tokens)
+            .build())
+    }
+}
+
+impl LlmProvider {
+    /// Validates unique model identifiers and all runtime-required limits.
+    pub fn validate_models(&self) -> Result<(), ConfigValidationError> {
+        let mut model_ids = std::collections::HashSet::new();
+        for model in &self.models {
+            if !model_ids.insert(model.id.as_str()) {
+                return Err(ConfigValidationError::DuplicateModel {
+                    provider_id: self.id.as_str().to_string(),
+                    model_id: model.id.clone(),
+                });
+            }
+            model.to_profile(self)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validates that the provider has a resolvable authentication source.
+    pub fn validate_auth_source(&self) -> Result<(), ConfigValidationError> {
+        if let Some(api_key) = &self.api_key {
+            return api_key.validate_source(self.id.as_str());
+        }
+        if self.auth.is_some() {
+            return Ok(());
+        }
+
+        Err(ConfigValidationError::MissingAuthentication {
+            provider_id: self.id.as_str().to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

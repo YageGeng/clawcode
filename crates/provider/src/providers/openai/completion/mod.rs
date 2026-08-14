@@ -985,6 +985,7 @@ impl TryFrom<CompletionResponse>
                     .map(|d| d.cached_tokens as u64)
                     .unwrap_or(0),
                 cache_creation_input_tokens: 0,
+                reasoning_tokens: None,
             })
             .unwrap_or_default();
 
@@ -1435,7 +1436,7 @@ where
     > {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = "openai",
@@ -1460,7 +1461,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Chat Completions completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -1488,7 +1489,7 @@ where
 
                         if enabled!(Level::TRACE) {
                             tracing::trace!(
-                                target: "clawcode::completions",
+                                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                                 "OpenAI Chat Completions completion response: {}",
                                 serde_json::to_string_pretty(&response)?
                             );

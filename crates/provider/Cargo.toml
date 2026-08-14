@@ -10,40 +10,56 @@ workspace = true
 doctest = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-config = { path = "../config" }
+# workspace crates
+config = { workspace = true }
+protocol = { workspace = true }
 
-typed-builder = { workspace = true }
+# error
+thiserror = { workspace = true }
 
+# tracing & log
+tracing = { workspace = true }
+tracing-futures = { workspace = true, features = ["futures-03"] }
+
+# async
 async-stream = { workspace = true }
-base64 = { workspace = true }
-bytes = { workspace = true }
 futures = { workspace = true }
+futures-timer = { workspace = true }
+pin-project-lite = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+# http
+bytes = { workspace = true }
+eventsource-stream = { workspace = true }
+http = { workspace = true }
+httpdate = { workspace = true }
+mime = { workspace = true }
 mime_guess = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
-schemars = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-url = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
-http = { workspace = true }
-tracing-futures = { workspace = true, features = ["futures-03"] }
-fastrand = { workspace = true }
-nanoid = { workspace = true }
-getrandom = { workspace = true, optional = true }
-eventsource-stream = { workspace = true }
-pin-project-lite = { workspace = true }
-futures-timer = { workspace = true }
-wasm-bindgen-futures = { workspace = true, optional = true }
-mime = { workspace = true }
 reqwest-middleware = { workspace = true, optional = true, features = [
   "json",
   "multipart",
   "charset",
   "http2",
 ] }
+url = { workspace = true }
+
+# serde
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+# wasm
+getrandom = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+
+# misc
+base64 = { workspace = true }
+fastrand = { workspace = true }
+nanoid = { workspace = true }
 
 # Native-only dependency for OpenAI Responses websocket mode.
 # Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
@@ -51,14 +67,25 @@ reqwest-middleware = { workspace = true, optional = true, features = [
 tokio-tungstenite = { workspace = true, optional = true }
 
 [dev-dependencies]
+# error
 anyhow = { workspace = true }
-base64 = { workspace = true }
-figment = { workspace = true, features = ["test"] }
-serde_path_to_error = { workspace = true }
+
+# tracing & log
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# async
 tokio = { workspace = true, features = ["full"] }
 tokio-test = { workspace = true }
+
+# serde
+figment = { workspace = true, features = ["test"] }
+serde_path_to_error = { workspace = true }
+
+# fs
 toml = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# misc
+base64 = { workspace = true }
 
 [features]
 default = ["reqwest", "rustls"]

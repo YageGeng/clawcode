@@ -20,7 +20,7 @@ use crate::client::{
     self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Provider,
     ProviderBuilder, ProviderClient,
 };
-use crate::completion::GetTokenUsage;
+use crate::completion::{GetFinishReason, GetTokenUsage, ProviderFinishReason};
 use crate::http_client::{self, HttpClientExt};
 use crate::message::{Document, DocumentSourceKind, TryIntoMany};
 use crate::model::{Model, ModelList, ModelListingError};
@@ -490,6 +490,12 @@ impl TryFrom<CompletionResponse>
             total_tokens: response.usage.total_tokens as u64,
             cached_input_tokens: response.usage.cached_input_tokens(),
             cache_creation_input_tokens: 0,
+            reasoning_tokens: response
+                .usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens)
+                .map(u64::from),
         };
 
         Ok(completion::CompletionResponse {
@@ -598,7 +604,7 @@ where
     > {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = "deepseek",
@@ -622,7 +628,7 @@ where
         ))?;
 
         if enabled!(Level::TRACE) {
-            tracing::trace!(target: "clawcode::completions",
+            tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "DeepSeek completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -660,7 +666,7 @@ where
                             response.usage.cached_input_tokens(),
                         );
                         if enabled!(Level::TRACE) {
-                            tracing::trace!(target: "clawcode::completions",
+                            tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                                 "DeepSeek completion response: {}",
                                 serde_json::to_string_pretty(&response)?
                             );
@@ -702,7 +708,7 @@ where
         request.additional_params = Some(params);
 
         if enabled!(Level::TRACE) {
-            tracing::trace!(target: "clawcode::completions",
+            tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "DeepSeek streaming completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -718,7 +724,7 @@ where
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
                 gen_ai.provider.name = "deepseek",
@@ -754,6 +760,20 @@ pub struct StreamingDelta {
 #[derive(Deserialize, Debug)]
 struct StreamingChoice {
     delta: StreamingDelta,
+    finish_reason: Option<String>,
+}
+
+impl StreamingChoice {
+    /// Converts a DeepSeek terminal string into the compatible stream reason.
+    fn compatible_finish_reason(&self) -> Option<CompatibleFinishReason> {
+        self.finish_reason.as_deref().map(|reason| match reason {
+            "tool_calls" | "function_call" => CompatibleFinishReason::ToolCalls,
+            "stop" => CompatibleFinishReason::Stop,
+            "length" => CompatibleFinishReason::Length,
+            "content_filter" => CompatibleFinishReason::Refusal,
+            reason => CompatibleFinishReason::Other(reason.to_string()),
+        })
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -767,11 +787,25 @@ struct StreamingCompletionChunk {
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct StreamingCompletionResponse {
     pub usage: Usage,
+    finish_reason: ProviderFinishReason,
+    raw_finish_reason: String,
 }
 
 impl GetTokenUsage for StreamingCompletionResponse {
     fn token_usage(&self) -> Option<crate::completion::Usage> {
         self.usage.token_usage()
+    }
+}
+
+impl GetFinishReason for StreamingCompletionResponse {
+    /// Returns the normalized DeepSeek terminal reason.
+    fn finish_reason(&self) -> ProviderFinishReason {
+        self.finish_reason.clone()
+    }
+
+    /// Returns the DeepSeek terminal reason string.
+    fn raw_finish_reason(&self) -> Option<String> {
+        Some(self.raw_finish_reason.clone())
     }
 }
 
@@ -809,7 +843,7 @@ impl CompatibleStreamProfile for DeepSeekCompatibleProfile {
                 data.usage,
                 &data.choices,
                 |choice| CompatibleChoiceData {
-                    finish_reason: CompatibleFinishReason::Other,
+                    finish_reason: choice.compatible_finish_reason(),
                     text: choice.delta.content.clone(),
                     reasoning: choice.delta.reasoning_content.clone(),
                     tool_calls:
@@ -822,8 +856,16 @@ impl CompatibleStreamProfile for DeepSeekCompatibleProfile {
         ))
     }
 
-    fn build_final_response(&self, usage: Self::Usage) -> Self::FinalResponse {
-        StreamingCompletionResponse { usage }
+    fn build_final_response(
+        &self,
+        usage: Self::Usage,
+        finish_reason: CompatibleFinishReason,
+    ) -> Self::FinalResponse {
+        StreamingCompletionResponse {
+            usage,
+            finish_reason: finish_reason.provider_finish_reason(),
+            raw_finish_reason: finish_reason.raw_finish_reason(),
+        }
     }
 
     fn uses_distinct_tool_call_eviction(&self) -> bool {
@@ -894,10 +936,11 @@ where
         let response =
             self.client.send::<_, Vec<u8>>(req).await.map_err(|error| {
                 match error {
-                    http_client::Error::InvalidStatusCodeWithMessage(
+                    http_client::Error::InvalidStatusCodeWithMessage {
                         status,
                         message,
-                    ) => ModelListingError::api_error_with_context(
+                        ..
+                    } => ModelListingError::api_error_with_context(
                         "DeepSeek",
                         path,
                         status.as_u16(),

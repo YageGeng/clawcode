@@ -1,0 +1,59 @@
+[package]
+name = "app"
+edition.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+acp = { workspace = true }
+config = { workspace = true }
+extension = { workspace = true }
+kernel = { workspace = true }
+mcp = { workspace = true }
+protocol = { workspace = true }
+skill = { workspace = true }
+store = { workspace = true }
+tools = { workspace = true }
+
+# error
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# async
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+
+# http
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+# fs
+dirs = { workspace = true }
+
+# cli
+clap = { workspace = true }
+
+[dev-dependencies]
+# async
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
+
+# http
+tower = { workspace = true }
+
+# fs
+tempfile = { workspace = true }
+
+[[bin]]
+name = "clawcode"
+path = "src/main.rs"

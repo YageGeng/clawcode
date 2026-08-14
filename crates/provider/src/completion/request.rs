@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
-pub use protocol::Usage;
+pub use super::usage::Usage;
 
 // Errors
 #[derive(Debug, Error)]
@@ -79,6 +79,63 @@ pub enum CompletionError {
     /// Error returned by the completion model provider
     #[error("ProviderError: {0}")]
     ProviderError(String),
+}
+
+/// Request retry classification derived from structured provider failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryDisposition {
+    /// The request may be retried after an optional provider-requested delay.
+    Retryable {
+        /// Delay parsed from Retry-After headers when supplied.
+        retry_after_ms: Option<u64>,
+    },
+    /// The same request should fail without another provider acquisition.
+    NonRetryable,
+}
+
+impl CompletionError {
+    /// Classifies provider acquisition failures using pi's request retry rules.
+    #[must_use]
+    pub fn retry_disposition(&self) -> RetryDisposition {
+        match self {
+            Self::HttpError(error) => {
+                if let Some(status) = error.status_code() {
+                    if status == http::StatusCode::REQUEST_TIMEOUT
+                        || status == http::StatusCode::CONFLICT
+                        || status == http::StatusCode::TOO_MANY_REQUESTS
+                        || status.is_server_error()
+                    {
+                        return RetryDisposition::Retryable {
+                            retry_after_ms: error.retry_after_ms(),
+                        };
+                    }
+                    return RetryDisposition::NonRetryable;
+                }
+
+                match error {
+                    http_client::Error::Instance(_)
+                    | http_client::Error::StreamEnded => {
+                        RetryDisposition::Retryable {
+                            retry_after_ms: None,
+                        }
+                    }
+                    _ => RetryDisposition::NonRetryable,
+                }
+            }
+            _ => RetryDisposition::NonRetryable,
+        }
+    }
+
+    /// Returns an HTTP status code when the provider failure carries one.
+    #[must_use]
+    pub fn status_code(&self) -> Option<u16> {
+        match self {
+            Self::HttpError(error) => {
+                error.status_code().map(|status| status.as_u16())
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Prompt errors
@@ -168,8 +225,18 @@ impl std::fmt::Display for Document {
     }
 }
 
-/// Re-exported from protocol — both crates use the same definition.
-pub type ToolDefinition = protocol::ToolDefinition;
+/// Provider-neutral function tool definition sent to completion APIs.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ToolDefinition {
+    /// Unique function name exposed to the model.
+    pub name: String,
+
+    /// Human-readable function description.
+    pub description: String,
+
+    /// JSON Schema describing accepted function arguments.
+    pub parameters: serde_json::Value,
+}
 
 /// Provider-native tool definition.
 ///
@@ -357,6 +424,31 @@ pub struct CompletionResponse<T> {
 pub trait GetTokenUsage {
     /// Returns token usage when the response type carries it.
     fn token_usage(&self) -> Option<crate::completion::Usage>;
+}
+
+/// Provider-neutral terminal reason extracted from a provider's final response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFinishReason {
+    /// The provider completed normal assistant output.
+    Stop,
+    /// The provider completed with one or more tool calls.
+    ToolUse,
+    /// The provider reached an output token or length limit.
+    Length,
+    /// The provider refused to fulfill the request.
+    Refusal,
+    /// A provider-specific terminal reason without a standard mapping.
+    Other(String),
+}
+
+/// Extracts normalized and provider-native terminal reasons from final responses.
+pub trait GetFinishReason {
+    /// Returns the normalized terminal reason.
+    fn finish_reason(&self) -> ProviderFinishReason;
+
+    /// Returns the provider-native terminal reason when it is available.
+    fn raw_finish_reason(&self) -> Option<String>;
 }
 
 impl GetTokenUsage for () {

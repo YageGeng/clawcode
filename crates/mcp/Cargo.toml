@@ -2,26 +2,41 @@
 name = "mcp"
 edition.workspace = true
 version.workspace = true
-description = "MCP client — server connection management, tool discovery, and tool calls"
+description = "Session-scoped MCP client and tool factory"
 
 [lints]
 workspace = true
 
 [dependencies]
-tokio = { workspace = true, features = ["process", "time", "sync"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-rmcp = { workspace = true, features = ["client", "auth", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-async-trait = { workspace = true }
-oauth2 = "5"
+# workspace crates
+config = { workspace = true }
+protocol = { workspace = true }
+tools = { workspace = true }
+
+# error
 thiserror = { workspace = true }
-protocol = { path = "../protocol" }
-tracing = { workspace = true }
-reqwest = { workspace = true, features = ["json"] }
-schemars = { workspace = true }
-dirs = { workspace = true }
+
+# async
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process", "rt", "sync", "time"] }
+
+# http
+http = { workspace = true }
+
+# serde
+serde_json = { workspace = true }
+
+# builder
 typed-builder = { workspace = true }
 
+# protocol
+rmcp = { workspace = true, features = [
+  "client",
+  "transport-child-process",
+  "transport-streamable-http-client-reqwest",
+] }
+
 [dev-dependencies]
-tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+# async
+tokio = { workspace = true, features = ["macros", "rt"] }
+tokio-util = { workspace = true }

@@ -1,16 +1,15 @@
-//! Loader that resolves an [`AppConfig`] from figment sources and stores it
-//! behind an [`ArcSwap`]-shared handle so future hot-reload can swap in place.
+//! Loader that resolves an immutable [`AppConfig`] from figment sources.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
 
 use crate::AppConfig;
+use protocol::ProductIdentity;
 
 /// Errors surfaced while constructing or loading configuration.
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +25,9 @@ pub enum ConfigError {
     /// MCP config failed validation after TOML/env extraction.
     #[error("mcp config error: {0}")]
     Mcp(#[from] crate::mcp::McpConfigError),
+    /// Cross-field application configuration failed validation.
+    #[error("config validation error: {0}")]
+    Validation(#[from] crate::config::ConfigValidationError),
     /// No configuration found at any default search path and no providers
     /// were set via `CLAW_*` environment variables.
     #[error("{0}")]
@@ -39,26 +41,22 @@ impl From<figment::Error> for ConfigError {
     }
 }
 
-/// Shared handle holding the active [`AppConfig`] inside an [`ArcSwap`].
-///
-/// Readers always go through [`current`](Self::current) to obtain a consistent
-/// snapshot. A future hot-reload path can call `self.0.store(Arc::new(new))`
-/// without breaking the API.
+/// Cheaply clonable immutable configuration handle.
 #[derive(Debug, Clone)]
-pub struct ConfigHandle(Arc<ArcSwap<AppConfig>>);
+pub struct ConfigHandle(Arc<AppConfig>);
 
 impl ConfigHandle {
     /// Construct a handle wrapping the supplied config; primarily used by tests
     /// and by the figment-backed loaders defined later in this module.
     #[must_use]
     pub fn from_config(cfg: AppConfig) -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(cfg)))
+        Self(Arc::new(cfg))
     }
 
     /// Load a consistent snapshot of the active config.
     #[must_use]
     pub fn current(&self) -> Arc<AppConfig> {
-        self.0.load_full()
+        Arc::clone(&self.0)
     }
 }
 
@@ -89,9 +87,13 @@ where
         fig = fig.merge(Toml::file(p));
     }
     // Env keys: CLAW_PROVIDERS__0__API_KEY -> providers[0].api_key
-    fig = fig.merge(Env::prefixed("CLAW_").split("__"));
+    fig = fig
+        .merge(Env::prefixed(ProductIdentity::CONFIG_ENV_PREFIX).split("__"));
     let cfg: AppConfig = fig.extract()?;
     cfg.validate()?;
+    for server in &cfg.mcp_servers {
+        server.validate()?;
+    }
     Ok(ConfigHandle::from_config(cfg))
 }
 
@@ -106,7 +108,7 @@ where
 /// empty, in which case [`load`] yields an `AppConfig::default()` handle.
 fn default_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(p) = std::env::var("CLAW_CONFIG") {
+    if let Ok(p) = std::env::var(ProductIdentity::CONFIG_PATH_ENV) {
         let path = PathBuf::from(p);
         if path.exists() {
             out.push(path);
@@ -115,13 +117,15 @@ fn default_paths() -> Vec<PathBuf> {
         }
     }
     if let Some(base) = dirs::config_dir() {
-        let xdg = base.join("clawcode").join("config.toml");
+        let xdg = base
+            .join(ProductIdentity::CONFIG_DIR_NAME)
+            .join(ProductIdentity::USER_CONFIG_FILE_NAME);
         if xdg.exists() {
             out.push(xdg);
             return out;
         }
     }
-    let cwd = PathBuf::from("./claw.toml");
+    let cwd = PathBuf::from(ProductIdentity::CONFIG_FILE_NAME);
     if cwd.exists() {
         out.push(cwd);
     }
@@ -136,31 +140,31 @@ fn default_paths() -> Vec<PathBuf> {
 pub fn load() -> Result<ConfigHandle, ConfigError> {
     let paths = default_paths();
     let no_files_found = paths.is_empty();
-    let handle = load_from(paths)?;
     if no_files_found {
-        let cfg = handle.current();
-        if cfg.providers.is_empty() {
-            return Err(ConfigError::NotFound(
-                "no config file found.\n\
-                 \n\
-                 Searched:\n  - $CLAW_CONFIG (not set)\n  - \
-                 $XDG_CONFIG_HOME/clawcode/config.toml (not found)\n  - \
-                 ./claw.toml (not found)\n\
-                 \n\
-                 Create a config file at one of these paths with at least one\n\
-                 [[providers]] section and active_model set. Example:\n\
-                 \n  active_model = \"deepseek/deepseek-v4-flash\"\n\
-                 \n  [[providers]]\n  id = \"deepseek\"\n  \
-                 provider_type = \"openai-completions\"\n  \
-                 base_url = \"https://api.deepseek.com\"\n  \
-                 api_key = \"your-api-key\"\n\
-                 \n  [[providers.models]]\n  id = \"deepseek-v4-flash\"\n\
-                 \n\
-                 Or set providers via CLAW_PROVIDERS_* environment variables."
-                    .to_string(),
-            ));
-        }
+        return Err(ConfigError::NotFound(format!(
+            "no config file found.\n\n\
+             Searched:\n  - ${} (not set)\n  - \
+             $XDG_CONFIG_HOME/{}/{} (not found)\n  - \
+             ./{} (not found)\n\n\
+             Create a config file at one of these paths with at least one\n\
+             [[providers]] section and active_model set. Example:\n\n  \
+             active_model = \"deepseek/deepseek-v4-flash\"\n\n  \
+             [[providers]]\n  id = \"deepseek\"\n  \
+             provider_type = \"openai-completions\"\n  \
+             base_url = \"https://api.deepseek.com\"\n  \
+             api_key = \"your-api-key\"\n\n  [[providers.models]]\n  \
+             id = \"deepseek-v4-flash\"\n  \
+             context_tokens = 1000000\n  \
+             max_output_tokens = 384000\n\n\
+             Or set providers via {}* environment variables.",
+            ProductIdentity::CONFIG_PATH_ENV,
+            ProductIdentity::CONFIG_DIR_NAME,
+            ProductIdentity::USER_CONFIG_FILE_NAME,
+            ProductIdentity::CONFIG_FILE_NAME,
+            ProductIdentity::CONFIG_ENV_PREFIX,
+        )));
     }
+    let handle = load_from(paths)?;
     Ok(handle)
 }
 

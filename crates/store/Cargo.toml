@@ -2,21 +2,25 @@
 name = "store"
 edition.workspace = true
 version.workspace = true
-description = "Session persistence abstraction — trait-based store for session lifecycle"
+description = "Pi v4 compatible JSONL session persistence"
 
 [lints]
 workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
+# workspace crates
+protocol = { workspace = true }
 
-tokio = { workspace = true, features = ["rt", "sync"] }
-async-trait = { workspace = true }
-chrono = { workspace = true, features = ["clock", "std"] }
+# error
+thiserror = { workspace = true }
+
+# serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+
+# builder
 typed-builder = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
+# fs
 tempfile = { workspace = true }

@@ -1,77 +1,49 @@
 # clawcode
 
-An AI coding agent that runs over the Agent Client Protocol (ACP). It orchestrates
-LLM calls, manages chat sessions, discovers project-level skills, and executes a
-registry of built-in and MCP-backed tools.
-
-clawcode ships two binaries:
-
-- **`acp`** — ACP stdio agent for any ACP-compatible client.
-- **`claw-tui`** — Interactive terminal client with session resume and streaming
-  responses.
+A modular agent backend inspired by pi's Turn lifecycle and session model. The
+runtime speaks Agent Client Protocol (ACP) v2 over stdio, HTTP/SSE, and
+WebSocket and includes a local, light-themed Agent WebUI.
 
 ## Architecture
 
-```
-┌──────────┐  ACP (stdio)  ┌───────┐
-│  ACP     │◄────────────►│  acp  │
-│  Client  │               └───┬───┘
-└──────────┘                   │
-                    ┌──────────▼──────────┐
-                    │       kernel        │
-                    │  session / turn     │
-                    │  orchestration      │
-                    └──┬───────┬───────┬──┘
-                       │       │       │
-              ┌────────▼┐ ┌────▼──┐ ┌──▼──────┐
-              │ provider │ │ tools │ │ skills  │
-              │ (LLMs)   │ │       │ │         │
-              └──────────┘ └───┬───┘ └─────────┘
-                          ┌────▼─────┐
-                          │   mcp    │
-                          │ servers  │
-                          └──────────┘
-```
-
-## Crate map
-
-| Crate | Purpose |
+| Crate | Responsibility |
 |---|---|
-| `protocol` | Internal event/op types for agent-core ↔ frontend communication |
-| `acp` | ACP bridge — translates internal protocol to Agent Client Protocol over stdio |
-| `kernel` | Agent core — session lifecycle, turn loop, LLM orchestration, tool dispatch |
-| `config` | Typed configuration loaded from `~/.config/clawcode/config.toml` or `./claw.toml` via Figment, shared behind `ArcSwap` |
-| `provider` | LLM provider abstraction — factory, completion, streaming clients |
-| `tools` | Built-in tools: shell execution, file I/O (read / write / edit / patch), skill invocation, sub-agent spawning, MCP tool passthrough |
-| `skills` | Skill discovery from `.agents/skills/` and `$HOME/.agents/skills/`, catalog rendering, `$skill-name` mention matching |
-| `mcp` | MCP client — server connection management, tool discovery, calls over stdio or streamable HTTP |
-| `store` | Session persistence — file-based store with manifest, recording, and replay |
-| `tui` | Interactive terminal UI — starts the local ACP agent in-process, renders streamed session updates, and switches between main/sub-agent sessions |
+| `app` | Production composition root and CLI |
+| `protocol` | Shared domain types, Turn/message events, and product identity |
+| `config` | Immutable TOML configuration |
+| `provider` | LLM API adapters and provider factory |
+| `kernel` | Session ownership, serialized per-session runs, Turn loop, and tool orchestration |
+| `tools` | Public `AgentTool` interface, registry, and pi-compatible coding tools |
+| `mcp` | Session-scoped MCP stdio and Streamable HTTP tools |
+| `skill` | Deterministic pi-compatible `SKILL.md` discovery and explicit invocation |
+| `extension` | Non-UI pi lifecycle hooks and plugin registrations |
+| `store` | Append-only pi v4 JSONL sessions, lanes, records, facts, branches, and forks |
+| `acp` | ACP v2 mapping plus stdio, HTTP/SSE, and WebSocket transports |
+| `web` | React/TypeScript Agent workbench using the ACP WebSocket transport |
 
-## Quick start
+The retained `config` and `provider` crates feed the new kernel through
+factories. Every runtime message and event carries a `turn_id` and a decimal
+string millisecond timestamp. Persisted messages also include creation,
+first-output, and last-output timestamps.
 
-### Prerequisites
+## Configuration
 
-- Rust stable (see `rust-toolchain.toml`)
-- An LLM API key (OpenAI, DeepSeek, or any OpenAI-compatible provider)
+Configuration is loaded once at startup. Search order is:
 
-### Configuration
+1. The explicit config-path environment variable.
+2. The product directory under the platform config directory.
+3. The repository-local TOML file.
 
-Create `~/.config/clawcode/config.toml`. For repo-local experiments, create `./claw.toml` as the fallback config:
+Example:
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-approval = "yolo"  # or "request_approval"
-
-[tui]
-theme = "dark"  # or "light"
 
 [[providers]]
 id = "deepseek"
 display_name = "DeepSeek"
 provider_type = "openai-completions"
 base_url = "https://api.deepseek.com"
-
 api_key = { env = "DEEPSEEK_API_KEY" }
 
 [[providers.models]]
@@ -80,68 +52,93 @@ display_name = "DeepSeek V4 Pro"
 context_tokens = 1000000
 max_output_tokens = 384000
 
-# Optional: connect MCP servers
+[retry]
+enabled = true
+max_retries = 3
+base_delay_ms = 2000
+
+[retry.provider]
+timeout_ms = 120000
+max_retries = 2
+max_retry_delay_ms = 60000
+
+[compaction]
+enabled = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+
 [[mcp_servers]]
-enabled = false
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+name = "example"
+command = "example-mcp-server"
+args = []
 ```
 
-Run the TUI with:
+## Running
+
+Run an ACP stdio agent:
 
 ```sh
-# Interactive terminal UI
-cargo run -p tui
-# Or run by binary name
-cargo run --bin claw-tui
-cargo run --bin acp
+cargo run -p app --bin clawcode -- stdio
 ```
 
-The TUI also supports listing persisted sessions and resuming one:
+Build the WebUI with Node.js 22.12 or newer, then run the same-origin HTTP
+server:
 
 ```sh
-cargo run -p tui -- --list-sessions
-cargo run -p tui -- --resume <SESSION_ID>
+cd web
+npm install --ignore-scripts
+npm run build
+cd ..
+cargo run -p app --bin clawcode -- serve --web-root web/dist
 ```
 
-In the TUI, use `/agent` to open the agent picker. It lists the main session
-and live sub-agents, then switches the active transcript to the selected agent
-session.
+Open `http://127.0.0.1:3000`. `GET /acp` upgrades to WebSocket when requested
+and is otherwise used for SSE; `POST /acp` carries ACP JSON-RPC requests. The
+service also exposes `GET /health`.
 
-Use `/model` from the main session to open the model picker, then use the arrow
-keys and Enter to switch the active model. `/model <provider/model>` also
-switches directly.
+The unauthenticated WebUI is deliberately loopback-only. The server rejects
+wildcard, LAN, and public bind addresses. The active model, Skills, and MCP
+configuration are read-only in the browser and are loaded from TOML at startup.
+The UI supports text, Markdown, and resource links; it does not upload files or
+implement ACP client filesystem or terminal callbacks. If `web/dist` is
+missing, UI routes return HTTP 503 while ACP and health routes stay available.
 
-## Sub-agents
+For frontend development, start the Rust server on port 3000, then run
+`npm run dev` from `web/`; Vite proxies bootstrap and ACP WebSocket traffic.
+Browser acceptance runs against the production `app` backend and the configured
+provider. It therefore requires a valid model configuration and credentials.
 
-Models can use the built-in agent tools to spawn and coordinate sub-agents.
-Sub-agents run as separate sessions with their own transcript streams, and the
-TUI can switch between the main session and sub-agent sessions with `/agent`.
+## Storage
 
-## Skills
+Sessions are stored as pi v4-compatible JSONL files under cwd-encoded
+directories. There is no global `index.jsonl`; listing scans v4 headers.
+Storage supports lanes, tree navigation, branch reads, branch forks, global
+name/label facts, operation records, and torn-tail recovery.
 
-Skills live in `.agents/skills/<name>/SKILL.md` (project) or
-`$HOME/.agents/skills/<name>/SKILL.md` (user). Each skill has YAML frontmatter
-with a `name` and `description`, and a markdown body that is injected into the
-system prompt when the user mentions `$skill-name`.
+Agent-level transient failures use 2/4/8-second exponential backoff, while
+provider request retry is configured independently. Threshold compaction does
+not replay a successful Assistant. Explicit overflow and recoverable length
+stops remove the failed Assistant from active context and compact-and-retry at
+most once. The former Turn-count compaction fields are not backward compatible.
 
-Project skills take priority over user skills with the same name.
+## ACP extensions
 
-## Local workspace state
+Pi concepts without native ACP equivalents use ACP v2 extension methods and
+`SessionUpdate::Other` values under the product namespace. Native
+`session/new`, `session/list`, `session/resume`, `session/prompt`,
+`session/cancel`, and `session/close` remain standard ACP methods. The agent
+does not advertise or invoke client filesystem or terminal callbacks.
 
-Local agent state directories are intentionally ignored by Git:
+## Validation
 
-- `.agents/`
-- `.claude/`
-- `.codex/`
-
-These directories may contain local skills, tool caches, transcripts, or
-agent-specific runtime files. Keep durable project documentation in `docs/`
-instead.
+```sh
+cd web && npm run check && npm run build && cd ..
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+```
 
 ## License
 
-Licensed under either of [MIT](./LICENSE-MIT) or [Apache 2.0](./LICENSE-APACHE), at your option.
-
-See [LICENSES](./LICENSES/) and [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+Licensed under either [MIT](./LICENSE-MIT) or
+[Apache 2.0](./LICENSE-APACHE), at your option.

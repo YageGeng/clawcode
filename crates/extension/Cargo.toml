@@ -1,0 +1,26 @@
+[package]
+name = "extension"
+edition.workspace = true
+version.workspace = true
+description = "Non-UI pi-compatible extension lifecycle"
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+protocol = { workspace = true }
+tools = { workspace = true }
+
+# error
+thiserror = { workspace = true }
+
+# async
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# async
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+# serde
+serde_json = { workspace = true }
