@@ -622,7 +622,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let path = dir.join(format!("clawcode-chatgpt-auth-{now}.json"));
+        let path = dir.join(format!(
+            "{}-{now}.json",
+            protocol::ProductIdentity::CHATGPT_AUTH_TEMP_PREFIX
+        ));
 
         std::fs::write(
             &path,

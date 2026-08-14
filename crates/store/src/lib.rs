@@ -1,33 +1,9 @@
-mod agent_graph;
-mod file_store;
-mod manifest;
-mod record;
-mod recorder;
-mod replay;
-pub mod traits;
+//! Pi v4 compatible JSONL session persistence.
 
-pub use agent_graph::AgentEdge;
-pub use agent_graph::AgentEdgeStatus;
-pub use agent_graph::AgentGraphStore;
-pub use file_store::FileSessionStore;
-pub use manifest::SessionManifestRecord;
-pub use manifest::SessionManifestStatus;
-pub use record::AgentEdgeRecord;
-pub use record::AgentEdgeStatusRecord;
-pub use record::CompactionRecord;
-pub use record::CreateSessionParams;
-pub use record::MessageRecord;
-pub use record::PersistedPayload;
-pub use record::PersistedRecord;
-pub use record::SCHEMA_VERSION;
-pub use record::SessionMetaRecord;
-pub use record::TurnAbortedRecord;
-pub use record::TurnCompleteRecord;
-pub use record::TurnContextRecord;
-pub use record::TurnKindRecord;
-pub use record::timestamp_now;
-pub use recorder::FileSessionRecorder;
-pub use recorder::SessionRecorder;
-pub use replay::ReplayedSession;
-pub use replay::replay_session_file;
-pub use traits::SessionStore;
+mod factory;
+mod model;
+mod session;
+mod state;
+
+pub use factory::JsonlStoreFactory;
+pub use model::*;

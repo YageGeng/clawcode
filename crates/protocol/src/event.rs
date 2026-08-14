@@ -1,524 +1,213 @@
-//! Streaming event types emitted from the kernel to the frontend.
-
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{AgentPath, AgentStatus};
-use crate::hook::HookCompletedEvent;
-use crate::item::{PatchPreviewChange, TurnId, TurnItem};
-use crate::permission::PermissionRequest;
-use crate::plan::PlanEntry;
-use crate::session::SessionId;
-use crate::tool::ToolCallStatus;
-use crate::usage::{ContextWindowUsage, Usage};
+use crate::{
+    AgentMessage, CompactionReason, CompactionResult, MessageId, ModelUsage,
+    RunId, Sequence, TimestampMs, ToolCall, ToolResult, TurnId, TurnRecord,
+};
 
-/// The content of a streamed tool-call delta.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ToolCallDeltaContent {
-    /// Tool/function name delivered by the provider.
-    Name(String),
-    /// Partial JSON argument data delivered by the provider.
-    Delta(String),
-}
-
-impl ToolCallDeltaContent {
-    /// Create a `Name` content from a string.
-    #[inline(always)]
-    pub fn name(name: impl Into<String>) -> Self {
-        ToolCallDeltaContent::Name(name.into())
-    }
-
-    /// Create a `Delta` content from a string.
-    #[inline(always)]
-    pub fn delta(delta: impl Into<String>) -> Self {
-        ToolCallDeltaContent::Delta(delta.into())
-    }
-}
-
-/// Streaming event emitted from the kernel to the frontend.
-///
-/// Each event carries a `session_id` and represents a discrete update
-/// the frontend should render: text deltas, tool calls, plan changes, etc.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum Event {
-    /// Text delta from the assistant message.
-    AgentMessageChunk {
-        session_id: SessionId,
-        /// Incremental text to append.
-        text: String,
-    },
-    /// Reasoning / thinking delta from the assistant.
-    AgentThoughtChunk {
-        session_id: SessionId,
-        /// Incremental thinking text to append.
-        text: String,
-    },
-    /// A tool call was initiated by the assistant.
-    ToolCall {
-        session_id: SessionId,
-        /// Agent that made the tool call.
-        agent_path: AgentPath,
-        /// Unique call identifier within the turn.
-        call_id: String,
-        /// Tool/function name.
-        name: String,
-        /// JSON-encoded arguments.
-        arguments: serde_json::Value,
-        /// Current execution status.
-        status: ToolCallStatus,
-    },
-    /// Incremental tool call parameter streaming from the LLM.
-    ToolCallDelta {
-        session_id: SessionId,
-        /// Matches the upcoming ToolCall event id.
-        call_id: String,
-        /// Tool name or arguments fragment.
-        content: ToolCallDeltaContent,
-    },
-    /// Incremental update to an active tool call.
-    ToolCallUpdate {
-        session_id: SessionId,
-        /// The tool call being updated.
-        call_id: String,
-        /// New output delta to append.
-        output_delta: Option<String>,
-        /// Updated status, if changed.
-        status: Option<ToolCallStatus>,
-    },
-    /// A structured turn item started.
-    ItemStarted {
-        session_id: SessionId,
-        /// Turn that owns the item.
-        turn_id: TurnId,
-        /// Structured item payload for display.
-        item: TurnItem,
-    },
-    /// A structured turn item completed.
-    ItemCompleted {
-        session_id: SessionId,
-        /// Turn that owns the item.
-        turn_id: TurnId,
-        /// Structured item payload for display.
-        item: TurnItem,
-    },
-    /// The agent's execution plan was created or updated.
-    PlanUpdate {
-        session_id: SessionId,
-        /// Complete list of plan entries (replaces previous plan).
-        entries: Vec<PlanEntry>,
-    },
-    /// Token usage information for the current request context.
-    UsageUpdate {
-        session_id: SessionId,
-        /// Current estimated context-window occupancy for the outgoing request.
-        context_window: ContextWindowUsage,
-        /// Provider-reported usage increment for one model response, if available.
-        usage: Option<Usage>,
-    },
-    /// The kernel is requesting user permission for a tool execution.
-    PermissionRequested {
-        session_id: SessionId,
-        /// The permission request details.
-        request: PermissionRequest,
-    },
-    /// The kernel requests user approval before executing a tool.
-    ExecApprovalRequested {
-        session_id: SessionId,
-        /// Identifies the tool call awaiting approval.
-        call_id: String,
-        /// Name of the tool being requested.
-        tool_name: String,
-        /// JSON arguments for the tool invocation.
-        arguments: serde_json::Value,
-        /// Working directory for the tool execution.
-        cwd: PathBuf,
-        /// Optional command-prefix policy amendment the user can persist.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        proposed_execpolicy_amendment: Option<crate::ExecPolicyAmendment>,
-    },
-    /// A sub-agent's runtime status changed.
-    AgentStatusChange {
-        session_id: SessionId,
-        /// The agent whose status changed.
-        agent_path: AgentPath,
-        /// New status.
-        status: AgentStatus,
-    },
-    /// A sub-agent was spawned.
-    AgentSpawned {
-        session_id: SessionId,
-        /// Canonical path of the new agent.
-        agent_path: AgentPath,
-        /// Human-readable nickname.
-        agent_nickname: String,
-        /// Role assigned at spawn.
-        agent_role: String,
-    },
-    /// The current turn has completed.
-    TurnComplete {
-        session_id: SessionId,
-        /// Reason the turn stopped.
-        stop_reason: StopReason,
-    },
-    /// Incremental output delta from a running exec command (stdout/stderr chunk).
-    ExecCommandOutputDelta {
-        session_id: SessionId,
-        call_id: String,
-        stream: ExecOutputStream,
-        /// Raw bytes from the stream, serialized as a JSON array of numbers.
-        chunk: Vec<u8>,
-    },
-    /// Preview update parsed from streamed apply_patch arguments.
-    PatchApplyUpdated {
-        session_id: SessionId,
-        /// The apply_patch tool call being previewed.
-        call_id: String,
-        /// Partial patch changes parsed from the argument stream.
-        changes: Vec<PatchPreviewChange>,
-    },
-    /// A lifecycle hook completed execution.
-    HookCompleted {
-        session_id: SessionId,
-        /// Completed hook run details.
-        completed: HookCompletedEvent,
-    },
-}
-
-impl Event {
-    /// Create an `AgentMessageChunk` event.
-    #[inline(always)]
-    pub fn message_chunk(
-        session_id: impl Into<SessionId>,
-        text: impl Into<String>,
-    ) -> Self {
-        Event::AgentMessageChunk {
-            session_id: session_id.into(),
-            text: text.into(),
-        }
-    }
-
-    /// Create an `AgentThoughtChunk` event for reasoning / thinking deltas.
-    #[inline(always)]
-    pub fn thought_chunk(
-        session_id: impl Into<SessionId>,
-        text: impl Into<String>,
-    ) -> Self {
-        Event::AgentThoughtChunk {
-            session_id: session_id.into(),
-            text: text.into(),
-        }
-    }
-
-    /// Create a `ToolCall` event.
-    #[inline(always)]
-    pub fn tool_call(
-        session_id: impl Into<SessionId>,
-        agent_path: impl Into<AgentPath>,
-        call_id: impl Into<String>,
-        name: impl Into<String>,
-        arguments: impl Into<serde_json::Value>,
-        status: ToolCallStatus,
-    ) -> Self {
-        Event::ToolCall {
-            session_id: session_id.into(),
-            agent_path: agent_path.into(),
-            call_id: call_id.into(),
-            name: name.into(),
-            arguments: arguments.into(),
-            status,
-        }
-    }
-
-    /// Create a `ToolCallDelta` event for streaming tool call parameter updates.
-    #[inline(always)]
-    pub fn tool_call_delta(
-        session_id: impl Into<SessionId>,
-        call_id: impl Into<String>,
-        content: ToolCallDeltaContent,
-    ) -> Self {
-        Event::ToolCallDelta {
-            session_id: session_id.into(),
-            call_id: call_id.into(),
-            content,
-        }
-    }
-
-    /// Create a `ToolCallUpdate` event for incremental tool output or status changes.
-    #[inline(always)]
-    pub fn tool_call_update(
-        session_id: impl Into<SessionId>,
-        call_id: impl Into<String>,
-        output_delta: Option<String>,
-        status: Option<ToolCallStatus>,
-    ) -> Self {
-        Event::ToolCallUpdate {
-            session_id: session_id.into(),
-            call_id: call_id.into(),
-            output_delta,
-            status,
-        }
-    }
-
-    /// Create a `PatchApplyUpdated` event for apply_patch argument previews.
-    #[inline(always)]
-    pub fn patch_apply_updated(
-        session_id: impl Into<SessionId>,
-        call_id: impl Into<String>,
-        changes: Vec<PatchPreviewChange>,
-    ) -> Self {
-        Event::PatchApplyUpdated {
-            session_id: session_id.into(),
-            call_id: call_id.into(),
-            changes,
-        }
-    }
-
-    /// Create an `ItemStarted` event for a structured turn item.
-    #[inline(always)]
-    pub fn item_started(
-        session_id: impl Into<SessionId>,
-        turn_id: impl Into<TurnId>,
-        item: TurnItem,
-    ) -> Self {
-        Event::ItemStarted {
-            session_id: session_id.into(),
-            turn_id: turn_id.into(),
-            item,
-        }
-    }
-
-    /// Create an `ItemCompleted` event for a structured turn item.
-    #[inline(always)]
-    pub fn item_completed(
-        session_id: impl Into<SessionId>,
-        turn_id: impl Into<TurnId>,
-        item: TurnItem,
-    ) -> Self {
-        Event::ItemCompleted {
-            session_id: session_id.into(),
-            turn_id: turn_id.into(),
-            item,
-        }
-    }
-
-    /// Create a `UsageUpdate` event with context and optional provider usage.
-    #[inline(always)]
-    pub fn usage_update(
-        session_id: impl Into<SessionId>,
-        context_window: ContextWindowUsage,
-        usage: Option<Usage>,
-    ) -> Self {
-        Event::UsageUpdate {
-            session_id: session_id.into(),
-            context_window,
-            usage,
-        }
-    }
-
-    /// Create a `TurnComplete` event.
-    #[inline(always)]
-    pub fn turn_complete(
-        session_id: impl Into<SessionId>,
-        stop_reason: StopReason,
-    ) -> Self {
-        Event::TurnComplete {
-            session_id: session_id.into(),
-            stop_reason,
-        }
-    }
-
-    /// Create an `ExecApprovalRequested` event to request user approval before tool execution.
-    #[inline(always)]
-    pub fn exec_approval(
-        session_id: impl Into<SessionId>,
-        call_id: impl Into<String>,
-        tool_name: impl Into<String>,
-        arguments: impl Into<serde_json::Value>,
-        cwd: impl Into<PathBuf>,
-        proposed_execpolicy_amendment: Option<crate::ExecPolicyAmendment>,
-    ) -> Self {
-        Event::ExecApprovalRequested {
-            session_id: session_id.into(),
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            arguments: arguments.into(),
-            cwd: cwd.into(),
-            proposed_execpolicy_amendment,
-        }
-    }
-
-    /// Create a `PlanUpdate` event.
-    #[inline(always)]
-    pub fn plan_update(
-        session_id: impl Into<SessionId>,
-        entries: Vec<PlanEntry>,
-    ) -> Self {
-        Event::PlanUpdate {
-            session_id: session_id.into(),
-            entries,
-        }
-    }
-
-    /// Create a `PermissionRequested` event.
-    #[inline(always)]
-    pub fn permission_requested(
-        session_id: impl Into<SessionId>,
-        request: PermissionRequest,
-    ) -> Self {
-        Event::PermissionRequested {
-            session_id: session_id.into(),
-            request,
-        }
-    }
-
-    /// Create an `AgentStatusChange` event for sub-agent lifecycle tracking.
-    #[inline(always)]
-    pub fn agent_status_change(
-        session_id: impl Into<SessionId>,
-        agent_path: impl Into<AgentPath>,
-        status: AgentStatus,
-    ) -> Self {
-        Event::AgentStatusChange {
-            session_id: session_id.into(),
-            agent_path: agent_path.into(),
-            status,
-        }
-    }
-
-    /// Create an `AgentSpawned` event.
-    #[inline(always)]
-    pub fn agent_spawned(
-        session_id: impl Into<SessionId>,
-        agent_path: impl Into<AgentPath>,
-        agent_nickname: impl Into<String>,
-        agent_role: impl Into<String>,
-    ) -> Self {
-        Event::AgentSpawned {
-            session_id: session_id.into(),
-            agent_path: agent_path.into(),
-            agent_nickname: agent_nickname.into(),
-            agent_role: agent_role.into(),
-        }
-    }
-}
-
-/// Reason a turn completed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    /// Turn finished normally.
-    EndTurn,
-    /// Turn was cancelled by the user.
+/// Typed terminal result shared by run lifecycle events and ACP mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentOutcome {
+    /// The run completed normally.
+    Succeeded,
+    /// The client cancelled active session work.
     Cancelled,
-    /// Turn terminated due to an error.
-    Error,
-}
-
-/// Distinguishes incremental output source for ExecCommandOutputDelta.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecOutputStream {
-    Stdout,
-    Stderr,
-}
-
-/// A single item yielded by a streaming tool's `execute_streaming` stream.
-/// The dispatch layer converts each variant into the corresponding [`Event`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolStreamItem {
-    /// Lifecycle start → dispatch emits [`Event::ItemStarted`].
-    Begin(crate::item::TurnItem),
-    /// Lifecycle end → dispatch emits [`Event::ItemCompleted`].
-    End(crate::item::TurnItem),
-    /// Incremental output chunk → dispatch emits [`Event::ExecCommandOutputDelta`].
-    Delta {
-        stream: ExecOutputStream,
-        chunk: Vec<u8>,
-    },
-    /// Final model-facing text → dispatch emits [`Event::ToolCallUpdate`].
-    /// `is_error` indicates whether the tool execution failed.
-    Final { content: String, is_error: bool },
-}
-
-/// A single item yielded by a tool arguments consumer while arguments stream.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolArgumentsStreamItem {
-    /// Preview changes parsed from streamed apply_patch arguments.
-    PatchPreview {
-        call_id: String,
-        changes: Vec<PatchPreviewChange>,
+    /// The run stopped because an operation failed.
+    Failed {
+        /// Stable human-readable failure summary.
+        message: String,
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::item::{FileChangeItem, FileChangeStatus, PatchPreviewChange};
+/// Metadata required on every streamed runtime event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventMetadata {
+    /// Turn that owns the event.
+    pub turn_id: TurnId,
 
-    /// Verifies that item lifecycle events preserve the owning turn id.
-    #[test]
-    fn item_lifecycle_events_roundtrip_turn_id() {
-        let session_id = SessionId::from("session-1");
-        let turn_id = TurnId("turn-1".to_string());
-        let item = TurnItem::FileChange(
-            FileChangeItem::builder()
-                .id("call-1".to_string())
-                .title("Apply patch".to_string())
-                .changes(Vec::new())
-                .status(FileChangeStatus::InProgress)
-                .build(),
-        );
+    /// Event creation time as precision-safe Unix milliseconds.
+    pub timestamp_ms: TimestampMs,
 
-        let started = Event::item_started(
-            session_id.clone(),
-            turn_id.clone(),
-            item.clone(),
-        );
-        let completed =
-            Event::item_completed(session_id, turn_id.clone(), item);
+    /// Monotonic sequence within the session event stream.
+    pub sequence: Sequence,
+}
 
-        let started_json =
-            serde_json::to_string(&started).expect("serialize started event");
-        let completed_json = serde_json::to_string(&completed)
-            .expect("serialize completed event");
-        let decoded_started: Event = serde_json::from_str(&started_json)
-            .expect("deserialize started event");
-        let decoded_completed: Event = serde_json::from_str(&completed_json)
-            .expect("deserialize completed event");
+/// Typed payload emitted by the agent runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum AgentEventPayload {
+    /// A run has acquired its session and is beginning its first turn.
+    RunStart {
+        /// Stable run identifier.
+        run_id: RunId,
+    },
 
-        assert!(matches!(
-            decoded_started,
-            Event::ItemStarted { turn_id: decoded, .. } if decoded == turn_id
-        ));
-        assert!(matches!(
-            decoded_completed,
-            Event::ItemCompleted { turn_id: decoded, .. } if decoded == turn_id
-        ));
-    }
+    /// A model turn has started.
+    TurnStart {
+        /// Run that owns the turn.
+        run_id: RunId,
+    },
 
-    /// Verifies that patch preview updates keep call id and preview changes on the wire.
-    #[test]
-    fn patch_apply_updated_event_roundtrips_preview_changes() {
-        let event = Event::patch_apply_updated(
-            SessionId::from("session-1"),
-            "call-1",
-            vec![PatchPreviewChange::Add {
-                path: PathBuf::from("added.txt"),
-                content: "hello\n".to_string(),
-            }],
-        );
+    /// An assistant message is about to receive streamed content.
+    MessageStart {
+        /// Stable assistant message identifier.
+        message_id: MessageId,
+    },
 
-        let encoded = serde_json::to_string(&event)
-            .expect("serialize patch preview event");
-        let decoded: Event =
-            serde_json::from_str(&encoded).expect("deserialize patch event");
+    /// Incremental assistant text produced during a streamed message.
+    MessageTextDelta {
+        /// Message receiving the text.
+        message_id: MessageId,
 
-        assert!(matches!(
-            decoded,
-            Event::PatchApplyUpdated { call_id, changes, .. }
-                if call_id == "call-1" && changes.len() == 1
-        ));
-    }
+        /// Text fragment in provider delivery order.
+        delta: String,
+    },
+
+    /// Incremental assistant reasoning produced during a streamed message.
+    MessageReasoningDelta {
+        /// Message receiving the reasoning text.
+        message_id: MessageId,
+
+        /// Reasoning fragment in provider delivery order.
+        delta: String,
+    },
+
+    /// A complete assistant or tool-result message is available.
+    MessageEnd {
+        /// Complete message including exact first/last output timing.
+        message: AgentMessage,
+    },
+
+    /// Complete token usage changed after an assistant attempt.
+    UsageUpdated {
+        /// Provider-reported token accounting for the attempt.
+        usage: ModelUsage,
+        /// Active model context window used to interpret the accounting.
+        context_window: u64,
+    },
+
+    /// A failed assistant attempt has been scheduled for retry.
+    RetryScheduled {
+        /// Run that owns the retry sequence.
+        run_id: RunId,
+        /// One-based retry attempt that will run after the delay.
+        attempt: u32,
+        /// Maximum number of retry attempts permitted by policy.
+        max_attempts: u32,
+        /// Backoff delay before the attempt starts.
+        delay_ms: u64,
+        /// Failure that caused the retry decision.
+        error: String,
+    },
+
+    /// A scheduled assistant retry is starting.
+    RetryStart {
+        /// Run that owns the retry sequence.
+        run_id: RunId,
+        /// One-based retry attempt now starting.
+        attempt: u32,
+        /// Maximum number of retry attempts permitted by policy.
+        max_attempts: u32,
+    },
+
+    /// An assistant retry sequence has reached an observable result.
+    RetryEnd {
+        /// Run that owns the retry sequence.
+        run_id: RunId,
+        /// One-based retry attempt that ended.
+        attempt: u32,
+        /// Whether the retry produced a successful assistant result.
+        success: bool,
+        /// Final failure when no later retry will be scheduled.
+        final_error: Option<String>,
+    },
+
+    /// One tool invocation is starting.
+    ToolExecutionStart {
+        /// Run that owns the invocation.
+        run_id: RunId,
+
+        /// Parsed tool call in source order.
+        call: ToolCall,
+    },
+
+    /// One tool invocation published a replaceable partial result.
+    ToolExecutionUpdate {
+        /// Run that owns the invocation.
+        run_id: RunId,
+
+        /// Latest visible result snapshot for the correlated tool call.
+        result: ToolResult,
+    },
+
+    /// One tool invocation completed, potentially before sibling calls.
+    ToolExecutionEnd {
+        /// Run that owns the invocation.
+        run_id: RunId,
+
+        /// Complete correlated result.
+        result: ToolResult,
+    },
+
+    /// A model turn and its complete tool batch have settled.
+    TurnEnd {
+        /// Persistable turn result and interval.
+        turn: TurnRecord,
+    },
+
+    /// A run settled after all normal, steering, and follow-up turns.
+    RunEnd {
+        /// Stable run identifier.
+        run_id: RunId,
+
+        /// Typed reason the run stopped.
+        outcome: AgentOutcome,
+    },
+
+    /// All run work, retries, tools, and queued follow-ups have settled.
+    AgentSettled {
+        /// Stable run identifier.
+        run_id: RunId,
+        /// Typed reason the final settled work stopped.
+        outcome: AgentOutcome,
+    },
+
+    /// The persisted display title for this session changed.
+    SessionTitleChanged {
+        /// New normalized session title.
+        title: String,
+    },
+
+    /// A model-backed context compaction operation started.
+    CompactionStart {
+        /// Run-shaped operation identifier used for event correlation.
+        run_id: RunId,
+        /// Cause that initiated this compaction.
+        reason: CompactionReason,
+    },
+
+    /// A model-backed context compaction operation completed.
+    CompactionEnd {
+        /// Run-shaped operation identifier used for event correlation.
+        run_id: RunId,
+
+        /// Cause that initiated this compaction.
+        reason: CompactionReason,
+
+        /// Persisted compaction identity and timing.
+        result: CompactionResult,
+    },
+}
+
+/// Streamed runtime event with mandatory turn, timestamp, and sequence fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentEvent {
+    /// Required event metadata flattened onto the wire envelope.
+    #[serde(flatten)]
+    pub metadata: EventMetadata,
+
+    /// Typed event payload flattened onto the wire envelope.
+    #[serde(flatten)]
+    pub payload: AgentEventPayload,
 }

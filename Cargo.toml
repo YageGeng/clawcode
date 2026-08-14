@@ -1,5 +1,17 @@
 [workspace]
-members = ["crates/*"]
+members = [
+  "crates/acp",
+  "crates/app",
+  "crates/config",
+  "crates/extension",
+  "crates/kernel",
+  "crates/mcp",
+  "crates/protocol",
+  "crates/provider",
+  "crates/skill",
+  "crates/store",
+  "crates/tools",
+]
 resolver = "3"
 
 [workspace.package]
@@ -46,6 +58,18 @@ multiple_unsafe_ops_per_block = "warn"
 mem_forget = "warn"
 
 [workspace.dependencies]
+# workspace crates
+acp = { path = "crates/acp" }
+config = { path = "crates/config" }
+extension = { path = "crates/extension" }
+kernel = { path = "crates/kernel" }
+mcp = { path = "crates/mcp" }
+protocol = { path = "crates/protocol" }
+provider = { path = "crates/provider" }
+skill = { path = "crates/skill" }
+store = { path = "crates/store" }
+tools = { path = "crates/tools" }
+
 # error
 anyhow = "1"
 thiserror = "2"
@@ -66,21 +90,24 @@ async-trait = "0.1"
 async-stream = "0.3"
 tokio-stream = "0.1"
 tokio-test = "0.4"
+tokio-util = "0.7"
 pin-project-lite = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tokio-tungstenite = { version = "0.29", default-features = false }
+tokio-tungstenite = { version = "0.30", default-features = false }
 
-# muitl thread
+# multi thread
 rayon = "1"
 
 # http
 bytes = "1"
 http = "1"
+httpdate = "=1.0.3"
 axum = "0.8"
 url = "2.5"
 hyper-util = "0.1"
-agent-client-protocol-http = { version = "1.2", default-features = false }
-tower-http = { version = "0.7", features = ["cors"] }
+agent-client-protocol-http = { version = "2", default-features = false }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
 reqwest-retry = "0.9"
 eventsource-stream = "0.2"
 reqwest = { version = "0.13", default-features = false }
@@ -104,14 +131,14 @@ wasm-bindgen-futures = "0.4"
 chrono = { version = "0.4", default-features = false }
 
 # fs
-toml = "1.1.2"
+toml = "1"
 mime = "0.3.17"
 mime_guess = "2.0.5"
 assert_fs = "1"
 tempfile = "3"
 
 # protocol
-agent-client-protocol = "1"
+agent-client-protocol = "2"
 
 # cli
 clap = { version = "4", features = ["derive"] }
@@ -129,16 +156,19 @@ nix = { version = "0.31", features = ["signal", "process"] }
 arc-swap = "1.9"
 wiremock = "0.6"
 dirs = "6"
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.10"
-fastrand = "2.4"
+fastrand = "2"
 futures-timer = "3"
 getrandom = "0.4"
 nanoid = "0.5"
 ordered-float = "5.3"
-rmcp = "2"
+rmcp = { version = "3", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 shlex = "2"
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+similar = "3"
+unicode-normalization = "0.1"

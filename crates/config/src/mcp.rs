@@ -178,88 +178,6 @@ fn present_string(value: &Option<String>) -> bool {
     value.as_deref().is_some_and(|s| !s.trim().is_empty())
 }
 
-// ---------------------------------------------------------------------------
-// Into runtime config (protocol::mcp types)
-// ---------------------------------------------------------------------------
-
-impl TryFrom<McpServerConfig> for protocol::mcp::McpServerConfig {
-    type Error = McpConfigError;
-
-    fn try_from(c: McpServerConfig) -> Result<Self, Self::Error> {
-        c.validate()?;
-
-        let McpServerConfig {
-            name,
-            enabled,
-            external,
-            startup_timeout_sec,
-            tool_timeout_sec,
-            command,
-            args,
-            env,
-            url,
-            bearer_token_env,
-            http_headers,
-            oauth,
-        } = c;
-
-        // Validation above guarantees exactly one transport branch is present.
-        let transport = match (command, url) {
-            (Some(cmd), None) => protocol::mcp::McpTransportConfig::Stdio {
-                command: cmd,
-                args: args.unwrap_or_default(),
-                env: env.unwrap_or_default(),
-                cwd: None,
-            },
-            (None, Some(u)) => {
-                protocol::mcp::McpTransportConfig::StreamableHttp {
-                    url: u,
-                    bearer_token_env,
-                    http_headers: http_headers.unwrap_or_default(),
-                }
-            }
-            _ => unreachable!(
-                "MCP transport validation must reject ambiguous configs"
-            ),
-        };
-
-        // The Option builder setter uses strip_option, so keep the Some/None branches explicit.
-        match oauth {
-            Some(oauth) => Ok(Self::builder()
-                .name(name)
-                .enabled(enabled)
-                .external(external)
-                .startup_timeout_secs(startup_timeout_sec)
-                .tool_timeout_secs(tool_timeout_sec)
-                .transport(transport)
-                .oauth(oauth.into())
-                .build()),
-            None => Ok(Self::builder()
-                .name(name)
-                .enabled(enabled)
-                .external(external)
-                .startup_timeout_secs(startup_timeout_sec)
-                .tool_timeout_secs(tool_timeout_sec)
-                .transport(transport)
-                .build()),
-        }
-    }
-}
-
-impl From<McpOAuthConfig> for protocol::mcp::McpOAuthParams {
-    fn from(o: McpOAuthConfig) -> Self {
-        // Optional OAuth fields come from config as Option values; construct the runtime value directly.
-        Self {
-            client_id: o.client_id,
-            client_secret: o.client_secret,
-            scopes: o.scopes.unwrap_or_default(),
-            redirect_uri: o.redirect_uri,
-            authorization_url: o.authorization_url,
-            token_url: o.token_url,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,20 +194,5 @@ command = "echo"
         .expect("config should deserialize");
 
         assert!(!config.external);
-    }
-
-    /// Runtime MCP server configs preserve the external marker from TOML.
-    #[test]
-    fn mcp_server_config_preserves_external_during_runtime_conversion() {
-        let config = McpServerConfig::builder()
-            .name("server".to_string())
-            .command("echo".to_string())
-            .external(true)
-            .build();
-
-        let runtime: protocol::mcp::McpServerConfig =
-            config.try_into().expect("config should convert");
-
-        assert!(runtime.external);
     }
 }

@@ -765,7 +765,7 @@ impl ResponsesUsage {
 
 impl GetTokenUsage for ResponsesUsage {
     fn token_usage(&self) -> Option<crate::completion::Usage> {
-        Some(crate::providers::internal::completion_usage(
+        let mut usage = crate::providers::internal::completion_usage(
             self.input_tokens,
             self.output_tokens,
             self.total_tokens,
@@ -773,7 +773,10 @@ impl GetTokenUsage for ResponsesUsage {
                 .as_ref()
                 .map(|details| details.cached_tokens)
                 .unwrap_or(0),
-        ))
+        );
+        usage.reasoning_tokens =
+            Some(self.output_tokens_details.reasoning_tokens);
+        Some(usage)
     }
 }
 
@@ -1545,7 +1548,7 @@ where
     {
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = tracing::field::Empty,
@@ -1569,7 +1572,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Responses completion request: {request}",
                 request = serde_json::to_string_pretty(&request)?
             );
@@ -1611,7 +1614,7 @@ where
                 }
                 if enabled!(Level::TRACE) {
                     tracing::trace!(
-                        target: "clawcode::completions",
+                        target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                         "OpenAI Responses completion response: {response}",
                         response = serde_json::to_string_pretty(&response)?
                     );
@@ -1681,6 +1684,9 @@ impl TryFrom<CompletionResponse>
                     .map(|d| d.cached_tokens)
                     .unwrap_or(0),
                 cache_creation_input_tokens: 0,
+                reasoning_tokens: Some(
+                    usage.output_tokens_details.reasoning_tokens,
+                ),
             })
             .unwrap_or_default();
 

@@ -514,7 +514,7 @@ where
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = "chatgpt",
@@ -588,7 +588,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "ChatGPT Responses streaming completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -607,7 +607,7 @@ where
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
                 gen_ai.provider.name = "chatgpt",

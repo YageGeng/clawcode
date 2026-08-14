@@ -1,6 +1,8 @@
 //! The streaming module for the OpenAI Responses API.
 //! Please see the `openai_streaming` or `openai_streaming_with_tools` example for more practical usage.
-use crate::completion::{self, CompletionError, GetTokenUsage};
+use crate::completion::{
+    self, CompletionError, GetFinishReason, GetTokenUsage, ProviderFinishReason,
+};
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::message::ReasoningContent;
@@ -40,6 +42,10 @@ pub enum StreamingCompletionChunk {
 pub struct StreamingCompletionResponse {
     /// Token usage
     pub usage: ResponsesUsage,
+    /// Normalized terminal reason derived from completed response items.
+    finish_reason: ProviderFinishReason,
+    /// Provider-native terminal response status.
+    raw_finish_reason: String,
 }
 
 pub(crate) fn reasoning_choices_from_done_item(
@@ -72,6 +78,18 @@ pub(crate) fn reasoning_choices_from_done_item(
 impl GetTokenUsage for StreamingCompletionResponse {
     fn token_usage(&self) -> Option<crate::completion::Usage> {
         self.usage.token_usage()
+    }
+}
+
+impl GetFinishReason for StreamingCompletionResponse {
+    /// Returns the normalized OpenAI Responses terminal reason.
+    fn finish_reason(&self) -> ProviderFinishReason {
+        self.finish_reason.clone()
+    }
+
+    /// Returns the OpenAI Responses terminal status.
+    fn raw_finish_reason(&self) -> Option<String> {
+        Some(self.raw_finish_reason.clone())
     }
 }
 
@@ -277,6 +295,8 @@ struct RawChoiceAccumulator {
     final_usage: ResponsesUsage,
     tool_calls: Vec<StreamingRawChoice>,
     tool_call_internal_ids: std::collections::HashMap<String, String>,
+    saw_tool_call: bool,
+    saw_refusal: bool,
 }
 
 impl RawChoiceAccumulator {
@@ -285,6 +305,8 @@ impl RawChoiceAccumulator {
             final_usage: initial_usage,
             tool_calls: Vec::new(),
             tool_call_internal_ids: std::collections::HashMap::new(),
+            saw_tool_call: false,
+            saw_refusal: false,
         }
     }
 
@@ -300,6 +322,7 @@ impl RawChoiceAccumulator {
                 item: Output::FunctionCall(func),
                 ..
             }) => {
+                self.saw_tool_call = true;
                 let internal_call_id = self
                     .tool_call_internal_ids
                     .entry(func.id.clone())
@@ -335,6 +358,7 @@ impl RawChoiceAccumulator {
                 });
             }
             ItemChunkKind::RefusalDelta(delta) => {
+                self.saw_refusal = true;
                 immediate
                     .push(streaming::RawStreamingChoice::Message(delta.delta));
             }
@@ -397,6 +421,7 @@ impl RawChoiceAccumulator {
     ) {
         match item {
             Output::FunctionCall(func) => {
+                self.saw_tool_call = true;
                 let internal_call_id = self
                     .tool_call_internal_ids
                     .entry(func.id.clone())
@@ -446,6 +471,14 @@ impl RawChoiceAccumulator {
         choices.push(RawStreamingChoice::FinalResponse(
             StreamingCompletionResponse {
                 usage: self.final_usage,
+                finish_reason: if self.saw_refusal {
+                    ProviderFinishReason::Refusal
+                } else if self.saw_tool_call {
+                    ProviderFinishReason::ToolUse
+                } else {
+                    ProviderFinishReason::Stop
+                },
+                raw_finish_reason: "completed".to_string(),
             },
         ));
         choices
@@ -970,7 +1003,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Responses streaming completion request: {}",
                 serde_json::to_string_pretty(&request)?
             );
@@ -988,7 +1021,7 @@ where
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
                 gen_ai.provider.name = tracing::field::Empty,

@@ -1,48 +1,64 @@
-//! Internal protocol types for clawcode agent-core / frontend communication.
-//!
-//! Uses a Submission Queue (SQ) / Event Queue (EQ) pattern:
-//! - The frontend sends [`Op`] submissions to the kernel.
-//! - The kernel streams [`Event`]s back through an event channel.
-//!
-//! These types are designed so they can be bridged to ACP
-//! (`agent-client-protocol`) for IDE-native UI rendering.
+//! Shared domain protocol for the agent runtime.
 
-pub mod acp_conv;
-pub mod agent;
-pub mod agent_ui;
-pub mod approvals;
-pub mod config;
-pub mod event;
-pub mod hook;
-pub mod item;
-pub mod kernel;
-pub mod mcp;
-pub mod message;
-pub mod one_or_many;
-pub mod op;
-pub mod permission;
-pub mod plan;
-pub mod session;
-pub mod tool;
-pub mod usage;
+mod acp;
+mod capability;
+mod event;
+mod extension;
+mod id;
+mod identity;
+mod mcp;
+mod message;
+mod model;
+mod queue;
+mod scalar;
+mod session;
+mod tool;
+mod turn;
 
-pub use agent::*;
-pub use agent_ui::*;
-pub use approvals::{
-    AdditionalPermissionProfile, ExecApprovalRequestEvent, ExecPolicyAmendment,
-    NetworkApprovalContext, NetworkApprovalProtocol, NetworkPolicyAmendment,
-    NetworkPolicyRuleAction, ParsedCommand,
+pub use acp::{
+    AcpCommandParameters, AcpCompactParameters, AcpForkParameters,
+    AcpNavigateParameters, AcpPendingMessageRemoveParameters,
+    AcpQueueMessageParameters, AcpSessionParameters,
+    AcpSessionRenameParameters, AcpSkillParameters, AcpWorkingDirectory,
+    AcpWorkingDirectoryError,
 };
-pub use config::*;
-pub use event::*;
-pub use hook::*;
-pub use item::*;
-pub use kernel::*;
-pub use message::*;
-pub use one_or_many::*;
-pub use op::*;
-pub use permission::*;
-pub use plan::*;
-pub use session::*;
-pub use tool::*;
-pub use usage::*;
+pub use capability::{
+    CompactionData, CompactionDetails, CompactionPolicy, CompactionReason,
+    CompactionResult, McpConnectionState, McpServerInfo, McpToolInfo,
+    ModelProfile, RetryPolicy, SessionTitle, SkillInfo,
+};
+pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
+pub use extension::{
+    ExtensionCommandDefinition, ExtensionContext, ExtensionDirective,
+    ExtensionEffects, ExtensionEvent, ExtensionFlagDefinition,
+    ExtensionFlagKind, ExtensionProviderRegistration,
+};
+pub use id::{IdGenerator, IdKind};
+pub use identity::{AcpExtensionMethod, ProductIdentity};
+pub use mcp::{McpCallResult, McpToolDescriptor};
+pub use message::{
+    AgentMessage, AssistantMetadata, ContentBlock, ExtensionMessage,
+    MessageContent, MessageIdentity, MessageTiming, MessageTimingError,
+    ModelUsage, Role,
+};
+pub use model::{
+    ModelFailure, ModelFinal, ModelRequest, ModelRetryDisposition,
+    ModelStreamEvent,
+};
+pub use queue::{PendingMessages, QueueKind, QueuedMessage};
+pub use scalar::{
+    EntryId, LaneId, MessageId, QueueId, RecordId, RunId, ScalarError,
+    Sequence, SessionId, TimestampMs, ToolCallId, TurnId,
+};
+pub use session::{
+    RunRequest, RunResult, SessionSummary, SessionTreeEntry,
+    SessionTreeSnapshot,
+};
+pub use tool::{
+    ToolCall, ToolDefinition, ToolResult, ToolResultDetails, TruncationDetails,
+    TruncationLimit,
+};
+pub use turn::{
+    StopReason, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
+    TurnTimingError,
+};

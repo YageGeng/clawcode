@@ -312,10 +312,11 @@ where
         let response =
             self.client.send::<_, Vec<u8>>(req).await.map_err(|error| {
                 match error {
-                    http_client::Error::InvalidStatusCodeWithMessage(
+                    http_client::Error::InvalidStatusCodeWithMessage {
                         status,
                         message,
-                    ) => ModelListingError::api_error_with_context(
+                        ..
+                    } => ModelListingError::api_error_with_context(
                         "Xiaomi MiMo",
                         path,
                         status.as_u16(),

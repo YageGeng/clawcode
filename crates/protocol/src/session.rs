@@ -1,115 +1,85 @@
-//! Session identifier and metadata types.
-
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use agent_client_protocol::schema::v1 as schema;
 use serde::{Deserialize, Serialize};
 
-use crate::message::Message;
-use crate::usage::{ContextWindowUsage, Usage};
+use crate::{
+    AgentMessage, EntryId, LaneId, RunId, SessionId, TimestampMs, TurnRecord,
+};
 
-/// Unique session identifier generated when a new session is created.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(pub Arc<str>);
-
-impl SessionId {
-    pub fn new(id: impl Into<Arc<str>>) -> Self {
-        Self(id.into())
-    }
-}
-
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Summary info for a session in listing results.
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
-pub struct SessionInfo {
+/// Input required to start one serialized agent run in an existing session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRequest {
+    /// Existing session that owns the run.
     pub session_id: SessionId,
+    /// Initial user text assigned to the run's first Turn.
+    pub input: String,
+}
+
+/// Complete in-process result returned after one run settles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunResult {
+    /// Stable run identifier shared by all produced Turns.
+    pub run_id: RunId,
+    /// Messages produced or consumed by this run in persisted order.
+    pub messages: Vec<AgentMessage>,
+    /// Completed Turns in execution order.
+    pub turns: Vec<TurnRecord>,
+}
+
+/// Persisted session metadata exposed without leaking a storage implementation.
+#[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
+pub struct SessionSummary {
+    /// Stable session identifier.
+    pub session_id: SessionId,
+    /// Working directory recorded in the v4 header.
     pub cwd: PathBuf,
+    /// Session creation timestamp in Unix milliseconds.
+    pub created_at_ms: TimestampMs,
+    /// Last JSONL modification timestamp in Unix milliseconds.
+    pub modified_at_ms: TimestampMs,
+    /// Source session when this session was forked.
     #[builder(default)]
-    pub title: Option<String>,
+    pub parent_session_id: Option<SessionId>,
+    /// Latest persisted session name fact.
     #[builder(default)]
-    pub updated_at: Option<String>,
+    pub name: Option<String>,
 }
 
-/// Data returned to the frontend after creating or loading a session.
-#[derive(Debug, Clone, typed_builder::TypedBuilder)]
-pub struct SessionCreated {
-    /// Session id that was created or restored.
+/// One persisted entry exposed for tree rendering and navigation.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeEntry {
+    /// Stable entry identifier.
+    pub entry_id: EntryId,
+    /// Parent entry on the branch, or root when absent.
+    #[builder(default)]
+    pub parent_id: Option<EntryId>,
+    /// Stable pi v4 entry discriminator.
+    pub kind: String,
+    /// Storage-assigned Unix millisecond timestamp.
+    pub timestamp_ms: TimestampMs,
+    /// Kind-specific JSON payload.
+    pub payload: serde_json::Value,
+}
+
+/// Session-wide tree snapshot plus the active lane cursor.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeSnapshot {
+    /// Session being inspected.
     pub session_id: SessionId,
-    /// Current model id in `provider_id/model_id` form.
-    pub current_model: String,
-    /// Available session mode presets.
-    pub modes: Vec<super::config::SessionMode>,
-    /// Available model selections.
-    pub models: Vec<super::config::ModelInfo>,
-    /// Replayed message history when loading an existing session.
+    /// Active lane name.
+    pub lane: LaneId,
+    /// Current lane leaf.
     #[builder(default)]
-    pub history: Vec<Message>,
-    /// Estimated live context-window usage when restoring a session.
-    #[builder(default, setter(strip_option))]
-    pub context_window_usage: Option<ContextWindowUsage>,
-    /// Provider-reported usage accumulated from replayed persisted messages.
+    pub leaf_id: Option<EntryId>,
+    /// All entries in shared sequence order.
+    pub entries: Vec<SessionTreeEntry>,
+    /// Latest global session name fact.
     #[builder(default)]
-    pub accumulated_usage: Option<Usage>,
-}
-
-/// Paginated session list result.
-#[derive(Debug, Clone)]
-pub struct SessionListPage {
-    pub sessions: Vec<SessionInfo>,
-    pub next_cursor: Option<String>,
-}
-
-impl From<SessionId> for String {
-    fn from(session_id: SessionId) -> Self {
-        session_id.0.to_string()
-    }
-}
-
-impl From<&SessionId> for String {
-    fn from(session_id: &SessionId) -> Self {
-        session_id.0.to_string()
-    }
-}
-
-impl From<String> for SessionId {
-    fn from(id: String) -> Self {
-        Self(id.into())
-    }
-}
-
-impl From<&str> for SessionId {
-    fn from(id: &str) -> Self {
-        Self(id.into())
-    }
-}
-
-impl From<Arc<str>> for SessionId {
-    fn from(id: Arc<str>) -> Self {
-        Self(id)
-    }
-}
-
-impl From<schema::SessionId> for SessionId {
-    fn from(session_id: schema::SessionId) -> Self {
-        Self(session_id.0)
-    }
-}
-
-impl From<SessionId> for schema::SessionId {
-    fn from(session_id: SessionId) -> Self {
-        schema::SessionId::new(session_id.0)
-    }
-}
-
-impl From<&SessionId> for schema::SessionId {
-    fn from(session_id: &SessionId) -> Self {
-        schema::SessionId::new(Arc::clone(&session_id.0))
-    }
+    pub name: Option<String>,
 }

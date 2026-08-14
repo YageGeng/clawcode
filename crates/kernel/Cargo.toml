@@ -2,35 +2,48 @@
 name = "kernel"
 edition.workspace = true
 version.workspace = true
-description = "Clawcode agent kernel - session management, LLM orchestration, tool execution"
 
 [lints]
 workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-provider = { path = "../provider" }
-config = { path = "../config" }
-tools = { path = "../tools" }
-hook = { path = "../hook" }
-skills = { path = "../skills" }
-mcp = { path = "../mcp" }
-store = { path = "../store" }
+# workspace crates
+config = { workspace = true }
+extension = { workspace = true }
+mcp = { workspace = true }
+protocol = { workspace = true }
+provider = { workspace = true }
+skill = { workspace = true }
+store = { workspace = true }
+tools = { workspace = true }
 
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+# error
+thiserror = { workspace = true }
+
+# async
+async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+
+# serde
+serde = { workspace = true }
 serde_json = { workspace = true }
-rand = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
-anyhow = { workspace = true }
-strum = { workspace = true }
-strum_macros = { workspace = true }
+
+# builder
 typed-builder = { workspace = true }
-async-stream = { workspace = true }
-chrono = { workspace = true }
+
+# misc
+fastrand = { workspace = true }
+nanoid = { workspace = true }
+
+[dev-dependencies]
+# async
+tokio = { workspace = true, features = ["sync", "time", "test-util"] }
+
+# http
+http = { workspace = true }
+
+# fs
 tempfile = { workspace = true }
-dirs = { workspace = true }

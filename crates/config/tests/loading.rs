@@ -7,20 +7,149 @@
 // Jail::expect_with's closure returns `figment::Error` (~208 bytes) which trips
 // `clippy::result_large_err`; we can't change figment's API.
 
-use config::{ApiKeyConfig, load_from};
+use config::{ApiKeyConfig, AppConfig, ConfigValidationError, load_from};
 use std::path::PathBuf;
+
+/// Supplies complete configuration documents for cross-field validation tests.
+struct ConfigFixture;
+
+impl ConfigFixture {
+    /// Returns one valid active provider and model with explicit limits.
+    fn valid() -> &'static str {
+        r#"
+active_model = "deepseek/deepseek-v4-flash"
+
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "sk-test"
+
+[[providers.models]]
+id = "deepseek-v4-flash"
+display_name = "DeepSeek V4 Flash"
+context_tokens = 1000000
+max_output_tokens = 384000
+"#
+    }
+
+    /// Returns an invalid provider whose active model identifier is duplicated.
+    fn duplicate_model() -> &'static str {
+        r#"
+active_model = "deepseek/deepseek-v4-flash"
+
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "sk-test"
+
+[[providers.models]]
+id = "deepseek-v4-flash"
+context_tokens = 1000000
+max_output_tokens = 384000
+
+[[providers.models]]
+id = "deepseek-v4-flash"
+context_tokens = 1000000
+max_output_tokens = 384000
+"#
+    }
+}
 
 /// Build a minimal provider config with a distinguishable API key.
 fn provider_config(api_key: &str) -> String {
     format!(
         r#"
+active_model = "deepseek/deepseek-v4-flash"
+
 [[providers]]
 id = "deepseek"
 display_name = "DeepSeek"
 base_url = "https://api.deepseek.com"
 api_key = "{api_key}"
+
+[[providers.models]]
+id = "deepseek-v4-flash"
+context_tokens = 1000000
+max_output_tokens = 384000
 "#
     )
+}
+
+/// Retry and compaction defaults match the immutable pi v4 runtime policy.
+#[test]
+fn defaults_match_pi_retry_and_compaction() {
+    let config = AppConfig::default();
+
+    assert!(config.retry.agent.enabled);
+    assert_eq!(config.retry.agent.max_retries, 3);
+    assert_eq!(config.retry.agent.base_delay_ms, 2_000);
+    assert_eq!(config.retry.provider.max_retry_delay_ms, 60_000);
+    assert!(config.compaction.enabled);
+    assert_eq!(config.compaction.reserve_tokens, 16_384);
+    assert_eq!(config.compaction.keep_recent_tokens, 20_000);
+}
+
+/// Active model resolution rejects duplicate provider model identifiers.
+#[test]
+fn active_model_requires_a_unique_provider_model() {
+    let config: AppConfig = toml::from_str(ConfigFixture::duplicate_model())
+        .expect("parse duplicate model config");
+
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigValidationError::DuplicateModel {
+            provider_id,
+            model_id,
+        }) if provider_id == "deepseek" && model_id == "deepseek-v4-flash"
+    ));
+}
+
+/// Active model resolution produces one stable profile with required limits.
+#[test]
+fn active_model_resolves_to_a_stable_model_profile() {
+    let config: AppConfig = toml::from_str(ConfigFixture::valid())
+        .expect("parse valid model config");
+
+    let profile = config.model_profile().expect("model profile");
+    assert_eq!(profile.provider_id, "deepseek");
+    assert_eq!(profile.model_id, "deepseek-v4-flash");
+    assert_eq!(profile.display_name, "DeepSeek V4 Flash");
+    assert_eq!(profile.context_tokens, 1_000_000);
+    assert_eq!(profile.max_output_tokens, 384_000);
+}
+
+/// Missing environment credentials identify only their source, never a secret value.
+#[test]
+fn missing_api_key_environment_is_reported_without_secret_material() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        jail.clear_env();
+        let config: AppConfig = toml::from_str(
+            r#"
+active_model = "deepseek/deepseek-v4-flash"
+
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = { env = "CLAWCODE_TEST_MISSING_API_KEY" }
+
+[[providers.models]]
+id = "deepseek-v4-flash"
+context_tokens = 1000000
+max_output_tokens = 384000
+"#,
+        )
+        .expect("parse environment auth config");
+
+        let error = config.validate().expect_err("missing environment key");
+        let message = error.to_string();
+        assert!(message.contains("CLAWCODE_TEST_MISSING_API_KEY"));
+        assert!(!message.contains("sk-secret-value"));
+        Ok(())
+    });
 }
 
 /// `load_from` reads a TOML file and populates AppConfig.providers.
@@ -39,6 +168,8 @@ api_key = "sk-from-file"
 
 [[providers.models]]
 id = "deepseek-v4-flash"
+context_tokens = 1000000
+max_output_tokens = 384000
 "#,
         )?;
         let handle = load_from([PathBuf::from("claw.toml")]).unwrap();
@@ -69,16 +200,7 @@ fn missing_file_yields_error() {
 fn load_uses_claw_config_env_var() {
     #[allow(clippy::result_large_err)]
     figment::Jail::expect_with(|jail| {
-        jail.create_file(
-            "custom.toml",
-            r#"
-[[providers]]
-id = "deepseek"
-display_name = "DeepSeek"
-base_url = "https://api.deepseek.com"
-api_key = "sk-custom"
-"#,
-        )?;
+        jail.create_file("custom.toml", &provider_config("sk-custom"))?;
         let abs = jail.directory().join("custom.toml");
         jail.set_env("CLAW_CONFIG", abs.to_str().unwrap());
         let handle = config::load().unwrap();
@@ -173,7 +295,7 @@ approval = "request_approval"
 
     assert_eq!(
         config.effective_approval_policy(),
-        protocol::AskForApproval::OnRequest
+        config::AskForApproval::OnRequest
     );
 }
 
@@ -189,7 +311,7 @@ approval = "yolo"
 
     assert_eq!(
         config.effective_approval_policy(),
-        protocol::AskForApproval::Never
+        config::AskForApproval::Never
     );
 }
 
@@ -206,6 +328,6 @@ approval_policy = "on-request"
 
     assert_eq!(
         config.effective_approval_policy(),
-        protocol::AskForApproval::OnRequest
+        config::AskForApproval::OnRequest
     );
 }

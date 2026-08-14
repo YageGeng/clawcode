@@ -1,8 +1,9 @@
 //! Unified LLM event and completion types shared by the factory and its callers.
 
-use serde::Serialize;
-
-use crate::completion::{CompletionError, GetTokenUsage, Usage};
+use crate::completion::{
+    CompletionError, GetFinishReason, GetTokenUsage, ProviderFinishReason,
+    Usage,
+};
 use crate::message::{AssistantContent, Reasoning, Text, ToolCall};
 use crate::one_or_many::OneOrMany;
 use crate::streaming::{StreamedAssistantContent, ToolCallDeltaContent};
@@ -23,8 +24,7 @@ pub type DynLlmStream = crate::wasm_compat::WasmCompatStream<
 /// Unified streaming event emitted by any LLM provider.
 ///
 /// Provider-agnostic variants (Text, ToolCall, …) are strongly typed.
-/// [`LlmStreamEvent::Final`] carries the provider-specific raw response
-/// serialized as `serde_json::Value` plus optional token usage.
+/// [`LlmStreamEvent::Final`] carries only normalized public terminal data.
 #[derive(Debug, Clone)]
 pub enum LlmStreamEvent {
     /// Text delta emitted by the assistant.
@@ -58,28 +58,27 @@ pub enum LlmStreamEvent {
         /// See: https://developers.openai.com/api/reference/resources/responses/methods/create
         replayable: bool,
     },
-    /// Provider-specific raw response with optional token usage.
-    Final {
-        /// Serialized provider response. Use `serde_json::from_value` to
-        /// deserialize back to the provider-specific type.
-        raw: serde_json::Value,
-        /// Token usage extracted from the final response, when available.
-        usage: Option<Usage>,
-    },
+    /// Provider terminal response with normalized reason and token usage.
+    Final(ProviderFinal),
+}
+
+/// Provider terminal data retained at the public factory boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderFinal {
+    /// Provider-neutral terminal reason.
+    pub finish_reason: ProviderFinishReason,
+    /// Provider-native terminal reason retained for diagnostics.
+    pub raw_finish_reason: Option<String>,
+    /// Complete token usage extracted from the final response.
+    pub usage: Option<Usage>,
 }
 
 /// Convert a provider-specific `StreamedAssistantContent<T>` into the
-/// unified `LlmStreamEvent`. `T` must be serializable and implement
-/// [`GetTokenUsage`] so that the [`Final`](LlmStreamEvent::Final) variant
-/// can carry both the raw JSON and the usage breakdown.
-///
-/// # Errors
-///
-/// Returns [`CompletionError::JsonError`] when serializing the `Final`
-/// response fails.
+/// unified `LlmStreamEvent`. `T` exposes terminal reason and token usage through
+/// traits so provider-private response JSON never crosses the factory boundary.
 impl<T> TryFrom<StreamedAssistantContent<T>> for LlmStreamEvent
 where
-    T: GetTokenUsage + Serialize,
+    T: GetFinishReason + GetTokenUsage,
 {
     type Error = CompletionError;
 
@@ -116,11 +115,13 @@ where
                 reasoning,
                 replayable,
             }),
-            StreamedAssistantContent::Final(r) => Ok(LlmStreamEvent::Final {
-                raw: serde_json::to_value(&r)
-                    .map_err(CompletionError::JsonError)?,
-                usage: r.token_usage(),
-            }),
+            StreamedAssistantContent::Final(response) => {
+                Ok(LlmStreamEvent::Final(ProviderFinal {
+                    finish_reason: response.finish_reason(),
+                    raw_finish_reason: response.raw_finish_reason(),
+                    usage: response.token_usage(),
+                }))
+            }
         }
     }
 }

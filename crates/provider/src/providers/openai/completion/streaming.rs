@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{Level, enabled, info_span};
 
-use crate::completion::{CompletionError, CompletionRequest, GetTokenUsage};
+use crate::completion::{
+    CompletionError, CompletionRequest, GetFinishReason, GetTokenUsage,
+    ProviderFinishReason,
+};
 use crate::http_client::HttpClientExt;
 use crate::json_utils::{self, merge};
 use crate::providers::internal::openai_chat_completions_compatible::{
@@ -52,7 +55,7 @@ struct StreamingDelta {
     tool_calls: Vec<StreamingToolCall>,
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     ToolCalls,
@@ -61,6 +64,21 @@ pub enum FinishReason {
     Length,
     #[serde(untagged)]
     Other(String), // This will handle the deprecated function_call
+}
+
+impl FinishReason {
+    /// Converts the OpenAI terminal reason into the compatible stream reason.
+    fn compatible(&self) -> CompatibleFinishReason {
+        match self {
+            Self::ToolCalls => CompatibleFinishReason::ToolCalls,
+            Self::Stop => CompatibleFinishReason::Stop,
+            Self::ContentFilter => CompatibleFinishReason::Refusal,
+            Self::Length => CompatibleFinishReason::Length,
+            Self::Other(reason) => {
+                CompatibleFinishReason::Other(reason.clone())
+            }
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -80,11 +98,25 @@ struct StreamingCompletionChunk {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StreamingCompletionResponse {
     pub usage: Usage,
+    finish_reason: ProviderFinishReason,
+    raw_finish_reason: String,
 }
 
 impl GetTokenUsage for StreamingCompletionResponse {
     fn token_usage(&self) -> Option<crate::completion::Usage> {
         self.usage.token_usage()
+    }
+}
+
+impl GetFinishReason for StreamingCompletionResponse {
+    /// Returns the normalized OpenAI Chat Completions terminal reason.
+    fn finish_reason(&self) -> ProviderFinishReason {
+        self.finish_reason.clone()
+    }
+
+    /// Returns the OpenAI Chat Completions terminal reason string.
+    fn raw_finish_reason(&self) -> Option<String> {
+        Some(self.raw_finish_reason.clone())
     }
 }
 
@@ -117,7 +149,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Chat Completions streaming completion request: {}",
                 serde_json::to_string_pretty(&request_as_json)?
             );
@@ -133,7 +165,7 @@ where
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
                 gen_ai.provider.name = "openai",
@@ -195,13 +227,10 @@ impl CompatibleStreamProfile for OpenAICompatibleProfile {
                 data.usage,
                 &data.choices,
                 |choice| CompatibleChoiceData {
-                    finish_reason: if choice.finish_reason
-                        == Some(FinishReason::ToolCalls)
-                    {
-                        CompatibleFinishReason::ToolCalls
-                    } else {
-                        CompatibleFinishReason::Other
-                    },
+                    finish_reason: choice
+                        .finish_reason
+                        .as_ref()
+                        .map(FinishReason::compatible),
                     text: choice.delta.content.clone(),
                     reasoning: choice.delta.reasoning_content.clone(),
                     tool_calls:
@@ -214,8 +243,16 @@ impl CompatibleStreamProfile for OpenAICompatibleProfile {
         ))
     }
 
-    fn build_final_response(&self, usage: Self::Usage) -> Self::FinalResponse {
-        StreamingCompletionResponse { usage }
+    fn build_final_response(
+        &self,
+        usage: Self::Usage,
+        finish_reason: CompatibleFinishReason,
+    ) -> Self::FinalResponse {
+        StreamingCompletionResponse {
+            usage,
+            finish_reason: finish_reason.provider_finish_reason(),
+            raw_finish_reason: finish_reason.raw_finish_reason(),
+        }
     }
 
     fn uses_distinct_tool_call_eviction(&self) -> bool {

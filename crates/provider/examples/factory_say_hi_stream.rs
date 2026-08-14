@@ -23,9 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = config::load()?;
     let factory = LlmFactory::new(config);
-    let llm = factory.get(&provider_id, &model_id).ok_or_else(|| {
-        format!("provider/model not found or failed to build: {provider_id}/{model_id}")
-    })?;
+    let llm = factory.resolve(&provider_id, &model_id)?;
 
     // Build a minimal provider-agnostic request with one user message.
     let request = CompletionRequest::builder()
@@ -59,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print!("\n[tool_call_delta] {content:?}");
                 io::stdout().flush()?;
             }
-            LlmStreamEvent::Final { usage, .. } => {
-                println!("\n[final usage] {usage:?}");
+            LlmStreamEvent::Final(final_) => {
+                println!("\n[final] {final_:?}");
             }
         }
     }

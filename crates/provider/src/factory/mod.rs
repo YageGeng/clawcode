@@ -3,7 +3,8 @@
 
 mod event;
 
-pub use event::{DynLlmStream, LlmCompletion, LlmStreamEvent};
+pub use crate::completion::ProviderFinishReason;
+pub use event::{DynLlmStream, LlmCompletion, LlmStreamEvent, ProviderFinal};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,7 +17,8 @@ use serde_json::Value;
 
 use crate::client::CompletionClient;
 use crate::completion::{
-    CompletionError, CompletionModel, CompletionRequest, GetTokenUsage,
+    CompletionError, CompletionModel, CompletionRequest, GetFinishReason,
+    GetTokenUsage,
 };
 use crate::streaming::StreamingCompletionResponse;
 use crate::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
@@ -34,6 +36,11 @@ pub trait Llm: std::fmt::Debug + WasmCompatSend + WasmCompatSync {
 
     /// Returns the configured model id (e.g. `"gpt-5"`, `"deepseek-v4-flash"`).
     fn model_id(&self) -> &str;
+
+    /// Verifies that the dynamic provider handle is ready without sending a request.
+    fn preflight(&self) -> Result<(), CompletionError> {
+        Ok(())
+    }
 
     /// Execute a provider-agnostic completion request.
     fn completion(
@@ -93,7 +100,7 @@ impl<M> Llm for ProviderBackedLlm<M>
 where
     M: CompletionModel + WasmCompatSend + WasmCompatSync + 'static,
     M::Response: Serialize,
-    M::StreamingResponse: GetTokenUsage + Serialize,
+    M::StreamingResponse: GetFinishReason + GetTokenUsage + Serialize,
 {
     fn provider_id(&self) -> &str {
         &self.provider_id
@@ -159,6 +166,32 @@ where
 /// then dispatches `provider_id` / `model_id` via O(1) cache lookup.
 pub struct LlmFactory {
     cache: HashMap<String, ArcLlm>,
+    build_errors: HashMap<String, String>,
+}
+
+/// Strict dynamic provider resolution failures.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LlmFactoryError {
+    /// The requested provider/model pair was absent from immutable configuration.
+    #[error("provider model '{provider_id}/{model_id}' is not configured")]
+    NotConfigured {
+        /// Requested provider identifier.
+        provider_id: String,
+        /// Requested model identifier.
+        model_id: String,
+    },
+    /// The configured provider/model pair failed client construction.
+    #[error(
+        "provider model '{provider_id}/{model_id}' failed to build: {reason}"
+    )]
+    BuildFailed {
+        /// Configured provider identifier.
+        provider_id: String,
+        /// Configured model identifier.
+        model_id: String,
+        /// Safe construction failure summary.
+        reason: String,
+    },
 }
 
 impl LlmFactory {
@@ -168,6 +201,7 @@ impl LlmFactory {
     pub fn new(config: config::ConfigHandle) -> Self {
         let cfg = config.current();
         let mut cache = HashMap::new();
+        let mut build_errors = HashMap::new();
 
         for provider in &cfg.providers {
             for model in &provider.models {
@@ -180,8 +214,9 @@ impl LlmFactory {
                         cache.insert(key, llm);
                     }
                     Err(e) => {
+                        build_errors.insert(key, e.to_string());
                         tracing::warn!(
-                            target: "clawcode::factory",
+                            target: protocol::ProductIdentity::TRACING_FACTORY_TARGET,
                             "skip provider={} model={}: {}",
                             provider.id.as_str(),
                             model.id,
@@ -192,7 +227,10 @@ impl LlmFactory {
             }
         }
 
-        Self { cache }
+        Self {
+            cache,
+            build_errors,
+        }
     }
 
     /// Look up a pre-built LLM handle by provider and model id.
@@ -203,6 +241,30 @@ impl LlmFactory {
         self.cache
             .get(&Self::cache_key(provider_id, model_id))
             .map(Arc::clone)
+    }
+
+    /// Resolves a configured provider/model pair or returns its retained build failure.
+    pub fn resolve(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<ArcLlm, LlmFactoryError> {
+        let key = Self::cache_key(provider_id, model_id);
+        if let Some(llm) = self.cache.get(&key) {
+            return Ok(Arc::clone(llm));
+        }
+        if let Some(reason) = self.build_errors.get(&key) {
+            return Err(LlmFactoryError::BuildFailed {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+                reason: reason.clone(),
+            });
+        }
+
+        Err(LlmFactoryError::NotConfigured {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+        })
     }
 
     /// Cache key combining provider and model identifiers.
@@ -559,7 +621,7 @@ fn wrap<M>(
 where
     M: CompletionModel + WasmCompatSend + WasmCompatSync + 'static,
     M::Response: Serialize,
-    M::StreamingResponse: GetTokenUsage + Serialize,
+    M::StreamingResponse: GetFinishReason + GetTokenUsage + Serialize,
 {
     Arc::new(ProviderBackedLlm::new(
         provider_id.to_string(),

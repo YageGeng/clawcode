@@ -22,10 +22,41 @@ use crate::streaming::{
 };
 use crate::wasm_compat::WasmCompatSend;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompatibleFinishReason {
     ToolCalls,
-    Other,
+    Stop,
+    Length,
+    Refusal,
+    Other(String),
+}
+
+impl CompatibleFinishReason {
+    /// Converts a compatible terminal reason into the public provider reason.
+    pub(crate) fn provider_finish_reason(
+        &self,
+    ) -> crate::completion::ProviderFinishReason {
+        match self {
+            Self::ToolCalls => crate::completion::ProviderFinishReason::ToolUse,
+            Self::Stop => crate::completion::ProviderFinishReason::Stop,
+            Self::Length => crate::completion::ProviderFinishReason::Length,
+            Self::Refusal => crate::completion::ProviderFinishReason::Refusal,
+            Self::Other(reason) => {
+                crate::completion::ProviderFinishReason::Other(reason.clone())
+            }
+        }
+    }
+
+    /// Returns the provider-native terminal reason for diagnostics.
+    pub(crate) fn raw_finish_reason(&self) -> String {
+        match self {
+            Self::ToolCalls => "tool_calls".to_string(),
+            Self::Stop => "stop".to_string(),
+            Self::Length => "length".to_string(),
+            Self::Refusal => "content_filter".to_string(),
+            Self::Other(reason) => reason.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +94,7 @@ impl CompatibleToolCallChunk {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompatibleChoice<D> {
-    pub(crate) finish_reason: CompatibleFinishReason,
+    pub(crate) finish_reason: Option<CompatibleFinishReason>,
     pub(crate) text: Option<String>,
     pub(crate) reasoning: Option<String>,
     pub(crate) tool_calls: Vec<CompatibleToolCallChunk>,
@@ -72,7 +103,7 @@ pub(crate) struct CompatibleChoice<D> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompatibleChoiceData<T, D> {
-    pub(crate) finish_reason: CompatibleFinishReason,
+    pub(crate) finish_reason: Option<CompatibleFinishReason>,
     pub(crate) text: Option<String>,
     pub(crate) reasoning: Option<String>,
     pub(crate) tool_calls: Vec<T>,
@@ -148,7 +179,11 @@ pub(crate) trait CompatibleStreamProfile: WasmCompatSend {
         data: &str,
     ) -> NormalizedCompatibleChunk<Self::Usage, Self::Detail>;
 
-    fn build_final_response(&self, usage: Self::Usage) -> Self::FinalResponse;
+    fn build_final_response(
+        &self,
+        usage: Self::Usage,
+        finish_reason: CompatibleFinishReason,
+    ) -> Self::FinalResponse;
 
     fn uses_distinct_tool_call_eviction(&self) -> bool {
         false
@@ -221,6 +256,7 @@ where
     let stream = stream! {
         let mut tool_calls: HashMap<usize, RawStreamingToolCall> = HashMap::new();
         let mut final_usage = None;
+        let mut final_finish_reason = None;
         let mut terminated_with_error = false;
 
         while let Some(event_result) = event_source.next().await {
@@ -336,13 +372,19 @@ where
                         yield Ok(RawStreamingChoice::Message(content));
                     }
 
-                    if choice.finish_reason == CompatibleFinishReason::ToolCalls {
+                    if matches!(
+                        choice.finish_reason.as_ref(),
+                        Some(&CompatibleFinishReason::ToolCalls)
+                    ) {
                         for tool_call in take_finalized_tool_calls(
                             &mut tool_calls,
                             DroppedToolCallContext::ToolCallsFinishReason,
                         ) {
                             yield Ok(RawStreamingChoice::ToolCall(tool_call));
                         }
+                    }
+                    if let Some(finish_reason) = choice.finish_reason {
+                        final_finish_reason = Some(finish_reason);
                     }
                 }
                 Err(crate::http_client::Error::StreamEnded) => {
@@ -369,11 +411,13 @@ where
             yield Ok(RawStreamingChoice::ToolCall(tool_call));
         }
 
-        let final_usage = final_usage.unwrap_or_default();
-        record_usage(&span, &final_usage);
-        yield Ok(RawStreamingChoice::FinalResponse(
-            profile.build_final_response(final_usage),
-        ));
+        if let Some(finish_reason) = final_finish_reason {
+            let final_usage = final_usage.unwrap_or_default();
+            record_usage(&span, &final_usage);
+            yield Ok(RawStreamingChoice::FinalResponse(
+                profile.build_final_response(final_usage, finish_reason),
+            ));
+        }
     }
     .instrument(instrument_span);
 
@@ -544,80 +588,4 @@ fn take_finalized_tool_calls(
     }
 
     completed_tool_calls
-}
-
-#[cfg(test)]
-pub(crate) mod test_support {
-    use crate::completion::GetTokenUsage;
-    use crate::streaming::{self, StreamedAssistantContent};
-    use bytes::Bytes;
-    use futures::StreamExt;
-
-    pub(crate) fn sse_bytes_from_data_lines<T>(
-        events: impl IntoIterator<Item = T>,
-    ) -> Bytes
-    where
-        T: AsRef<str>,
-    {
-        Bytes::from(
-            events
-                .into_iter()
-                .map(|event| format!("data: {}\n\n", event.as_ref()))
-                .collect::<String>(),
-        )
-    }
-
-    pub(crate) fn sse_bytes_from_json_events(
-        events: &[serde_json::Value],
-    ) -> Bytes {
-        Bytes::from(
-            events
-                .iter()
-                .map(|event| {
-                    format!(
-                        "data: {}\n\n",
-                        serde_json::to_string(event)
-                            .expect("event should serialize")
-                    )
-                })
-                .collect::<String>(),
-        )
-    }
-
-    pub(crate) async fn assert_zero_arg_tool_call_is_emitted<R>(
-        mut stream: streaming::StreamingCompletionResponse<R>,
-        expected_id: &str,
-        expected_name: &str,
-        expect_final_response: bool,
-    ) where
-        R: Clone + Unpin + GetTokenUsage,
-    {
-        let mut saw_final = false;
-        let mut collected_tool_calls = Vec::new();
-
-        while let Some(chunk) = stream.next().await {
-            match chunk.expect("stream item should be ok") {
-                StreamedAssistantContent::ToolCallDelta { .. } => {}
-                StreamedAssistantContent::Final(_) => saw_final = true,
-                StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                    collected_tool_calls.push(tool_call);
-                }
-                _ => panic!(
-                    "unexpected stream item while asserting zero-arg tool call"
-                ),
-            }
-        }
-
-        if expect_final_response {
-            assert!(saw_final, "stream should still yield a final response");
-        }
-
-        assert_eq!(collected_tool_calls.len(), 1);
-        assert_eq!(collected_tool_calls[0].id, expected_id);
-        assert_eq!(collected_tool_calls[0].function.name, expected_name);
-        assert_eq!(
-            collected_tool_calls[0].function.arguments,
-            serde_json::json!({})
-        );
-    }
 }

@@ -10,7 +10,10 @@ use super::completion::{
     Message, SystemContent, ToolChoice, ToolDefinition, Usage,
     apply_cache_control, split_system_messages_from_history,
 };
-use crate::completion::{CompletionError, CompletionRequest, GetTokenUsage};
+use crate::completion::{
+    CompletionError, CompletionRequest, GetFinishReason, GetTokenUsage,
+    ProviderFinishReason,
+};
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::http_client::{self, HttpClientExt};
 use crate::json_utils::merge_inplace;
@@ -120,6 +123,7 @@ struct ThinkingState {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StreamingCompletionResponse {
     pub usage: PartialUsage,
+    stop_reason: String,
 }
 
 impl GetTokenUsage for StreamingCompletionResponse {
@@ -137,6 +141,24 @@ impl GetTokenUsage for StreamingCompletionResponse {
             + usage.output_tokens;
 
         Some(usage)
+    }
+}
+
+impl GetFinishReason for StreamingCompletionResponse {
+    /// Returns the normalized Anthropic Messages terminal reason.
+    fn finish_reason(&self) -> ProviderFinishReason {
+        match self.stop_reason.as_str() {
+            "end_turn" | "stop_sequence" => ProviderFinishReason::Stop,
+            "tool_use" => ProviderFinishReason::ToolUse,
+            "max_tokens" => ProviderFinishReason::Length,
+            "refusal" => ProviderFinishReason::Refusal,
+            reason => ProviderFinishReason::Other(reason.to_string()),
+        }
+    }
+
+    /// Returns the Anthropic Messages terminal reason string.
+    fn raw_finish_reason(&self) -> Option<String> {
+        Some(self.stop_reason.clone())
     }
 }
 
@@ -162,7 +184,7 @@ where
             .unwrap_or_else(|| self.model.clone());
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
                 gen_ai.provider.name = Ext::PROVIDER_NAME,
@@ -285,7 +307,7 @@ where
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
-                target: "clawcode::completions",
+                target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "Anthropic completion request: {}",
                 serde_json::to_string_pretty(&body)?
             );
@@ -308,6 +330,8 @@ where
             let mut sse_stream = Box::pin(stream);
             let mut input_tokens = 0;
             let mut final_usage = None;
+            let mut final_stop_reason = None;
+            let mut terminated_with_error = false;
 
             let mut text_content = String::new();
 
@@ -341,6 +365,7 @@ where
                                             let span = tracing::Span::current();
                                             span.record_token_usage(&usage);
                                             final_usage = Some(usage);
+                                            final_stop_reason = delta.stop_reason.clone();
                                             break;
                                         }
                                     _ => {}
@@ -358,12 +383,15 @@ where
                                     yield Err(CompletionError::ResponseError(
                                         format!("Failed to parse JSON: {} (Data: {})", e, sse.data)
                                     ));
+                                    terminated_with_error = true;
+                                    break;
                                 }
                             }
                         }
                     },
                     Err(e) => {
                         yield Err(CompletionError::ProviderError(format!("SSE Error: {e}")));
+                        terminated_with_error = true;
                         break;
                     }
                 }
@@ -372,9 +400,14 @@ where
             // Ensure event source is closed when stream ends
             sse_stream.close();
 
-            yield Ok(RawStreamingChoice::FinalResponse(StreamingCompletionResponse {
-                usage: final_usage.unwrap_or_default()
-            }))
+            if !terminated_with_error
+                && let Some(stop_reason) = final_stop_reason
+            {
+                yield Ok(RawStreamingChoice::FinalResponse(StreamingCompletionResponse {
+                    usage: final_usage.unwrap_or_default(),
+                    stop_reason,
+                }))
+            }
         }.instrument(span));
 
         Ok(streaming::StreamingCompletionResponse::stream(stream))

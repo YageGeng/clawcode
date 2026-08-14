@@ -2,14 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use protocol::{ApprovalMode, AskForApproval};
-
-use crate::agent::MultiAgentConfig;
-use crate::llm::LlmProvider;
+use crate::approval::{ApprovalMode, AskForApproval};
+use crate::llm::{LlmModel, LlmProvider};
 use crate::mcp::McpServerConfig;
+use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
 use crate::tools::ToolsConfig;
-use crate::tui::TuiConfig;
+pub use protocol::CompactionPolicy as CompactionConfig;
+use protocol::ModelProfile;
 
 /// File-backed session persistence settings.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -19,39 +19,105 @@ pub struct SessionPersistenceConfig {
     pub data_home: Option<String>,
 }
 
-/// Manual context compaction settings.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct CompactionConfig {
-    /// Number of recent user turns to keep verbatim after compaction.
-    #[serde(default = "default_compaction_retained_turns")]
-    pub retained_turns: usize,
-    /// Whether context compaction should run automatically before model requests.
-    #[serde(default)]
-    pub auto: bool,
-    /// Fraction of the current model context window that triggers automatic compaction.
-    #[serde(default = "default_compaction_trigger_ratio")]
-    pub trigger_ratio: f64,
-}
-
-impl Default for CompactionConfig {
-    /// Return the default manual compaction policy.
-    fn default() -> Self {
-        Self {
-            retained_turns: default_compaction_retained_turns(),
-            auto: false,
-            trigger_ratio: default_compaction_trigger_ratio(),
-        }
-    }
-}
-
-/// Default number of recent user turns retained after manual compaction.
-fn default_compaction_retained_turns() -> usize {
-    2
-}
-
-/// Default context window fraction that triggers automatic compaction.
-fn default_compaction_trigger_ratio() -> f64 {
-    0.9
+/// Cross-field validation failures detected after TOML extraction.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigValidationError {
+    /// The active model did not contain a provider and model identifier.
+    #[error("active model '{value}' must use provider/model format")]
+    MalformedActiveModel {
+        /// Invalid configured active model value.
+        value: String,
+    },
+    /// No provider matched the active provider identifier.
+    #[error("active provider '{provider_id}' is not configured")]
+    MissingProvider {
+        /// Provider identifier referenced by the active model.
+        provider_id: String,
+    },
+    /// More than one provider used the active provider identifier.
+    #[error("provider identifier '{provider_id}' is configured more than once")]
+    DuplicateProvider {
+        /// Duplicated provider identifier.
+        provider_id: String,
+    },
+    /// No model matched the active model identifier.
+    #[error("active model '{provider_id}/{model_id}' is not configured")]
+    MissingModel {
+        /// Provider identifier containing the expected model.
+        provider_id: String,
+        /// Missing model identifier.
+        model_id: String,
+    },
+    /// More than one model used the same identifier under a provider.
+    #[error(
+        "model identifier '{provider_id}/{model_id}' is configured more than once"
+    )]
+    DuplicateModel {
+        /// Provider identifier containing the duplicate.
+        provider_id: String,
+        /// Duplicated model identifier.
+        model_id: String,
+    },
+    /// A model omitted a limit required by the runtime.
+    #[error(
+        "model '{provider_id}/{model_id}' is missing required limit '{field}'"
+    )]
+    MissingModelLimit {
+        /// Provider identifier containing the model.
+        provider_id: String,
+        /// Model missing the required limit.
+        model_id: String,
+        /// Name of the missing limit field.
+        field: &'static str,
+    },
+    /// A required model limit was explicitly configured as zero.
+    #[error(
+        "model '{provider_id}/{model_id}' limit '{field}' must be greater than zero"
+    )]
+    ZeroModelLimit {
+        /// Provider identifier containing the model.
+        provider_id: String,
+        /// Model containing the zero limit.
+        model_id: String,
+        /// Name of the invalid limit field.
+        field: &'static str,
+    },
+    /// Exponential retry delay arithmetic would overflow milliseconds.
+    #[error(
+        "retry backoff overflows milliseconds for base_delay_ms={base_delay_ms} and max_retries={max_retries}"
+    )]
+    InvalidRetryDuration {
+        /// Configured initial delay.
+        base_delay_ms: u64,
+        /// Configured retry count.
+        max_retries: u32,
+    },
+    /// Reserved compaction tokens consume the complete model context window.
+    #[error(
+        "compaction reserve_tokens={reserve_tokens} must be less than context_tokens={context_tokens}"
+    )]
+    CompactionReserveOverflow {
+        /// Configured reserve token count.
+        reserve_tokens: u64,
+        /// Active model context window.
+        context_tokens: u64,
+    },
+    /// Provider authentication configuration is absent.
+    #[error("provider '{provider_id}' has no authentication source")]
+    MissingAuthentication {
+        /// Provider missing authentication configuration.
+        provider_id: String,
+    },
+    /// A configured API key source could not be resolved safely.
+    #[error(
+        "provider '{provider_id}' could not resolve API key source '{key_source}'"
+    )]
+    AuthResolution {
+        /// Provider whose API key source failed.
+        provider_id: String,
+        /// Plain source label or environment variable name, never a secret value.
+        key_source: String,
+    },
 }
 
 /// Top-level application configuration.
@@ -69,9 +135,6 @@ pub struct AppConfig {
     /// enhanced tool approval policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<AskForApproval>,
-    /// Multi-agent subsystem configuration.
-    #[serde(default)]
-    pub multi_agent: MultiAgentConfig,
     /// Skill subsystem configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
@@ -87,9 +150,9 @@ pub struct AppConfig {
     /// Manual context compaction configuration.
     #[serde(default)]
     pub compaction: CompactionConfig,
-    /// Local terminal UI configuration.
+    /// Assistant and provider retry configuration.
     #[serde(default)]
-    pub tui: TuiConfig,
+    pub retry: RetryConfig,
 }
 
 fn default_active_model() -> String {
@@ -103,13 +166,12 @@ impl Default for AppConfig {
             active_model: default_active_model(),
             approval: ApprovalMode::default(),
             approval_policy: None,
-            multi_agent: MultiAgentConfig::default(),
             skills: SkillsConfig::default(),
             tools: ToolsConfig::default(),
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
             compaction: CompactionConfig::default(),
-            tui: TuiConfig::default(),
+            retry: RetryConfig::default(),
         }
     }
 }
@@ -123,6 +185,58 @@ impl AppConfig {
             .unwrap_or_default()
     }
 
+    /// Resolves the uniquely configured active provider and model.
+    pub fn resolve_active_model(
+        &self,
+    ) -> Result<(&LlmProvider, &LlmModel), ConfigValidationError> {
+        let (provider_id, model_id) = self
+            .active_model
+            .split_once('/')
+            .filter(|(provider_id, model_id)| {
+                !provider_id.is_empty() && !model_id.is_empty()
+            })
+            .ok_or_else(|| ConfigValidationError::MalformedActiveModel {
+                value: self.active_model.clone(),
+            })?;
+        let mut providers = self
+            .providers
+            .iter()
+            .filter(|provider| provider.id.as_str() == provider_id);
+        let provider = providers.next().ok_or_else(|| {
+            ConfigValidationError::MissingProvider {
+                provider_id: provider_id.to_string(),
+            }
+        })?;
+        if providers.next().is_some() {
+            return Err(ConfigValidationError::DuplicateProvider {
+                provider_id: provider_id.to_string(),
+            });
+        }
+
+        let mut models =
+            provider.models.iter().filter(|model| model.id == model_id);
+        let model = models.next().ok_or_else(|| {
+            ConfigValidationError::MissingModel {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+            }
+        })?;
+        if models.next().is_some() {
+            return Err(ConfigValidationError::DuplicateModel {
+                provider_id: provider_id.to_string(),
+                model_id: model_id.to_string(),
+            });
+        }
+
+        Ok((provider, model))
+    }
+
+    /// Builds the stable runtime profile for the configured active model.
+    pub fn model_profile(&self) -> Result<ModelProfile, ConfigValidationError> {
+        let (provider, model) = self.resolve_active_model()?;
+        model.to_profile(provider)
+    }
+
     /// Return the enhanced approval policy after applying legacy compatibility.
     #[must_use]
     pub fn effective_approval_policy(&self) -> AskForApproval {
@@ -131,9 +245,24 @@ impl AppConfig {
     }
 
     /// Validate cross-field invariants that serde cannot express directly.
-    pub fn validate(&self) -> Result<(), crate::mcp::McpConfigError> {
-        for server in &self.mcp_servers {
-            server.validate()?;
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        for provider in &self.providers {
+            provider.validate_models()?;
+            provider.validate_auth_source()?;
+        }
+
+        let profile = self.model_profile()?;
+        if !self.retry.has_valid_backoff() {
+            return Err(ConfigValidationError::InvalidRetryDuration {
+                base_delay_ms: self.retry.agent.base_delay_ms,
+                max_retries: self.retry.agent.max_retries,
+            });
+        }
+        if self.compaction.reserve_tokens >= profile.context_tokens {
+            return Err(ConfigValidationError::CompactionReserveOverflow {
+                reserve_tokens: self.compaction.reserve_tokens,
+                context_tokens: profile.context_tokens,
+            });
         }
 
         Ok(())
@@ -149,20 +278,6 @@ mod tests {
     fn app_config_default_is_empty() {
         let cfg = AppConfig::default();
         assert!(cfg.providers.is_empty());
-    }
-
-    /// AppConfig reads the TUI theme from the nested tui section.
-    #[test]
-    fn app_config_reads_tui_theme() {
-        let cfg: AppConfig = toml::from_str(
-            r#"
-[tui]
-theme = "light"
-"#,
-        )
-        .expect("parse app config");
-
-        assert_eq!(cfg.tui.theme, crate::tui::TuiTheme::Light);
     }
 
     /// AppConfig enables all built-in tool groups by default.
@@ -193,51 +308,32 @@ enable_skill = false
         assert!(!cfg.tools.enable_skill);
     }
 
-    /// AppConfig defaults manual compaction to retaining two recent user turns.
+    /// AppConfig defaults compaction to pi's reserve and retained-tail budgets.
     #[test]
-    fn app_config_default_compaction_retained_turns_is_two() {
+    fn app_config_default_compaction_matches_pi() {
         let cfg = AppConfig::default();
 
-        assert_eq!(cfg.compaction.retained_turns, 2);
+        assert!(cfg.compaction.enabled);
+        assert_eq!(cfg.compaction.reserve_tokens, 16_384);
+        assert_eq!(cfg.compaction.keep_recent_tokens, 20_000);
     }
 
-    /// AppConfig defaults automatic compaction to disabled with a 90% trigger ratio.
+    /// AppConfig reads pi-style compaction settings from TOML.
     #[test]
-    fn app_config_default_auto_compaction_is_disabled_at_ninety_percent() {
-        let cfg = AppConfig::default();
-
-        assert!(!cfg.compaction.auto);
-        assert!((cfg.compaction.trigger_ratio - 0.9).abs() < f64::EPSILON);
-    }
-
-    /// AppConfig reads the compaction retained turn count from TOML.
-    #[test]
-    fn app_config_reads_compaction_retained_turns() {
+    fn app_config_reads_compaction_settings() {
         let cfg: AppConfig = toml::from_str(
             r#"
 [compaction]
-retained_turns = 0
+enabled = false
+reserve_tokens = 10000
+keep_recent_tokens = 25000
 "#,
         )
         .expect("parse app config");
 
-        assert_eq!(cfg.compaction.retained_turns, 0);
-    }
-
-    /// AppConfig reads automatic compaction settings from TOML.
-    #[test]
-    fn app_config_reads_auto_compaction_settings() {
-        let cfg: AppConfig = toml::from_str(
-            r#"
-[compaction]
-auto = true
-trigger_ratio = 0.75
-"#,
-        )
-        .expect("parse app config");
-
-        assert!(cfg.compaction.auto);
-        assert!((cfg.compaction.trigger_ratio - 0.75).abs() < f64::EPSILON);
+        assert!(!cfg.compaction.enabled);
+        assert_eq!(cfg.compaction.reserve_tokens, 10_000);
+        assert_eq!(cfg.compaction.keep_recent_tokens, 25_000);
     }
 
     /// AppConfig extracts the provider id from the active model setting.

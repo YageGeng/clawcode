@@ -19,8 +19,12 @@ pub enum Error {
     Protocol(#[from] http::Error),
     #[error("Invalid status code: {0}")]
     InvalidStatusCode(StatusCode),
-    #[error("Invalid status code {0} with message: {1}")]
-    InvalidStatusCodeWithMessage(StatusCode, String),
+    #[error("Invalid status code {status} with message: {message}")]
+    InvalidStatusCodeWithMessage {
+        status: StatusCode,
+        message: String,
+        retry_after_ms: Option<u64>,
+    },
     #[error("Header value outside of legal range: {0}")]
     InvalidHeaderValue(#[from] http::header::InvalidHeaderValue),
     #[error("Request in error state, cannot access headers")]
@@ -40,6 +44,23 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Precision-safe conversion used by fractional retry delay headers.
+trait CeilMilliseconds {
+    /// Converts finite non-negative milliseconds without lossy numeric casts.
+    fn ceil_milliseconds(self) -> Option<u64>;
+}
+
+impl CeilMilliseconds for f64 {
+    fn ceil_milliseconds(self) -> Option<u64> {
+        if !self.is_finite() || self < 0.0 {
+            return None;
+        }
+        let duration =
+            std::time::Duration::try_from_secs_f64(self / 1_000.0).ok()?;
+        u64::try_from(duration.as_nanos().div_ceil(1_000_000)).ok()
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn instance_error<E: std::error::Error + Send + Sync + 'static>(
     error: E,
@@ -54,10 +75,67 @@ fn instance_error<E: std::error::Error + 'static>(error: E) -> Error {
 
 async fn non_success_status_error(response: reqwest::Response) -> Error {
     let status = response.status();
+    let retry_after_ms = response
+        .headers()
+        .get("retry-after-ms")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(CeilMilliseconds::ceil_milliseconds)
+        .or_else(|| {
+            response
+                .headers()
+                .get(http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(|seconds| {
+                            (seconds * 1_000.0).ceil_milliseconds()
+                        })
+                        .or_else(|| {
+                            let deadline =
+                                httpdate::parse_http_date(value).ok()?;
+                            let remaining = deadline
+                                .duration_since(std::time::SystemTime::now())
+                                .unwrap_or_default();
+                            u64::try_from(remaining.as_millis()).ok()
+                        })
+                })
+        });
     let message = response.text().await.unwrap_or_else(|error| {
         format!("failed to read error response body: {error}")
     });
-    Error::InvalidStatusCodeWithMessage(status, message)
+    Error::InvalidStatusCodeWithMessage {
+        status,
+        message,
+        retry_after_ms,
+    }
+}
+
+impl Error {
+    /// Returns the HTTP status carried by a failed provider response.
+    #[must_use]
+    pub const fn status_code(&self) -> Option<StatusCode> {
+        match self {
+            Self::InvalidStatusCode(status)
+            | Self::InvalidStatusCodeWithMessage { status, .. } => {
+                Some(*status)
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the provider-requested retry delay parsed from response headers.
+    #[must_use]
+    pub const fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::InvalidStatusCodeWithMessage { retry_after_ms, .. } => {
+                *retry_after_ms
+            }
+            _ => None,
+        }
+    }
 }
 
 pub type LazyBytes = WasmBoxedFuture<'static, Result<Bytes>>;

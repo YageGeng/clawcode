@@ -2,30 +2,50 @@
 name = "tools"
 edition.workspace = true
 version.workspace = true
-description = "Built-in agent tools: shell execution, file I/O, MCP stub"
+description = "Agent tool contracts, registry, and built-in tools"
 
 [lints]
 workspace = true
 
 [dependencies]
-protocol = { path = "../protocol" }
-skills = { path = "../skills" }
-mcp = { path = "../mcp" }
+# workspace crates
+protocol = { workspace = true }
 
+# error
+thiserror = { workspace = true }
+
+# async
 async-trait = { workspace = true }
-async-stream = { workspace = true }
-futures = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "process", "sync", "time"] }
+tokio-util = { workspace = true }
+
+# serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-serde_path_to_error = { workspace = true }
-shlex = { workspace = true }
-nix = { workspace = true }
-portable-pty = { workspace = true }
-tokio = { workspace = true, features = ["process", "fs", "time", "sync"] }
-tokio-stream = { workspace = true }
-thiserror = { workspace = true }
+
+# builder
 typed-builder = { workspace = true }
-xxhash-rust = { workspace = true }
+
+# fs
+dirs = { workspace = true }
+tempfile = { workspace = true }
+
+# pty
+nix = { workspace = true }
+
+# misc
+base64 = { workspace = true }
+image = { workspace = true }
+similar = { workspace = true }
+unicode-normalization = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+# async
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+# fs
+tempfile = { workspace = true }
+
+# misc
+base64 = { workspace = true }

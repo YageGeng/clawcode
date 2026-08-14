@@ -16,6 +16,8 @@
 //!
 pub mod message;
 pub mod request;
+mod usage;
 
 pub use message::{AssistantContent, Message, MessageError};
 pub use request::*;
+pub use usage::Usage;
