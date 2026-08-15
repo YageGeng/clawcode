@@ -29,6 +29,13 @@ pub(crate) struct AcpExtensionRequest {
     parameters: serde_json::Value,
 }
 
+impl AcpExtensionRequest {
+    /// Returns the original extension parameters without adding method metadata.
+    pub(crate) fn parameters(&self) -> &serde_json::Value {
+        &self.parameters
+    }
+}
+
 impl JsonRpcMessage for AcpExtensionRequest {
     /// Matches every extension method centralized by the protocol crate.
     fn matches_method(method: &str) -> bool {

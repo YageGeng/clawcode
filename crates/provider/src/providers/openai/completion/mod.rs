@@ -22,7 +22,7 @@ use crate::{
 use serde::{Deserialize, Serialize, Serializer};
 use std::convert::Infallible;
 use std::fmt;
-use tracing::{Instrument, Level, enabled, info_span};
+use tracing::{Instrument, Level};
 
 use std::str::FromStr;
 
@@ -1436,7 +1436,7 @@ where
     > {
         let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
@@ -1460,7 +1460,7 @@ where
             tool_result_array_content: self.tool_result_array_content,
         })?;
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Chat Completions completion request: {}",
@@ -1492,7 +1492,7 @@ where
                         span.record_response_metadata(&response);
                         span.record_token_usage(&response.usage);
 
-                        if enabled!(Level::TRACE) {
+                        if tracing::enabled!(Level::TRACE) {
                             tracing::trace!(
                                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                                 "OpenAI Chat Completions completion response: {}",

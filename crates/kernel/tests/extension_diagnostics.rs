@@ -388,9 +388,8 @@ async fn diagnostic_infrastructure_failures_are_logged() {
         .expect("diagnostic failures must not abort the run");
 
     let output = logs.content();
-    assert!(output.contains("extension_id=diagnostic-fixture"));
-    assert!(output.contains("point=input"));
-    assert!(output.contains("stage=persist"));
-    assert!(output.contains("stage=sink"));
+    assert!(output.contains("for extension diagnostic-fixture at input"));
+    assert!(output.contains("during persist"));
+    assert!(output.contains("during sink"));
     assert!(!output.contains("prompt-secret-must-not-be-logged"));
 }

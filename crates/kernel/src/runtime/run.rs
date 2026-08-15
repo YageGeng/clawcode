@@ -28,6 +28,11 @@ impl Kernel {
         let first_turn_id =
             TurnId::try_from(self.id_generator.next(IdKind::Turn))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        tracing::info!(
+            "started Kernel Run {} for session {}",
+            run_id,
+            request.session_id
+        );
         let _active_run = ActiveRunLease::acquire(
             Arc::clone(&session),
             run_id.clone(),
@@ -59,6 +64,11 @@ impl Kernel {
             protocol::InputResult::Continue => request.input.clone(),
             protocol::InputResult::Transform { text } => text,
             protocol::InputResult::Handled => {
+                tracing::info!(
+                    "completed Kernel Run {} for session {} because an extension handled the input",
+                    run_id,
+                    request.session_id
+                );
                 return Ok(RunResult {
                     run_id,
                     messages: Vec::new(),
@@ -213,6 +223,11 @@ impl Kernel {
                     Ok,
                 )?;
             let turn_started_at = self.clock.now();
+            tracing::info!(
+                "started Turn {} for Kernel Run {}",
+                turn_id,
+                run_id
+            );
             // Model selection is snapshotted once so host changes made during
             // this Turn apply only to the next Turn.
             let turn_model = session
@@ -742,6 +757,15 @@ impl Kernel {
                 },
                 &extension_context,
             ).await;
+            tracing::info!(
+                "settled Turn {} for Kernel Run {} in {} ms with outcome {:?}",
+                turn_id,
+                run_id,
+                turn_ended_at
+                    .get()
+                    .saturating_sub(turn_started_at.get()),
+                turn.outcome
+            );
             turns.push(turn);
 
             if cancelled {
@@ -959,6 +983,13 @@ impl Kernel {
                     .build()
                     .settle()
                     .await?;
+                tracing::info!(
+                    "settled Kernel Run {} for session {} with outcome {:?} after {} Turns",
+                    run_id,
+                    request.session_id,
+                    completion.outcome,
+                    completion.result.turns.len()
+                );
                 Ok(completion.result)
             }
             Err(error) => {
@@ -977,6 +1008,12 @@ impl Kernel {
                     .build()
                     .settle()
                     .await?;
+                tracing::error!(
+                    "failed Kernel Run {} for session {}: {}",
+                    run_id,
+                    request.session_id,
+                    error
+                );
                 Err(error)
             }
         }

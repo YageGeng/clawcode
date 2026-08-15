@@ -119,6 +119,7 @@ impl WebFixture {
             .expect("kernel");
         let application = Application {
             kernel: Arc::new(kernel),
+            id_generator: Arc::new(RouteIds),
             ui_bootstrap: UiBootstrapResponse::builder()
                 .product(ProductInfo {
                     name: ProductIdentity::NAME.to_string(),

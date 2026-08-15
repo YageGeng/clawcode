@@ -391,7 +391,7 @@ where
                     break;
                 }
                 Err(error) => {
-                    tracing::error!(?error, "SSE error");
+                    tracing::error!("SSE error: {}", error);
                     terminated_with_error = true;
                     yield Err(CompletionError::ProviderError(error.to_string()));
                     break;

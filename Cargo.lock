@@ -22,6 +22,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tools",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -200,6 +202,8 @@ dependencies = [
  "tools",
  "tower",
  "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
  "typed-builder",
 ]
 
@@ -1863,6 +1867,7 @@ dependencies = [
  "tokio-util",
  "tools",
  "tracing",
+ "tracing-futures",
  "tracing-subscriber",
  "typed-builder",
 ]
@@ -3730,6 +3735,7 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "chrono",
  "matchers",
  "nu-ansi-term",
  "once_cell",

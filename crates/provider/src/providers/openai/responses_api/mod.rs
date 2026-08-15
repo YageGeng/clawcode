@@ -29,7 +29,7 @@ use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, completion, message};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
-use tracing::{Instrument, Level, enabled, info_span};
+use tracing::{Instrument, Level};
 
 use std::convert::Infallible;
 use std::ops::Add;
@@ -1548,7 +1548,7 @@ where
     {
         let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
@@ -1573,7 +1573,7 @@ where
             crate::completion::prepare_json_request(&request, request_hooks)
                 .await?;
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Responses completion request: {request}",
@@ -1618,7 +1618,7 @@ where
                         cached_tokens,
                     );
                 }
-                if enabled!(Level::TRACE) {
+                if tracing::enabled!(Level::TRACE) {
                     tracing::trace!(
                         target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                         "OpenAI Responses completion response: {response}",

@@ -1,7 +1,7 @@
 use http::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{Level, enabled, info_span};
+use tracing::Level;
 
 use crate::completion::{
     CompletionError, CompletionRequest, GetFinishReason, GetTokenUsage,
@@ -148,7 +148,7 @@ where
             json!({"stream": true, "stream_options": {"include_usage": true}}),
         );
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Chat Completions streaming completion request: {}",
@@ -173,7 +173,7 @@ where
         }
 
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",

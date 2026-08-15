@@ -6,6 +6,7 @@ pub mod extensions;
 pub mod hook;
 pub mod llm;
 pub mod loader;
+pub mod logging;
 pub mod mcp;
 pub mod retry;
 pub mod skills;
@@ -23,6 +24,7 @@ pub use llm::{
     ProviderType,
 };
 pub use loader::{ConfigError, ConfigHandle, load, load_from};
+pub use logging::LoggingConfig;
 pub use mcp::{McpConfigError, McpOAuthConfig, McpServerConfig};
 pub use retry::{ProviderRetryConfig, RetryConfig};
 pub use skills::SkillsConfig;

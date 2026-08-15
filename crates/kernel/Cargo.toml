@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 
 # tracing & log
 tracing = { workspace = true }
+tracing-futures = { workspace = true }
 
 # async
 async-stream = { workspace = true }

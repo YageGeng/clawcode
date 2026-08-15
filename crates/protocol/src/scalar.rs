@@ -100,6 +100,7 @@ macro_rules! define_string_id {
 }
 
 define_string_id!(SessionId, "session");
+define_string_id!(TraceId, "trace");
 define_string_id!(RunId, "run");
 define_string_id!(TurnId, "turn");
 define_string_id!(MessageId, "message");

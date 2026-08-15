@@ -72,7 +72,7 @@ pub use model::{
 pub use queue::{PendingMessages, QueueKind, QueuedMessage};
 pub use scalar::{
     EntryId, ExtensionId, LaneId, MessageId, QueueId, RecordId, RunId,
-    ScalarError, Sequence, SessionId, TimestampMs, ToolCallId, TurnId,
+    ScalarError, Sequence, SessionId, TimestampMs, ToolCallId, TraceId, TurnId,
 };
 pub use session::{
     RunRequest, RunResult, SessionSummary, SessionTreeEntry,

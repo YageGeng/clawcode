@@ -7,7 +7,9 @@
 // Jail::expect_with's closure returns `figment::Error` (~208 bytes) which trips
 // `clippy::result_large_err`; we can't change figment's API.
 
-use config::{ApiKeyConfig, AppConfig, ConfigValidationError, load_from};
+use config::{
+    ApiKeyConfig, AppConfig, ConfigValidationError, LoggingConfig, load_from,
+};
 use std::path::PathBuf;
 
 /// Supplies complete configuration documents for cross-field validation tests.
@@ -89,6 +91,31 @@ fn defaults_match_pi_retry_and_compaction() {
     assert!(config.compaction.enabled);
     assert_eq!(config.compaction.reserve_tokens, 16_384);
     assert_eq!(config.compaction.keep_recent_tokens, 20_000);
+}
+
+/// Missing logging configuration keeps info filtering and plain-text output.
+#[test]
+fn logging_defaults_to_info_filter() {
+    assert_eq!(LoggingConfig::default().filter, "info");
+    assert!(!LoggingConfig::default().color);
+    assert_eq!(AppConfig::default().logging.filter, "info");
+    assert!(!AppConfig::default().logging.color);
+}
+
+/// TOML can configure the complete EnvFilter directive without a parallel schema.
+#[test]
+fn logging_filter_loads_from_toml() {
+    let config: AppConfig = toml::from_str(
+        r#"
+[logging]
+filter = "warn,kernel=debug,provider=trace"
+color = true
+"#,
+    )
+    .expect("parse logging config");
+
+    assert_eq!(config.logging.filter, "warn,kernel=debug,provider=trace");
+    assert!(config.logging.color);
 }
 
 /// Missing extension settings keep the production command guard enabled.

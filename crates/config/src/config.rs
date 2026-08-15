@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::approval::{ApprovalMode, AskForApproval};
 use crate::extensions::ExtensionsConfig;
 use crate::llm::{LlmModel, LlmProvider};
+use crate::logging::LoggingConfig;
 use crate::mcp::McpServerConfig;
 use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
@@ -124,6 +125,9 @@ pub enum ConfigValidationError {
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AppConfig {
+    /// Immutable process logging configuration.
+    #[serde(default)]
+    pub logging: LoggingConfig,
     /// Configured LLM providers.
     #[serde(default)]
     pub providers: Vec<LlmProvider>,
@@ -166,6 +170,7 @@ fn default_active_model() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            logging: LoggingConfig::default(),
             providers: Vec::new(),
             active_model: default_active_model(),
             approval: ApprovalMode::default(),

@@ -1,5 +1,9 @@
 active_model = "deepseek/deepseek-v4-flash"
 
+[logging]
+filter = "info,acp::trace=debug"
+color = true
+
 [extensions]
 enabled = ["command-guard"]
 

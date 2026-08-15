@@ -18,7 +18,7 @@ use crate::{
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, str::FromStr};
-use tracing::{Instrument, Level, enabled, info_span};
+use tracing::{Instrument, Level};
 
 // ================================================================
 // Anthropic Completion API
@@ -1494,7 +1494,7 @@ where
             .clone()
             .unwrap_or_else(|| self.model.clone());
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
@@ -1532,7 +1532,7 @@ where
                 automatic_caching_ttl: self.automatic_caching_ttl.clone(),
             })?;
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "Anthropic completion request: {}",
@@ -1573,7 +1573,7 @@ where
                         let span = tracing::Span::current();
                         span.record_response_metadata(&completion);
                         span.record_token_usage(&completion.usage);
-                        if enabled!(Level::TRACE) {
+                        if tracing::enabled!(Level::TRACE) {
                             tracing::trace!(
                                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                                 "Anthropic completion response: {}",
