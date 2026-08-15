@@ -2,7 +2,7 @@ use async_stream::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{Level, enabled, info_span};
+use tracing::Level;
 use tracing_futures::Instrument;
 
 use super::completion::{
@@ -184,7 +184,7 @@ where
             .clone()
             .unwrap_or_else(|| self.model.clone());
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",
@@ -306,7 +306,7 @@ where
             merge_inplace(&mut body, additional_params_payload)
         }
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "Anthropic completion request: {}",

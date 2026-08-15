@@ -14,7 +14,7 @@
 
 use bytes::Bytes;
 use http::Request;
-use tracing::{Instrument, Level, enabled, info_span};
+use tracing::{Instrument, Level};
 
 use crate::client::{
     self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Provider,
@@ -604,7 +604,7 @@ where
     > {
         let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
@@ -628,7 +628,7 @@ where
             completion_request,
         ))?;
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "DeepSeek completion request: {}",
                 serde_json::to_string_pretty(&request)?
@@ -670,7 +670,7 @@ where
                             "gen_ai.usage.cache_read.input_tokens",
                             response.usage.cached_input_tokens(),
                         );
-                        if enabled!(Level::TRACE) {
+                        if tracing::enabled!(Level::TRACE) {
                             tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                                 "DeepSeek completion response: {}",
                                 serde_json::to_string_pretty(&response)?
@@ -713,7 +713,7 @@ where
 
         request.additional_params = Some(params);
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "DeepSeek streaming completion request: {}",
                 serde_json::to_string_pretty(&request)?
@@ -733,7 +733,7 @@ where
         }
 
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",

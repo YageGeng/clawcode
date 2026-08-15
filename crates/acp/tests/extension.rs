@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use acp::AcpServerFactory;
+use acp::{AcpServerFactory, AcpTransportKind};
 use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
 use agent_client_protocol::{
     Client, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, UntypedMessage,
@@ -184,7 +184,8 @@ async fn send_request(
     Client
         .v2()
         .connect_with(
-            AcpServerFactory::new(kernel).component(),
+            AcpServerFactory::new(kernel, Arc::new(NanoidIdGenerator))
+                .component(AcpTransportKind::Stdio),
             async move |connection| {
                 connection
                     .send_request(wire::InitializeRequest::new(
@@ -295,7 +296,8 @@ async fn native_session_delete_is_advertised_and_idempotent() {
     Client
         .v2()
         .connect_with(
-            AcpServerFactory::new(kernel).component(),
+            AcpServerFactory::new(kernel, Arc::new(NanoidIdGenerator))
+                .component(AcpTransportKind::Stdio),
             async move |connection| {
                 let initialized = connection
                     .send_request(wire::InitializeRequest::new(

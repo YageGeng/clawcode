@@ -14,6 +14,9 @@ protocol = { workspace = true }
 # error
 thiserror = { workspace = true }
 
+# tracing & log
+tracing = { workspace = true }
+
 # async
 async-trait = { workspace = true }
 futures = { workspace = true }
@@ -37,7 +40,11 @@ store = { workspace = true }
 tools = { workspace = true }
 
 # async
+tokio = { workspace = true, features = ["time"] }
 tokio-util = { workspace = true }
+
+# tracing & log
+tracing-subscriber = { workspace = true }
 
 # fs
 tempfile = { workspace = true }

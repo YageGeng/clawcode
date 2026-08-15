@@ -41,7 +41,7 @@ use crate::{
 use crate::{http_client, message};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::{Instrument, info_span};
+use tracing::Instrument;
 
 // ================================================================
 // Main Moonshot Client
@@ -522,7 +522,7 @@ where
     > {
         let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
@@ -624,7 +624,7 @@ where
     > {
         let request_hooks = request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -185,26 +186,65 @@ impl ProviderModel {
         cancellation: CancellationToken,
         hooks: Option<Arc<dyn provider::completion::CompletionRequestHooks>>,
     ) -> Result<ModelStream, ModelError> {
+        let provider_name =
+            format!("{}/{}", self.profile.provider_id, self.profile.model_id);
+        let provider_span = tracing::info_span!("provider_request");
+        provider_span.in_scope(|| {
+            tracing::info!("started Provider request {}", provider_name);
+        });
+        let started_at = Instant::now();
         let mut provider_request = ProviderRequest::try_from(request)?.0;
         provider_request.hooks = hooks;
         let options = ProviderRequestOptions::from((
             self.retry.clone(),
             cancellation.clone(),
         ));
-        let mut provider_stream =
-            options.acquire(&self.llm, provider_request).await?;
+        // The Provider span is attached to both acquisition and returned stream
+        // polling so detached streaming work keeps the operation Trace.
+        let acquisition = tracing::Instrument::instrument(
+            options.acquire(&self.llm, provider_request),
+            provider_span.clone(),
+        )
+        .await;
+        let mut provider_stream = match acquisition {
+            Ok(stream) => stream,
+            Err(error) => {
+                provider_span.in_scope(|| {
+                    tracing::warn!(
+                        "failed to start Provider request {} in {} ms",
+                        provider_name,
+                        started_at.elapsed().as_millis()
+                    );
+                });
+                return Err(error);
+            }
+        };
         let stream = async_stream::try_stream! {
             let mut received_final = false;
             while let Some(event) = provider_stream.next().await {
                 if cancellation.is_cancelled() {
+                    tracing::warn!(
+                        "cancelled Provider request {} after {} ms",
+                        provider_name,
+                        started_at.elapsed().as_millis()
+                    );
                     Err(ModelError::Cancelled)?;
                 }
                 if received_final {
+                    tracing::warn!(
+                        "Provider request {} emitted data after its terminal event",
+                        provider_name
+                    );
                     Err(ModelError::Protocol(
                         "provider emitted data after Final".to_string(),
                     ))?;
                 }
                 match event.map_err(|error| {
+                    tracing::warn!(
+                        "Provider request {} stream failed after {} ms",
+                        provider_name,
+                        started_at.elapsed().as_millis()
+                    );
                     ModelError::Stream(error.model_failure())
                 })? {
                     LlmStreamEvent::Text(text) => {
@@ -231,6 +271,11 @@ impl ProviderModel {
                     LlmStreamEvent::ToolCallDelta { .. } => {}
                     LlmStreamEvent::Final(final_) => {
                         received_final = true;
+                        tracing::info!(
+                            "completed Provider request {} in {} ms",
+                            provider_name,
+                            started_at.elapsed().as_millis()
+                        );
                         yield ModelStreamEvent::Finished(
                             final_.into_model_final(),
                         );
@@ -238,6 +283,11 @@ impl ProviderModel {
                 }
             }
             if !received_final {
+                tracing::warn!(
+                    "Provider request {} ended without a terminal event after {} ms",
+                    provider_name,
+                    started_at.elapsed().as_millis()
+                );
                 Err(ModelError::Stream(ModelFailure {
                     summary: "provider stream ended without Final".to_string(),
                     status: None,
@@ -245,7 +295,10 @@ impl ProviderModel {
                 }))?;
             }
         };
-        Ok(Box::pin(stream))
+        Ok(Box::pin(tracing_futures::Instrument::instrument(
+            stream,
+            provider_span,
+        )))
     }
 }
 
@@ -453,6 +506,19 @@ impl ProviderRequestOptions {
                 base_delay.saturating_mul(jitter_permille) / 1_000
             };
             retry_index += 1;
+            match failure.status {
+                Some(status) => tracing::warn!(
+                    "retrying Provider request after attempt {} in {} ms following HTTP status {}",
+                    retry_index,
+                    delay_ms,
+                    status
+                ),
+                None => tracing::warn!(
+                    "retrying Provider request after attempt {} in {} ms without an HTTP status",
+                    retry_index,
+                    delay_ms
+                ),
+            }
             tokio::select! {
                 () = self.cancellation.cancelled() => {
                     return Err(ModelError::Cancelled);

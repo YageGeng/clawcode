@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +20,49 @@ use provider::factory::{
 };
 use provider::wasm_compat::WasmBoxedFuture;
 use tokio_util::sync::CancellationToken;
+
+/// Serializes Provider stream tests around tracing's process-wide callsite cache.
+static PROVIDER_STREAM_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+/// Shared in-memory writer used to inspect Provider lifecycle logs.
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    /// Returns all UTF-8 tracing output written by the subscriber.
+    fn content(&self) -> String {
+        String::from_utf8(self.0.lock().expect("log lock").clone())
+            .expect("UTF-8 logs")
+    }
+}
+
+/// One writer handle backed by the shared test buffer.
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogWriter {
+    /// Appends one formatted tracing buffer to the shared capture.
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_poison_error| io::Error::other("log lock poisoned"))?
+            .write(buffer)
+    }
+
+    /// The in-memory capture has no buffered state to flush.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    /// Creates a writer handle sharing the captured byte buffer.
+    fn make_writer(&'writer self) -> Self::Writer {
+        CapturedLogWriter(Arc::clone(&self.0))
+    }
+}
 
 /// Scripted dynamic provider that exposes request acquisition counts.
 #[derive(Debug)]
@@ -156,6 +200,7 @@ fn sample_profile() -> ModelProfile {
 /// Provider Final preserves a length stop and complete usage accounting.
 #[tokio::test]
 async fn provider_final_preserves_usage_and_length_stop() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
     let llm = Arc::new(FixtureLlm::new(vec![Ok(vec![LlmStreamEvent::Final(
         ProviderFinal {
             finish_reason: ProviderFinishReason::Length,
@@ -198,6 +243,7 @@ async fn provider_final_preserves_usage_and_length_stop() {
 /// Provider EOF without an explicit Final becomes a stream protocol failure.
 #[tokio::test]
 async fn stream_eof_without_final_is_a_protocol_failure() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
     let llm = Arc::new(FixtureLlm::new(vec![Ok(Vec::new())]));
     let model = ProviderModel::new(
         sample_profile(),
@@ -232,6 +278,14 @@ async fn preflight_does_not_acquire_a_provider_stream() {
 /// A retryable 503 reacquires the provider stream once after backoff.
 #[tokio::test(start_paused = true)]
 async fn retryable_provider_failure_reacquires_the_stream() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
     let llm = Arc::new(FixtureLlm::new(vec![
         Err(CompletionError::HttpError(
             provider::http_client::Error::InvalidStatusCode(
@@ -250,9 +304,10 @@ async fn retryable_provider_failure_reacquires_the_stream() {
         },
     );
     let cancellation = CancellationToken::new();
-    let task = tokio::spawn(async move {
-        model.stream(sample_request(), cancellation).await
-    });
+    let task = tokio::spawn(tracing_futures::WithSubscriber::with_subscriber(
+        async move { model.stream(sample_request(), cancellation).await },
+        dispatch,
+    ));
 
     tokio::task::yield_now().await;
     assert_eq!(llm.acquisition_count(), 1);
@@ -260,6 +315,11 @@ async fn retryable_provider_failure_reacquires_the_stream() {
     let result = task.await.expect("retry task");
     let _stream = result.expect("retry should acquire a stream");
     assert_eq!(llm.acquisition_count(), 2);
+    let output = logs.content();
+    assert!(
+        output.contains("retrying Provider request after attempt 1"),
+        "captured logs: {output:?}"
+    );
 }
 
 /// Static provider declarations participate in the immutable model catalog.
@@ -321,6 +381,7 @@ fn provider_model_factory_builds_static_extension_providers() {
 /// Cancellation interrupts an active provider backoff before another request.
 #[tokio::test(start_paused = true)]
 async fn cancellation_interrupts_provider_retry_backoff() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
     let llm = Arc::new(FixtureLlm::new(vec![Err(CompletionError::HttpError(
         provider::http_client::Error::InvalidStatusCode(
             http::StatusCode::SERVICE_UNAVAILABLE,
@@ -356,6 +417,7 @@ async fn cancellation_interrupts_provider_retry_backoff() {
 /// Tool-result images cross the kernel/provider boundary as typed base64 image content.
 #[tokio::test]
 async fn tool_result_image_is_preserved_in_provider_request() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
     let llm =
         Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
     let model = ProviderModel::new(
@@ -413,6 +475,7 @@ async fn tool_result_image_is_preserved_in_provider_request() {
 /// Provider conversion includes `!` output and omits `!!` output from model context.
 #[tokio::test]
 async fn user_bash_context_projection_matches_pi_prefix_semantics() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
     let llm =
         Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
     let model = ProviderModel::new(
@@ -470,4 +533,61 @@ async fn user_bash_context_projection_matches_pi_prefix_semantics() {
 
     assert!(serialized.contains("visible"));
     assert!(!serialized.contains("private"));
+}
+
+/// Provider acquisition and stream settlement retain the parent operation Trace.
+#[tokio::test]
+async fn provider_stream_lifecycle_is_logged_without_message_content() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let llm =
+        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
+    let model = ProviderModel::new(
+        sample_profile(),
+        llm as Arc<dyn Llm>,
+        config::ProviderRetryConfig::default(),
+    );
+    tracing_futures::WithSubscriber::with_subscriber(
+        async move {
+            let root = tracing::info_span!(
+                "acp_operation",
+                trace_id = "trace-provider-test"
+            );
+            tracing::Instrument::instrument(
+                async move {
+                    let mut stream = model
+                        .stream(sample_request(), CancellationToken::new())
+                        .await
+                        .expect("provider stream");
+                    while let Some(event) = stream.next().await {
+                        event.expect("provider event");
+                    }
+                },
+                root,
+            )
+            .await;
+        },
+        dispatch,
+    )
+    .await;
+
+    let output = logs.content();
+    for lifecycle in ["started Provider request", "completed Provider request"]
+    {
+        let line = output
+            .lines()
+            .find(|line| line.contains(lifecycle))
+            .unwrap_or_else(|| {
+                panic!("missing {lifecycle} log line in {output:?}")
+            });
+        assert!(line.contains("trace_id=\"trace-provider-test\""));
+        assert!(line.contains("fixture/fixture-model"));
+    }
+    assert!(!output.contains("hello"));
 }

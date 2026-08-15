@@ -33,7 +33,7 @@ use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{Level, enabled, info_span};
+use tracing::Level;
 
 const CHATGPT_API_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_ORIGINATOR: &str = "rig";
@@ -520,7 +520,7 @@ where
         let request = self.create_request(completion_request)?;
 
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat",
                 gen_ai.operation.name = "chat",
@@ -595,7 +595,7 @@ where
         let request_hooks = completion_request.hooks.clone();
         let request = self.create_request(completion_request)?;
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "ChatGPT Responses streaming completion request: {}",
@@ -619,7 +619,7 @@ where
         }
 
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",

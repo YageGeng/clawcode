@@ -15,7 +15,7 @@ use crate::wasm_compat::WasmCompatSend;
 use async_stream::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{Level, debug, enabled, info_span};
+use tracing::Level;
 use tracing_futures::Instrument as _;
 
 use super::{CompletionResponse, GenericResponsesCompletionModel, Output};
@@ -789,7 +789,7 @@ where
                         let Err(err) = data else {
                             continue;
                         };
-                        debug!(
+                        tracing::debug!(
                             "Couldn't deserialize SSE data as StreamingCompletionChunk: {:?}",
                             err
                         );
@@ -822,7 +822,7 @@ where
                     event_source.close();
                 }
                 Err(error) => {
-                    tracing::error!(?error, "SSE error");
+                    tracing::error!("SSE error: {}", error);
                     terminated_with_error = true;
                     yield Err(CompletionError::ProviderError(error.to_string()));
                     break;
@@ -1002,7 +1002,7 @@ where
         let mut request = self.create_completion_request(completion_request)?;
         request.stream = Some(true);
 
-        if enabled!(Level::TRACE) {
+        if tracing::enabled!(Level::TRACE) {
             tracing::trace!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "OpenAI Responses streaming completion request: {}",
@@ -1026,7 +1026,7 @@ where
         // let request_builder = self.client.post_reqwest("/responses").json(&request);
 
         let span = if tracing::Span::current().is_disabled() {
-            info_span!(
+            tracing::info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
                 "chat_streaming",
                 gen_ai.operation.name = "chat_streaming",

@@ -1,5 +1,6 @@
 //! Production composition root for the modular agent backend.
 
+mod logging;
 mod web;
 
 use std::path::PathBuf;
@@ -10,11 +11,12 @@ use kernel::{
     ProviderModelFactory,
 };
 use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
-use protocol::ProductIdentity;
+use protocol::{IdGenerator, ProductIdentity};
 use skill::FilesystemSkillFactory;
 use store::{JsonlStoreFactory, SystemClock};
 use tools::BuiltinToolFactory;
 
+pub use logging::{LoggingError, LoggingFactory};
 pub use web::{
     ActiveModelInfo, LocalBindAddress, ProductInfo, UiBootstrapResponse,
     WebServerOptions,
@@ -64,6 +66,8 @@ pub enum ApplicationError {
 pub struct Application {
     /// Session-owning agent kernel.
     pub kernel: Arc<Kernel>,
+    /// Shared identifier policy used for independent ACP operation traces.
+    pub id_generator: Arc<dyn IdGenerator>,
     /// Immutable browser bootstrap response captured from startup config.
     pub ui_bootstrap: UiBootstrapResponse,
 }
@@ -141,6 +145,7 @@ impl ApplicationFactory {
                 as Arc<dyn skill::SkillFactory>
         });
         let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+        let id_generator: Arc<dyn IdGenerator> = Arc::new(NanoidIdGenerator);
         let kernel = KernelFactory::builder()
             .model_factory(Arc::new(ProviderModelFactory::from_config(
                 self.config,
@@ -152,7 +157,7 @@ impl ApplicationFactory {
             )))
             .extension_factory(Arc::new(extension_factory))
             .clock(clock)
-            .id_generator(Arc::new(NanoidIdGenerator))
+            .id_generator(Arc::clone(&id_generator))
             .system_prompt_factory(Arc::new(PiSystemPromptFactory::new(
                 config_root,
             )))
@@ -167,6 +172,7 @@ impl ApplicationFactory {
             .build()?;
         Ok(Application {
             kernel: Arc::new(kernel),
+            id_generator,
             ui_bootstrap,
         })
     }

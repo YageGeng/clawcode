@@ -100,6 +100,7 @@ impl Application {
         let bootstrap = self.ui_bootstrap.clone();
         let router = AcpServerFactory::http_router(
             Arc::clone(&self.kernel),
+            Arc::clone(&self.id_generator),
             HttpTransportOptions {
                 path: options.acp_path,
                 allowed_origins: vec![options.browser_origin],

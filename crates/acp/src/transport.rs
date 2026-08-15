@@ -4,9 +4,9 @@ use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_http::{AcpHttpServer, CorsOptions, ServerOptions};
 use axum::Router;
 use kernel::Kernel;
-use protocol::ProductIdentity;
+use protocol::{IdGenerator, ProductIdentity};
 
-use crate::AcpServerFactory;
+use crate::{AcpServerFactory, AcpTransportKind};
 
 /// HTTP/SSE and WebSocket route configuration for browser and remote clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,13 +44,16 @@ pub enum AcpTransportError {
 impl AcpServerFactory {
     /// Runs one ACP v2 connection over process stdin/stdout JSON-RPC framing.
     pub async fn serve_stdio(&self) -> Result<(), AcpTransportError> {
-        self.component().connect_to(Stdio::new()).await?;
+        self.component(AcpTransportKind::Stdio)
+            .connect_to(Stdio::new())
+            .await?;
         Ok(())
     }
 
     /// Builds the official HTTP/SSE router with WebSocket upgrade on the same path.
     pub fn http_router(
         kernel: Arc<Kernel>,
+        id_generator: Arc<dyn IdGenerator>,
         options: HttpTransportOptions,
     ) -> Result<Router, AcpTransportError> {
         let cors = if options.allowed_origins.is_empty() {
@@ -66,7 +69,11 @@ impl AcpServerFactory {
             health_endpoint: options.health_endpoint,
         };
         Ok(AcpHttpServer::new(move || {
-            AcpServerFactory::new(Arc::clone(&kernel)).component()
+            AcpServerFactory::new(
+                Arc::clone(&kernel),
+                Arc::clone(&id_generator),
+            )
+            .component(AcpTransportKind::Http)
         })
         .with_options(server_options)
         .into_router())

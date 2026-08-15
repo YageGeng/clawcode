@@ -20,7 +20,7 @@ enum DiagnosticStage {
 }
 
 impl std::fmt::Display for DiagnosticStage {
-    /// Formats a stable low-cardinality stage value for structured logs.
+    /// Formats a stable stage value for readable diagnostic messages.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Identity => "identity",
@@ -61,11 +61,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             Ok(turn_id) => turn_id.clone(),
             Err(error) => {
                 tracing::warn!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Identity,
-                    error = %error,
-                    "extension diagnostic turn lock failed"
+                    "extension diagnostic turn lock failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Identity,
+                    error
                 );
                 None
             }
@@ -77,11 +77,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
                     Ok(turn_id) => turn_id,
                     Err(error) => {
                         tracing::error!(
-                            extension_id = %extension_id,
-                            point = %point,
-                            stage = %DiagnosticStage::Identity,
-                            error = %error,
-                            "extension diagnostic turn id generation failed"
+                            "extension diagnostic Turn ID generation failed for extension {} at {} during {}: {}",
+                            extension_id,
+                            point,
+                            DiagnosticStage::Identity,
+                            error
                         );
                         return;
                     }
@@ -95,11 +95,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             Ok(message_id) => message_id,
             Err(error) => {
                 tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Identity,
-                    error = %error,
-                    "extension diagnostic message id generation failed"
+                    "extension diagnostic message ID generation failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Identity,
+                    error
                 );
                 return;
             }
@@ -136,11 +136,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             Ok(entry_id) => entry_id,
             Err(error) => {
                 tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Identity,
-                    error = %error,
-                    "extension diagnostic entry id generation failed"
+                    "extension diagnostic entry ID generation failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Identity,
+                    error
                 );
                 return;
             }
@@ -149,11 +149,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             Ok(payload) => payload,
             Err(error) => {
                 tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Serialize,
-                    error = %error,
-                    "extension diagnostic serialization failed"
+                    "extension diagnostic serialization failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Serialize,
+                    error
                 );
                 return;
             }
@@ -170,22 +170,22 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
                 Ok(_entry) => true,
                 Err(error) => {
                     tracing::error!(
-                        extension_id = %extension_id,
-                        point = %point,
-                        stage = %DiagnosticStage::Persist,
-                        error = %error,
-                        "extension diagnostic persistence failed"
+                        "extension diagnostic persistence failed for extension {} at {} during {}: {}",
+                        extension_id,
+                        point,
+                        DiagnosticStage::Persist,
+                        error
                     );
                     false
                 }
             },
             Err(error) => {
                 tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Persist,
-                    error = %error,
-                    "extension diagnostic store lock failed"
+                    "extension diagnostic store lock failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Persist,
+                    error
                 );
                 false
             }
@@ -194,11 +194,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             match self.history.lock() {
                 Ok(mut history) => history.push(message),
                 Err(error) => tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::History,
-                    error = %error,
-                    "extension diagnostic history lock failed"
+                    "extension diagnostic history lock failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::History,
+                    error
                 ),
             }
         }
@@ -207,11 +207,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             Ok(sink) => sink.as_ref().map(Arc::clone),
             Err(error) => {
                 tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Sink,
-                    error = %error,
-                    "extension diagnostic sink lock failed"
+                    "extension diagnostic sink lock failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Sink,
+                    error
                 );
                 return;
             }
@@ -232,11 +232,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             Ok(sequence) => sequence,
             Err(error) => {
                 tracing::error!(
-                    extension_id = %extension_id,
-                    point = %point,
-                    stage = %DiagnosticStage::Sequence,
-                    error,
-                    "extension diagnostic sequence failed"
+                    "extension diagnostic sequence failed for extension {} at {} during {}: {}",
+                    extension_id,
+                    point,
+                    DiagnosticStage::Sequence,
+                    error
                 );
                 return;
             }
@@ -257,11 +257,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
             .await
         {
             tracing::error!(
-                extension_id = %extension_id,
-                point = %point,
-                stage = %DiagnosticStage::Sink,
-                error = %error,
-                "extension diagnostic event emission failed"
+                "extension diagnostic event emission failed for extension {} at {} during {}: {}",
+                extension_id,
+                point,
+                DiagnosticStage::Sink,
+                error
             );
         }
     }

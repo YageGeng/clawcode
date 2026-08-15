@@ -1,8 +1,8 @@
 use std::convert::TryFrom;
 
 use protocol::{
-    EntryId, LaneId, MessageId, QueueId, RecordId, RunId, ScalarError,
-    Sequence, SessionId, TimestampMs, ToolCallId, TurnId,
+    EntryId, IdKind, LaneId, MessageId, QueueId, RecordId, RunId, ScalarError,
+    Sequence, SessionId, TimestampMs, ToolCallId, TraceId, TurnId,
 };
 
 /// A timestamp larger than JavaScript's safe integer limit remains exact on the wire.
@@ -98,6 +98,9 @@ fn domain_identifiers_are_non_empty_string_newtypes() {
         serde_json::to_string(
             &QueueId::try_from("queue-1").expect("valid queue id"),
         ),
+        serde_json::to_string(
+            &TraceId::try_from("trace-1").expect("valid trace id"),
+        ),
     ];
 
     for encoded in cases {
@@ -107,4 +110,18 @@ fn domain_identifiers_are_non_empty_string_newtypes() {
                 .starts_with('"')
         );
     }
+}
+
+/// Trace identifiers use the shared string scalar contract and remain readable in logs.
+#[test]
+fn trace_identifier_is_validated_and_displayable() {
+    assert_eq!(
+        TraceId::try_from("  "),
+        Err(ScalarError::EmptyIdentifier { kind: "trace" })
+    );
+
+    let trace_id =
+        TraceId::try_from("trace-operation-1").expect("valid trace identifier");
+    assert_eq!(trace_id.to_string(), "trace-operation-1");
+    assert_eq!(IdKind::Trace.prefix(), "trace");
 }
