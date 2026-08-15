@@ -58,6 +58,7 @@ impl AcpServerFactory {
                         AcpExtensionMethod::SkillList,
                         AcpExtensionMethod::McpStatus,
                         AcpExtensionMethod::ExtensionCommand,
+                        AcpExtensionMethod::UserBash,
                     ]
                     .into_iter()
                     .map(|method| serde_json::Value::String(method.to_string()))

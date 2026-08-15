@@ -1,5 +1,106 @@
 use super::*;
 
+/// Session-local selections reconstructed from Pi v4 branch entries.
+struct RestoredSessionSettings {
+    model: Arc<dyn Model>,
+    thinking_level: ThinkingLevel,
+    active_tools: Vec<String>,
+}
+
+impl RestoredSessionSettings {
+    /// Replays setting entries on the active branch and validates current capabilities.
+    fn load(
+        store: &dyn SessionStore,
+        lane: &LaneId,
+        models: &ModelCatalog,
+        tools: &ToolRegistry,
+    ) -> Result<Self, KernelError> {
+        let mut settings = Self {
+            model: models.active(),
+            thinking_level: ThinkingLevel::Off,
+            active_tools: tools
+                .names()
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect(),
+        };
+        let Some(leaf) = store.lane(lane) else {
+            return Ok(settings);
+        };
+        for entry in store.branch(leaf)? {
+            match entry.kind {
+                EntryKind::ModelChange => {
+                    let provider_id = entry
+                        .payload
+                        .get("provider")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            KernelError::Protocol(format!(
+                                "model change {} has no provider",
+                                entry.id
+                            ))
+                        })?;
+                    let model_id = entry
+                        .payload
+                        .get("modelId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            KernelError::Protocol(format!(
+                                "model change {} has no modelId",
+                                entry.id
+                            ))
+                        })?;
+                    settings.model = models
+                        .resolve(provider_id, model_id)
+                        .ok_or_else(|| {
+                            ModelError::Unavailable(format!(
+                                "persisted model is not configured: {provider_id}/{model_id}"
+                            ))
+                        })?;
+                }
+                EntryKind::ThinkingLevelChange => {
+                    settings.thinking_level = serde_json::from_value(
+                        entry
+                            .payload
+                            .get("thinkingLevel")
+                            .cloned()
+                            .ok_or_else(|| {
+                                KernelError::Protocol(format!(
+                                    "thinking change {} has no thinkingLevel",
+                                    entry.id
+                                ))
+                            })?,
+                    )?;
+                }
+                EntryKind::ActiveToolsChange => {
+                    settings.active_tools = serde_json::from_value(
+                        entry.payload.get("activeTools").cloned().ok_or_else(
+                            || {
+                                KernelError::Protocol(format!(
+                                    "active-tools change {} has no activeTools",
+                                    entry.id
+                                ))
+                            },
+                        )?,
+                    )?;
+                    for name in &settings.active_tools {
+                        if tools.tool(name).is_none() {
+                            return Err(KernelError::Tool(
+                                tools::ToolError::NotFound(name.clone()),
+                            ));
+                        }
+                    }
+                }
+                EntryKind::Message
+                | EntryKind::Compaction
+                | EntryKind::BranchSummary
+                | EntryKind::Custom => {}
+            }
+        }
+        Ok(settings)
+    }
+}
+
 impl Kernel {
     /// Generates, persists, and registers one new session for a working directory.
     pub async fn create_generated_session(
@@ -38,16 +139,13 @@ impl Kernel {
         let path = store.path().to_path_buf();
         let runtime = self.build_session_runtime(store, cwd).await?;
         self.register_session(session_id.clone(), runtime)?;
-        self.dispatch(ExtensionEvent::ProjectTrust, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::ResourcesDiscover, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::SessionStart, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::ModelSelect, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::ThinkingLevelSelect, &session_id, None)
-            .await?;
+        if let Err(error) = self
+            .start_extensions(&session_id, protocol::SessionStartReason::New)
+            .await
+        {
+            self.rollback_session_registration(&session_id, true)?;
+            return Err(error);
+        }
         Ok(path)
     }
 
@@ -79,8 +177,6 @@ impl Kernel {
         session_id: SessionId,
         cwd: PathBuf,
     ) -> Result<PathBuf, KernelError> {
-        self.dispatch(ExtensionEvent::SessionBeforeSwitch, &session_id, None)
-            .await?;
         let existing = self
             .sessions
             .read()
@@ -101,8 +197,22 @@ impl Kernel {
                 .map_err(|_poison_error| KernelError::Poisoned)?
                 .path()
                 .to_path_buf();
-            self.dispatch(ExtensionEvent::SessionSwitch, &session_id, None)
-                .await?;
+            let context = self.extension_context(&existing, None, None)?;
+            let before = existing
+                .extensions
+                .emit_session_before_switch(
+                    &protocol::SessionBeforeSwitchEvent {
+                        reason: protocol::SessionSwitchReason::Resume,
+                        target_session_id: Some(session_id.clone()),
+                    },
+                    &context,
+                )
+                .await;
+            if before.cancel {
+                return Err(KernelError::ExtensionBlocked(
+                    "session resume cancelled".to_string(),
+                ));
+            }
             return Ok(path);
         }
         {
@@ -123,19 +233,31 @@ impl Kernel {
         let store = self.store_factory.open(&metadata.path)?;
         let path = store.path().to_path_buf();
         let runtime = self.build_session_runtime(store, cwd).await?;
+        let context = self.extension_context(&runtime, None, None)?;
+        let before = runtime
+            .extensions
+            .emit_session_before_switch(
+                &protocol::SessionBeforeSwitchEvent {
+                    reason: protocol::SessionSwitchReason::Resume,
+                    target_session_id: Some(session_id.clone()),
+                },
+                &context,
+            )
+            .await;
+        if before.cancel {
+            runtime.extensions.invalidate();
+            return Err(KernelError::ExtensionBlocked(
+                "session resume cancelled".to_string(),
+            ));
+        }
         self.register_session(session_id.clone(), runtime)?;
-        self.dispatch(ExtensionEvent::ProjectTrust, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::ResourcesDiscover, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::SessionStart, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::ModelSelect, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::ThinkingLevelSelect, &session_id, None)
-            .await?;
-        self.dispatch(ExtensionEvent::SessionSwitch, &session_id, None)
-            .await?;
+        if let Err(error) = self
+            .start_extensions(&session_id, protocol::SessionStartReason::Resume)
+            .await
+        {
+            self.rollback_session_registration(&session_id, false)?;
+            return Err(error);
+        }
         Ok(path)
     }
 
@@ -151,8 +273,22 @@ impl Kernel {
             .map_err(|_poison_error| KernelError::Poisoned)?
             .cancel();
         let _run_guard = session.run_gate.lock().await;
-        self.dispatch(ExtensionEvent::SessionShutdown, session_id, None)
-            .await?;
+        // Transition before invoking hooks so reentrant host operations fail
+        // immediately instead of waiting on the gate held by this shutdown.
+        session.begin_closing()?;
+        let context = self.extension_context(&session, None, None)?;
+        session
+            .extensions
+            .emit_session_shutdown(
+                &protocol::SessionShutdownEvent {
+                    reason: protocol::SessionShutdownReason::Quit,
+                    target_session_id: None,
+                },
+                &context,
+            )
+            .await;
+        session.finish_closing()?;
+        session.extensions.invalidate();
         self.sessions
             .write()
             .map_err(|_poison_error| KernelError::Poisoned)?
@@ -272,36 +408,18 @@ impl Kernel {
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .set_name(Some(title.as_str().to_string()))?;
-        self.dispatch(ExtensionEvent::SessionInfoChanged, session_id, None)
-            .await?;
-        Ok(())
-    }
-
-    /// Moves the main lane and rebuilds model history from the selected branch.
-    pub async fn navigate_session(
-        &self,
-        session_id: &SessionId,
-        target: Option<EntryId>,
-    ) -> Result<SessionTreeSnapshot, KernelError> {
-        self.dispatch(ExtensionEvent::SessionBeforeTree, session_id, None)
-            .await?;
         let session = self.session(session_id)?;
-        let _run_guard = session.run_gate.lock().await;
-        let history = {
-            let mut store = session
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            store.move_lane(&session.lane, target)?;
-            Self::history_from_store(store.as_ref(), &session.lane)?
-        };
-        *session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? = history;
-        self.dispatch(ExtensionEvent::SessionTree, session_id, None)
-            .await?;
-        self.session_tree(session_id)
+        let context = self.extension_context(&session, None, None)?;
+        session
+            .extensions
+            .emit_session_info_changed(
+                &protocol::SessionInfoChangedEvent {
+                    name: Some(title.as_str().to_string()),
+                },
+                &context,
+            )
+            .await;
+        Ok(())
     }
 
     /// Forks one selected ancestor branch into a new persisted session and registers it.
@@ -312,13 +430,23 @@ impl Kernel {
         new_session_id: SessionId,
         cwd: PathBuf,
     ) -> Result<PathBuf, KernelError> {
-        self.dispatch(
-            ExtensionEvent::SessionBeforeFork,
-            source_session_id,
-            None,
-        )
-        .await?;
         let source = self.session(source_session_id)?;
+        let context = self.extension_context(&source, None, None)?;
+        let decision = source
+            .extensions
+            .emit_session_before_fork(
+                &protocol::SessionBeforeForkEvent {
+                    entry_id: source_leaf.clone(),
+                    position: protocol::SessionForkPosition::At,
+                },
+                &context,
+            )
+            .await;
+        if decision.cancel {
+            return Err(KernelError::ExtensionBlocked(
+                "session fork cancelled".to_string(),
+            ));
+        }
         let source_path = source
             .store
             .lock()
@@ -340,8 +468,16 @@ impl Kernel {
         let path = store.path().to_path_buf();
         let runtime = self.build_session_runtime(store, cwd).await?;
         self.register_session(new_session_id.clone(), runtime)?;
-        self.dispatch(ExtensionEvent::SessionFork, &new_session_id, None)
-            .await?;
+        if let Err(error) = self
+            .start_extensions(
+                &new_session_id,
+                protocol::SessionStartReason::Fork,
+            )
+            .await
+        {
+            self.rollback_session_registration(&new_session_id, true)?;
+            return Err(error);
+        }
         Ok(path)
     }
 
@@ -365,13 +501,136 @@ impl Kernel {
         Ok(session_id)
     }
 
+    /// Runs typed startup, resource, session, model, and thinking points for one runtime.
+    async fn start_extensions(
+        &self,
+        session_id: &SessionId,
+        reason: protocol::SessionStartReason,
+    ) -> Result<(), KernelError> {
+        let session = self.session(session_id)?;
+        let context = self.extension_context(&session, None, None)?;
+        let trust = session
+            .extensions
+            .emit_project_trust(
+                &protocol::ProjectTrustEvent {
+                    cwd: session.cwd.clone(),
+                },
+                &context,
+            )
+            .await;
+        // Pi announces the live session before extensions discover resources
+        // that will be attached to that session runtime.
+        session
+            .extensions
+            .emit_session_start(
+                &protocol::SessionStartEvent {
+                    reason,
+                    previous_session_id: None,
+                },
+                &context,
+            )
+            .await;
+        if trust.trusted != protocol::ProjectTrustDecision::No {
+            let resources = session
+                .extensions
+                .emit_resources_discover(
+                    &protocol::ResourcesDiscoverEvent {
+                        cwd: session.cwd.clone(),
+                        reason: protocol::ResourcesDiscoverReason::Startup,
+                    },
+                    &context,
+                )
+                .await;
+            let skill_paths = resources
+                .skill_paths
+                .into_iter()
+                .map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        session.cwd.join(path)
+                    }
+                })
+                .collect::<Vec<_>>();
+            if let Some(factory) = &self.skill_factory {
+                *session
+                    .skills
+                    .write()
+                    .map_err(|_poison_error| KernelError::Poisoned)? =
+                    Some(factory.create_with_roots(skill_paths)?);
+            }
+            let prompt_paths = resources
+                .prompt_paths
+                .into_iter()
+                .map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        session.cwd.join(path)
+                    }
+                })
+                .collect::<Vec<_>>();
+            *session
+                .prompt_templates
+                .write()
+                .map_err(|_poison_error| KernelError::Poisoned)? =
+                crate::PromptTemplateCatalog::discover(&prompt_paths)?;
+        }
+        let restored_model = session
+            .model
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .profile()
+            .clone();
+        let restored_thinking_level = *session
+            .thinking_level
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        session
+            .extensions
+            .emit_model_select(
+                &protocol::ModelSelectEvent {
+                    model: restored_model,
+                    previous_model: None,
+                    source: protocol::ModelSelectSource::Restore,
+                },
+                &context,
+            )
+            .await;
+        session
+            .extensions
+            .emit_thinking_level_select(
+                &protocol::ThinkingLevelSelectEvent {
+                    level: restored_thinking_level,
+                    previous_level: protocol::ThinkingLevel::Off,
+                },
+                &context,
+            )
+            .await;
+        Ok(())
+    }
+
     /// Builds session-scoped tools and reconstructs model history from the active main branch.
     async fn build_session_runtime(
         &self,
         store: Box<dyn SessionStore>,
         cwd: PathBuf,
     ) -> Result<Arc<SessionRuntime>, KernelError> {
+        let modules = self.extension_factory.create_modules()?;
+        let mut registrar = ExtensionRegistrar::new();
+        for module in modules {
+            registrar.register_module(module.as_ref())?;
+        }
+        let extension_registry = Arc::new(registrar.freeze());
         let mut tools = (*self.tools).clone();
+        let mut extension_tool_names = BTreeSet::new();
+        for (_extension_id, tool) in extension_registry.tools() {
+            let name = tool.definition().name;
+            // The first extension registration wins while still overriding built-ins.
+            if extension_tool_names.insert(name) {
+                tools.upsert(tool);
+            }
+        }
         let mcp_servers = if let Some(factory) = &self.mcp_factory {
             let mcp_session = factory.create().await?;
             tools.merge(mcp_session.tools)?;
@@ -381,30 +640,99 @@ impl Kernel {
         };
         let lane = LaneId::try_from("main")
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let settings = RestoredSessionSettings::load(
+            store.as_ref(),
+            &lane,
+            &self.models,
+            &tools,
+        )?;
         let history = Self::history_from_store(store.as_ref(), &lane)?;
+        // Resume starts after persisted entry order so replayed transcript events
+        // always sort before newly emitted live events in ACP clients.
+        let initial_event_sequence =
+            u64::try_from(store.entries().len()).unwrap_or(u64::MAX);
         let queue = PendingQueue::from_records(&store.records())?;
         let project_context =
             self.system_prompt_factory.project_context(&cwd)?;
+        let session_skills = self
+            .skill_factory
+            .as_ref()
+            .map(|factory| factory.create())
+            .transpose()?;
+        let commands =
+            DynamicCommandRegistry::new(extension_registry.commands())
+                .map_err(|error| {
+                    KernelError::ExtensionBlocked(error.to_string())
+                })?;
+        let mut flags = self.static_extensions.flags.clone();
+        let mut flag_names = flags
+            .iter()
+            .map(|flag| flag.name.clone())
+            .collect::<BTreeSet<_>>();
+        for flag in extension_registry.flags() {
+            if flag_names.insert(flag.name.clone()) {
+                flags.push(flag);
+            }
+        }
+        let tool_state =
+            SessionToolState::new(tools.clone(), settings.active_tools)?;
+        let event_sink = Arc::new(Mutex::new(None));
+        let diagnostic_turn_id = Arc::new(Mutex::new(None));
+        let event_sequence = Arc::new(AtomicU64::new(initial_event_sequence));
+        // Diagnostics share transcript persistence without retaining the session
+        // runtime and creating a reference cycle through ExtensionRuntime.
+        let store = Arc::new(Mutex::new(store));
+        let history = Arc::new(Mutex::new(history));
+        let extensions = Arc::new(ExtensionRuntime::new(
+            Arc::clone(&extension_registry),
+            Arc::new(
+                KernelExtensionDiagnostics::builder()
+                    .clock(Arc::clone(&self.clock))
+                    .sink(Arc::clone(&event_sink))
+                    .turn_id(Arc::clone(&diagnostic_turn_id))
+                    .sequence(Arc::clone(&event_sequence))
+                    .store(Arc::clone(&store))
+                    .history(Arc::clone(&history))
+                    .lane(lane.clone())
+                    .id_generator(Arc::clone(&self.id_generator))
+                    .build(),
+            ),
+        ));
         Ok(Arc::new(
             SessionRuntime::builder()
-                .store(Mutex::new(store))
+                .store(store)
                 .lane(lane)
                 .cwd(cwd)
-                .tools(Arc::new(tools))
                 .mcp_servers(Arc::from(mcp_servers))
                 .project_context(project_context)
-                .history(Mutex::new(history))
+                .skills(RwLock::new(session_skills))
+                .prompt_templates(RwLock::new(
+                    crate::PromptTemplateCatalog::default(),
+                ))
+                .extensions(extensions)
+                .tool_state(tool_state)
+                .commands(commands)
+                .flags(Arc::from(flags))
+                .models(Arc::clone(&self.models))
+                .model(RwLock::new(settings.model))
+                .thinking_level(RwLock::new(settings.thinking_level))
+                .event_bus(broadcast::channel(64).0)
+                .event_sink(event_sink)
+                .diagnostic_turn_id(diagnostic_turn_id)
+                .history(history)
                 .queue(Mutex::new(queue))
+                .lifecycle(RwLock::new(SessionLifecycle::Active))
                 .run_gate(AsyncMutex::new(()))
                 .active_run_id(Mutex::new(None))
+                .idle_notify(Notify::new())
                 .cancellation(Mutex::new(CancellationToken::new()))
-                .event_sequence(AtomicU64::new(0))
+                .event_sequence(event_sequence)
                 .build(),
         ))
     }
 
     /// Reconstructs compaction-aware model context from one persisted lane branch.
-    fn history_from_store(
+    pub(in crate::runtime) fn history_from_store(
         store: &dyn SessionStore,
         lane: &LaneId,
     ) -> Result<Vec<AgentMessage>, KernelError> {
@@ -493,6 +821,26 @@ impl Kernel {
             return Err(KernelError::DuplicateSession(session_id));
         }
         sessions.insert(session_id, runtime);
+        Ok(())
+    }
+
+    /// Removes a partially started runtime and optionally its new durable log.
+    fn rollback_session_registration(
+        &self,
+        session_id: &SessionId,
+        delete_persisted: bool,
+    ) -> Result<(), KernelError> {
+        let runtime = self
+            .sessions
+            .write()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .remove(session_id);
+        if let Some(runtime) = runtime {
+            runtime.extensions.invalidate();
+        }
+        if delete_persisted {
+            self.store_factory.delete(session_id)?;
+        }
         Ok(())
     }
 

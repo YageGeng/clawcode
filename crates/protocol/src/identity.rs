@@ -1,4 +1,44 @@
 use std::fmt;
+use std::path::{Path, PathBuf};
+
+/// Absolute path supplied through the product configuration override variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOverridePath(PathBuf);
+
+impl TryFrom<PathBuf> for ConfigOverridePath {
+    type Error = ConfigOverridePathError;
+
+    /// Rejects relative overrides whose meaning would differ across build and runtime processes.
+    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
+        if path.is_absolute() {
+            Ok(Self(path))
+        } else {
+            Err(ConfigOverridePathError::Relative(path))
+        }
+    }
+}
+
+impl AsRef<Path> for ConfigOverridePath {
+    /// Borrows the validated absolute path.
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl From<ConfigOverridePath> for PathBuf {
+    /// Consumes the validated override into its filesystem representation.
+    fn from(path: ConfigOverridePath) -> Self {
+        path.0
+    }
+}
+
+/// Validation failures for an explicit configuration path override.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigOverridePathError {
+    /// Relative paths have no stable base across Cargo and the running application.
+    #[error("configuration override must be an absolute path: {0}")]
+    Relative(PathBuf),
+}
 
 /// Centralizes names that must change together when the product is renamed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +131,8 @@ pub enum AcpExtensionMethod {
     McpStatus,
     /// Dispatches a registered extension command.
     ExtensionCommand,
+    /// Executes a user-authored shell command entirely on the server.
+    UserBash,
 }
 
 impl fmt::Display for AcpExtensionMethod {
@@ -121,6 +163,7 @@ impl AcpExtensionMethod {
             Self::SkillList => "_clawcode/skill/list",
             Self::McpStatus => "_clawcode/mcp/status",
             Self::ExtensionCommand => "_clawcode/extension/command",
+            Self::UserBash => "_clawcode/session/bash",
         }
     }
 
@@ -141,6 +184,7 @@ impl AcpExtensionMethod {
             Self::SkillList,
             Self::McpStatus,
             Self::ExtensionCommand,
+            Self::UserBash,
         ]
         .into_iter()
         .find(|candidate| candidate.as_str() == method)

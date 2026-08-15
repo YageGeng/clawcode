@@ -74,6 +74,10 @@ pub enum ToolError {
     #[error("tool already registered: {0}")]
     Duplicate(String),
 
+    /// A dynamic registry lock was poisoned by a panicking writer.
+    #[error("tool registry lock poisoned")]
+    RegistryPoisoned,
+
     /// Registered tool failed during execution.
     #[error("{message}")]
     Execution {
@@ -89,6 +93,16 @@ pub enum ToolError {
 pub trait AgentTool: Send + Sync {
     /// Returns the model-facing name, description, and argument schema.
     fn definition(&self) -> ToolDefinition;
+
+    /// Validates a parsed call before any side-effectful execution begins.
+    fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let definition = self.definition();
+        if definition.name == call.name {
+            Ok(())
+        } else {
+            Err(ToolError::NotFound(call.name.clone()))
+        }
+    }
 
     /// Executes one correlated tool call in its turn context.
     async fn execute(
@@ -124,6 +138,11 @@ impl ToolRegistry {
         Ok(())
     }
 
+    /// Inserts or replaces a tool under its declared name.
+    pub fn upsert(&mut self, tool: Arc<dyn AgentTool>) {
+        self.tools.insert(tool.definition().name, tool);
+    }
+
     /// Merges another registry while preserving duplicate-name validation.
     pub fn merge(&mut self, other: ToolRegistry) -> Result<(), ToolError> {
         for tool in other.tools.into_values() {
@@ -142,6 +161,35 @@ impl ToolRegistry {
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|tool| tool.definition()).collect()
+    }
+
+    /// Builds an immutable registry containing only requested existing tool names.
+    pub fn subset<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, ToolError> {
+        let mut subset = Self::default();
+        for name in names {
+            let tool = self
+                .tool(name)
+                .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
+            subset.register(tool)?;
+        }
+        Ok(subset)
+    }
+
+    /// Returns one shared tool implementation without executing it.
+    #[must_use]
+    pub fn tool(&self, name: &str) -> Option<Arc<dyn AgentTool>> {
+        self.tools.get(name).map(Arc::clone)
+    }
+
+    /// Runs side-effect-free argument validation against one registry snapshot.
+    pub fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let tool = self
+            .tool(&call.name)
+            .ok_or_else(|| ToolError::NotFound(call.name.clone()))?;
+        tool.validate(call)
     }
 
     /// Dispatches a call to the registered tool with the same name.

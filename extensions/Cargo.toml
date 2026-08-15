@@ -1,0 +1,53 @@
+[package]
+name = "extensions"
+edition.workspace = true
+version.workspace = true
+description = "Statically compiled built-in Rust extensions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+extension = { workspace = true }
+protocol = { workspace = true }
+
+# async
+async-trait = { workspace = true }
+
+# serde
+serde_json = { workspace = true }
+
+# shell
+shlex = { workspace = true }
+
+[build-dependencies]
+# workspace crates
+config = { workspace = true }
+protocol = { workspace = true }
+
+# error
+thiserror = { workspace = true }
+
+# serde
+serde = { workspace = true }
+
+# fs
+toml = { workspace = true }
+
+[dev-dependencies]
+# workspace crates
+config = { workspace = true }
+
+# async
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# error
+thiserror = { workspace = true }
+
+# serde
+serde = { workspace = true }
+
+# fs
+tempfile = { workspace = true }
+toml = { workspace = true }

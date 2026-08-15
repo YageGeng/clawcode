@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::{EntryId, QueueId, SessionId};
+use crate::{EntryId, QueueId, SessionId, UserBashRequest};
 
 /// Parameters shared by ACP extensions that reference one session.
 #[derive(Debug, Deserialize)]
@@ -14,6 +14,9 @@ pub struct AcpSessionParameters {
 
 /// Model-backed compaction uses the common session-only request shape.
 pub type AcpCompactParameters = AcpSessionParameters;
+
+/// Server-side bash uses the shared Kernel request without a duplicate ACP shape.
+pub type AcpUserBashParameters = UserBashRequest;
 
 /// Parameters for adding one follow-up to the active run.
 #[derive(Debug, Deserialize)]

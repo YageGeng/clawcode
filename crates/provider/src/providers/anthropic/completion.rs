@@ -1488,6 +1488,7 @@ where
         completion::CompletionResponse<CompletionResponse>,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let request_model = completion_request
             .model
             .clone()
@@ -1540,13 +1541,18 @@ where
         }
 
         async move {
-            let request: Vec<u8> = serde_json::to_vec(&request)?;
+            let (request, prepared_hooks) =
+                completion::prepare_json_request(&request, request_hooks)
+                    .await?;
 
-            let req = self
+            let mut req = self
                 .client
                 .post("/v1/messages")?
                 .body(request)
                 .map_err(|e| CompletionError::HttpError(e.into()))?;
+            if let Some(hooks) = prepared_hooks {
+                hooks.attach(&mut req).await?;
+            }
 
             let response = self
                 .client

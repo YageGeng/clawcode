@@ -91,6 +91,46 @@ fn defaults_match_pi_retry_and_compaction() {
     assert_eq!(config.compaction.keep_recent_tokens, 20_000);
 }
 
+/// Missing extension settings keep the production command guard enabled.
+#[test]
+fn extensions_default_to_command_guard() {
+    let config = AppConfig::default();
+
+    assert_eq!(
+        config.extensions.enabled,
+        vec![
+            protocol::ExtensionId::try_from("command-guard")
+                .expect("default extension id")
+        ]
+    );
+}
+
+/// An explicit empty extension list disables every compiled extension.
+#[test]
+fn extensions_allow_an_explicit_empty_list() {
+    let config: AppConfig = toml::from_str("[extensions]\nenabled = []\n")
+        .expect("parse extensions");
+
+    assert!(config.extensions.enabled.is_empty());
+}
+
+/// Extension order remains stable because it controls hook priority.
+#[test]
+fn extensions_preserve_configured_order() {
+    let config: AppConfig = toml::from_str(
+        "[extensions]\nenabled = [\"hook-examples\", \"command-guard\"]\n",
+    )
+    .expect("parse extensions");
+    let ids: Vec<_> = config
+        .extensions
+        .enabled
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+    assert_eq!(ids, vec!["hook-examples", "command-guard"]);
+}
+
 /// Active model resolution rejects duplicate provider model identifiers.
 #[test]
 fn active_model_requires_a_unique_provider_model() {
@@ -209,6 +249,21 @@ fn load_uses_claw_config_env_var() {
             cfg.providers[0].api_key,
             Some(ApiKeyConfig::Plaintext("sk-custom".to_string()))
         );
+        Ok(())
+    });
+}
+
+/// Relative explicit paths are rejected so build-time and runtime resolution cannot diverge.
+#[test]
+fn load_rejects_relative_claw_config_path() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        jail.create_file("custom.toml", &provider_config("sk-custom"))?;
+        jail.set_env("CLAW_CONFIG", "custom.toml");
+
+        let error = config::load().expect_err("relative override must fail");
+
+        assert!(error.to_string().contains("must be an absolute path"));
         Ok(())
     });
 }

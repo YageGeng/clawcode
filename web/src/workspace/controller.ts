@@ -8,6 +8,7 @@ import type { McpServerInfo, PendingMessages, PromptInput, SessionSummary, Sessi
 import { useWorkspaceStore } from "./store";
 import type { WorkspaceAction } from "./state";
 import { SessionUpdateRouter } from "./updateRouter";
+import type { WorkspaceStoreAccess } from "./updateRouter";
 
 const RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 5_000] as const;
 
@@ -24,9 +25,13 @@ export class WorkspaceController {
   constructor(bootstrap: UiBootstrap) {
     this.bootstrap = bootstrap;
     this.methods = AcpMethods.forNamespace(bootstrap.product.slug);
+    const store: WorkspaceStoreAccess = {
+      getState: () => useWorkspaceStore.getState(),
+      dispatch: (action) => this.dispatch(action)
+    };
     this.updateRouter = new SessionUpdateRouter(
       bootstrap.product.slug,
-      (action) => this.dispatch(action),
+      store,
       (sessionId) => this.refreshSessionRuntime(sessionId)
     );
   }

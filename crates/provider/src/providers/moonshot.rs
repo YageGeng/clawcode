@@ -520,6 +520,7 @@ where
         completion::CompletionResponse<openai::CompletionResponse>,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
@@ -552,12 +553,16 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
-        let req = self
+        let (body, prepared_hooks) =
+            completion::prepare_json_request(&request, request_hooks).await?;
+        let mut req = self
             .client
             .post("/chat/completions")?
             .body(body)
             .map_err(http_client::Error::from)?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         let async_block = async move {
             let response = self.client.send::<_, bytes::Bytes>(req).await?;
@@ -617,6 +622,7 @@ where
         StreamingCompletionResponse<Self::StreamingResponse>,
         CompletionError,
     > {
+        let request_hooks = request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
@@ -655,12 +661,16 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
-        let req = self
+        let (body, prepared_hooks) =
+            completion::prepare_json_request(&request, request_hooks).await?;
+        let mut req = self
             .client
             .post("/chat/completions")?
             .body(body)
             .map_err(http_client::Error::from)?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         crate::providers::openai::completion::streaming::send_compatible_streaming_request(
             self.client.clone(),

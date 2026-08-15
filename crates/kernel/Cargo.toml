@@ -20,11 +20,14 @@ tools = { workspace = true }
 # error
 thiserror = { workspace = true }
 
+# tracing & log
+tracing = { workspace = true }
+
 # async
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["process", "sync", "time"] }
 tokio-util = { workspace = true }
 
 # serde
@@ -41,6 +44,9 @@ nanoid = { workspace = true }
 [dev-dependencies]
 # async
 tokio = { workspace = true, features = ["sync", "time", "test-util"] }
+
+# tracing & log
+tracing-subscriber = { workspace = true }
 
 # http
 http = { workspace = true }

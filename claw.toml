@@ -1,5 +1,8 @@
 active_model = "deepseek/deepseek-v4-flash"
 
+[extensions]
+enabled = ["command-guard"]
+
 # Approval strategy to use.
 approval = "yolo"
 

@@ -132,6 +132,7 @@ where
         streaming::StreamingCompletionResponse<StreamingCompletionResponse>,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let request =
             super::CompletionRequest::try_from(OpenAIRequestParams {
                 model: self.model.clone(),
@@ -155,13 +156,21 @@ where
             );
         }
 
-        let req_body = serde_json::to_vec(&request_as_json)?;
+        let (req_body, prepared_hooks) =
+            crate::completion::prepare_json_request(
+                &request_as_json,
+                request_hooks,
+            )
+            .await?;
 
-        let req = self
+        let mut req = self
             .client
             .post("/chat/completions")?
             .body(req_body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(

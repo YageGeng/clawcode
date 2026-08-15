@@ -139,6 +139,7 @@ impl AcpEventMapper {
                         )]
                     }
                     MessageContent::System { .. }
+                    | MessageContent::BashExecution { .. }
                     | MessageContent::Extension { .. } => {
                         vec![Self::extension_update(&event)?]
                     }
@@ -230,7 +231,8 @@ impl AcpEventMapper {
                 )),
             ],
             AgentEventPayload::CompactionStart { .. }
-            | AgentEventPayload::CompactionEnd { .. } => {
+            | AgentEventPayload::CompactionEnd { .. }
+            | AgentEventPayload::ExtensionHandlerFailed { .. } => {
                 vec![Self::extension_update(&event)?]
             }
             AgentEventPayload::TurnStart { .. }
@@ -265,6 +267,10 @@ impl AcpEventMapper {
         ]);
         match &event.payload {
             AgentEventPayload::MessageEnd { message } => {
+                product.insert(
+                    "messageTiming".to_string(),
+                    serde_json::to_value(message.timing)?,
+                );
                 if let MessageContent::Assistant { metadata, .. } =
                     &message.content
                 {
@@ -294,6 +300,7 @@ impl AcpEventMapper {
             | AgentEventPayload::RetryEnd { .. }
             | AgentEventPayload::CompactionStart { .. }
             | AgentEventPayload::CompactionEnd { .. }
+            | AgentEventPayload::ExtensionHandlerFailed { .. }
             | AgentEventPayload::AgentSettled { .. } => {}
         }
         Ok(wire::Meta::from_iter([(

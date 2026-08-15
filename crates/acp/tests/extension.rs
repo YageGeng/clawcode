@@ -11,7 +11,7 @@ use kernel::{
     Kernel, KernelFactory, Model, ModelError, ModelFactory, ModelStream,
     NanoidIdGenerator,
 };
-use protocol::{AcpExtensionMethod, ModelProfile, ModelRequest};
+use protocol::{AcpExtensionMethod, ModelProfile, ModelRequest, SessionId};
 use store::{JsonlStoreFactory, SystemClock};
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
@@ -91,6 +91,7 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == SESSION_LIST_METHOD
             || method == SESSION_DELETE_METHOD
             || method == AcpExtensionMethod::Compact.as_str()
+            || method == AcpExtensionMethod::UserBash.as_str()
     }
 
     /// Returns the static ACP method associated with this request.
@@ -116,6 +117,9 @@ impl JsonRpcMessage for IntegrationRequest {
             SESSION_DELETE_METHOD => SESSION_DELETE_METHOD,
             method if method == AcpExtensionMethod::Compact.as_str() => {
                 AcpExtensionMethod::Compact.as_str()
+            }
+            method if method == AcpExtensionMethod::UserBash.as_str() => {
+                AcpExtensionMethod::UserBash.as_str()
             }
             _ => {
                 return Err(agent_client_protocol::Error::method_not_found());
@@ -163,7 +167,7 @@ fn integration_kernel(root: &Path) -> Arc<Kernel> {
             root,
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(NanoidIdGenerator))
         .build()
@@ -343,4 +347,50 @@ async fn native_session_delete_is_advertised_and_idempotent() {
         )
         .await
         .expect("native delete request");
+}
+
+/// ACP exposes server-side bash without negotiating client terminal callbacks.
+#[tokio::test]
+async fn user_bash_extension_executes_and_persists_on_the_server() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let result = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::UserBash.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "command": "printf 'acp bash'",
+                "excludeFromContext": true
+            }),
+        ),
+    )
+    .await
+    .expect("execute server bash");
+
+    assert_eq!(result["output"], "acp bash");
+    assert_eq!(result["exitCode"], 0);
+    assert_eq!(result["cancelled"], false);
+    assert_eq!(result["truncated"], false);
+    let session_id = SessionId::try_from(session_id).expect("session id");
+    let transcript = kernel
+        .session_transcript(&session_id)
+        .expect("persisted transcript");
+    assert!(matches!(
+        &transcript[0].content,
+        protocol::MessageContent::BashExecution { bash }
+            if bash.exclude_from_context && bash.result.output == "acp bash"
+    ));
 }

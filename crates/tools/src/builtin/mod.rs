@@ -1,7 +1,7 @@
 mod bash;
 mod edit;
 mod mutation;
-mod output;
+pub(crate) mod output;
 mod path;
 mod read;
 mod write;

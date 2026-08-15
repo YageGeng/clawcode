@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
 use protocol::{
@@ -67,24 +66,29 @@ fn message_timing_rejects_reversed_intervals() {
     );
 }
 
-/// Unknown pi message payloads survive protocol serialization without shape loss.
+/// Typed extension messages preserve extension identity and structured details.
 #[test]
 fn extension_message_preserves_unknown_payload_and_metadata() {
-    let message = ExtensionMessage {
-        discriminator: "pi.custom.progress".to_string(),
-        payload: serde_json::json!({ "completed": 3, "total": 8 }),
-        meta: BTreeMap::from([(
-            "source".to_string(),
-            serde_json::json!("extension"),
-        )]),
-    };
+    let message = ExtensionMessage::builder()
+        .extension_id(
+            protocol::ExtensionId::try_from("audit")
+                .expect("extension identifier"),
+        )
+        .custom_type("progress".to_string())
+        .blocks(vec![ContentBlock::Text {
+            text: "working".to_string(),
+        }])
+        .display(true)
+        .include_in_context(false)
+        .details(serde_json::json!({ "completed": 3, "total": 8 }))
+        .build();
 
     let encoded =
         serde_json::to_value(message).expect("extension should serialize");
 
-    assert_eq!(encoded["discriminator"], "pi.custom.progress");
-    assert_eq!(encoded["payload"]["completed"], 3);
-    assert_eq!(encoded["meta"]["source"], "extension");
+    assert_eq!(encoded["extension_id"], "audit");
+    assert_eq!(encoded["custom_type"], "progress");
+    assert_eq!(encoded["details"]["completed"], 3);
 }
 
 /// Image blocks preserve base64 payloads and MIME types for tool-result replay.

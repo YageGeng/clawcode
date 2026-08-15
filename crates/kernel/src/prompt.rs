@@ -9,6 +9,10 @@ use protocol::{
     TurnId,
 };
 
+mod template;
+
+pub use template::{PromptTemplate, PromptTemplateCatalog};
+
 /// Context filenames in the same per-directory precedence used by pi v4.
 const PROJECT_CONTEXT_CANDIDATES: [&str; 5] = [
     "AGENTS.override.md",
@@ -132,6 +136,15 @@ pub enum PromptError {
     #[error("project context I/O failed for {path}: {source}")]
     ProjectContext {
         /// Context path that failed.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A prompt-template path could not be inspected or read.
+    #[error("prompt template I/O failed for {path}: {source}")]
+    PromptTemplate {
+        /// Template path that failed.
         path: PathBuf,
         /// Underlying filesystem failure.
         #[source]

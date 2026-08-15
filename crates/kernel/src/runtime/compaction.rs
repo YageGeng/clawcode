@@ -23,6 +23,18 @@ pub(super) struct CompactionExecution<'a> {
     excluded_message_id: Option<&'a MessageId>,
 }
 
+/// Immutable inputs for one tool-free model summary request.
+#[derive(typed_builder::TypedBuilder)]
+pub(in crate::runtime) struct SummaryGeneration<'a> {
+    session: &'a Arc<SessionRuntime>,
+    run_id: &'a RunId,
+    turn_id: &'a TurnId,
+    timestamp: TimestampMs,
+    messages: Vec<AgentMessage>,
+    cancellation: &'a CancellationToken,
+    instruction: &'a str,
+}
+
 impl Kernel {
     /// Generates and persists one model-backed pi v4 compaction atomically on failure.
     pub async fn compact_session(
@@ -46,7 +58,7 @@ impl Kernel {
         reason: CompactionReason,
     ) -> Result<CompactionResult, KernelError> {
         let session = self.session(session_id)?;
-        let _run_guard = session.run_gate.lock().await;
+        let _run_guard = session.acquire_operation().await?;
         let cancellation = CancellationToken::new();
         *session
             .cancellation
@@ -71,15 +83,13 @@ impl Kernel {
         execution: CompactionExecution<'_>,
     ) -> Result<CompactionResult, KernelError> {
         let CompactionExecution {
-            session_id,
+            session_id: _session_id,
             session,
             sink,
             reason,
             cancellation,
             excluded_message_id,
         } = execution;
-        self.dispatch(ExtensionEvent::SessionBeforeCompact, session_id, None)
-            .await?;
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let turn_id = TurnId::try_from(self.id_generator.next(IdKind::Turn))
@@ -87,6 +97,29 @@ impl Kernel {
         let entry_id = EntryId::try_from(self.id_generator.next(IdKind::Entry))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let started_at_ms = self.clock.now();
+        let will_retry = reason == CompactionReason::Overflow
+            && excluded_message_id.is_some();
+        let extension_context =
+            self.extension_context(session, Some(&run_id), Some(&turn_id))?;
+        let extension_result = session
+            .extensions
+            .emit_session_before_compact(
+                &protocol::SessionBeforeCompactEvent::builder()
+                    .reason(reason)
+                    .will_retry(will_retry)
+                    .branch_entries(
+                        extension_context.snapshot.tree.entries.clone(),
+                    )
+                    .build(),
+                &extension_context,
+            )
+            .await;
+        if extension_result.cancel {
+            return Err(KernelError::ExtensionBlocked(
+                "session compaction cancelled".to_string(),
+            ));
+        }
+        let extension_compaction = extension_result.compaction;
         let emitter = EventEmitter {
             clock: Arc::clone(&self.clock),
             sink,
@@ -131,29 +164,49 @@ impl Kernel {
             &compacted_history,
             self.compaction_policy,
         );
-        let summary = match self
-            .generate_compaction_summary(
-                &turn_id,
-                started_at_ms,
-                preparation.summarized,
-                cancellation,
-            )
-            .await
-        {
-            Ok(summary) => summary,
-            Err(error) => {
-                self.record_operation(
-                    session,
-                    &run_id,
-                    RecordKind::OperationFinished,
-                    serde_json::json!({
-                        "status": "failed",
-                        "error": error.to_string(),
-                    }),
-                )?;
-                return Err(error);
-            }
-        };
+        let from_extension = extension_compaction.is_some();
+        let (summary, retained_tail, tokens_before) =
+            if let Some(compaction) = extension_compaction {
+                (
+                    compaction.summary,
+                    compaction.retained_tail,
+                    compaction.tokens_before,
+                )
+            } else {
+                let summary = match self
+                    .generate_compaction_summary(
+                        SummaryGeneration::builder()
+                            .session(session)
+                            .run_id(&run_id)
+                            .turn_id(&turn_id)
+                            .timestamp(started_at_ms)
+                            .messages(preparation.summarized)
+                            .cancellation(cancellation)
+                            .instruction(COMPACTION_INSTRUCTION)
+                            .build(),
+                    )
+                    .await
+                {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        self.record_operation(
+                            session,
+                            &run_id,
+                            RecordKind::OperationFinished,
+                            serde_json::json!({
+                                "status": "failed",
+                                "error": error.to_string(),
+                            }),
+                        )?;
+                        return Err(error);
+                    }
+                };
+                (
+                    summary,
+                    preparation.retained_tail,
+                    preparation.tokens_before,
+                )
+            };
         let ended_at_ms = self.clock.now();
         let details = CompactionDetails::builder()
             .reason(reason)
@@ -163,8 +216,8 @@ impl Kernel {
             .build();
         let data = CompactionData::builder()
             .summary(summary.clone())
-            .retained_tail(preparation.retained_tail.clone())
-            .tokens_before(preparation.tokens_before)
+            .retained_tail(retained_tail.clone())
+            .tokens_before(tokens_before)
             .details(Some(details.clone()))
             .build();
         session
@@ -197,11 +250,10 @@ impl Kernel {
                 blocks: vec![ContentBlock::Text { text: summary }],
             },
         };
-        let mut context = Vec::with_capacity(
-            preparation.retained_tail.len().saturating_add(1),
-        );
+        let mut context =
+            Vec::with_capacity(retained_tail.len().saturating_add(1));
         context.push(summary_message);
-        context.extend(preparation.retained_tail);
+        context.extend(retained_tail);
         *session
             .history
             .lock()
@@ -230,7 +282,7 @@ impl Kernel {
         )?;
         emitter
             .emit_at(
-                turn_id,
+                turn_id.clone(),
                 ended_at_ms,
                 AgentEventPayload::CompactionEnd {
                     run_id,
@@ -239,19 +291,35 @@ impl Kernel {
                 },
             )
             .await?;
-        self.dispatch(ExtensionEvent::SessionCompact, session_id, None)
-            .await?;
+        session
+            .extensions
+            .emit_session_compact(
+                &protocol::SessionCompactEvent::builder()
+                    .compaction(result.clone())
+                    .from_extension(from_extension)
+                    .reason(reason)
+                    .will_retry(will_retry)
+                    .build(),
+                &extension_context,
+            )
+            .await;
         Ok(result)
     }
 
     /// Streams a tool-free summary request and rejects empty or tool-producing output.
-    async fn generate_compaction_summary(
+    pub(in crate::runtime) async fn generate_compaction_summary(
         &self,
-        turn_id: &TurnId,
-        timestamp: TimestampMs,
-        messages: Vec<AgentMessage>,
-        cancellation: &CancellationToken,
+        generation: SummaryGeneration<'_>,
     ) -> Result<String, KernelError> {
+        let SummaryGeneration {
+            session,
+            run_id,
+            turn_id,
+            timestamp,
+            messages,
+            cancellation,
+            instruction,
+        } = generation;
         let instruction = AgentMessage {
             identity: MessageIdentity {
                 message_id: self.message_id()?,
@@ -261,7 +329,7 @@ impl Kernel {
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
             content: MessageContent::System {
                 blocks: vec![ContentBlock::Text {
-                    text: COMPACTION_INSTRUCTION.to_string(),
+                    text: instruction.to_string(),
                 }],
             },
         };
@@ -272,12 +340,24 @@ impl Kernel {
             messages: request_messages,
             tools: Vec::new(),
         };
+        let completion_hooks =
+            self.completion_hooks(session, run_id, turn_id)?;
+        // Compaction uses one immutable model snapshot just like a normal Turn.
+        let model = session
+            .model
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .clone();
+        model.preflight().await?;
         let mut retry_state = RetryState::default();
         loop {
             let result: Result<String, ModelError> = async {
-                let mut stream = self
-                    .model
-                    .stream(request.clone(), cancellation.clone())
+                let mut stream = model
+                    .stream_with_hooks(
+                        request.clone(),
+                        cancellation.clone(),
+                        Some(Arc::clone(&completion_hooks)),
+                    )
                     .await?;
                 let mut summary = String::new();
                 loop {
@@ -492,6 +572,7 @@ impl ContextUsageEstimate {
                     | MessageContent::User { .. }
                     | MessageContent::Assistant { .. }
                     | MessageContent::ToolResult { .. }
+                    | MessageContent::BashExecution { .. }
                     | MessageContent::Extension { .. } => None,
                 });
 
@@ -611,6 +692,14 @@ impl EstimatedTokens for AgentMessage {
             | MessageContent::User { blocks }
             | MessageContent::Assistant { blocks, .. }
             | MessageContent::ToolResult { blocks, .. } => blocks,
+            MessageContent::BashExecution { bash } => {
+                if bash.exclude_from_context {
+                    return 0;
+                }
+                let characters = bash.model_text().chars().count();
+                return u64::try_from(characters.div_ceil(4))
+                    .unwrap_or(u64::MAX);
+            }
             MessageContent::Extension { extension } => {
                 let characters = serde_json::to_string(extension)
                     .map_or(0_usize, |value| value.chars().count());

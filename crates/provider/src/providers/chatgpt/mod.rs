@@ -32,6 +32,7 @@ use crate::streaming::StreamingCompletionResponse;
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{Level, enabled, info_span};
 
 const CHATGPT_API_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -438,20 +439,25 @@ where
     async fn completion_from_sse(
         &self,
         request: ResponsesRequest,
+        request_hooks: Option<Arc<dyn completion::CompletionRequestHooks>>,
     ) -> Result<
         completion::CompletionResponse<responses_api::CompletionResponse>,
         CompletionError,
     > {
-        let body = serde_json::to_vec(&request)?;
+        let (body, prepared_hooks) =
+            completion::prepare_json_request(&request, request_hooks).await?;
         let auth =
             self.client.ext().auth.auth_context().await.map_err(|err| {
                 CompletionError::ProviderError(err.to_string())
             })?;
 
-        let req = self
+        let mut req = self
             .add_auth_headers(self.client.post("/responses")?, &auth)
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         let response = self.client.send(req).await?;
         let text = http_client::text(response).await?;
@@ -510,6 +516,7 @@ where
         completion_request: completion::CompletionRequest,
     ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError>
     {
+        let request_hooks = completion_request.hooks.clone();
         let request = self.create_request(completion_request)?;
 
         let span = if tracing::Span::current().is_disabled() {
@@ -533,7 +540,8 @@ where
 
         tracing_futures::Instrument::instrument(
             async move {
-                let response = self.completion_from_sse(request).await?;
+                let response =
+                    self.completion_from_sse(request, request_hooks).await?;
                 let span = tracing::Span::current();
                 span.record("gen_ai.response.id", &response.raw_response.id);
                 span.record(
@@ -584,6 +592,7 @@ where
         >,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let request = self.create_request(completion_request)?;
 
         if enabled!(Level::TRACE) {
@@ -594,16 +603,20 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
+        let (body, prepared_hooks) =
+            completion::prepare_json_request(&request, request_hooks).await?;
         let auth =
             self.client.ext().auth.auth_context().await.map_err(|err| {
                 CompletionError::ProviderError(err.to_string())
             })?;
 
-        let req = self
+        let mut req = self
             .add_auth_headers(self.client.post("/responses")?, &auth)
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(

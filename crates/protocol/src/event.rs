@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, CompactionReason, CompactionResult, MessageId, ModelUsage,
-    RunId, Sequence, TimestampMs, ToolCall, ToolResult, TurnId, TurnRecord,
+    AgentMessage, CompactionReason, CompactionResult, ExtensionId, MessageId,
+    ModelUsage, RunId, Sequence, TimestampMs, ToolCall, ToolResult, TurnId,
+    TurnRecord,
 };
 
 /// Typed terminal result shared by run lifecycle events and ACP mapping.
@@ -197,6 +198,16 @@ pub enum AgentEventPayload {
 
         /// Persisted compaction identity and timing.
         result: CompactionResult,
+    },
+
+    /// An extension handler failed and normal lifecycle processing continued.
+    ExtensionHandlerFailed {
+        /// Extension whose handler returned the error.
+        extension_id: ExtensionId,
+        /// Stable lifecycle point name.
+        point: String,
+        /// Sanitized human-readable diagnostic.
+        message: String,
     },
 }
 

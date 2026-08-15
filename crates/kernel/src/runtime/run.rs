@@ -1,14 +1,22 @@
 use super::*;
 
 impl Kernel {
-    /// Executes one run while preserving per-session serialization.
-    pub async fn run(
+    /// Executes one run with an explicit input source for trusted host callers.
+    pub(in crate::runtime) async fn run_with_source(
         &self,
         request: RunRequest,
         sink: Arc<dyn EventSink>,
+        input_source: protocol::InputSource,
     ) -> Result<RunResult, KernelError> {
+        // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
+        if let Some(result) = self
+            .try_execute_user_bash_request(&request, Arc::clone(&sink))
+            .await?
+        {
+            return Ok(result);
+        }
         let session = self.session(&request.session_id)?;
-        let _run_guard = session.run_gate.lock().await;
+        let _run_guard = session.acquire_operation().await?;
         let cancellation = CancellationToken::new();
         *session
             .cancellation
@@ -17,28 +25,54 @@ impl Kernel {
             cancellation.clone();
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let _active_run =
-            ActiveRunLease::acquire(Arc::clone(&session), run_id.clone())?;
         let first_turn_id =
             TurnId::try_from(self.id_generator.next(IdKind::Turn))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let _active_run = ActiveRunLease::acquire(
+            Arc::clone(&session),
+            run_id.clone(),
+            first_turn_id.clone(),
+            Arc::clone(&sink),
+        )?;
         let emitter = EventEmitter {
             clock: Arc::clone(&self.clock),
             sink,
             session: Arc::clone(&session),
         };
-        self.dispatch(
-            ExtensionEvent::Input,
-            &request.session_id,
-            Some(first_turn_id.clone()),
-        )
-        .await?;
-        self.dispatch(
-            ExtensionEvent::BeforeAgentStart,
-            &request.session_id,
-            Some(first_turn_id.clone()),
-        )
-        .await?;
+        let extension_context = self.extension_context(
+            &session,
+            Some(&run_id),
+            Some(&first_turn_id),
+        )?;
+        let input = session
+            .extensions
+            .emit_input(
+                protocol::InputEvent {
+                    text: request.input.clone(),
+                    source: input_source,
+                    streaming_behavior: None,
+                },
+                &extension_context,
+            )
+            .await;
+        let run_input = match input {
+            protocol::InputResult::Continue => request.input.clone(),
+            protocol::InputResult::Transform { text } => text,
+            protocol::InputResult::Handled => {
+                return Ok(RunResult {
+                    run_id,
+                    messages: Vec::new(),
+                    turns: Vec::new(),
+                });
+            }
+        };
+        // Pi expands prompt templates only after extensions have transformed input.
+        let run_input = session
+            .prompt_templates
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .expand(&run_input)
+            .unwrap_or(run_input);
         emitter
             .emit(
                 first_turn_id.clone(),
@@ -53,14 +87,54 @@ impl Kernel {
             RecordKind::OperationStarted,
             serde_json::json!({ "operation": "agent" }),
         )?;
-        self.dispatch(
-            ExtensionEvent::AgentStart,
-            &request.session_id,
-            Some(first_turn_id.clone()),
-        )
-        .await?;
         let execution: Result<RunCompletion, KernelError> = async {
-            self.model.preflight().await?;
+            let initial_tools = session.tool_state.snapshot()?.active_registry()?;
+            let initial_skills = session
+                .skills
+                .read()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .as_ref()
+                .map(skill::SkillCatalog::descriptors)
+                .unwrap_or_default();
+            let initial_system_prompt = self.system_prompt_factory.create(
+                SystemPromptContext::builder()
+                    .cwd(session.cwd.clone())
+                    .turn_id(first_turn_id.clone())
+                    .timestamp_ms(self.clock.now())
+                    .tools(initial_tools.definitions())
+                    .skills(initial_skills.clone())
+                    .project(session.project_context.clone())
+                    .build(),
+            )?;
+            let before_agent = session
+                .extensions
+                .emit_before_agent_start(
+                    protocol::BeforeAgentStartEvent {
+                        prompt: run_input.clone(),
+                        system_prompt: initial_system_prompt
+                            .content
+                            .text_content()
+                            .unwrap_or_default(),
+                        skills: initial_skills
+                            .into_iter()
+                            .map(|skill| skill.name)
+                            .collect(),
+                    },
+                    &extension_context,
+                )
+                .await;
+            session
+                .extensions
+                .emit_agent_start(
+                    &protocol::AgentStartEvent,
+                    &extension_context,
+                )
+                .await;
+            let initial_model = session
+                .model
+                .read()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .clone();
 
         let pre_prompt_compaction = {
             let history = session
@@ -79,7 +153,7 @@ impl Kernel {
             latest_assistant
                 .and_then(|(message, metadata)| {
                     self.compaction_policy
-                        .overflow_recovery(metadata, self.model.profile())
+                        .overflow_recovery(metadata, initial_model.profile())
                         .map(|recovery| {
                             let excluded = (recovery
                                 == OverflowRecovery::CompactAndRetry)
@@ -90,7 +164,7 @@ impl Kernel {
                 .or_else(|| {
                     ContextUsageEstimate::from_history(&history)
                         .should_compact(
-                            self.model.profile().context_tokens,
+                            initial_model.profile().context_tokens,
                             self.compaction_policy,
                         )
                         .then_some((CompactionReason::Threshold, None))
@@ -114,7 +188,8 @@ impl Kernel {
 
         let mut produced_messages = Vec::new();
         let mut turns = Vec::new();
-        let mut next_initial_input = Some(request.input);
+        let mut next_initial_input = Some(run_input.clone());
+            let mut before_agent = Some(before_agent);
         let mut next_queued_item = None;
         let mut next_turn_id = Some(first_turn_id.clone());
         let mut retry_state = RetryState::default();
@@ -138,6 +213,19 @@ impl Kernel {
                     Ok,
                 )?;
             let turn_started_at = self.clock.now();
+            // Model selection is snapshotted once so host changes made during
+            // this Turn apply only to the next Turn.
+            let turn_model = session
+                .model
+                .read()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .clone();
+            turn_model.preflight().await?;
+            *session
+                .diagnostic_turn_id
+                .lock()
+                .map_err(|_poison_error| KernelError::Poisoned)? =
+                Some(turn_id.clone());
             emitter
                 .emit(
                     turn_id.clone(),
@@ -146,12 +234,21 @@ impl Kernel {
                     },
                 )
                 .await?;
-            self.dispatch(
-                ExtensionEvent::TurnStart,
-                &request.session_id,
-                Some(turn_id.clone()),
-            )
-            .await?;
+            let extension_context = self.extension_context(
+                &session,
+                Some(&run_id),
+                Some(&turn_id),
+            )?;
+            session
+                .extensions
+                .emit_turn_start(
+                    &protocol::TurnStartEvent {
+                        turn_index: turns.len(),
+                        timestamp_ms: turn_started_at,
+                    },
+                    &extension_context,
+                )
+                .await;
 
             let queued_entry_id =
                 queued_item.as_ref().map(|item| item.entry_id.clone());
@@ -192,12 +289,24 @@ impl Kernel {
                         },
                     )
                     .await?;
-                self.dispatch(
-                    ExtensionEvent::MessageStart,
-                    &request.session_id,
-                    Some(turn_id.clone()),
-                )
-                .await?;
+                session
+                    .extensions
+                    .emit_message_start(
+                        &protocol::MessageStartEvent {
+                            message: message.clone(),
+                        },
+                        &extension_context,
+                    )
+                    .await;
+                let message = session
+                    .extensions
+                    .emit_message_end(
+                        protocol::MessageEndEvent {
+                            message: message.clone(),
+                        },
+                        &extension_context,
+                    )
+                    .await;
                 match queued_entry_id {
                     Some(entry_id) => {
                         self.persist_message_at(&session, &message, entry_id)?
@@ -237,22 +346,9 @@ impl Kernel {
                         },
                     )
                     .await?;
-                self.dispatch(
-                    ExtensionEvent::MessageEnd,
-                    &request.session_id,
-                    Some(turn_id.clone()),
-                )
-                .await?;
                 produced_messages.push(message);
             }
 
-            let context_directive = self
-                .dispatch(
-                    ExtensionEvent::Context,
-                    &request.session_id,
-                    Some(turn_id.clone()),
-                )
-                .await?;
             let mut history = session
                 .history
                 .lock()
@@ -267,45 +363,100 @@ impl Kernel {
                         if metadata.error.is_some()
                 )
             });
-            let system_prompt = self.system_prompt_factory.create(
+            // One immutable registry snapshot defines the complete Turn.
+            let turn_tools =
+                Arc::new(session.tool_state.snapshot()?.active_registry()?);
+            let skill_descriptors = session
+                .skills
+                .read()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .as_ref()
+                .map(skill::SkillCatalog::descriptors)
+                .unwrap_or_default();
+            let mut system_prompt = self.system_prompt_factory.create(
                 SystemPromptContext::builder()
                     .cwd(session.cwd.clone())
                     .turn_id(turn_id.clone())
                     .timestamp_ms(turn_started_at)
-                    .tools(session.tools.definitions())
-                    .skills(
-                        self.skills
-                            .as_ref()
-                            .map(skill::SkillCatalog::descriptors)
-                            .unwrap_or_default(),
-                    )
+                    .tools(turn_tools.definitions())
+                    .skills(skill_descriptors.clone())
                     .project(session.project_context.clone())
                     .build(),
             )?;
+            if let Some(before_agent) = before_agent.take() {
+                if let Some(replacement) = before_agent.system_prompt {
+                    system_prompt.content = MessageContent::System {
+                        blocks: vec![ContentBlock::Text { text: replacement }],
+                    };
+                }
+                for draft in before_agent.messages {
+                    let message = self
+                        .materialize_extension_message(&turn_id, draft)?;
+                    session
+                        .extensions
+                        .emit_message_start(
+                            &protocol::MessageStartEvent {
+                                message: message.clone(),
+                            },
+                            &extension_context,
+                        )
+                        .await;
+                    let identity = message.identity.clone();
+                    let message = session
+                        .extensions
+                        .emit_message_end(
+                            protocol::MessageEndEvent { message },
+                            &extension_context,
+                        )
+                        .await;
+                    if message.identity != identity
+                        || !matches!(
+                            message.content,
+                            MessageContent::Extension { .. }
+                        )
+                    {
+                        return Err(KernelError::Protocol(
+                            "message_end must preserve Extension identity and role"
+                                .to_string(),
+                        ));
+                    }
+                    self.persist_message(&session, &message)?;
+                    emitter
+                        .emit(
+                            turn_id.clone(),
+                            AgentEventPayload::MessageEnd {
+                                message: message.clone(),
+                            },
+                        )
+                        .await?;
+                    history.push(message.clone());
+                    produced_messages.push(message);
+                }
+            }
             history.insert(0, system_prompt);
-            history.extend(context_directive.injections);
-            self.dispatch(
-                ExtensionEvent::BeforeProviderHeaders,
-                &request.session_id,
-                Some(turn_id.clone()),
-            )
-            .await?;
-            self.dispatch(
-                ExtensionEvent::BeforeProviderRequest,
-                &request.session_id,
-                Some(turn_id.clone()),
-            )
-            .await?;
-            let request_for_model = ModelRequest {
+            let mut request_for_model = ModelRequest {
                 messages: history,
-                tools: session.tools.definitions(),
+                tools: turn_tools.definitions(),
             };
+            if let Some(messages) = session
+                .extensions
+                .emit_context(
+                    protocol::ContextEvent {
+                        request: request_for_model.clone(),
+                    },
+                    &extension_context,
+                )
+                .await
+                .messages
+            {
+                request_for_model.messages = messages;
+            }
             let assistant_id = self.message_id()?;
             let assistant_timestamp = self.clock.now();
             let mut attempt = AssistantAttempt::new(
                 assistant_id.clone(),
                 turn_id.clone(),
-                self.model.profile().clone(),
+                turn_model.profile().clone(),
                 assistant_timestamp,
             );
             emitter
@@ -317,25 +468,25 @@ impl Kernel {
                     },
                 )
                 .await?;
-            self.dispatch(
-                ExtensionEvent::MessageStart,
-                &request.session_id,
-                Some(turn_id.clone()),
-            )
-            .await?;
+            session
+                .extensions
+                .emit_message_start(
+                    &protocol::MessageStartEvent {
+                        message: attempt.snapshot(assistant_timestamp)?,
+                    },
+                    &extension_context,
+                )
+                .await;
 
-            let settlement = match self
-                .model
-                .stream(request_for_model, cancellation.clone())
+            let settlement = match turn_model
+                .stream_with_hooks(
+                    request_for_model,
+                    cancellation.clone(),
+                    Some(self.completion_hooks(&session, &run_id, &turn_id)?),
+                )
                 .await
             {
                 Ok(mut stream) => {
-                    self.dispatch(
-                        ExtensionEvent::AfterProviderResponse,
-                        &request.session_id,
-                        Some(turn_id.clone()),
-                    )
-                    .await?;
                     loop {
                         let item = tokio::select! {
                             () = cancellation.cancelled() => {
@@ -374,16 +525,19 @@ impl Kernel {
                                         timestamp,
                                         AgentEventPayload::MessageTextDelta {
                                             message_id: assistant_id.clone(),
-                                            delta,
+                                            delta: delta.clone(),
                                         },
                                     )
                                     .await?;
-                                self.dispatch(
-                                    ExtensionEvent::MessageUpdate,
-                                    &request.session_id,
-                                    Some(turn_id.clone()),
-                                )
-                                .await?;
+                                session.extensions.emit_message_update(
+                                    &protocol::MessageUpdateEvent {
+                                        message: attempt.snapshot(timestamp)?,
+                                        update: protocol::MessageUpdate::Text {
+                                            delta,
+                                        },
+                                    },
+                                    &extension_context,
+                                ).await;
                             }
                             ModelStreamEvent::ReasoningDelta(delta) => {
                                 emitter
@@ -392,24 +546,30 @@ impl Kernel {
                                         timestamp,
                                         AgentEventPayload::MessageReasoningDelta {
                                             message_id: assistant_id.clone(),
-                                            delta,
+                                            delta: delta.clone(),
                                         },
                                     )
                                     .await?;
-                                self.dispatch(
-                                    ExtensionEvent::MessageUpdate,
-                                    &request.session_id,
-                                    Some(turn_id.clone()),
-                                )
-                                .await?;
+                                session.extensions.emit_message_update(
+                                    &protocol::MessageUpdateEvent {
+                                        message: attempt.snapshot(timestamp)?,
+                                        update: protocol::MessageUpdate::Reasoning {
+                                            delta,
+                                        },
+                                    },
+                                    &extension_context,
+                                ).await;
                             }
-                            ModelStreamEvent::ToolCall(_call) => {
-                                self.dispatch(
-                                    ExtensionEvent::ToolCall,
-                                    &request.session_id,
-                                    Some(turn_id.clone()),
-                                )
-                                .await?;
+                            ModelStreamEvent::ToolCall(call) => {
+                                session.extensions.emit_message_update(
+                                    &protocol::MessageUpdateEvent {
+                                        message: attempt.snapshot(timestamp)?,
+                                        update: protocol::MessageUpdate::ToolCall {
+                                            call,
+                                        },
+                                    },
+                                    &extension_context,
+                                ).await;
                             }
                             ModelStreamEvent::Finished(_final) => {}
                         }
@@ -444,15 +604,28 @@ impl Kernel {
                         (message, Vec::new(), StopReason::Cancelled, None, true)
                     }
                 };
+            let original_identity = assistant.identity.clone();
+            let assistant = session.extensions.emit_message_end(
+                protocol::MessageEndEvent { message: assistant },
+                &extension_context,
+            ).await;
+            if assistant.identity != original_identity
+                || !matches!(assistant.content, MessageContent::Assistant { .. })
+            {
+                return Err(KernelError::Protocol(
+                    "message_end must preserve Assistant identity and role".to_string(),
+                ));
+            }
             let (usage, overflow_recovery) = match &assistant.content {
                 MessageContent::Assistant { metadata, .. } => (
                     metadata.usage.clone(),
                     self.compaction_policy
-                        .overflow_recovery(metadata, self.model.profile()),
+                        .overflow_recovery(metadata, turn_model.profile()),
                 ),
                 MessageContent::System { .. }
                 | MessageContent::User { .. }
                 | MessageContent::ToolResult { .. }
+                | MessageContent::BashExecution { .. }
                 | MessageContent::Extension { .. } => unreachable!(
                     "AssistantAttempt always produces an Assistant message"
                 ),
@@ -465,18 +638,12 @@ impl Kernel {
                     AgentEventPayload::MessageEnd { message: assistant },
                 )
                 .await?;
-            self.dispatch(
-                ExtensionEvent::MessageEnd,
-                &request.session_id,
-                Some(turn_id.clone()),
-            )
-            .await?;
             emitter
                 .emit(
                     turn_id.clone(),
                     AgentEventPayload::UsageUpdated {
                         usage,
-                        context_window: self.model.profile().context_tokens,
+                        context_window: turn_model.profile().context_tokens,
                     },
                 )
                 .await?;
@@ -492,12 +659,15 @@ impl Kernel {
                         .session(&session)
                         .emitter(&emitter)
                         .cancellation(&cancellation)
+                        .tools(Arc::clone(&turn_tools))
                         .calls(tool_calls.clone())
                         .build(),
                 )
                 .await?
             };
             cancelled |= tool_batch.cancelled;
+            let tool_terminated = tool_batch.terminate;
+            let turn_tool_results = tool_batch.results.clone();
             for message in tool_batch.messages {
                 emitter
                     .emit(
@@ -507,18 +677,22 @@ impl Kernel {
                         },
                     )
                     .await?;
-                self.dispatch(
-                    ExtensionEvent::MessageStart,
-                    &request.session_id,
-                    Some(turn_id.clone()),
-                )
-                .await?;
-                self.dispatch(
-                    ExtensionEvent::ToolResult,
-                    &request.session_id,
-                    Some(turn_id.clone()),
-                )
-                .await?;
+                session.extensions.emit_message_start(
+                    &protocol::MessageStartEvent { message: message.clone() },
+                    &extension_context,
+                ).await;
+                let original_identity = message.identity.clone();
+                let message = session.extensions.emit_message_end(
+                    protocol::MessageEndEvent { message },
+                    &extension_context,
+                ).await;
+                if message.identity != original_identity
+                    || !matches!(message.content, MessageContent::ToolResult { .. })
+                {
+                    return Err(KernelError::Protocol(
+                        "message_end must preserve ToolResult identity and role".to_string(),
+                    ));
+                }
                 self.persist_message(&session, &message)?;
                 produced_messages.push(message.clone());
                 emitter
@@ -527,12 +701,6 @@ impl Kernel {
                         AgentEventPayload::MessageEnd { message },
                     )
                     .await?;
-                self.dispatch(
-                    ExtensionEvent::MessageEnd,
-                    &request.session_id,
-                    Some(turn_id.clone()),
-                )
-                .await?;
             }
 
             let turn_ended_at = self.clock.now();
@@ -567,12 +735,13 @@ impl Kernel {
                     AgentEventPayload::TurnEnd { turn: turn.clone() },
                 )
                 .await?;
-            self.dispatch(
-                ExtensionEvent::TurnEnd,
-                &request.session_id,
-                Some(turn_id.clone()),
-            )
-            .await?;
+            session.extensions.emit_turn_end(
+                &protocol::TurnEndEvent {
+                    turn: turn.clone(),
+                    tool_results: turn_tool_results,
+                },
+                &extension_context,
+            ).await;
             turns.push(turn);
 
             if cancelled {
@@ -723,7 +892,8 @@ impl Kernel {
                     .build());
             }
 
-            let should_continue_for_tools = !tool_calls.is_empty();
+            let should_continue_for_tools =
+                !tool_terminated && !tool_calls.is_empty();
             next_queued_item = {
                 let queue = session
                     .queue
@@ -742,7 +912,7 @@ impl Kernel {
                             .map_err(|_poison_error| KernelError::Poisoned)?,
                     )
                     .should_compact(
-                        self.model.profile().context_tokens,
+                        turn_model.profile().context_tokens,
                         self.compaction_policy,
                     );
                 let auto_compaction_reason = match overflow_recovery {
@@ -784,6 +954,7 @@ impl Kernel {
                     .turn_id(completion.turn_id)
                     .cancellation(&cancellation)
                     .outcome(&completion.outcome)
+                    .messages(completion.result.messages.clone())
                     .auto_compaction_reason(completion.auto_compaction_reason)
                     .build()
                     .settle()

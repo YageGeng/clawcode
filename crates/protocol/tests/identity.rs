@@ -18,6 +18,7 @@ fn acp_extension_methods_use_the_product_namespace() {
         AcpExtensionMethod::SkillList,
         AcpExtensionMethod::McpStatus,
         AcpExtensionMethod::ExtensionCommand,
+        AcpExtensionMethod::UserBash,
     ];
 
     for method in methods {
@@ -52,5 +53,9 @@ fn webui_extension_methods_are_centralized() {
     assert_eq!(
         AcpExtensionMethod::McpStatus.as_str(),
         format!("_{}/mcp/status", ProductIdentity::ACP_NAMESPACE)
+    );
+    assert_eq!(
+        AcpExtensionMethod::UserBash.as_str(),
+        format!("_{}/session/bash", ProductIdentity::ACP_NAMESPACE)
     );
 }

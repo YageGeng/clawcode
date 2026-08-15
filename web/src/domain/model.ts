@@ -19,13 +19,14 @@ export type SessionSummary = Readonly<{
 }>;
 
 export type EventOrder = Readonly<{
+  sequence: number;
   receivedOrder: number;
 }>;
 
 export const EventOrdering = {
   /** Preserves ACP v2 update application order across replay and live WebSocket delivery. */
   compare(left: EventOrder, right: EventOrder): number {
-    return left.receivedOrder - right.receivedOrder;
+    return left.sequence - right.sequence || left.receivedOrder - right.receivedOrder;
   }
 } as const;
 
@@ -82,13 +83,41 @@ export type MessageEntity = Readonly<{
 export type ToolCallEntity = Readonly<{
   toolCallId: ToolCallId;
   title: string;
-  status: "pending" | "in_progress" | "completed" | "failed";
+  status: "pending" | "in_progress" | "completed" | "failed" | "blocked";
   rawInput?: unknown;
   rawOutput?: unknown;
   content: readonly unknown[];
   startedAtMs?: TimestampMs;
   endedAtMs?: TimestampMs;
   meta?: EventMeta;
+}>;
+
+export type BashExecutionEntity = Readonly<{
+  messageId: MessageId;
+  turnId: TurnId;
+  command: string;
+  output: string;
+  disposition: Readonly<{ type: "completed" }> | Readonly<{ type: "blocked"; reason: string }>;
+  exitCode?: number;
+  cancelled: boolean;
+  truncated: boolean;
+  fullOutputPath?: string;
+  excludeFromContext: boolean;
+  timestampMs: TimestampMs;
+  startedAtMs: TimestampMs;
+  endedAtMs: TimestampMs;
+}>;
+
+export type ExtensionEntity = Readonly<{
+  id: string;
+  turnId: TurnId;
+  extensionId: string;
+  customType: string;
+  blocks: readonly unknown[];
+  details?: unknown;
+  message?: string;
+  timestampMs: TimestampMs;
+  kind: "message" | "error";
 }>;
 
 export type PromptResourceLink = Readonly<{
@@ -154,4 +183,6 @@ export type SessionEvent = Readonly<{
 
 export type TranscriptEntry =
   | Readonly<{ type: "message"; messageId: MessageId; order: EventOrder }>
-  | Readonly<{ type: "tool"; toolCallId: ToolCallId; order: EventOrder }>;
+  | Readonly<{ type: "tool"; toolCallId: ToolCallId; order: EventOrder }>
+  | Readonly<{ type: "bash"; messageId: MessageId; order: EventOrder }>
+  | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>;

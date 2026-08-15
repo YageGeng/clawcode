@@ -6,17 +6,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
-use extension::{Extension, StaticExtensionFactory};
+use extension::{
+    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
+    ExtensionRegistrar, ModelSelectPoint, ProjectTrustPoint,
+    ResourcesDiscoverPoint, SessionBeforeSwitchPoint, SessionInfoChangedPoint,
+    SessionStartPoint, StaticExtensionFactory, ThinkingLevelSelectPoint,
+};
 use futures::{Stream, stream};
 use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
 };
 use protocol::{
-    AgentEvent, AgentEventPayload, ExtensionContext, ExtensionDirective,
-    ExtensionEvent, IdGenerator, IdKind, McpConnectionState, McpServerInfo,
-    ModelFailure, ModelFinal, ModelProfile, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
-    SessionId, SessionTitle, StopReason, TimestampMs,
+    AgentEvent, AgentEventPayload, ExtensionDescriptor, ExtensionId,
+    IdGenerator, IdKind, McpConnectionState, McpServerInfo, ModelFailure,
+    ModelFinal, ModelProfile, ModelRequest, ModelRetryDisposition,
+    ModelStreamEvent, ModelUsage, QueueKind, RunRequest, SessionId,
+    SessionTitle, StopReason, TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -185,18 +190,117 @@ impl EventSink for RecordingSink {
     }
 }
 
-struct RecordingExtension(Arc<Mutex<Vec<ExtensionEvent>>>);
+#[derive(Clone)]
+struct RecordingExtension(Arc<Mutex<Vec<&'static str>>>);
+
+impl ExtensionModule for RecordingExtension {
+    /// Declares the deterministic test extension identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("recording").expect("extension id"),
+            name: "Recording".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers only the typed session points asserted by this test.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<ModelSelectPoint, _>(self.clone())?;
+        registrar.on::<ThinkingLevelSelectPoint, _>(self.clone())?;
+        registrar.on::<SessionInfoChangedPoint, _>(self.clone())?;
+        registrar.on::<ProjectTrustPoint, _>(self.clone())?;
+        registrar.on::<SessionStartPoint, _>(self.clone())?;
+        registrar.on::<ResourcesDiscoverPoint, _>(self.clone())?;
+        registrar.on::<SessionBeforeSwitchPoint, _>(self.clone())
+    }
+}
+
+macro_rules! record_session_observer {
+    ($point:ty, $event:ty, $name:literal) => {
+        #[async_trait]
+        impl ExtensionHandler<$point> for RecordingExtension {
+            /// Records one typed session observer invocation.
+            async fn handle(
+                &self,
+                _event: &$event,
+                _context: &ExtensionContext,
+            ) -> Result<(), ExtensionError> {
+                self.0.lock().expect("extension lock").push($name);
+                Ok(())
+            }
+        }
+    };
+}
+
+record_session_observer!(
+    ModelSelectPoint,
+    protocol::ModelSelectEvent,
+    "model_select"
+);
+record_session_observer!(
+    ThinkingLevelSelectPoint,
+    protocol::ThinkingLevelSelectEvent,
+    "thinking_level_select"
+);
+record_session_observer!(
+    SessionInfoChangedPoint,
+    protocol::SessionInfoChangedEvent,
+    "session_info_changed"
+);
+record_session_observer!(
+    SessionStartPoint,
+    protocol::SessionStartEvent,
+    "session_start"
+);
 
 #[async_trait]
-impl Extension for RecordingExtension {
-    /// Records session lifecycle hooks while allowing each operation to continue.
+impl ExtensionHandler<ProjectTrustPoint> for RecordingExtension {
+    /// Records trust evaluation while allowing local resource discovery.
     async fn handle(
         &self,
-        event: &ExtensionEvent,
+        _event: &protocol::ProjectTrustEvent,
         _context: &ExtensionContext,
-    ) -> Result<ExtensionDirective, extension::ExtensionError> {
-        self.0.lock().expect("extension lock").push(event.clone());
-        Ok(ExtensionDirective::Continue)
+    ) -> Result<protocol::ProjectTrustResult, ExtensionError> {
+        self.0.lock().expect("extension lock").push("project_trust");
+        Ok(protocol::ProjectTrustResult {
+            trusted: protocol::ProjectTrustDecision::Yes,
+            remember: false,
+        })
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<ResourcesDiscoverPoint> for RecordingExtension {
+    /// Records resource discovery without contributing additional paths.
+    async fn handle(
+        &self,
+        _event: &protocol::ResourcesDiscoverEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::ResourcesDiscoverResult, ExtensionError> {
+        self.0
+            .lock()
+            .expect("extension lock")
+            .push("resources_discover");
+        Ok(protocol::ResourcesDiscoverResult::default())
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionBeforeSwitchPoint> for RecordingExtension {
+    /// Records the cancellable switch point while allowing the operation.
+    async fn handle(
+        &self,
+        _event: &protocol::SessionBeforeSwitchEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::SessionCancelResult, ExtensionError> {
+        self.0
+            .lock()
+            .expect("extension lock")
+            .push("session_before_switch");
+        Ok(protocol::SessionCancelResult::default())
     }
 }
 
@@ -215,7 +319,7 @@ fn build_kernel(
             root,
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(ids);
     let factory = match skill_root {
@@ -247,9 +351,17 @@ async fn session_management_dispatches_declared_extension_hooks() {
             root.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(vec![
-            Arc::new(RecordingExtension(Arc::clone(&extension_events))),
-        ])))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new({
+                let extension_events = Arc::clone(&extension_events);
+                move || {
+                    Ok(Arc::new(RecordingExtension(Arc::clone(
+                        &extension_events,
+                    ))) as Arc<dyn ExtensionModule>)
+                }
+            })],
+        )))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
         .build()
@@ -282,12 +394,24 @@ async fn session_management_dispatches_declared_extension_hooks() {
         .expect("resume session");
 
     let events = extension_events.lock().expect("extension lock");
+    assert_eq!(
+        &events[..5],
+        [
+            "project_trust",
+            "session_start",
+            "resources_discover",
+            "model_select",
+            "thinking_level_select",
+        ]
+    );
     for expected in [
-        ExtensionEvent::ModelSelect,
-        ExtensionEvent::ThinkingLevelSelect,
-        ExtensionEvent::SessionInfoChanged,
-        ExtensionEvent::SessionBeforeSwitch,
-        ExtensionEvent::SessionSwitch,
+        "project_trust",
+        "session_start",
+        "resources_discover",
+        "model_select",
+        "thinking_level_select",
+        "session_info_changed",
+        "session_before_switch",
     ] {
         assert!(events.contains(&expected), "missing {expected}");
     }
@@ -500,7 +624,7 @@ async fn mcp_status_is_available_from_the_registered_session() {
             root.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
         .mcp_factory(Some(Arc::new(StaticMcpFactory)))

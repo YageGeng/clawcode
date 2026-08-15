@@ -14,10 +14,15 @@
 //! translate it into provider-specific request bodies and convert responses back into
 //! [`CompletionResponse`].
 //!
+mod hooks;
 pub mod message;
 pub mod request;
 mod usage;
 
+pub use hooks::{
+    CompletionRequestHooks, PreparedCompletionHooks, ProviderHeaders,
+    ProviderResponseMetadata, prepare_json_request,
+};
 pub use message::{AssistantContent, Message, MessageError};
 pub use request::*;
 pub use usage::Usage;

@@ -8,15 +8,15 @@ use crate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncate_tail};
 
 /// Latest visible tail and optional durable complete-output location.
 #[derive(Debug)]
-pub(super) struct OutputSnapshot {
-    pub(super) content: String,
-    pub(super) truncation: TruncationDetails,
-    pub(super) full_output_path: Option<PathBuf>,
+pub(crate) struct OutputSnapshot {
+    pub(crate) content: String,
+    pub(crate) truncation: TruncationDetails,
+    pub(crate) full_output_path: Option<PathBuf>,
 }
 
 /// Bounded streaming output state that spills complete bytes only after truncation.
 #[derive(typed_builder::TypedBuilder)]
-pub(super) struct OutputAccumulator {
+pub(crate) struct OutputAccumulator {
     max_lines: usize,
     max_bytes: usize,
     max_rolling_bytes: usize,
@@ -42,7 +42,7 @@ pub(super) struct OutputAccumulator {
 
 impl OutputAccumulator {
     /// Creates an accumulator with pi's 2000-line and 50KB visible limits.
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::builder()
             .max_lines(DEFAULT_MAX_LINES)
             .max_bytes(DEFAULT_MAX_BYTES)
@@ -52,7 +52,7 @@ impl OutputAccumulator {
     }
 
     /// Appends one raw stdout/stderr chunk and starts durable spooling if needed.
-    pub(super) async fn append(
+    pub(crate) async fn append(
         &mut self,
         data: Vec<u8>,
     ) -> std::io::Result<()> {
@@ -91,7 +91,7 @@ impl OutputAccumulator {
     }
 
     /// Returns the latest visible tail without finalizing the durable spool.
-    pub(super) fn snapshot(&self) -> OutputSnapshot {
+    pub(crate) fn snapshot(&self) -> OutputSnapshot {
         let decoded = String::from_utf8_lossy(&self.rolling);
         let visible = if self.rolling_starts_at_line_boundary {
             decoded.as_ref()
@@ -125,7 +125,7 @@ impl OutputAccumulator {
     }
 
     /// Flushes and closes complete output before the final ToolResult references it.
-    pub(super) async fn finish(&mut self) -> std::io::Result<OutputSnapshot> {
+    pub(crate) async fn finish(&mut self) -> std::io::Result<OutputSnapshot> {
         if self.is_truncated() {
             self.ensure_full_output_file().await?;
         }
@@ -137,7 +137,7 @@ impl OutputAccumulator {
     }
 
     /// Returns the exact byte length of the current final source line.
-    pub(super) const fn last_line_bytes(&self) -> usize {
+    pub(crate) const fn last_line_bytes(&self) -> usize {
         self.current_line_bytes
     }
 

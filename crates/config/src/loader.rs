@@ -9,7 +9,7 @@ use figment::{
 };
 
 use crate::AppConfig;
-use protocol::ProductIdentity;
+use protocol::{ConfigOverridePath, ConfigOverridePathError, ProductIdentity};
 
 /// Errors surfaced while constructing or loading configuration.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +28,9 @@ pub enum ConfigError {
     /// Cross-field application configuration failed validation.
     #[error("config validation error: {0}")]
     Validation(#[from] crate::config::ConfigValidationError),
+    /// An explicit configuration path could not be interpreted consistently.
+    #[error("config path error: {0}")]
+    Path(#[from] ConfigOverridePathError),
     /// No configuration found at any default search path and no providers
     /// were set via `CLAW_*` environment variables.
     #[error("{0}")]
@@ -99,21 +102,22 @@ where
 
 /// Resolve default configuration search paths in priority order:
 ///
-/// 1. `$CLAW_CONFIG` if set and the path exists.
+/// 1. Absolute `$CLAW_CONFIG` if set and the path exists.
 /// 2. `$XDG_CONFIG_HOME/clawcode/config.toml` (or `~/.config/clawcode/config.toml`) if it exists.
 /// 3. `./claw.toml` in the current working directory if the user config does not exist.
 ///
 /// Missing default candidates are silently skipped. Missing paths passed
 /// directly to [`load_from`] still raise an error. The returned vec may be
 /// empty, in which case [`load`] yields an `AppConfig::default()` handle.
-fn default_paths() -> Vec<PathBuf> {
+fn default_paths() -> Result<Vec<PathBuf>, ConfigError> {
     let mut out = Vec::new();
-    if let Ok(p) = std::env::var(ProductIdentity::CONFIG_PATH_ENV) {
-        let path = PathBuf::from(p);
+    if let Some(path) = std::env::var_os(ProductIdentity::CONFIG_PATH_ENV) {
+        let path =
+            PathBuf::from(ConfigOverridePath::try_from(PathBuf::from(path))?);
         if path.exists() {
             out.push(path);
             // An explicit config path should not be merged with implicit defaults.
-            return out;
+            return Ok(out);
         }
     }
     if let Some(base) = dirs::config_dir() {
@@ -122,14 +126,14 @@ fn default_paths() -> Vec<PathBuf> {
             .join(ProductIdentity::USER_CONFIG_FILE_NAME);
         if xdg.exists() {
             out.push(xdg);
-            return out;
+            return Ok(out);
         }
     }
     let cwd = PathBuf::from(ProductIdentity::CONFIG_FILE_NAME);
     if cwd.exists() {
         out.push(cwd);
     }
-    out
+    Ok(out)
 }
 
 /// Load configuration from the default search paths plus the `CLAW_` env layer.
@@ -138,7 +142,7 @@ fn default_paths() -> Vec<PathBuf> {
 /// environment variables, returns [`ConfigError::NotFound`] with a message
 /// listing the searched locations.
 pub fn load() -> Result<ConfigHandle, ConfigError> {
-    let paths = default_paths();
+    let paths = default_paths()?;
     let no_files_found = paths.is_empty();
     if no_files_found {
         return Err(ConfigError::NotFound(format!(

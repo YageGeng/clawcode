@@ -98,6 +98,14 @@ impl SkillInfoFromPath for Path {
 pub trait SkillFactory: Send + Sync {
     /// Discovers configured skill roots into one deterministic catalog.
     fn create(&self) -> Result<SkillCatalog, SkillError>;
+
+    /// Discovers configured roots followed by session-local extension roots.
+    fn create_with_roots(
+        &self,
+        _additional_roots: Vec<PathBuf>,
+    ) -> Result<SkillCatalog, SkillError> {
+        self.create()
+    }
 }
 
 /// Filesystem skill factory with roots ordered from lowest to highest priority.
@@ -126,6 +134,16 @@ impl SkillFactory for FilesystemSkillFactory {
         Ok(SkillCatalog {
             skills: discovery.skills,
         })
+    }
+
+    /// Adds extension roots after configured roots so session resources have priority.
+    fn create_with_roots(
+        &self,
+        additional_roots: Vec<PathBuf>,
+    ) -> Result<SkillCatalog, SkillError> {
+        let mut roots = self.roots.clone();
+        roots.extend(additional_roots);
+        Self::new(roots).create()
     }
 }
 
@@ -163,6 +181,7 @@ impl SkillDiscovery {
 }
 
 /// Deterministic catalog supporting metadata lookup and explicit full-file invocation.
+#[derive(Clone)]
 pub struct SkillCatalog {
     skills: BTreeMap<String, SkillInfo>,
 }

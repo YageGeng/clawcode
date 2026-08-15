@@ -1,8 +1,10 @@
 import type { EventMeta, MessageId, SessionId } from "../acp/protocol";
 import type {
+  BashExecutionEntity,
   CompactionStatus,
   ContextUsage,
   EventOrder,
+  ExtensionEntity,
   McpServerInfo,
   MessageEntity,
   PendingMessages,
@@ -31,6 +33,8 @@ export type WorkspaceState = Readonly<{
   messages: ReadonlyMap<MessageId, MessageEntity>;
   transcript: readonly TranscriptEntry[];
   tools: ReadonlyMap<string, ToolCallEntity>;
+  bashExecutions: ReadonlyMap<MessageId, BashExecutionEntity>;
+  extensions: ReadonlyMap<string, ExtensionEntity>;
   events: readonly SessionEvent[];
   pending: PendingMessages;
   tree: SessionTree | undefined;
@@ -55,6 +59,8 @@ export type WorkspaceAction =
   | { readonly type: "message/text-delta"; readonly messageId: MessageId; readonly role: "user" | "assistant"; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
   | { readonly type: "message/reasoning-delta"; readonly messageId: MessageId; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
   | { readonly type: "tool/upserted"; readonly tool: ToolCallEntity; readonly order: EventOrder }
+  | { readonly type: "bash/upserted"; readonly bash: BashExecutionEntity; readonly order: EventOrder }
+  | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
   | { readonly type: "tree/replaced"; readonly tree: SessionTree }
@@ -74,6 +80,8 @@ export const initialWorkspaceState: WorkspaceState = {
   messages: new Map(),
   transcript: [],
   tools: new Map(),
+  bashExecutions: new Map(),
+  extensions: new Map(),
   events: [],
   pending: { steering: [], followUp: [] },
   tree: undefined,
@@ -102,6 +110,8 @@ export function reduceWorkspace(
         messages: new Map(),
         transcript: [],
         tools: new Map(),
+        bashExecutions: new Map(),
+        extensions: new Map(),
         events: [],
         pending: { steering: [], followUp: [] },
         tree: undefined,
@@ -117,7 +127,7 @@ export function reduceWorkspace(
       ...state,
       sessions: state.sessions.map((session) => session.sessionId === action.sessionId ? { ...session, title: action.title } : session)
     };
-    case "transcript/cleared": return { ...state, messages: new Map(), transcript: [], tools: new Map(), events: [], contextUsage: undefined, retry: undefined, compaction: { type: "idle" } };
+    case "transcript/cleared": return { ...state, messages: new Map(), transcript: [], tools: new Map(), bashExecutions: new Map(), extensions: new Map(), events: [], contextUsage: undefined, retry: undefined, compaction: { type: "idle" } };
     case "message/upserted": {
       const messages = new Map(state.messages);
       const exists = messages.has(action.message.messageId);
@@ -153,6 +163,22 @@ export function reduceWorkspace(
       const transcript = exists ? state.transcript : [...state.transcript, { type: "tool" as const, toolCallId: action.tool.toolCallId, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, tools, transcript };
+    }
+    case "bash/upserted": {
+      const bashExecutions = new Map(state.bashExecutions);
+      const exists = bashExecutions.has(action.bash.messageId);
+      bashExecutions.set(action.bash.messageId, action.bash);
+      const transcript = exists ? state.transcript : [...state.transcript, { type: "bash" as const, messageId: action.bash.messageId, order: action.order }]
+        .sort((left, right) => Ordering.compare(left.order, right.order));
+      return { ...state, bashExecutions, transcript };
+    }
+    case "extension/upserted": {
+      const extensions = new Map(state.extensions);
+      const exists = extensions.has(action.extension.id);
+      extensions.set(action.extension.id, action.extension);
+      const transcript = exists ? state.transcript : [...state.transcript, { type: "extension" as const, extensionEventId: action.extension.id, order: action.order }]
+        .sort((left, right) => Ordering.compare(left.order, right.order));
+      return { ...state, extensions, transcript };
     }
     case "event/received": return { ...state, events: [...state.events, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
     case "queue/replaced": return { ...state, pending: action.pending };

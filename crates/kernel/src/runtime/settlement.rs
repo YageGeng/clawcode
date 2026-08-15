@@ -3,8 +3,8 @@ use std::sync::Arc;
 use protocol::{AgentEventPayload, AgentOutcome, RunId, SessionId, TurnId};
 
 use super::{
-    CompactionExecution, CompactionReason, EventEmitter, ExtensionEvent,
-    Kernel, KernelError, RecordKind, RunResult, SessionRuntime,
+    CompactionExecution, CompactionReason, EventEmitter, Kernel, KernelError,
+    RecordKind, RunResult, SessionRuntime,
 };
 
 impl RunSettlement<'_> {
@@ -51,6 +51,8 @@ pub(super) struct RunSettlement<'a> {
     cancellation: &'a tokio_util::sync::CancellationToken,
     outcome: &'a AgentOutcome,
     #[builder(default)]
+    messages: Vec<protocol::AgentMessage>,
+    #[builder(default)]
     auto_compaction_reason: Option<CompactionReason>,
 }
 
@@ -72,13 +74,20 @@ impl RunSettlement<'_> {
                 },
             )
             .await?;
-        self.kernel
-            .dispatch(
-                ExtensionEvent::AgentEnd,
-                self.session_id,
-                Some(self.turn_id.clone()),
+        let extension_context = self.kernel.extension_context(
+            self.session,
+            Some(self.run_id),
+            Some(&self.turn_id),
+        )?;
+        self.session
+            .extensions
+            .emit_agent_end(
+                &protocol::AgentEndEvent {
+                    messages: self.messages,
+                },
+                &extension_context,
             )
-            .await?;
+            .await;
         if let Some(reason) = self.auto_compaction_reason {
             // Pi compacts after AgentEnd and before the final settled event.
             self.kernel
@@ -95,16 +104,20 @@ impl RunSettlement<'_> {
         }
         self.emitter
             .emit(
-                self.turn_id,
+                self.turn_id.clone(),
                 AgentEventPayload::AgentSettled {
                     run_id: self.run_id.clone(),
                     outcome: self.outcome.clone(),
                 },
             )
             .await?;
-        self.kernel
-            .dispatch(ExtensionEvent::AgentSettled, self.session_id, None)
-            .await?;
+        self.session
+            .extensions
+            .emit_agent_settled(
+                &protocol::AgentSettledEvent,
+                &extension_context,
+            )
+            .await;
         Ok(())
     }
 }

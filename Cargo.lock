@@ -184,6 +184,7 @@ dependencies = [
  "config",
  "dirs",
  "extension",
+ "extensions",
  "futures",
  "kernel",
  "mcp",
@@ -1005,6 +1006,24 @@ dependencies = [
  "thiserror",
  "tokio",
  "tools",
+ "typed-builder",
+]
+
+[[package]]
+name = "extensions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "config",
+ "extension",
+ "protocol",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]
@@ -1843,6 +1862,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tools",
+ "tracing",
+ "tracing-subscriber",
  "typed-builder",
 ]
 
@@ -2343,6 +2364,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "base64 0.23.1",
  "bytes",
  "config",

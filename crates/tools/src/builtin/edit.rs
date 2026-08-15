@@ -53,6 +53,34 @@ impl TryFrom<serde_json::Value> for EditArguments {
     }
 }
 
+impl TryFrom<&ToolCall> for EditArguments {
+    type Error = ToolError;
+
+    /// Normalizes and decodes one edit call without consuming its correlation.
+    fn try_from(call: &ToolCall) -> Result<Self, Self::Error> {
+        Self::try_from(call.arguments.clone()).map_err(|error| {
+            ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                message: error.to_string(),
+            }
+        })
+    }
+}
+
+impl EditArguments {
+    /// Rejects empty replacement batches before filesystem mutation begins.
+    fn validate(&self) -> Result<(), ToolError> {
+        if self.edits.is_empty() {
+            return Err(ToolError::InvalidArguments {
+                tool: "edit".to_string(),
+                message: "Edit tool input is invalid. edits must contain at least one replacement."
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// One edit matched against a shared immutable base snapshot.
 #[derive(Debug, typed_builder::TypedBuilder)]
 struct MatchedEdit {
@@ -193,26 +221,19 @@ impl AgentTool for EditTool {
         }
     }
 
+    /// Validates normalized edit JSON and requires at least one replacement.
+    fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
+        EditArguments::try_from(call)?.validate()
+    }
+
     /// Applies all replacements atomically from one original snapshot under the file queue.
     async fn execute(
         &self,
         call: ToolCall,
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
-        let arguments =
-            EditArguments::try_from(call.arguments).map_err(|error| {
-                ToolError::InvalidArguments {
-                    tool: call.name.clone(),
-                    message: error.to_string(),
-                }
-            })?;
-        if arguments.edits.is_empty() {
-            return Err(ToolError::InvalidArguments {
-                tool: call.name,
-                message: "Edit tool input is invalid. edits must contain at least one replacement."
-                    .to_string(),
-            });
-        }
+        let arguments = EditArguments::try_from(&call)?;
+        arguments.validate()?;
         let absolute = ResolvedPath::new(&arguments.path, &context.cwd)?;
         with_file_mutation(absolute.as_path(), || async {
             context.ensure_active()?;
