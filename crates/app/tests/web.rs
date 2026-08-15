@@ -111,9 +111,7 @@ impl WebFixture {
                 store_root.path(),
                 Arc::clone(&clock),
             )))
-            .extension_factory(Arc::new(
-                StaticExtensionFactory::new(Vec::new()),
-            ))
+            .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
             .id_generator(Arc::new(RouteIds))
             .build()

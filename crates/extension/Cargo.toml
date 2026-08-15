@@ -17,10 +17,14 @@ thiserror = { workspace = true }
 
 # async
 async-trait = { workspace = true }
-
-[dev-dependencies]
-# async
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["sync"] }
 
 # serde
 serde_json = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+[dev-dependencies]
+# async
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

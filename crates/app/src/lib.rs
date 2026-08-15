@@ -5,7 +5,6 @@ mod web;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use extension::StaticExtensionFactory;
 use kernel::{
     Kernel, KernelFactory, NanoidIdGenerator, PiSystemPromptFactory,
     ProviderModelFactory,
@@ -35,6 +34,10 @@ pub enum ApplicationError {
     /// Kernel factory construction failed.
     #[error(transparent)]
     Kernel(#[from] kernel::KernelError),
+
+    /// Static extension selection or construction failed.
+    #[error(transparent)]
+    Extension(#[from] extension::ExtensionError),
 
     /// Process working-directory lookup failed.
     #[error(transparent)]
@@ -87,6 +90,10 @@ impl ApplicationFactory {
     /// Builds provider, tool, MCP, skill, store, extension, and kernel factories.
     pub fn build(self) -> Result<Application, ApplicationError> {
         let snapshot = self.config.current();
+        // Resolve generated extension code before external factories so an
+        // unavailable runtime selection fails startup without side effects.
+        let extension_factory = extensions::compiled_extensions()?
+            .select(&snapshot.extensions.enabled)?;
         let sessions_root = match &snapshot.session_persistence.data_home {
             Some(data_home) => PathBuf::from(data_home).join("sessions"),
             None => dirs::data_local_dir()
@@ -143,9 +150,7 @@ impl ApplicationFactory {
                 sessions_root,
                 Arc::clone(&clock),
             )))
-            .extension_factory(Arc::new(
-                StaticExtensionFactory::new(Vec::new()),
-            ))
+            .extension_factory(Arc::new(extension_factory))
             .clock(clock)
             .id_generator(Arc::new(NanoidIdGenerator))
             .system_prompt_factory(Arc::new(PiSystemPromptFactory::new(

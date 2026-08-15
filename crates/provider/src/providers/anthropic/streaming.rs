@@ -178,6 +178,7 @@ where
         streaming::StreamingCompletionResponse<StreamingCompletionResponse>,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let request_model = completion_request
             .model
             .clone()
@@ -313,13 +314,18 @@ where
             );
         }
 
-        let body: Vec<u8> = serde_json::to_vec(&body)?;
+        let (body, prepared_hooks) =
+            crate::completion::prepare_json_request(&body, request_hooks)
+                .await?;
 
-        let req = self
+        let mut req = self
             .client
             .post("/v1/messages")?
             .body(body)
             .map_err(http_client::Error::Protocol)?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         let stream = GenericEventSource::new(self.client.clone(), req);
 

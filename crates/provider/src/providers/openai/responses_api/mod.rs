@@ -1546,6 +1546,7 @@ where
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError>
     {
+        let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
@@ -1568,7 +1569,9 @@ where
         span.record("gen_ai.provider.name", "openai");
         span.record("gen_ai.request.model", &self.model);
         let request = self.create_completion_request(completion_request)?;
-        let body = serde_json::to_vec(&request)?;
+        let (body, prepared_hooks) =
+            crate::completion::prepare_json_request(&request, request_hooks)
+                .await?;
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
@@ -1578,11 +1581,14 @@ where
             );
         }
 
-        let req = self
+        let mut req = self
             .client
             .post("/responses")?
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         async move {
             let response = self.client.send(req).await?;

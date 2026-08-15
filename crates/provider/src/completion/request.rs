@@ -524,9 +524,13 @@ pub trait CompletionModel: Clone + WasmCompatSend + WasmCompatSync {
 /// Struct representing a general completion request that can be sent to a completion model provider.
 ///
 /// Uses `typed-builder` per project convention (more than 3 fields).
-#[derive(Debug, Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
+#[derive(Clone, Serialize, Deserialize, typed_builder::TypedBuilder)]
 #[builder(builder_type(name = RequestArgs))]
 pub struct CompletionRequest {
+    /// Optional request-local hooks applied after provider-native serialization.
+    #[serde(skip)]
+    #[builder(default)]
+    pub hooks: Option<std::sync::Arc<dyn super::CompletionRequestHooks>>,
     /// Optional model override for this request.
     #[builder(default)]
     pub model: Option<String>,
@@ -593,6 +597,25 @@ impl CompletionRequest {
             tools,
         );
         self
+    }
+}
+
+impl std::fmt::Debug for CompletionRequest {
+    /// Redacts the hook implementation while preserving ordinary request diagnostics.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompletionRequest")
+            .field("has_hooks", &self.hooks.is_some())
+            .field("model", &self.model)
+            .field("preamble", &self.preamble)
+            .field("chat_history", &self.chat_history)
+            .field("tools", &self.tools)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("tool_choice", &self.tool_choice)
+            .field("additional_params", &self.additional_params)
+            .field("output_schema", &self.output_schema)
+            .finish()
     }
 }
 

@@ -1,9 +1,8 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MessageId, StopReason, TimestampMs, ToolCallId, ToolResultDetails, TurnId,
+    ExtensionId, MessageId, StopReason, TimestampMs, ToolCallId,
+    ToolResultDetails, TurnId, UserBashResult,
 };
 
 /// Serde adapter for precision-safe unsigned decimal token counts.
@@ -266,17 +265,75 @@ impl ContentBlock {
     }
 }
 
-/// Opaque message emitted by pi-compatible extensions or future protocol versions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Typed custom message emitted by a pi-compatible extension.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
 pub struct ExtensionMessage {
-    /// Stable discriminator selected by the extension producer.
-    pub discriminator: String,
+    /// Extension that owns the custom message schema.
+    pub extension_id: ExtensionId,
+    /// Extension-defined message subtype.
+    pub custom_type: String,
+    /// Ordered message content.
+    pub blocks: Vec<ContentBlock>,
+    /// Whether clients should render this message.
+    pub display: bool,
+    /// Whether this message is projected into future model context.
+    pub include_in_context: bool,
+    /// Extension-owned structured details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub details: Option<serde_json::Value>,
+}
 
-    /// Opaque extension payload preserved without schema loss.
-    pub payload: serde_json::Value,
+/// Pi-compatible transcript message produced by a user-authored `!` or `!!` command.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct BashExecutionMessage {
+    /// Shell command after removing the user-facing prefix.
+    pub command: String,
+    /// Complete server-side execution outcome.
+    pub result: UserBashResult,
+    /// Whether `!!` excluded this message from future model context.
+    pub exclude_from_context: bool,
+}
 
-    /// Opaque metadata mapped to ACP v2 `_meta` by the ACP adapter.
-    pub meta: BTreeMap<String, serde_json::Value>,
+impl BashExecutionMessage {
+    /// Converts one included bash execution into Pi's model-facing user message text.
+    #[must_use]
+    pub fn model_text(&self) -> String {
+        let mut text = format!("Ran `{}`\n", self.command);
+        if self.result.output.is_empty() {
+            text.push_str("(no output)");
+        } else {
+            text.push_str("```\n");
+            text.push_str(&self.result.output);
+            text.push_str("\n```");
+        }
+        if self.result.cancelled {
+            text.push_str("\n\n(command cancelled)");
+        } else if let Some(code) = self.result.exit_code
+            && code != 0
+        {
+            text.push_str(&format!("\n\nCommand exited with code {code}"));
+        }
+        if self.result.truncated
+            && let Some(path) = &self.result.full_output_path
+        {
+            text.push_str(&format!(
+                "\n\n[Output truncated. Full output: {path}]"
+            ));
+        }
+        text
+    }
 }
 
 /// Content variants supported by the agent-domain transcript.
@@ -319,6 +376,12 @@ pub enum MessageContent {
         details: Option<ToolResultDetails>,
     },
 
+    /// User-authored server-side shell execution retained with Pi `!`/`!!` semantics.
+    BashExecution {
+        /// Command, result, and context-exclusion state.
+        bash: BashExecutionMessage,
+    },
+
     /// A pi-compatible custom message with no native ACP counterpart.
     Extension {
         /// Opaque extension message.
@@ -334,7 +397,9 @@ impl MessageContent {
             Self::System { .. } => Some(Role::System),
             Self::User { .. } => Some(Role::User),
             Self::Assistant { .. } => Some(Role::Assistant),
-            Self::ToolResult { .. } | Self::Extension { .. } => None,
+            Self::ToolResult { .. }
+            | Self::BashExecution { .. }
+            | Self::Extension { .. } => None,
         }
     }
 
@@ -346,6 +411,7 @@ impl MessageContent {
             | Self::User { blocks }
             | Self::Assistant { blocks, .. }
             | Self::ToolResult { blocks, .. } => blocks,
+            Self::BashExecution { bash } => return Some(bash.model_text()),
             Self::Extension { .. } => return None,
         };
         let text = blocks

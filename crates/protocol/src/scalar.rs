@@ -108,6 +108,15 @@ define_string_id!(EntryId, "entry");
 define_string_id!(LaneId, "lane");
 define_string_id!(RecordId, "record");
 define_string_id!(QueueId, "queue");
+define_string_id!(ExtensionId, "extension");
+
+impl TurnId {
+    /// Creates the stable synthetic Turn identity for out-of-turn session messages.
+    #[must_use]
+    pub fn system(session_id: &SessionId) -> Self {
+        Self(format!("system-{session_id}"))
+    }
+}
 
 /// Unix time in milliseconds serialized as a decimal string.
 #[derive(

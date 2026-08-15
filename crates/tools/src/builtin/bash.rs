@@ -1,29 +1,38 @@
-use std::path::Path;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use protocol::{
-    ContentBlock, ProductIdentity, ToolCall, ToolCallId, ToolDefinition,
-    ToolResult, ToolResultDetails, TruncationLimit,
+    ContentBlock, ToolCall, ToolCallId, ToolDefinition, ToolResult,
+    ToolResultDetails, TruncationLimit,
 };
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncReadExt as _};
-use tokio::process::Command;
 
-use super::output::{OutputAccumulator, OutputSnapshot};
 use crate::{
-    AgentTool, DEFAULT_MAX_BYTES, ToolError, ToolExecutionContext, format_size,
+    AgentTool, BashExecutionRequest, BashExecutor, BashOutputSnapshot,
+    BashTermination, DEFAULT_MAX_BYTES, ToolError, ToolExecutionContext,
+    format_size,
 };
 
 const MAX_TIMEOUT_SECONDS: f64 = 2_147_483_647.0 / 1_000.0;
-const UPDATE_THROTTLE: Duration = Duration::from_millis(100);
-const EXIT_STDIO_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Deserialize)]
 struct BashArguments {
     command: String,
     timeout: Option<f64>,
+}
+
+impl TryFrom<&ToolCall> for BashArguments {
+    type Error = ToolError;
+
+    /// Decodes one bash call without consuming the correlated protocol value.
+    fn try_from(call: &ToolCall) -> Result<Self, Self::Error> {
+        serde_json::from_value(call.arguments.clone()).map_err(|error| {
+            ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                message: error.to_string(),
+            }
+        })
+    }
 }
 
 impl BashArguments {
@@ -56,13 +65,6 @@ impl BashArguments {
     }
 }
 
-/// Terminal condition observed while collecting one command's output.
-enum CommandTermination {
-    Exited(Option<i32>),
-    Aborted,
-    TimedOut(String),
-}
-
 /// Pi-compatible local bash tool with streaming, cancellation, and bounded output.
 pub(super) struct BashTool;
 
@@ -90,39 +92,20 @@ impl AgentTool for BashTool {
         }
     }
 
+    /// Validates bash JSON and timeout bounds without starting a process.
+    fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
+        BashArguments::try_from(call)?.timeout_duration()?;
+        Ok(())
+    }
+
     /// Executes one command and streams replaceable tail snapshots until settlement.
     async fn execute(
         &self,
         call: ToolCall,
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
-        let arguments = serde_json::from_value::<BashArguments>(call.arguments)
-            .map_err(|error| ToolError::InvalidArguments {
-                tool: call.name.clone(),
-                message: error.to_string(),
-            })?;
+        let arguments = BashArguments::try_from(&call)?;
         let timeout = arguments.timeout_duration()?;
-        if context.cancellation.is_cancelled() {
-            return Err(ToolError::Execution {
-                tool: call.name,
-                message: "Command aborted".to_string(),
-            });
-        }
-        if !tokio::fs::try_exists(&context.cwd).await.map_err(|error| {
-            ToolError::Execution {
-                tool: call.name.clone(),
-                message: error.to_string(),
-            }
-        })? {
-            return Err(ToolError::Execution {
-                tool: call.name,
-                message: format!(
-                    "Working directory does not exist: {}\nCannot execute bash commands.",
-                    context.cwd.display()
-                ),
-            });
-        }
-
         context.publish(
             ToolResult::builder()
                 .tool_call_id(call.tool_call_id.clone())
@@ -130,132 +113,27 @@ impl AgentTool for BashTool {
                 .is_error(false)
                 .build(),
         );
-        let mut command = Command::new(Self::shell_path());
-        command
-            .arg("-c")
-            .arg(&arguments.command)
-            .current_dir(&context.cwd)
-            .env(ProductIdentity::SESSION_ID_ENV, context.session_id.as_str())
-            .env(ProductIdentity::TURN_ID_ENV, context.turn_id.as_str())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        {
-            std::os::unix::process::CommandExt::process_group(
-                command.as_std_mut(),
-                0,
-            );
-        }
-        let mut child =
-            command.spawn().map_err(|error| ToolError::Execution {
-                tool: call.name.clone(),
-                message: error.to_string(),
-            })?;
-        let child_pid = child.id();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut readers = tokio::task::JoinSet::new();
-        if let Some(stdout) = child.stdout.take() {
-            Self::spawn_reader(&mut readers, stdout, sender.clone());
-        }
-        if let Some(stderr) = child.stderr.take() {
-            Self::spawn_reader(&mut readers, stderr, sender.clone());
-        }
-        drop(sender);
-
-        let mut output = OutputAccumulator::new();
-        let mut last_update = Instant::now()
-            .checked_sub(UPDATE_THROTTLE)
-            .unwrap_or_else(Instant::now);
-        let mut wait = Box::pin(child.wait());
-        let mut timeout_wait = Box::pin(async move {
-            match timeout {
-                Some(timeout) => tokio::time::sleep(timeout).await,
-                None => std::future::pending::<()>().await,
-            }
-        });
-        let termination = loop {
-            tokio::select! {
-                () = context.cancellation.cancelled() => {
-                    Self::kill_process_tree(child_pid).await;
-                    break CommandTermination::Aborted;
-                }
-                () = &mut timeout_wait => {
-                    Self::kill_process_tree(child_pid).await;
-                    break CommandTermination::TimedOut(
-                        arguments.timeout_label().unwrap_or_default(),
-                    );
-                }
-                status = &mut wait => {
-                    let status = status.map_err(|error| ToolError::Execution {
-                        tool: call.name.clone(),
-                        message: error.to_string(),
-                    })?;
-                    break CommandTermination::Exited(status.code());
-                }
-                chunk = receiver.recv() => {
-                    let Some(chunk) = chunk else {
-                        continue;
-                    };
-                    output.append(chunk).await.map_err(|error| ToolError::Execution {
-                        tool: call.name.clone(),
-                        message: error.to_string(),
-                    })?;
-                    if last_update.elapsed() >= UPDATE_THROTTLE {
-                        Self::publish_snapshot(
-                            &call.tool_call_id,
-                            context,
-                            output.snapshot(),
-                        );
-                        last_update = Instant::now();
-                    }
-                }
-            }
+        let request = BashExecutionRequest::builder()
+            .command(arguments.command.clone())
+            .cwd(context.cwd.clone())
+            .session_id(context.session_id.clone())
+            .turn_id(context.turn_id.clone())
+            .cancellation(context.cancellation.clone());
+        let request = match timeout {
+            Some(timeout) => request.timeout(timeout).build(),
+            None => request.build(),
         };
-        if !matches!(termination, CommandTermination::Exited(_)) {
-            let _status = wait.await;
-        }
-        // Reader tasks drain normal pipe buffers independently from the more
-        // expensive output accumulator. The grace applies only when a
-        // descendant inherited a pipe and keeps EOF from arriving.
-        let reader_result = tokio::time::timeout(EXIT_STDIO_GRACE, async {
-            while readers.join_next().await.is_some() {}
+        let output = BashExecutor::execute(request, |snapshot| {
+            Self::publish_snapshot(&call.tool_call_id, context, snapshot);
         })
-        .await;
-        if reader_result.is_err() {
-            readers.abort_all();
-            while readers.join_next().await.is_some() {}
-        }
-        while let Some(chunk) = receiver.recv().await {
-            output.append(chunk).await.map_err(|error| {
-                ToolError::Execution {
-                    tool: call.name.clone(),
-                    message: error.to_string(),
-                }
-            })?;
-        }
-        let snapshot =
-            output
-                .finish()
-                .await
-                .map_err(|error| ToolError::Execution {
-                    tool: call.name.clone(),
-                    message: error.to_string(),
-                })?;
-        Self::publish_snapshot(
-            &call.tool_call_id,
-            context,
-            OutputSnapshot {
-                content: snapshot.content.clone(),
-                truncation: snapshot.truncation.clone(),
-                full_output_path: snapshot.full_output_path.clone(),
-            },
-        );
+        .await?;
         let (visible, details) =
-            Self::format_output(&output, snapshot, "(no output)");
-        match termination {
-            CommandTermination::Exited(Some(code)) if code != 0 => {
+            Self::format_output(output.snapshot, "(no output)");
+        match output.termination {
+            BashTermination::Exited
+                if output.result.exit_code.is_some_and(|code| code != 0) =>
+            {
+                let code = output.result.exit_code.unwrap_or_default();
                 Err(ToolError::Execution {
                     tool: call.name,
                     message: Self::append_status(
@@ -264,21 +142,21 @@ impl AgentTool for BashTool {
                     ),
                 })
             }
-            CommandTermination::Aborted => Err(ToolError::Execution {
+            BashTermination::Aborted => Err(ToolError::Execution {
                 tool: call.name,
                 message: Self::append_status(&visible, "Command aborted"),
             }),
-            CommandTermination::TimedOut(timeout) => {
-                Err(ToolError::Execution {
-                    tool: call.name,
-                    message: Self::append_status(
-                        &visible,
-                        &format!("Command timed out after {timeout} seconds"),
+            BashTermination::TimedOut => Err(ToolError::Execution {
+                tool: call.name,
+                message: Self::append_status(
+                    &visible,
+                    &format!(
+                        "Command timed out after {} seconds",
+                        arguments.timeout_label().unwrap_or_default()
                     ),
-                })
-            }
-            CommandTermination::Exited(Some(_))
-            | CommandTermination::Exited(None) => {
+                ),
+            }),
+            BashTermination::Exited => {
                 let builder = ToolResult::builder()
                     .tool_call_id(call.tool_call_id)
                     .blocks(vec![ContentBlock::Text { text: visible }])
@@ -293,68 +171,11 @@ impl AgentTool for BashTool {
 }
 
 impl BashTool {
-    /// Resolves bash using pi's Unix preference order with a portable sh fallback.
-    fn shell_path() -> &'static Path {
-        if Path::new("/bin/bash").exists() {
-            Path::new("/bin/bash")
-        } else {
-            Path::new("sh")
-        }
-    }
-
-    /// Reads one stdout or stderr pipe into the shared arrival-order channel.
-    fn spawn_reader(
-        readers: &mut tokio::task::JoinSet<()>,
-        mut reader: impl AsyncRead + Unpin + Send + 'static,
-        sender: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    ) {
-        readers.spawn(async move {
-            let mut buffer = vec![0_u8; 8 * 1_024];
-            loop {
-                let read = match reader.read(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => read,
-                };
-                let Some(chunk) = buffer.get(..read) else {
-                    break;
-                };
-                if sender.send(chunk.to_vec()).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    /// Terminates the command process group so descendants cannot outlive cancellation.
-    async fn kill_process_tree(pid: Option<u32>) {
-        let Some(pid) = pid else {
-            return;
-        };
-        #[cfg(unix)]
-        {
-            if let Ok(pid) = i32::try_from(pid) {
-                let _result = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(-pid),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
-        }
-        #[cfg(windows)]
-        {
-            let _result = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-        }
-    }
-
     /// Publishes one replaceable partial snapshot without marking it final.
     fn publish_snapshot(
         tool_call_id: &ToolCallId,
         context: &ToolExecutionContext,
-        snapshot: OutputSnapshot,
+        snapshot: BashOutputSnapshot,
     ) {
         let details = (snapshot.truncation.truncated
             || snapshot.full_output_path.is_some())
@@ -370,7 +191,7 @@ impl BashTool {
         let builder = ToolResult::builder()
             .tool_call_id(tool_call_id.clone())
             .blocks(vec![ContentBlock::Text {
-                text: snapshot.content,
+                text: snapshot.output,
             }])
             .is_error(false);
         context.publish(match details {
@@ -381,15 +202,14 @@ impl BashTool {
 
     /// Adds pi's truncation footer and returns typed bash details when needed.
     fn format_output(
-        output: &OutputAccumulator,
-        snapshot: OutputSnapshot,
+        snapshot: BashOutputSnapshot,
         empty_text: &str,
     ) -> (String, Option<ToolResultDetails>) {
         let truncation = snapshot.truncation;
-        let mut text = if snapshot.content.is_empty() {
+        let mut text = if snapshot.output.is_empty() {
             empty_text.to_string()
         } else {
-            snapshot.content
+            snapshot.output
         };
         if !truncation.truncated {
             return (text, None);
@@ -404,7 +224,7 @@ impl BashTool {
             format!(
                 "[Showing last {} of line {end_line} (line is {}). Full output: {path}]",
                 format_size(truncation.output_bytes),
-                format_size(output.last_line_bytes())
+                format_size(snapshot.last_line_bytes)
             )
         } else if truncation.truncated_by == Some(TruncationLimit::Lines) {
             format!(

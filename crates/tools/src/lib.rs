@@ -1,9 +1,14 @@
 //! Agent tool contracts, registry, factories, and built-in tools.
 
+mod bash;
 mod builtin;
 mod contract;
 mod truncation;
 
+pub use bash::{
+    BashExecutionOutput, BashExecutionRequest, BashExecutor,
+    BashOutputSnapshot, BashTermination,
+};
 pub use builtin::BuiltinToolFactory;
 pub use contract::{
     AgentTool, DiscardToolUpdates, ToolError, ToolExecutionContext,

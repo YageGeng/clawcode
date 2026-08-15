@@ -19,6 +19,20 @@ struct ReadArguments {
     limit: Option<f64>,
 }
 
+impl TryFrom<&ToolCall> for ReadArguments {
+    type Error = ToolError;
+
+    /// Decodes one read call without consuming its execution correlation.
+    fn try_from(call: &ToolCall) -> Result<Self, Self::Error> {
+        serde_json::from_value(call.arguments.clone()).map_err(|error| {
+            ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                message: error.to_string(),
+            }
+        })
+    }
+}
+
 impl ReadArguments {
     /// Converts pi's 1-based number offset into a safe zero-based line index.
     fn start_line(&self) -> Result<usize, ToolError> {
@@ -98,6 +112,14 @@ impl AgentTool for ReadTool {
         }
     }
 
+    /// Validates read JSON and numeric pagination without filesystem access.
+    fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let arguments = ReadArguments::try_from(call)?;
+        arguments.start_line()?;
+        arguments.line_limit()?;
+        Ok(())
+    }
+
     /// Reads a text page or returns a base64 image attachment detected by magic bytes.
     async fn execute(
         &self,
@@ -105,11 +127,7 @@ impl AgentTool for ReadTool {
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         context.ensure_active()?;
-        let arguments = serde_json::from_value::<ReadArguments>(call.arguments)
-            .map_err(|error| ToolError::InvalidArguments {
-                tool: call.name.clone(),
-                message: error.to_string(),
-            })?;
+        let arguments = ReadArguments::try_from(&call)?;
         let path =
             ResolvedPath::for_read(&arguments.path, &context.cwd).await?;
         let bytes = tokio::fs::read(path.as_path()).await.map_err(|error| {

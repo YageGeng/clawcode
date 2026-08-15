@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::approval::{ApprovalMode, AskForApproval};
+use crate::extensions::ExtensionsConfig;
 use crate::llm::{LlmModel, LlmProvider};
 use crate::mcp::McpServerConfig;
 use crate::retry::RetryConfig;
@@ -141,6 +142,9 @@ pub struct AppConfig {
     /// Built-in tool registration configuration.
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Static Rust extensions selected in hook execution order.
+    #[serde(default)]
+    pub extensions: ExtensionsConfig,
     /// MCP server configurations.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -168,6 +172,7 @@ impl Default for AppConfig {
             approval_policy: None,
             skills: SkillsConfig::default(),
             tools: ToolsConfig::default(),
+            extensions: ExtensionsConfig::default(),
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
             compaction: CompactionConfig::default(),

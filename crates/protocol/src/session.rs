@@ -15,6 +15,45 @@ pub struct RunRequest {
     pub input: String,
 }
 
+/// Prefix-free user-bash input shared by Kernel and ACP request handling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserBashInput {
+    /// Shell command supplied after `!` or `!!`.
+    pub command: String,
+    /// Whether the resulting transcript message is excluded from model context.
+    #[serde(default)]
+    pub exclude_from_context: bool,
+}
+
+impl UserBashInput {
+    /// Parses a non-empty Pi `!` or `!!` command while preserving ordinary prompt text.
+    #[must_use]
+    pub fn parse_prefixed(input: &str) -> Option<Self> {
+        let exclude_from_context = input.starts_with("!!");
+        let command = input
+            .strip_prefix(if exclude_from_context { "!!" } else { "!" })?
+            .trim();
+        (!command.is_empty()).then(|| Self {
+            command: command.to_string(),
+            exclude_from_context,
+        })
+    }
+}
+
+/// Session-bound request for one server-side user-bash execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserBashRequest {
+    /// Session whose server-side working directory owns the command.
+    pub session_id: SessionId,
+    /// Shell command supplied without a `!` prefix.
+    pub command: String,
+    /// Whether the resulting transcript message is excluded from model context.
+    #[serde(default)]
+    pub exclude_from_context: bool,
+}
+
 /// Complete in-process result returned after one run settles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {

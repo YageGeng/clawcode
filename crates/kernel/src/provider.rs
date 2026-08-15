@@ -20,7 +20,7 @@ use provider::message::{
     ToolResult as ProviderToolResult, ToolResultContent, UserContent,
 };
 
-use crate::{Model, ModelError, ModelFactory, ModelStream};
+use crate::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
 use tokio_util::sync::CancellationToken;
 
 /// Resolves the configured active model through the retained provider factory.
@@ -64,6 +64,96 @@ impl ModelFactory for ProviderModelFactory {
             config.retry.provider.clone(),
         )))
     }
+
+    /// Builds all configured and statically contributed models into one catalog.
+    fn create_catalog(
+        &self,
+        registration: &protocol::StaticExtensionRegistration,
+    ) -> Result<ModelCatalog, ModelError> {
+        let mut merged = self.config.current().as_ref().clone();
+        for contributed in &registration.providers {
+            if merged
+                .providers
+                .iter()
+                .any(|provider| provider.id.as_str() == contributed.name)
+            {
+                return Err(ModelError::Unavailable(format!(
+                    "extension provider duplicates configured provider: {}",
+                    contributed.name
+                )));
+            }
+            let mut value = contributed.config.clone();
+            let object = value.as_object_mut().ok_or_else(|| {
+                ModelError::Unavailable(format!(
+                    "extension provider '{}' config must be an object",
+                    contributed.name
+                ))
+            })?;
+            if let Some(id) = object.get("id").and_then(|id| id.as_str()) {
+                if id != contributed.name {
+                    return Err(ModelError::Unavailable(format!(
+                        "extension provider name '{}' does not match config id '{id}'",
+                        contributed.name
+                    )));
+                }
+            } else {
+                object.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(contributed.name.clone()),
+                );
+            }
+            object.entry("display_name").or_insert_with(|| {
+                serde_json::Value::String(contributed.name.clone())
+            });
+            let provider: config::LlmProvider = serde_json::from_value(value)
+                .map_err(|error| {
+                ModelError::Unavailable(format!(
+                    "extension provider '{}' is invalid: {error}",
+                    contributed.name
+                ))
+            })?;
+            merged.providers.push(provider);
+        }
+        merged
+            .validate()
+            .map_err(|error| ModelError::Unavailable(error.to_string()))?;
+
+        // Rebuild only when static providers exist; otherwise retain the mature
+        // provider cache supplied by the embedding application.
+        let providers = if registration.providers.is_empty() {
+            Arc::clone(&self.providers)
+        } else {
+            Arc::new(LlmFactory::new(config::ConfigHandle::from_config(
+                merged.clone(),
+            )))
+        };
+        let mut models = Vec::new();
+        for provider in &merged.providers {
+            for model in &provider.models {
+                let profile = model.to_profile(provider).map_err(|error| {
+                    ModelError::Unavailable(error.to_string())
+                })?;
+                let llm = providers
+                    .resolve(&profile.provider_id, &profile.model_id)
+                    .map_err(|error| {
+                        ModelError::Unavailable(error.to_string())
+                    })?;
+                models.push(Arc::new(ProviderModel::new(
+                    profile,
+                    llm,
+                    merged.retry.provider.clone(),
+                )) as Arc<dyn Model>);
+            }
+        }
+        let (active_provider_id, active_model_id) =
+            merged.active_model.split_once('/').ok_or_else(|| {
+                ModelError::Unavailable(format!(
+                    "active model '{}' must use provider/model format",
+                    merged.active_model
+                ))
+            })?;
+        ModelCatalog::new(active_provider_id, active_model_id, models)
+    }
 }
 
 /// Production model adapter over one immutable dynamic provider handle.
@@ -87,29 +177,16 @@ impl ProviderModel {
             retry,
         }
     }
-}
 
-#[async_trait]
-impl Model for ProviderModel {
-    /// Returns the immutable provider/model profile resolved at construction.
-    fn profile(&self) -> &ModelProfile {
-        &self.profile
-    }
-
-    /// Verifies the already-constructed provider handle without inference.
-    async fn preflight(&self) -> Result<(), ModelError> {
-        self.llm
-            .preflight()
-            .map_err(|error| ModelError::Preflight(error.model_failure()))
-    }
-
-    /// Converts runtime transcript data at the provider boundary and streams it back.
-    async fn stream(
+    /// Converts and starts one provider request with request-local hooks attached.
+    async fn stream_request(
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
+        hooks: Option<Arc<dyn provider::completion::CompletionRequestHooks>>,
     ) -> Result<ModelStream, ModelError> {
-        let provider_request = ProviderRequest::try_from(request)?.0;
+        let mut provider_request = ProviderRequest::try_from(request)?.0;
+        provider_request.hooks = hooks;
         let options = ProviderRequestOptions::from((
             self.retry.clone(),
             cancellation.clone(),
@@ -169,6 +246,40 @@ impl Model for ProviderModel {
             }
         };
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl Model for ProviderModel {
+    /// Returns the immutable provider/model profile resolved at construction.
+    fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
+    /// Verifies the already-constructed provider handle without inference.
+    async fn preflight(&self) -> Result<(), ModelError> {
+        self.llm
+            .preflight()
+            .map_err(|error| ModelError::Preflight(error.model_failure()))
+    }
+
+    /// Converts runtime transcript data at the provider boundary and streams it back.
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ModelStream, ModelError> {
+        self.stream_request(request, cancellation, None).await
+    }
+
+    /// Attaches extension-composed provider hooks to the concrete request.
+    async fn stream_with_hooks(
+        &self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+        hooks: Option<Arc<dyn provider::completion::CompletionRequestHooks>>,
+    ) -> Result<ModelStream, ModelError> {
+        self.stream_request(request, cancellation, hooks).await
     }
 }
 
@@ -409,6 +520,22 @@ impl ProviderMessage {
                 blocks,
                 ..
             } => Some(Self::try_from_tool_result(tool_call_id, blocks)),
+            MessageContent::BashExecution { bash }
+                if !bash.exclude_from_context =>
+            {
+                Some(Self::try_from_role(
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: bash.model_text(),
+                    }],
+                ))
+            }
+            MessageContent::BashExecution { .. } => None,
+            MessageContent::Extension { extension }
+                if extension.include_in_context =>
+            {
+                Some(Self::try_from_role(Role::User, extension.blocks))
+            }
             MessageContent::Extension { .. } => None,
         }
     }

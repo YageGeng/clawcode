@@ -3,15 +3,19 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
-use extension::{Extension, StaticExtensionFactory};
+use extension::{
+    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
+    ExtensionRegistrar, StaticExtensionFactory, ToolCallPoint,
+    ToolExecutionUpdatePoint,
+};
 use futures::{Stream, stream};
 use kernel::{EventSink, KernelFactory, Model, ModelError, ModelFactory};
 use protocol::{
     AgentEvent, AgentEventPayload, AgentOutcome, ContentBlock, EntryId,
-    ExtensionContext, ExtensionDirective, ExtensionEvent, IdGenerator, IdKind,
-    LaneId, MessageContent, ModelFailure, ModelFinal, ModelProfile,
-    ModelRequest, ModelRetryDisposition, ModelStreamEvent, ModelUsage,
-    RunRequest, SessionId, StopReason, TimestampMs, ToolCall, ToolCallId,
+    ExtensionDescriptor, ExtensionId, IdGenerator, IdKind, LaneId,
+    MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
+    ModelRetryDisposition, ModelStreamEvent, ModelUsage, RunRequest, SessionId,
+    StopReason, TimestampMs, ToolBlock, ToolCall, ToolCallId, ToolCallResult,
     ToolDefinition, ToolResult,
 };
 use store::{
@@ -248,6 +252,58 @@ impl ToolFactory for StreamingToolFactory {
     }
 }
 
+struct BurstUpdateTool;
+
+#[async_trait]
+impl AgentTool for BurstUpdateTool {
+    /// Describes the high-frequency latest-value update fixture.
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "burst_updates".to_string(),
+            description: "Publish many replaceable snapshots synchronously."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    /// Publishes many snapshots without yielding so only the latest value matters.
+    async fn execute(
+        &self,
+        call: ToolCall,
+        context: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        for sequence in 0..2_000 {
+            context.publish(
+                ToolResult::builder()
+                    .tool_call_id(call.tool_call_id.clone())
+                    .blocks(vec![ContentBlock::Text {
+                        text: format!("snapshot-{sequence}"),
+                    }])
+                    .is_error(false)
+                    .build(),
+            );
+        }
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(vec![ContentBlock::Text {
+                text: "final".to_string(),
+            }])
+            .is_error(false)
+            .build())
+    }
+}
+
+struct BurstUpdateToolFactory;
+
+impl ToolFactory for BurstUpdateToolFactory {
+    /// Registers the burst-update tool used to verify latest-value delivery.
+    fn create(&self) -> Result<ToolRegistry, ToolError> {
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(BurstUpdateTool))?;
+        Ok(registry)
+    }
+}
+
 #[derive(Default)]
 struct RecordingSink(Mutex<Vec<AgentEvent>>);
 
@@ -260,18 +316,81 @@ impl EventSink for RecordingSink {
     }
 }
 
-struct RecordingExtension(Arc<Mutex<Vec<ExtensionEvent>>>);
+#[derive(Clone)]
+struct RecordingExtension(Arc<Mutex<Vec<&'static str>>>);
+
+/// Policy extension that blocks every tool before its implementation runs.
+#[derive(Clone)]
+struct BlockingToolExtension;
 
 #[async_trait]
-impl Extension for RecordingExtension {
-    /// Records each lifecycle event while allowing the operation to continue.
+impl ExtensionHandler<ToolCallPoint> for BlockingToolExtension {
+    /// Returns a typed policy block used to verify persisted tool outcomes.
     async fn handle(
         &self,
-        event: &ExtensionEvent,
+        _event: &protocol::ToolCallEvent,
         _context: &ExtensionContext,
-    ) -> Result<ExtensionDirective, extension::ExtensionError> {
-        self.0.lock().expect("extension lock").push(event.clone());
-        Ok(ExtensionDirective::Continue)
+    ) -> Result<ToolCallResult, ExtensionError> {
+        Ok(ToolCallResult::Block(
+            ToolBlock::builder()
+                .reason("policy denied".to_string())
+                .terminate(false)
+                .build(),
+        ))
+    }
+}
+
+impl ExtensionModule for BlockingToolExtension {
+    /// Declares the deterministic policy extension identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("tool-policy").expect("extension id"),
+            name: "Tool policy".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the policy before tool validation and execution.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<ToolCallPoint, _>(self.clone())
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<ToolExecutionUpdatePoint> for RecordingExtension {
+    /// Records each typed partial tool update while allowing execution to continue.
+    async fn handle(
+        &self,
+        _event: &protocol::ToolExecutionUpdateEvent,
+        _context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        self.0
+            .lock()
+            .expect("extension lock")
+            .push("tool_execution_update");
+        Ok(())
+    }
+}
+
+impl ExtensionModule for RecordingExtension {
+    /// Declares the deterministic tool-observer extension identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("tool-recorder").expect("extension id"),
+            name: "Tool recorder".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the partial tool-update observer used by this test.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<ToolExecutionUpdatePoint, _>(self.clone())
     }
 }
 
@@ -345,7 +464,7 @@ async fn preflight_failure_emits_and_persists_terminal_run_state() {
         .store_factory(
             Arc::clone(&store_factory) as Arc<dyn SessionStoreFactory>
         )
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
         .build()
@@ -423,7 +542,7 @@ async fn streamed_response_produces_one_timed_turn() {
             temporary.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
         .build()
@@ -524,9 +643,7 @@ async fn stream_failures_persist_complete_error_assistants() {
                 temporary.path(),
                 Arc::clone(&clock),
             )))
-            .extension_factory(Arc::new(
-                StaticExtensionFactory::new(Vec::new()),
-            ))
+            .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
             .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
             .build()
@@ -632,7 +749,7 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
             temporary.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
         .build()
@@ -699,6 +816,84 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
     assert_eq!(completion_ids, vec![fast_id, slow_id]);
 }
 
+/// Policy-blocked tools persist a typed outcome that protocol clients can distinguish.
+#[tokio::test]
+async fn blocked_tool_result_preserves_policy_outcome() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(2_400)));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("blocked-call")
+                        .expect("tool id"),
+                    name: "delayed_text".to_string(),
+                    arguments: serde_json::json!({
+                        "delay_ms": 0,
+                        "text": "must not execute"
+                    }),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::TextDelta("blocked".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+        ])),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(DelayedToolFactory))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new(|| {
+                Ok(Arc::new(BlockingToolExtension) as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-blocked-tool").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let result = kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "run blocked tool".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("run kernel");
+    let tool_message = result
+        .messages
+        .iter()
+        .find(|message| {
+            matches!(message.content, MessageContent::ToolResult { .. })
+        })
+        .expect("blocked tool result");
+    let value = serde_json::to_value(tool_message).expect("serialize result");
+
+    assert_eq!(value["content"]["details"]["type"], "blocked");
+    assert_eq!(value["content"]["details"]["reason"], "policy denied");
+    assert_eq!(value["content"]["details"]["terminate"], false);
+}
+
 /// Tool snapshots are emitted before the final result and retain correlation metadata.
 #[tokio::test]
 async fn tool_partial_update_precedes_final_result() {
@@ -729,9 +924,17 @@ async fn tool_partial_update_precedes_final_result() {
             temporary.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(vec![
-            Arc::new(RecordingExtension(Arc::clone(&extension_events))),
-        ])))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new({
+                let extension_events = Arc::clone(&extension_events);
+                move || {
+                    Ok(Arc::new(RecordingExtension(Arc::clone(
+                        &extension_events,
+                    ))) as Arc<dyn ExtensionModule>)
+                }
+            })],
+        )))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
         .build()
@@ -792,8 +995,98 @@ async fn tool_partial_update_precedes_final_result() {
         extension_events
             .lock()
             .expect("extension lock")
-            .contains(&ExtensionEvent::ToolExecutionUpdate)
+            .contains(&"tool_execution_update")
     );
+}
+
+/// Synchronous tool updates coalesce to the latest snapshot before completion.
+#[tokio::test]
+async fn tool_updates_coalesce_to_the_latest_snapshot() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(2_750)));
+    let tool_call_id = ToolCallId::try_from("burst-1").expect("tool id");
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "burst_updates".to_string(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::TextDelta("done".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+        ])),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(BurstUpdateToolFactory))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-burst-tool").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    let sink = Arc::new(RecordingSink::default());
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        kernel.run(
+            RunRequest {
+                session_id,
+                input: "run burst tool".to_string(),
+            },
+            sink.clone(),
+        ),
+    )
+    .await
+    .expect("burst tool must settle")
+    .expect("run kernel");
+
+    let events = sink.0.lock().expect("sink lock");
+    let updates = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.payload {
+            AgentEventPayload::ToolExecutionUpdate { result, .. }
+                if result.tool_call_id == tool_call_id =>
+            {
+                Some((index, result))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let end_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.payload,
+                AgentEventPayload::ToolExecutionEnd { result, .. }
+                    if result.tool_call_id == tool_call_id
+            )
+        })
+        .expect("tool end");
+
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].1.blocks[0].text(), Some("snapshot-1999"));
+    assert!(updates[0].0 < end_index);
 }
 
 /// Session cancellation interrupts a pending provider stream and settles the Turn.
@@ -810,9 +1103,7 @@ async fn cancellation_settles_pending_turn_as_cancelled() {
                 temporary.path(),
                 Arc::clone(&clock),
             )))
-            .extension_factory(Arc::new(
-                StaticExtensionFactory::new(Vec::new()),
-            ))
+            .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
             .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
             .build()
@@ -894,7 +1185,7 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
             temporary.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
         .build()
@@ -983,7 +1274,7 @@ async fn resume_rejects_assistant_without_metadata_as_invalid_session() {
         .model_factory(Arc::new(StaticModelFactory(model)))
         .tool_factory(Arc::new(BuiltinToolFactory::new()))
         .store_factory(store_factory)
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
         .build()

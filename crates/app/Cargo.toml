@@ -11,6 +11,7 @@ workspace = true
 acp = { workspace = true }
 config = { workspace = true }
 extension = { workspace = true }
+extensions = { workspace = true }
 kernel = { workspace = true }
 mcp = { workspace = true }
 protocol = { workspace = true }

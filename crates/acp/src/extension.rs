@@ -10,7 +10,7 @@ use protocol::{
     AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpQueueMessageParameters,
     AcpSessionParameters, AcpSessionRenameParameters, AcpSkillParameters,
-    QueueKind, SessionTitle,
+    AcpUserBashParameters, QueueKind, SessionTitle,
 };
 
 use crate::server::AcpEventSink;
@@ -298,6 +298,27 @@ impl AcpExtensionDispatcher {
                     .map_err(
                         agent_client_protocol::Error::into_internal_error,
                     )?
+            }
+            AcpExtensionMethod::UserBash => {
+                let input: AcpUserBashParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let session_id = input.session_id.clone();
+                serde_json::to_value(
+                    self.kernel
+                        .execute_user_bash(
+                            input,
+                            Arc::new(AcpEventSink::new(
+                                session_id,
+                                self.connection.clone(),
+                            )),
+                        )
+                        .await
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
             }
         };
         Ok(AcpExtensionResponse(result))

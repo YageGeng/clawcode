@@ -1,53 +1,75 @@
 mod attempt;
 mod compaction;
+mod extension;
+mod lifecycle;
 mod queue;
 mod retry;
 mod run;
 mod session;
 mod settlement;
 mod tool_batch;
+mod tool_state;
+mod tool_updates;
+mod tree;
+mod user_bash;
 
-use std::collections::HashMap;
+use extension::KernelExtensionDiagnostics;
+use lifecycle::SessionLifecycle;
+
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use extension::{ExtensionFactory, ExtensionPipeline};
+use ::extension::{
+    DynamicCommandRegistry, ExtensionFactory, ExtensionRegistrar,
+    ExtensionRuntime,
+};
 use futures::StreamExt;
 use protocol::{
-    AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome, CompactionData,
-    CompactionDetails, CompactionPolicy, CompactionReason, CompactionResult,
-    ContentBlock, EntryId, EventMetadata, ExtensionCommandDefinition,
-    ExtensionContext, ExtensionEffects, ExtensionEvent, IdGenerator, IdKind,
-    LaneId, McpServerInfo, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelRequest, ModelRetryDisposition, ModelStreamEvent,
-    QueueId, RecordId, RetryPolicy, RunId, RunRequest, RunResult, Sequence,
-    SessionId, SessionSummary, SessionTitle, SessionTreeEntry,
-    SessionTreeSnapshot, SkillInfo, StopReason, TimestampMs, ToolCall,
-    ToolResult, TurnId, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
+    AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
+    BashExecutionMessage, CompactionData, CompactionDetails, CompactionPolicy,
+    CompactionReason, CompactionResult, ContentBlock, EntryId, EventMetadata,
+    ExtensionEventData, ExtensionFlagDefinition, IdGenerator, IdKind, LaneId,
+    McpServerInfo, MessageContent, MessageId, MessageIdentity, MessageTiming,
+    ModelRequest, ModelRetryDisposition, ModelStreamEvent, QueueId, RecordId,
+    RetryPolicy, RunId, RunRequest, RunResult, Sequence, SessionId,
+    SessionSummary, SessionTitle, SessionTreeEntry, SessionTreeSnapshot,
+    SkillInfo, StopReason, ThinkingLevel, TimestampMs, ToolCall, ToolResult,
+    TurnId, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming, UserBashInput,
+    UserBashRequest, UserBashResult,
 };
 use store::{
     Clock, EntryKind, NewEntry, NewRecord, RecordKind, SessionCreateOptions,
     SessionForkOptions, SessionStore, StoreFactory,
 };
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
-use tools::{ToolExecutionContext, ToolFactory, ToolRegistry, ToolUpdateSink};
+use tools::{
+    BashExecutionRequest, BashExecutor, ToolExecutionContext, ToolFactory,
+    ToolRegistry,
+};
 
 use crate::{
-    EventSink, Model, ModelError, ModelFactory, PiSystemPromptFactory,
-    ProjectContext, SinkError, SystemPromptContext, SystemPromptFactory,
+    EventSink, Model, ModelCatalog, ModelError, ModelFactory,
+    PiSystemPromptFactory, ProjectContext, SinkError, SystemPromptContext,
+    SystemPromptFactory,
 };
 use attempt::{
     AssistantAttempt, AssistantAttemptResult, AssistantAttemptSettlement,
 };
 pub use compaction::ContextUsageEstimate;
-use compaction::{CompactionExecution, CompactionPolicyExt, OverflowRecovery};
+use compaction::{
+    CompactionExecution, CompactionPolicyExt, OverflowRecovery,
+    SummaryGeneration,
+};
 use queue::{PendingQueue, PendingQueueItem, QueueCancellationReason};
 pub use retry::RetryClassifier;
 use retry::RetryState;
 use settlement::{RunCompletion, RunSettlement};
+use tool_state::SessionToolState;
+use tool_updates::{ToolExecutionUpdate, ToolUpdateChannel};
 
 /// Errors surfaced by kernel construction, persistence, extensions, and Turns.
 #[derive(Debug, thiserror::Error)]
@@ -63,7 +85,7 @@ pub enum KernelError {
     Store(#[from] store::StoreError),
     /// Extension construction or dispatch failed.
     #[error("extension subsystem failed: {0}")]
-    Extension(#[from] extension::ExtensionError),
+    Extension(#[from] ::extension::ExtensionError),
     /// Session-scoped MCP construction failed.
     #[error("MCP subsystem failed: {0}")]
     Mcp(#[from] mcp::McpError),
@@ -82,6 +104,9 @@ pub enum KernelError {
     /// A session identifier was registered more than once.
     #[error("session already exists: {0}")]
     DuplicateSession(SessionId),
+    /// A closing session cannot accept another serialized operation.
+    #[error("session is closing")]
+    SessionClosing,
     /// A resume request supplied a different working directory for a live session.
     #[error(
         "session working directory mismatch for {session_id}: expected {expected:?}, received {received:?}"
@@ -146,56 +171,79 @@ pub struct KernelFactory {
 impl KernelFactory {
     /// Resolves every factory once and returns a ready session-owning kernel.
     pub fn build(self) -> Result<Kernel, KernelError> {
-        let model = self.model_factory.create()?;
-        let extensions = self.extension_factory.create()?;
-        let mut tools = self.tool_factory.create()?;
-        for tool in extensions.tools() {
-            tools.register(tool)?;
-        }
-        let tools = Arc::new(tools);
+        // Static declarations must be frozen before provider/model construction
+        // because provider contributions participate in the immutable catalog.
+        let static_extensions =
+            Arc::new(self.extension_factory.static_registration()?);
+        let models =
+            Arc::new(self.model_factory.create_catalog(&static_extensions)?);
+        let tools = Arc::new(self.tool_factory.create()?);
         let skills = self
             .skill_factory
+            .as_ref()
             .map(|factory| factory.create())
             .transpose()?;
         Ok(Kernel::builder()
-            .model(model)
+            .models(models)
+            .static_extensions(static_extensions)
             .tools(tools)
             .store_factory(self.store_factory)
-            .extensions(extensions)
+            .extension_factory(self.extension_factory)
             .clock(self.clock)
             .id_generator(self.id_generator)
             .system_prompt_factory(self.system_prompt_factory)
             .mcp_factory(self.mcp_factory)
+            .skill_factory(self.skill_factory)
             .skills(skills)
             .max_turns(self.max_turns)
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
-            .sessions(RwLock::new(HashMap::new()))
+            .sessions(Arc::new(RwLock::new(HashMap::new())))
+            .shutdown(CancellationToken::new())
             .build())
     }
 }
 
 /// Session-owning agent runtime that serializes runs per session.
-#[derive(typed_builder::TypedBuilder)]
+#[derive(Clone, typed_builder::TypedBuilder)]
 pub struct Kernel {
-    model: Arc<dyn Model>,
+    models: Arc<ModelCatalog>,
+    static_extensions: Arc<protocol::StaticExtensionRegistration>,
     tools: Arc<ToolRegistry>,
     store_factory: Arc<dyn StoreFactory>,
-    extensions: ExtensionPipeline,
+    extension_factory: Arc<dyn ExtensionFactory>,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
     system_prompt_factory: Arc<dyn SystemPromptFactory>,
     #[builder(default)]
     mcp_factory: Option<Arc<dyn mcp::McpFactory>>,
     #[builder(default)]
+    skill_factory: Option<Arc<dyn skill::SkillFactory>>,
+    #[builder(default)]
     skills: Option<skill::SkillCatalog>,
     max_turns: usize,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
-    sessions: RwLock<HashMap<SessionId, Arc<SessionRuntime>>>,
+    sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionRuntime>>>>,
+    shutdown: CancellationToken,
 }
 
 impl Kernel {
+    /// Executes one run while preserving per-session serialization.
+    pub async fn run(
+        &self,
+        request: RunRequest,
+        sink: Arc<dyn EventSink>,
+    ) -> Result<RunResult, KernelError> {
+        self.run_with_source(request, sink, protocol::InputSource::Rpc)
+            .await
+    }
+
+    /// Waits until an extension or the embedding application requests shutdown.
+    pub async fn wait_for_shutdown(&self) {
+        self.shutdown.cancelled().await;
+    }
+
     /// Invokes one discovered skill explicitly and returns its complete source.
     pub fn invoke_skill(&self, name: &str) -> Result<String, KernelError> {
         self.skills
@@ -221,9 +269,18 @@ impl Kernel {
         Ok(self.session(session_id)?.mcp_servers.to_vec())
     }
 
-    /// Returns registered non-UI extension commands for protocol discovery.
-    pub fn extension_commands(&self) -> Vec<ExtensionCommandDefinition> {
-        self.extensions.commands()
+    /// Returns immutable command-line flag declarations from static extensions.
+    #[must_use]
+    pub fn extension_flags(&self) -> Vec<ExtensionFlagDefinition> {
+        self.static_extensions.flags.clone()
+    }
+
+    /// Returns immutable parsed values for statically registered flags.
+    #[must_use]
+    pub fn extension_flag_values(
+        &self,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        self.static_extensions.flag_values.clone()
     }
 
     /// Dispatches one registered extension command and returns its typed directive as JSON.
@@ -233,51 +290,31 @@ impl Kernel {
         name: String,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, KernelError> {
-        if !self
-            .extensions
-            .commands()
-            .iter()
-            .any(|command| command.name == name)
-        {
-            return Err(KernelError::ExtensionCommandNotFound(name));
-        }
-        let directive = self
-            .dispatch(
-                ExtensionEvent::Command { name, arguments },
-                session_id,
-                None,
+        let session = self.session(session_id)?;
+        let command = session
+            .commands
+            .snapshot()
+            .map_err(|error| KernelError::ExtensionBlocked(error.to_string()))?
+            .resolve(&name)
+            .map_err(|_error| KernelError::ExtensionCommandNotFound(name))?;
+        let context = self
+            .extension_context(&session, None, None)?
+            .for_extension(&command.extension_id);
+        command
+            .handler
+            .handle(
+                "",
+                &arguments,
+                &::extension::ExtensionCommandContext { event: context },
             )
             .await?;
-        serde_json::to_value(directive).map_err(KernelError::from)
+        Ok(serde_json::Value::Null)
     }
 
     /// Generates and validates one transcript message identifier.
     fn message_id(&self) -> Result<MessageId, KernelError> {
         MessageId::try_from(self.id_generator.next(IdKind::Message))
             .map_err(|error| KernelError::Protocol(error.to_string()))
-    }
-
-    /// Dispatches one extension hook and converts an intentional block to a kernel error.
-    async fn dispatch(
-        &self,
-        event: ExtensionEvent,
-        session_id: &SessionId,
-        turn_id: Option<TurnId>,
-    ) -> Result<ExtensionEffects, KernelError> {
-        let effects = self
-            .extensions
-            .dispatch(
-                &event,
-                &ExtensionContext {
-                    session_id: session_id.clone(),
-                    turn_id,
-                },
-            )
-            .await?;
-        if let Some(reason) = effects.block_reason.clone() {
-            return Err(KernelError::ExtensionBlocked(reason));
-        }
-        Ok(effects)
     }
 }
 
@@ -290,18 +327,31 @@ impl From<serde_json::Error> for KernelError {
 
 #[derive(typed_builder::TypedBuilder)]
 struct SessionRuntime {
-    store: Mutex<Box<dyn SessionStore>>,
+    store: Arc<Mutex<Box<dyn SessionStore>>>,
     lane: LaneId,
     cwd: PathBuf,
-    tools: Arc<ToolRegistry>,
     mcp_servers: Arc<[McpServerInfo]>,
     project_context: ProjectContext,
-    history: Mutex<Vec<AgentMessage>>,
+    skills: RwLock<Option<skill::SkillCatalog>>,
+    prompt_templates: RwLock<crate::PromptTemplateCatalog>,
+    extensions: Arc<ExtensionRuntime>,
+    tool_state: SessionToolState,
+    commands: DynamicCommandRegistry,
+    flags: Arc<[ExtensionFlagDefinition]>,
+    models: Arc<ModelCatalog>,
+    model: RwLock<Arc<dyn Model>>,
+    thinking_level: RwLock<ThinkingLevel>,
+    event_bus: broadcast::Sender<ExtensionEventData>,
+    event_sink: Arc<Mutex<Option<Arc<dyn EventSink>>>>,
+    diagnostic_turn_id: Arc<Mutex<Option<TurnId>>>,
+    history: Arc<Mutex<Vec<AgentMessage>>>,
     queue: Mutex<PendingQueue>,
+    lifecycle: RwLock<SessionLifecycle>,
     run_gate: AsyncMutex<()>,
     active_run_id: Mutex<Option<RunId>>,
+    idle_notify: Notify,
     cancellation: Mutex<CancellationToken>,
-    event_sequence: AtomicU64,
+    event_sequence: Arc<AtomicU64>,
 }
 
 /// Clears active-run correlation on every success and error exit from `Kernel::run`.
@@ -315,12 +365,22 @@ impl ActiveRunLease {
     fn acquire(
         session: Arc<SessionRuntime>,
         run_id: RunId,
+        turn_id: TurnId,
+        sink: Arc<dyn EventSink>,
     ) -> Result<Self, KernelError> {
         *session
             .active_run_id
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)? =
             Some(run_id.clone());
+        *session
+            .event_sink
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)? = Some(sink);
+        *session
+            .diagnostic_turn_id
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)? = Some(turn_id);
         Ok(Self { session, run_id })
     }
 }
@@ -332,6 +392,13 @@ impl Drop for ActiveRunLease {
             && active_run_id.as_ref() == Some(&self.run_id)
         {
             *active_run_id = None;
+        }
+        self.session.idle_notify.notify_waiters();
+        if let Ok(mut sink) = self.session.event_sink.lock() {
+            *sink = None;
+        }
+        if let Ok(mut turn_id) = self.session.diagnostic_turn_id.lock() {
+            *turn_id = None;
         }
     }
 }
@@ -351,26 +418,17 @@ struct ToolBatch<'a> {
     session: &'a Arc<SessionRuntime>,
     emitter: &'a EventEmitter,
     cancellation: &'a CancellationToken,
+    tools: Arc<ToolRegistry>,
     calls: Vec<ToolCall>,
 }
 
 /// Completed source-ordered tool messages plus cancellation state for the Turn.
-#[derive(Default)]
+#[derive(Default, typed_builder::TypedBuilder)]
 struct ToolBatchResult {
     messages: Vec<AgentMessage>,
+    results: Vec<ToolResult>,
     cancelled: bool,
-}
-
-/// Bridges synchronous tool snapshots into the serialized kernel event loop.
-struct KernelToolUpdates {
-    sender: mpsc::UnboundedSender<ToolResult>,
-}
-
-impl ToolUpdateSink for KernelToolUpdates {
-    /// Queues the latest snapshot without blocking the tool's output collector.
-    fn publish(&self, update: ToolResult) {
-        let _result = self.sender.send(update);
-    }
+    terminate: bool,
 }
 
 impl EventEmitter {

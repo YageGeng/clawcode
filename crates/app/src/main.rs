@@ -40,9 +40,11 @@ async fn main() -> anyhow::Result<()> {
     let application = ApplicationFactory::load()?.build()?;
     match cli.command {
         Command::Stdio => {
-            AcpServerFactory::new(Arc::clone(&application.kernel))
-                .serve_stdio()
-                .await?;
+            let server = AcpServerFactory::new(Arc::clone(&application.kernel));
+            tokio::select! {
+                result = server.serve_stdio() => result?,
+                () = application.kernel.wait_for_shutdown() => {},
+            }
         }
         Command::Serve {
             bind,
@@ -60,7 +62,12 @@ async fn main() -> anyhow::Result<()> {
             )?;
             let bind = bind.into_inner();
             let listener = tokio::net::TcpListener::bind(bind).await?;
-            axum::serve(listener, router).await?;
+            let shutdown_kernel = Arc::clone(&application.kernel);
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    shutdown_kernel.wait_for_shutdown().await;
+                })
+                .await?;
         }
     }
     Ok(())

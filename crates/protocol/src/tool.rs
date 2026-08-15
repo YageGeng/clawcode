@@ -67,6 +67,13 @@ pub enum ToolResultDetails {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_output_path: Option<String>,
     },
+    /// Policy disposition produced before a tool implementation is invoked.
+    Blocked {
+        /// Human-readable reason returned to the model and protocol clients.
+        reason: String,
+        /// Whether the policy requested termination after the current batch.
+        terminate: bool,
+    },
     /// Diff data produced after a successful exact-text edit.
     Edit {
         /// Absolute edited file path used by ACP's native diff update.

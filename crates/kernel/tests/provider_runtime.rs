@@ -3,11 +3,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use kernel::{Model, ModelError, ProviderModel};
+use kernel::{
+    Model, ModelError, ModelFactory, ProviderModel, ProviderModelFactory,
+};
 use protocol::{
-    AgentMessage, ContentBlock, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelProfile, ModelRequest, ModelStreamEvent, StopReason,
-    TimestampMs, TurnId,
+    AgentMessage, BashExecutionMessage, ContentBlock, MessageContent,
+    MessageId, MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
+    ModelStreamEvent, StaticExtensionRegistration, StopReason, TimestampMs,
+    TurnId, UserBashResult,
 };
 use provider::completion::{CompletionError, CompletionRequest, Usage};
 use provider::factory::{
@@ -259,6 +262,62 @@ async fn retryable_provider_failure_reacquires_the_stream() {
     assert_eq!(llm.acquisition_count(), 2);
 }
 
+/// Static provider declarations participate in the immutable model catalog.
+#[test]
+fn provider_model_factory_builds_static_extension_providers() {
+    let base_provider = config::LlmProvider {
+        id: config::ProviderId::Other("base".to_string()),
+        display_name: "Base".to_string(),
+        provider_type: config::ProviderType::OpenaiCompletions,
+        base_url: "https://example.com/v1".to_string(),
+        api_key: Some(config::ApiKeyConfig::Plaintext("sk-test".to_string())),
+        auth: None,
+        models: vec![config::LlmModel {
+            id: "base-model".to_string(),
+            display_name: None,
+            context_tokens: Some(128_000),
+            max_output_tokens: Some(8_000),
+            extra_param: serde_json::Value::Null,
+        }],
+    };
+    let config = config::ConfigHandle::from_config(config::AppConfig {
+        providers: vec![base_provider],
+        active_model: "base/base-model".to_string(),
+        ..config::AppConfig::default()
+    });
+    let registration = StaticExtensionRegistration::builder()
+        .providers(vec![protocol::ExtensionProviderRegistration {
+            name: "extension-provider".to_string(),
+            config: serde_json::json!({
+                "display_name": "Extension Provider",
+                "provider_type": "openai-completions",
+                "base_url": "https://example.com/v1",
+                "api_key": "sk-test",
+                "models": [{
+                    "id": "extension-model",
+                    "context_tokens": 64000,
+                    "max_output_tokens": 4096
+                }]
+            }),
+        }])
+        .build();
+
+    let catalog = ProviderModelFactory::from_config(config)
+        .create_catalog(&registration)
+        .expect("extension model catalog");
+
+    assert_eq!(catalog.profiles().len(), 2);
+    assert_eq!(
+        catalog
+            .resolve("extension-provider", "extension-model")
+            .expect("extension model")
+            .profile()
+            .display_name,
+        "extension-model"
+    );
+    assert_eq!(catalog.active().profile().model_id, "base-model");
+}
+
 /// Cancellation interrupts an active provider backoff before another request.
 #[tokio::test(start_paused = true)]
 async fn cancellation_interrupts_provider_retry_backoff() {
@@ -349,4 +408,66 @@ async fn tool_result_image_is_preserved_in_provider_request() {
         value["chat_history"][0]["content"][0]["content"][0]["data"]["value"],
         "aW1hZ2U="
     );
+}
+
+/// Provider conversion includes `!` output and omits `!!` output from model context.
+#[tokio::test]
+async fn user_bash_context_projection_matches_pi_prefix_semantics() {
+    let llm =
+        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
+    let model = ProviderModel::new(
+        sample_profile(),
+        Arc::clone(&llm) as Arc<dyn Llm>,
+        config::ProviderRetryConfig::default(),
+    );
+    let timestamp = TimestampMs::from(300);
+    let messages = [("visible", false), ("private", true)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (output, exclude_from_context))| AgentMessage {
+            identity: MessageIdentity {
+                message_id: MessageId::try_from(format!("bash-{index}"))
+                    .expect("message id"),
+                turn_id: TurnId::try_from(format!("turn-bash-{index}"))
+                    .expect("turn id"),
+            },
+            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
+                .expect("message timing"),
+            content: MessageContent::BashExecution {
+                bash: BashExecutionMessage::builder()
+                    .command(format!("printf '{output}'"))
+                    .result(
+                        UserBashResult::builder()
+                            .disposition(
+                                protocol::UserBashDisposition::Completed,
+                            )
+                            .output(output.to_string())
+                            .exit_code(Some(0))
+                            .cancelled(false)
+                            .truncated(false)
+                            .build(),
+                    )
+                    .exclude_from_context(exclude_from_context)
+                    .build(),
+            },
+        })
+        .collect();
+
+    let _stream = model
+        .stream(
+            ModelRequest {
+                messages,
+                tools: Vec::new(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("provider stream");
+    let serialized = serde_json::to_string(
+        &llm.last_request().expect("captured provider request"),
+    )
+    .expect("serialize provider request");
+
+    assert!(serialized.contains("visible"));
+    assert!(!serialized.contains("private"));
 }

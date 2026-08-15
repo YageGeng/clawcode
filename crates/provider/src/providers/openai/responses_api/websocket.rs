@@ -187,6 +187,23 @@ impl ResponsesWebSocketEvent {
             Self::Item(_) => false,
         }
     }
+
+    /// Maps a terminal WebSocket event to sanitized HTTP-like response status.
+    fn provider_status(&self) -> u16 {
+        let status = match self {
+            Self::Response(chunk) => Some(chunk.response.status.clone()),
+            Self::Done(done) => done.status(),
+            Self::Error(_) => Some(ResponseStatus::Failed),
+            Self::Item(_) => None,
+        };
+        match status {
+            Some(ResponseStatus::Completed) => 200,
+            Some(ResponseStatus::Incomplete) => 206,
+            Some(ResponseStatus::Failed | ResponseStatus::Cancelled) => 500,
+            Some(ResponseStatus::InProgress | ResponseStatus::Queued)
+            | None => 102,
+        }
+    }
 }
 
 /// A builder for an OpenAI Responses WebSocket session.
@@ -277,6 +294,8 @@ pub struct ResponsesWebSocketSession<H = reqwest::Client> {
     event_timeout: Option<Duration>,
     closed: bool,
     failed: bool,
+    in_flight_hooks:
+        Option<std::sync::Arc<dyn crate::completion::CompletionRequestHooks>>,
 }
 
 impl<H> ResponsesWebSocketSession<H>
@@ -307,6 +326,7 @@ where
             event_timeout,
             closed: false,
             failed: false,
+            in_flight_hooks: None,
         })
     }
 
@@ -348,6 +368,7 @@ where
             ));
         }
 
+        let request_hooks = completion_request.hooks.clone();
         let payload = ResponsesWebSocketClientEvent {
             kind: ResponsesWebSocketClientEventKind::ResponseCreate,
             request: self.prepare_request(completion_request)?,
@@ -362,12 +383,22 @@ where
             );
         }
 
+        let mut payload = serde_json::to_value(payload)?;
+        if let Some(hooks) = &request_hooks {
+            // An established WebSocket has no per-message headers, but the
+            // logical phase still runs before payload mutation for parity.
+            hooks
+                .before_headers(crate::completion::ProviderHeaders::default())
+                .await?;
+            payload = hooks.before_payload(payload).await?;
+        }
         let payload = serde_json::to_string(&payload)?;
 
         if let Err(error) = self.socket.send(Message::text(payload)).await {
             return Err(self.fail_session(websocket_provider_error(error)));
         }
         self.in_flight = true;
+        self.in_flight_hooks = request_hooks;
 
         Ok(())
     }
@@ -425,6 +456,17 @@ where
                 {
                     self.pending_done_response_id = None;
                     continue;
+                }
+            }
+            if event.is_terminal()
+                && let Some(hooks) = self.in_flight_hooks.take()
+            {
+                let metadata = crate::completion::ProviderResponseMetadata {
+                    status: event.provider_status(),
+                    headers: crate::completion::ProviderHeaders::default(),
+                };
+                if let Err(error) = hooks.after_response(metadata).await {
+                    return Err(self.fail_session(error));
                 }
             }
             self.update_state_for_event(&event);
@@ -592,6 +634,7 @@ where
         self.previous_response_id = None;
         self.pending_done_response_id = None;
         self.in_flight = false;
+        self.in_flight_hooks = None;
     }
 
     fn mark_closed(&mut self) {
@@ -867,12 +910,16 @@ mod tests {
         websocket_url,
     };
     use crate::client::CompletionClient;
-    use crate::completion::CompletionModel;
+    use crate::completion::{
+        CompletionError, CompletionModel, CompletionRequestHooks,
+        ProviderHeaders, ProviderResponseMetadata,
+    };
     use crate::providers::openai::responses_api::{
         CompletionResponse, ResponseObject, ResponseStatus, ResponsesUsage,
     };
     use futures::{SinkExt, StreamExt};
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
@@ -903,6 +950,110 @@ mod tests {
             tools: Vec::new(),
             additional_parameters: Default::default(),
         }
+    }
+
+    /// Records request-local WebSocket hook order and mutates the JSON event.
+    #[derive(Default)]
+    struct WebSocketHooks(Mutex<Vec<&'static str>>);
+
+    #[async_trait::async_trait]
+    impl CompletionRequestHooks for WebSocketHooks {
+        /// Adds a marker after the header phase.
+        async fn before_payload(
+            &self,
+            mut payload: serde_json::Value,
+        ) -> Result<serde_json::Value, CompletionError> {
+            self.0.lock().expect("hook order lock").push("payload");
+            payload
+                .as_object_mut()
+                .expect("websocket event object")
+                .insert("hooked".to_string(), json!(true));
+            Ok(payload)
+        }
+
+        /// Records the logical header phase for a message on an established socket.
+        async fn before_headers(
+            &self,
+            headers: ProviderHeaders,
+        ) -> Result<ProviderHeaders, CompletionError> {
+            self.0.lock().expect("hook order lock").push("headers");
+            assert!(headers.is_empty());
+            Ok(headers)
+        }
+
+        /// Records the sanitized terminal response phase.
+        async fn after_response(
+            &self,
+            response: ProviderResponseMetadata,
+        ) -> Result<(), CompletionError> {
+            self.0.lock().expect("hook order lock").push("response");
+            assert_eq!(response.status, 200);
+            assert!(response.headers.is_empty());
+            Ok(())
+        }
+    }
+
+    /// WebSocket response.create messages use the same hook order as HTTP requests.
+    #[tokio::test]
+    async fn websocket_request_hooks_wrap_payload_and_terminal_response() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server accept");
+            let mut socket = accept_async(stream).await.expect("upgrade");
+            let request = socket
+                .next()
+                .await
+                .expect("request exists")
+                .expect("valid request")
+                .into_text()
+                .expect("text request");
+            let payload: serde_json::Value =
+                serde_json::from_str(&request).expect("request JSON");
+            assert_eq!(payload["hooked"], json!(true));
+            let response = serde_json::to_value(sample_response(
+                ResponseStatus::Completed,
+            ))
+            .expect("response JSON");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("send response");
+        });
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client build");
+        let model = client.completion_model("gpt-4o");
+        let hooks = Arc::new(WebSocketHooks::default());
+        let mut request = model.completion_request("hello").build();
+        request.hooks =
+            Some(Arc::clone(&hooks) as Arc<dyn CompletionRequestHooks>);
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session connect");
+
+        session.send(request).await.expect("request send");
+        session.next_event().await.expect("terminal response event");
+        session.close().await.expect("close session");
+        server.await.expect("server task");
+
+        assert_eq!(
+            *hooks.0.lock().expect("hook order lock"),
+            vec!["headers", "payload", "response"]
+        );
     }
 
     #[test]

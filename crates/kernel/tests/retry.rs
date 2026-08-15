@@ -218,9 +218,7 @@ impl RetryFixture {
                     root.path(),
                     Arc::clone(&clock),
                 )))
-                .extension_factory(Arc::new(StaticExtensionFactory::new(
-                    Vec::new(),
-                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::default()))
                 .clock(clock)
                 .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
                 .retry_policy(retry_policy)

@@ -602,6 +602,7 @@ where
         completion::CompletionResponse<CompletionResponse>,
         crate::completion::CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
                 target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
@@ -634,12 +635,16 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
-        let req = self
+        let (body, prepared_hooks) =
+            completion::prepare_json_request(&request, request_hooks).await?;
+        let mut req = self
             .client
             .post("/chat/completions")?
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         async move {
             let response = self.client.send::<_, Bytes>(req).await?;
@@ -694,6 +699,7 @@ where
         crate::streaming::StreamingCompletionResponse<Self::StreamingResponse>,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let preamble = completion_request.preamble.clone();
         let mut request = DeepseekCompletionRequest::try_from((
             self.model.as_ref(),
@@ -714,13 +720,17 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
+        let (body, prepared_hooks) =
+            completion::prepare_json_request(&request, request_hooks).await?;
 
-        let req = self
+        let mut req = self
             .client
             .post("/chat/completions")?
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(

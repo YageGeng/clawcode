@@ -140,6 +140,38 @@ impl AssistantAttempt {
         Ok(())
     }
 
+    /// Builds the current immutable Assistant snapshot for streaming observers.
+    pub(super) fn snapshot(
+        &self,
+        observed_at_ms: TimestampMs,
+    ) -> Result<AgentMessage, ModelError> {
+        let started_at_ms = self.started_at_ms.unwrap_or(self.timestamp_ms);
+        let ended_at_ms = self.ended_at_ms.unwrap_or(observed_at_ms);
+        let final_ = self
+            .final_
+            .clone()
+            .unwrap_or_else(|| Self::terminal_final(StopReason::EndTurn));
+        Ok(AgentMessage {
+            identity: self.identity.clone(),
+            timing: MessageTiming::try_from((
+                self.timestamp_ms,
+                started_at_ms,
+                ended_at_ms,
+            ))
+            .map_err(|error| ModelError::Protocol(error.to_string()))?,
+            content: protocol::MessageContent::Assistant {
+                blocks: self.blocks.clone(),
+                metadata: AssistantMetadata::builder()
+                    .provider_id(self.profile.provider_id.clone())
+                    .model_id(self.profile.model_id.clone())
+                    .stop_reason(final_.stop_reason)
+                    .raw_stop_reason(final_.raw_stop_reason)
+                    .usage(final_.usage)
+                    .build(),
+            },
+        })
+    }
+
     /// Converts the attempt into one complete success, failure, or cancellation message.
     pub(super) fn settle(
         mut self,

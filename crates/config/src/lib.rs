@@ -2,6 +2,7 @@
 
 pub mod approval;
 pub mod config;
+pub mod extensions;
 pub mod hook;
 pub mod llm;
 pub mod loader;
@@ -15,6 +16,7 @@ pub use config::{
     AppConfig, CompactionConfig, ConfigValidationError,
     SessionPersistenceConfig,
 };
+pub use extensions::{DEFAULT_EXTENSION_ID, ExtensionsConfig};
 pub use hook::{HookEventsToml, HookHandlerConfig, HooksFile, MatcherGroup};
 pub use llm::{
     ApiKeyConfig, LlmModel, LlmProvider, ProviderAuthConfig, ProviderId,

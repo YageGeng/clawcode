@@ -2,10 +2,10 @@ use acp::AcpEventMapper;
 use agent_client_protocol::schema::v2::SessionUpdate;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
-    AssistantMetadata, ContentBlock, EventMetadata, MessageContent, MessageId,
-    MessageIdentity, MessageTiming, ModelUsage, ProductIdentity, RunId,
-    Sequence, StopReason, TimestampMs, ToolCallId, ToolResult,
-    ToolResultDetails, TurnId,
+    AssistantMetadata, BashExecutionMessage, ContentBlock, EventMetadata,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelUsage,
+    ProductIdentity, RunId, Sequence, StopReason, TimestampMs, ToolCallId,
+    ToolResult, ToolResultDetails, TurnId, UserBashDisposition, UserBashResult,
 };
 
 /// Native ACP chunks retain mandatory Turn and timestamp metadata in `_meta`.
@@ -60,6 +60,65 @@ fn turn_start_maps_to_acp_v2_other_session_update() {
     assert_eq!(value["sessionUpdate"], "_clawcode/event");
     assert_eq!(value["payload"]["event"], "turn_start");
     assert_eq!(value["payload"]["run_id"], "run-1");
+}
+
+/// User-bash replay preserves typed policy disposition in the ACP extension update.
+#[test]
+fn user_bash_replay_preserves_blocked_disposition() {
+    let turn_id = TurnId::try_from("turn-bash").expect("turn id");
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: turn_id.clone(),
+            timestamp_ms: TimestampMs::from(2_100),
+            sequence: Sequence::try_from(5).expect("sequence"),
+        },
+        payload: AgentEventPayload::MessageEnd {
+            message: AgentMessage {
+                identity: MessageIdentity {
+                    message_id: MessageId::try_from("message-bash")
+                        .expect("message id"),
+                    turn_id,
+                },
+                timing: MessageTiming::try_from((
+                    TimestampMs::from(2_000),
+                    TimestampMs::from(2_000),
+                    TimestampMs::from(2_100),
+                ))
+                .expect("message timing"),
+                content: MessageContent::BashExecution {
+                    bash: BashExecutionMessage::builder()
+                        .command("rm -rf /tmp/value".to_string())
+                        .result(
+                            UserBashResult::builder()
+                                .disposition(UserBashDisposition::Blocked {
+                                    reason: "policy denied".to_string(),
+                                })
+                                .output("policy denied".to_string())
+                                .cancelled(false)
+                                .truncated(false)
+                                .build(),
+                        )
+                        .exclude_from_context(false)
+                        .build(),
+                },
+            },
+        },
+    };
+
+    let updates = AcpEventMapper::map(event).expect("map bash replay");
+    let value =
+        serde_json::to_value(updates.first()).expect("serialize update");
+    assert_eq!(value["sessionUpdate"], "_clawcode/event");
+    assert_eq!(
+        value["payload"]["message"]["content"]["bash"]["result"]["disposition"]
+            ["type"],
+        "blocked"
+    );
+    assert_eq!(
+        value["payload"]["message"]["content"]["bash"]["result"]["disposition"]
+            ["reason"],
+        "policy denied"
+    );
 }
 
 /// Session title changes use ACP's native session-info update with string timing metadata.
@@ -151,6 +210,17 @@ fn assistant_replay_maps_reasoning_and_tool_calls_without_loss() {
         .into_iter()
         .map(|update| serde_json::to_value(update).expect("serialize update"))
         .collect::<Vec<_>>();
+    assert!(values.iter().all(|value| {
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]["messageTiming"]
+            ["timestamp_ms"]
+            == "7000"
+            && value["_meta"][ProductIdentity::ACP_NAMESPACE]
+                ["messageTiming"]["started_at_ms"]
+                == "7100"
+            && value["_meta"][ProductIdentity::ACP_NAMESPACE]
+                ["messageTiming"]["ended_at_ms"]
+                == "8000"
+    }));
     assert!(values.iter().any(|value| {
         value["sessionUpdate"] == "agent_thought"
             && value["content"][0]["text"] == "reasoning"

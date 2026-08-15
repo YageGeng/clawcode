@@ -382,12 +382,35 @@ where
         U: From<Bytes>,
         U: WasmCompatSend + 'static,
     {
-        req.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/json"),
-        );
+        if req
+            .extensions()
+            .get::<crate::completion::PreparedCompletionHooks>()
+            .is_none()
+        {
+            req.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+        }
 
-        self.http_client.send(req)
+        let hooks = req
+            .extensions()
+            .get::<crate::completion::PreparedCompletionHooks>()
+            .cloned();
+        let response = self.http_client.send(req);
+        async move {
+            let response = response.await?;
+            if let Some(hooks) = hooks {
+                let metadata = crate::completion::PreparedCompletionHooks::response_metadata(
+                    &response,
+                );
+                hooks
+                    .observe_response(metadata)
+                    .await
+                    .map_err(http_client::instance_error)?;
+            }
+            Ok(response)
+        }
     }
 
     fn send_multipart<U>(
@@ -412,12 +435,35 @@ where
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        req.headers_mut().insert(
-            http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/json"),
-        );
+        if req
+            .extensions()
+            .get::<crate::completion::PreparedCompletionHooks>()
+            .is_none()
+        {
+            req.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+        }
 
-        self.http_client.send_streaming(req)
+        let hooks = req
+            .extensions()
+            .get::<crate::completion::PreparedCompletionHooks>()
+            .cloned();
+        let response = self.http_client.send_streaming(req);
+        async move {
+            let response = response.await?;
+            if let Some(hooks) = hooks {
+                let metadata = crate::completion::PreparedCompletionHooks::response_metadata(
+                    &response,
+                );
+                hooks
+                    .observe_response(metadata)
+                    .await
+                    .map_err(http_client::instance_error)?;
+            }
+            Ok(response)
+        }
     }
 }
 

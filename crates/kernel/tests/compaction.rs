@@ -290,9 +290,7 @@ impl CompactionFixture {
                     root.path(),
                     Arc::clone(&clock),
                 )))
-                .extension_factory(Arc::new(StaticExtensionFactory::new(
-                    Vec::new(),
-                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::default()))
                 .clock(clock)
                 .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
                 .retry_policy(
@@ -493,7 +491,7 @@ async fn threshold_usage_compacts_without_repeating_assistant_call() {
             root.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
         .compaction_policy(
@@ -585,9 +583,7 @@ impl OverflowFixture {
                 root.path(),
                 Arc::clone(&clock),
             )))
-            .extension_factory(Arc::new(
-                StaticExtensionFactory::new(Vec::new()),
-            ))
+            .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
             .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
             .retry_policy(
@@ -761,7 +757,7 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
             root.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(Arc::clone(&clock))
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(100))))
         .compaction_policy(
@@ -816,7 +812,7 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
             root.path(),
             Arc::clone(&clock),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::new(Vec::new())))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(200))))
         .compaction_policy(

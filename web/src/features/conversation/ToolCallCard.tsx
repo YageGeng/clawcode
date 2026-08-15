@@ -1,4 +1,4 @@
-import { Check, ChevronDown, CircleAlert, LoaderCircle, Wrench } from "lucide-react";
+import { Ban, Check, ChevronDown, CircleAlert, LoaderCircle, Wrench } from "lucide-react";
 
 import type { ToolCallEntity } from "../../domain/model";
 
@@ -36,9 +36,10 @@ function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "ra
   </div>;
 }
 
+/** Renders one ACP tool lifecycle with product-specific blocked refinement. */
 export function ToolCallCard({ tool }: ToolCallCardProps) {
-  const statusLabel = tool.status === "completed" ? "完成" : tool.status === "failed" ? "失败" : tool.status === "in_progress" ? "执行中" : "等待中";
-  const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />;
+  const statusLabel = tool.status === "completed" ? "完成" : tool.status === "blocked" ? "已阻止" : tool.status === "failed" ? "失败" : tool.status === "in_progress" ? "执行中" : "等待中";
+  const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);
   return (
     <details className="tool-card" data-status={tool.status}>

@@ -8,10 +8,11 @@ mod runtime;
 mod sink;
 
 pub use id::NanoidIdGenerator;
-pub use model::{Model, ModelError, ModelFactory, ModelStream};
+pub use model::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
 pub use prompt::{
     PiSystemPromptFactory, ProjectContext, ProjectInstruction, PromptError,
-    SystemPromptContext, SystemPromptFactory,
+    PromptTemplate, PromptTemplateCatalog, SystemPromptContext,
+    SystemPromptFactory,
 };
 pub use protocol::{PendingMessages, QueueKind, QueuedMessage};
 pub use provider::{ProviderModel, ProviderModelFactory};

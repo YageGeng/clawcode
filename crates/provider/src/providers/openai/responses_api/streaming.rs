@@ -998,6 +998,7 @@ where
         streaming::StreamingCompletionResponse<StreamingCompletionResponse>,
         CompletionError,
     > {
+        let request_hooks = completion_request.hooks.clone();
         let mut request = self.create_completion_request(completion_request)?;
         request.stream = Some(true);
 
@@ -1009,13 +1010,18 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
+        let (body, prepared_hooks) =
+            crate::completion::prepare_json_request(&request, request_hooks)
+                .await?;
 
-        let req = self
+        let mut req = self
             .client
             .post("/responses")?
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
+        if let Some(hooks) = prepared_hooks {
+            hooks.attach(&mut req).await?;
+        }
 
         // let request_builder = self.client.post_reqwest("/responses").json(&request);
 

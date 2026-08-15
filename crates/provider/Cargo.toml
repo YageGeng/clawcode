@@ -22,6 +22,7 @@ tracing = { workspace = true }
 tracing-futures = { workspace = true, features = ["futures-03"] }
 
 # async
+async-trait = { workspace = true }
 async-stream = { workspace = true }
 futures = { workspace = true }
 futures-timer = { workspace = true }

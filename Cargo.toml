@@ -11,6 +11,7 @@ members = [
   "crates/skill",
   "crates/store",
   "crates/tools",
+  "extensions",
 ]
 resolver = "3"
 
@@ -62,6 +63,7 @@ mem_forget = "warn"
 acp = { path = "crates/acp" }
 config = { path = "crates/config" }
 extension = { path = "crates/extension" }
+extensions = { path = "extensions" }
 kernel = { path = "crates/kernel" }
 mcp = { path = "crates/mcp" }
 protocol = { path = "crates/protocol" }

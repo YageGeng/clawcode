@@ -701,6 +701,10 @@
   border-color: #efc5cb;
 }
 
+.tool-card[data-status="blocked"] {
+  border-color: #edd7ab;
+}
+
 .tool-card__icon {
   display: grid;
   color: var(--accent);
@@ -713,6 +717,10 @@
 
 .tool-card[data-status="failed"] .tool-card__icon {
   color: var(--danger);
+}
+
+.tool-card[data-status="blocked"] .tool-card__icon {
+  color: var(--warning);
 }
 
 .tool-card__title {
@@ -1486,4 +1494,37 @@
   .workbench[data-inspector-open="false"] .inspector-panel {
     display: none;
   }
+}
+
+.extension-card {
+  margin: 0.5rem 0;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: 0.65rem;
+  background: var(--surface-raised);
+}
+
+.extension-card--error {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.extension-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.extension-card header span {
+  font-weight: 650;
+}
+
+.extension-card header small {
+  color: var(--text-secondary);
+}
+
+.extension-card__content {
+  white-space: pre-wrap;
 }

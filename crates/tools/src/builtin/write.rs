@@ -12,6 +12,20 @@ struct WriteArguments {
     content: String,
 }
 
+impl TryFrom<&ToolCall> for WriteArguments {
+    type Error = ToolError;
+
+    /// Decodes one write call without consuming its execution correlation.
+    fn try_from(call: &ToolCall) -> Result<Self, Self::Error> {
+        serde_json::from_value(call.arguments.clone()).map_err(|error| {
+            ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                message: error.to_string(),
+            }
+        })
+    }
+}
+
 /// Pi-compatible local file creator and complete-file writer.
 pub(super) struct WriteTool;
 
@@ -39,19 +53,18 @@ impl AgentTool for WriteTool {
         }
     }
 
+    /// Validates write JSON without creating directories or changing files.
+    fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
+        WriteArguments::try_from(call).map(|_arguments| ())
+    }
+
     /// Creates parent directories and writes the complete content under a per-file queue.
     async fn execute(
         &self,
         call: ToolCall,
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
-        let arguments = serde_json::from_value::<WriteArguments>(
-            call.arguments,
-        )
-        .map_err(|error| ToolError::InvalidArguments {
-            tool: call.name.clone(),
-            message: error.to_string(),
-        })?;
+        let arguments = WriteArguments::try_from(&call)?;
         let absolute = ResolvedPath::new(&arguments.path, &context.cwd)?;
         with_file_mutation(absolute.as_path(), || async {
             context.ensure_active()?;

@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use protocol::{
-    EntryId, LaneId, RecordId, RunId, Sequence, SessionId, TimestampMs,
+    EntryId, ExtensionEntryData, LaneId, RecordId, RunId, Sequence, SessionId,
+    TimestampMs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -327,6 +328,27 @@ pub trait SessionStore: Send {
         lane: &LaneId,
         entry: NewEntry,
     ) -> Result<SessionEntry, StoreError>;
+
+    /// Appends one typed extension entry using Pi v4's custom-entry wire shape.
+    fn append_extension_entry(
+        &mut self,
+        lane: &LaneId,
+        entry_id: EntryId,
+        entry: ExtensionEntryData,
+    ) -> Result<SessionEntry, StoreError> {
+        self.append_entry(
+            lane,
+            NewEntry {
+                id: entry_id,
+                kind: EntryKind::Custom,
+                payload: serde_json::json!({
+                    "extensionId": entry.extension_id,
+                    "customType": entry.custom_type,
+                    "data": entry.data,
+                }),
+            },
+        )
+    }
 
     /// Returns the current leaf of a lane.
     fn lane(&self, lane: &LaneId) -> Option<&EntryId>;
