@@ -532,20 +532,18 @@ impl Kernel {
             .await;
         let project_resources_allowed =
             trust.trusted != protocol::ProjectTrustDecision::No;
-        let resources = if project_resources_allowed {
-            session
-                .extensions
-                .emit_resources_discover(
-                    &protocol::ResourcesDiscoverEvent {
-                        cwd: session.cwd.clone(),
-                        reason: protocol::ResourcesDiscoverReason::Startup,
-                    },
-                    &context,
-                )
-                .await
-        } else {
-            protocol::ResourcesDiscoverResult::default()
-        };
+        // Project trust gates built-in project roots; Extension-owned roots
+        // remain discoverable because they are not implicitly project content.
+        let resources = session
+            .extensions
+            .emit_resources_discover(
+                &protocol::ResourcesDiscoverEvent {
+                    cwd: session.cwd.clone(),
+                    reason: protocol::ResourcesDiscoverReason::Startup,
+                },
+                &context,
+            )
+            .await;
         let skills = self
             .skill_factory
             .as_ref()

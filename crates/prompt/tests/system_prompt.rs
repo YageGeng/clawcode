@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use prompt::{FilesystemPromptFactory, PromptFactory, SystemPromptTurnInput};
 use protocol::{
     ProductIdentity, PromptContentSource, PromptPolicy, PromptResourceRequest,
-    SkillInfo, SystemPromptTool, ToolPromptContribution,
+    SkillDiscoveryMode, SkillInfo, SkillSource, SkillSourceKind,
+    SkillSourceScope, SystemPromptTool, ToolPromptContribution,
 };
 
 /// Creates one Session snapshot with optional configured System and Append text.
@@ -58,6 +59,29 @@ fn prompt_tool(
                 .collect(),
         },
     }
+}
+
+/// Creates complete configured Skill metadata for System Prompt assertions.
+fn skill_info(name: &str, description: &str, path: PathBuf) -> SkillInfo {
+    let reference_dir = path
+        .parent()
+        .expect("Skill reference directory")
+        .to_path_buf();
+    SkillInfo::builder()
+        .name(name.to_string())
+        .description(description.to_string())
+        .path(path.clone())
+        .reference_dir(reference_dir.clone())
+        .source(
+            SkillSource::builder()
+                .kind(SkillSourceKind::Configured)
+                .scope(SkillSourceScope::Configured)
+                .root(path)
+                .origin_base_dir(reference_dir)
+                .discovery_mode(SkillDiscoveryMode::Pi)
+                .build(),
+        )
+        .build()
 }
 
 /// Default prompts use shared identity and expose only normalized non-empty snippets.
@@ -186,13 +210,11 @@ fn custom_prompt_preserves_append_context_skill_and_cwd_order() {
     let skill_path = workspace.path().join("skills/rust/SKILL.md");
     let built = session.build_system_prompt(SystemPromptTurnInput {
         tools: vec![prompt_tool("read", Some("Read files"), &[])],
-        skills: vec![
-            SkillInfo::builder()
-                .name("rust&review".to_string())
-                .description("Review <Rust> safely".to_string())
-                .path(skill_path.clone())
-                .build(),
-        ],
+        skills: vec![skill_info(
+            "rust&review",
+            "Review <Rust> safely",
+            skill_path.clone(),
+        )],
         include_skill_instructions: true,
     });
 
@@ -236,11 +258,11 @@ fn skill_catalog_requires_read_and_enabled_policy() {
         None,
         None,
     );
-    let skill = SkillInfo::builder()
-        .name("review".to_string())
-        .description("Review code".to_string())
-        .path(PathBuf::from("/skills/review/SKILL.md"))
-        .build();
+    let skill = skill_info(
+        "review",
+        "Review code",
+        PathBuf::from("/skills/review/SKILL.md"),
+    );
     let without_read = session.build_system_prompt(SystemPromptTurnInput {
         tools: vec![prompt_tool("bash", Some("Execute commands"), &[])],
         skills: vec![skill.clone()],

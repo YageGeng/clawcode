@@ -51,6 +51,10 @@ pub enum ApplicationError {
     #[error("no platform configuration directory is available")]
     MissingConfigDirectory,
 
+    /// No user home directory was available for portable Agent Skills.
+    #[error("no user home directory is available")]
+    MissingHomeDirectory,
+
     /// ACP HTTP/SSE/WebSocket router construction failed.
     #[error(transparent)]
     AcpTransport(#[from] acp::AcpTransportError),
@@ -133,12 +137,22 @@ impl ApplicationFactory {
         let builtin_tools = BuiltinToolFactory::new()
             .filesystem_enabled(snapshot.tools.enable_fs)
             .shell_enabled(snapshot.tools.enable_shell);
-        let skill_factory = snapshot.tools.enable_skill.then(|| {
-            Arc::new(FilesystemSkillFactory::new(
-                config_root.clone(),
-                snapshot.skills.rules.clone(),
-            )) as Arc<dyn skill::SkillFactory>
-        });
+        // Home discovery is a Skill dependency and must not block deployments
+        // that explicitly disable the Skill subsystem.
+        let skill_factory = if snapshot.tools.enable_skill {
+            let user_home = dirs::home_dir()
+                .ok_or(ApplicationError::MissingHomeDirectory)?;
+            Some(Arc::new(
+                FilesystemSkillFactory::builder()
+                    .global_root(config_root.clone())
+                    .user_home(user_home)
+                    .configured_paths(snapshot.skills.paths.clone())
+                    .rules(snapshot.skills.rules.clone())
+                    .build(),
+            ) as Arc<dyn skill::SkillFactory>)
+        } else {
+            None
+        };
         let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
         let id_generator: Arc<dyn IdGenerator> = Arc::new(NanoidIdGenerator);
         let kernel = KernelFactory::builder()

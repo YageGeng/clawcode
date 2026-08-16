@@ -1,61 +1,153 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ignore::WalkBuilder;
 use prompt::MarkdownDocument;
-use protocol::SkillInfo;
-use serde::Deserialize;
+use protocol::{
+    SkillCollision, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiagnosticSeverity, SkillDiscoveryMode, SkillInfo,
+};
 
-use crate::SkillError;
+use crate::metadata::SkillMetadata;
+use crate::source::SkillRoot;
 
-/// YAML fields used to derive effective Skill metadata.
-#[derive(Debug, Default, Deserialize)]
-struct SkillMetadata {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default, rename = "disable-model-invocation")]
-    disable_model_invocation: bool,
-}
-
-/// Recursively discovers Skills while stopping below each Skill directory.
+/// Discovers Skills in source order while retaining recoverable diagnostics.
 #[derive(Default)]
 pub(crate) struct SkillDiscovery {
     skills: BTreeMap<String, SkillInfo>,
-    diagnostics: Vec<String>,
+    real_paths: HashSet<std::path::PathBuf>,
+    diagnostics: Vec<SkillDiagnostic>,
 }
 
 impl SkillDiscovery {
-    /// Visits one root or descendant while isolating malformed automatic resources.
-    pub(crate) fn visit(&mut self, path: &Path, include_root_files: bool) {
-        if path.is_file() {
-            let is_skill_file =
-                path.file_name().is_some_and(|name| name == "SKILL.md")
-                    || (include_root_files
-                        && path.extension().is_some_and(|value| value == "md"));
-            if is_skill_file && let Err(error) = self.insert(path) {
-                self.diagnostics.push(format!(
-                    "invalid Skill '{}': {error}",
-                    path.display()
-                ));
+    /// Visits one typed source using its required-path and traversal semantics.
+    pub(crate) fn visit(&mut self, source: &SkillRoot) {
+        let metadata = match fs::metadata(&source.info.root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if source.required {
+                    self.diagnostics.push(
+                        SkillDiagnostic::builder()
+                            .severity(SkillDiagnosticSeverity::Error)
+                            .code(SkillDiagnosticCode::PathNotFound)
+                            .message(format!(
+                                "Skill path does not exist: {}",
+                                source.info.root.display()
+                            ))
+                            .path(Some(source.info.root.clone()))
+                            .source(Some(source.info.clone()))
+                            .build(),
+                    );
+                }
+                return;
+            }
+            Err(error) => {
+                self.diagnostics.push(
+                    SkillDiagnostic::builder()
+                        .severity(SkillDiagnosticSeverity::Warning)
+                        .code(SkillDiagnosticCode::FileInfoFailed)
+                        .message(format!(
+                            "failed to inspect Skill path '{}': {error}",
+                            source.info.root.display()
+                        ))
+                        .path(Some(source.info.root.clone()))
+                        .source(Some(source.info.clone()))
+                        .build(),
+                );
+                return;
+            }
+        };
+
+        if metadata.is_file() {
+            if source
+                .info
+                .root
+                .extension()
+                .is_some_and(|value| value == "md")
+            {
+                self.insert(&source.info.root, source);
+            } else {
+                self.unsupported_path(source);
             }
             return;
         }
-
-        let skill_file = path.join("SKILL.md");
-        if skill_file.is_file() {
-            if let Err(error) = self.insert(&skill_file) {
-                self.diagnostics.push(format!(
-                    "invalid Skill '{}': {error}",
-                    skill_file.display()
-                ));
-            }
+        if !metadata.is_dir() {
+            self.unsupported_path(source);
             return;
         }
 
-        let mut builder = WalkBuilder::new(path);
+        self.visit_directory(source);
+    }
+
+    /// Returns conflict-resolved metadata and diagnostics after all sources finish.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (BTreeMap<String, SkillInfo>, Vec<SkillDiagnostic>) {
+        (self.skills, self.diagnostics)
+    }
+
+    /// Traverses one source directory without descending below a Skill root.
+    fn visit_directory(&mut self, source: &SkillRoot) {
+        // Pi treats a visible root SKILL.md as the complete directory source.
+        let mut root_builder = Self::walk_builder(source);
+        root_builder.max_depth(Some(1));
+        let root_skill =
+            root_builder.build().filter_map(Result::ok).find(|entry| {
+                entry.depth() == 1
+                    && entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_file())
+                    && entry.file_name() == "SKILL.md"
+            });
+        if let Some(root_skill) = root_skill {
+            self.insert(root_skill.path(), source);
+            return;
+        }
+
+        for entry in Self::walk_builder(source).build() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.diagnostics.push(
+                        SkillDiagnostic::builder()
+                            .severity(SkillDiagnosticSeverity::Warning)
+                            .code(SkillDiagnosticCode::DirectoryReadFailed)
+                            .message(format!(
+                                "failed to discover Skill under '{}': {error}",
+                                source.info.root.display()
+                            ))
+                            .path(Some(source.info.root.clone()))
+                            .source(Some(source.info.clone()))
+                            .build(),
+                    );
+                    continue;
+                }
+            };
+            if entry.depth() == 0
+                || !entry
+                    .file_type()
+                    .is_some_and(|file_type| file_type.is_file())
+            {
+                continue;
+            }
+            let nested_skill = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name == "SKILL.md");
+            let root_markdown = source.info.discovery_mode
+                == SkillDiscoveryMode::Pi
+                && entry.depth() == 1
+                && entry.path().extension().is_some_and(|value| value == "md");
+            if nested_skill || root_markdown {
+                self.insert(entry.path(), source);
+            }
+        }
+    }
+
+    /// Builds the ignore-aware walker shared by root detection and traversal.
+    fn walk_builder(source: &SkillRoot) -> WalkBuilder {
+        let mut builder = WalkBuilder::new(&source.info.root);
         builder
             .follow_links(true)
             .parents(false)
@@ -72,120 +164,129 @@ impl SkillDiscovery {
                 if name == "node_modules" || name.starts_with('.') {
                     return false;
                 }
-                if entry
+                !(entry
                     .file_type()
                     .is_some_and(|file_type| file_type.is_dir())
-                    && entry
-                        .path()
-                        .parent()
-                        .is_some_and(|parent| parent.join("SKILL.md").is_file())
-                {
-                    return false;
-                }
-                true
+                    && entry.path().parent().is_some_and(|parent| {
+                        parent.join("SKILL.md").is_file()
+                    }))
             });
-        for entry in builder.build() {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    self.diagnostics.push(format!(
-                        "failed to discover Skill under '{}': {error}",
-                        path.display()
-                    ));
-                    continue;
-                }
-            };
-            if entry.depth() == 0
-                || !entry
-                    .file_type()
-                    .is_some_and(|file_type| file_type.is_file())
-            {
-                continue;
+        builder
+    }
+
+    /// Parses, validates, de-duplicates, and inserts one Skill candidate.
+    fn insert(&mut self, path: &Path, source: &SkillRoot) {
+        let canonical_path = match fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) => {
+                self.diagnostics.push(
+                    SkillDiagnostic::builder()
+                        .severity(SkillDiagnosticSeverity::Warning)
+                        .code(SkillDiagnosticCode::FileInfoFailed)
+                        .message(format!(
+                            "failed to resolve Skill file '{}': {error}",
+                            path.display()
+                        ))
+                        .path(Some(path.to_path_buf()))
+                        .source(Some(source.info.clone()))
+                        .build(),
+                );
+                return;
             }
-            let is_skill_file = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name == "SKILL.md");
-            let is_root_markdown = include_root_files
-                && entry.depth() == 1
-                && entry.path().extension().is_some_and(|value| value == "md");
-            if (is_skill_file || is_root_markdown)
-                && let Err(error) = self.insert(entry.path())
-            {
-                self.diagnostics.push(format!(
-                    "invalid Skill '{}': {error}",
-                    entry.path().display()
-                ));
-            }
+        };
+        if self.real_paths.contains(&canonical_path) {
+            return;
         }
-    }
-
-    /// Returns discovered metadata and recoverable diagnostics after traversal.
-    pub(crate) fn into_parts(
-        self,
-    ) -> (BTreeMap<String, SkillInfo>, Vec<String>) {
-        (self.skills, self.diagnostics)
-    }
-
-    /// Parses and inserts one canonical SKILL.md descriptor.
-    fn insert(&mut self, path: &Path) -> Result<(), SkillError> {
-        let canonical_path = fs::canonicalize(path)?;
-        let content = fs::read_to_string(&canonical_path)?;
+        let content = match fs::read_to_string(&canonical_path) {
+            Ok(content) => content,
+            Err(error) => {
+                self.diagnostics.push(
+                    SkillDiagnostic::builder()
+                        .severity(SkillDiagnosticSeverity::Warning)
+                        .code(SkillDiagnosticCode::FileReadFailed)
+                        .message(format!(
+                            "failed to read Skill file '{}': {error}",
+                            canonical_path.display()
+                        ))
+                        .path(Some(canonical_path))
+                        .source(Some(source.info.clone()))
+                        .build(),
+                );
+                return;
+            }
+        };
         let document = MarkdownDocument::parse(&content);
-        let metadata: SkillMetadata = document.metadata().map_err(|error| {
-            SkillError::InvalidFrontmatter {
-                path: canonical_path.clone(),
-                reason: error.to_string(),
+        let (metadata, mut diagnostics) = match SkillMetadata::parse(
+            &document,
+            &canonical_path,
+            &source.info,
+        ) {
+            Ok(result) => result,
+            Err(diagnostic) => {
+                self.diagnostics.push(*diagnostic);
+                return;
             }
-        })?;
-        let name = metadata
-            .name
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                canonical_path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|value| value.to_str())
-                    .map(str::to_string)
-            })
-            .ok_or_else(|| SkillError::InvalidFrontmatter {
-                path: canonical_path.clone(),
-                reason: "missing name".to_string(),
-            })?;
-        let description = metadata
-            .description
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| SkillError::InvalidFrontmatter {
-                path: canonical_path.clone(),
-                reason: "missing description".to_string(),
-            })?;
-        if let Some(winner) = self.skills.get(&name) {
-            self.diagnostics.push(format!(
-                "Skill name '{name}' collision: keeping '{}' and ignoring '{}'",
-                winner.path.display(),
-                canonical_path.display()
-            ));
-            return Ok(());
+        };
+        self.diagnostics.append(&mut diagnostics);
+
+        if let Some(winner) = self.skills.get(&metadata.name) {
+            self.diagnostics.push(
+                SkillDiagnostic::builder()
+                    .severity(SkillDiagnosticSeverity::Warning)
+                    .code(SkillDiagnosticCode::NameCollision)
+                    .message(format!(
+                        "Skill name '{}' collision: keeping '{}' and ignoring '{}'",
+                        metadata.name,
+                        winner.path.display(),
+                        canonical_path.display()
+                    ))
+                    .path(Some(canonical_path.clone()))
+                    .source(Some(source.info.clone()))
+                    .collision(Some(SkillCollision {
+                        name: metadata.name,
+                        winner_path: winner.path.clone(),
+                        loser_path: canonical_path,
+                    }))
+                    .build(),
+            );
+            return;
         }
+
+        let reference_dir = canonical_path
+            .parent()
+            .unwrap_or(canonical_path.as_path())
+            .to_path_buf();
+        self.real_paths.insert(canonical_path.clone());
         self.skills.insert(
-            name.clone(),
+            metadata.name.clone(),
             SkillInfo::builder()
-                .name(name)
-                .description(description)
+                .name(metadata.name)
+                .description(metadata.description)
                 .path(canonical_path)
+                .reference_dir(reference_dir)
+                .source(source.info.clone())
                 .disable_model_invocation(metadata.disable_model_invocation)
                 .build(),
         );
-        Ok(())
     }
-}
 
-/// Resolves a configured Skill path against the Session working directory.
-pub(crate) fn resolve_skill_path(path: &Path, cwd: &Path) -> PathBuf {
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    fs::canonicalize(&resolved).unwrap_or(resolved)
+    /// Records a required or discovered path whose filesystem type is unsupported.
+    fn unsupported_path(&mut self, source: &SkillRoot) {
+        self.diagnostics.push(
+            SkillDiagnostic::builder()
+                .severity(if source.required {
+                    SkillDiagnosticSeverity::Error
+                } else {
+                    SkillDiagnosticSeverity::Warning
+                })
+                .code(SkillDiagnosticCode::UnsupportedPath)
+                .message(format!(
+                    "Skill path is not a Markdown file or directory: {}",
+                    source.info.root.display()
+                ))
+                .path(Some(source.info.root.clone()))
+                .source(Some(source.info.clone()))
+                .build(),
+        );
+    }
 }

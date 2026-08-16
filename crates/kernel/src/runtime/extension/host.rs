@@ -366,6 +366,7 @@ impl ExtensionHost for SessionExtensionHost {
         };
         self.kernel
             .queue_message(&invocation.session_id, delivery, text)
+            .await
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;

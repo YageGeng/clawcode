@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use prompt::{FilesystemPromptFactory, PromptFactory, SystemPromptTurnInput};
 use protocol::{
-    PromptPolicy, PromptResourceRequest, SkillResourceRequest,
-    SkillSelectionRule, SystemPromptTool, ToolPromptContribution,
+    PromptPolicy, PromptResourceRequest, SkillDiagnosticCode,
+    SkillResourceRequest, SkillSelectionRule, SystemPromptTool,
+    ToolPromptContribution,
 };
-use skill::{FilesystemSkillFactory, SkillError, SkillFactory};
+use skill::{FilesystemSkillFactory, SkillCommandExpansion, SkillFactory};
 
 /// Writes one SKILL.md document and creates its parent directory.
 fn write_skill(path: &Path, content: &str) {
@@ -27,7 +28,20 @@ fn request(cwd: &Path) -> SkillResourceRequest {
     }
 }
 
-/// Recursive discovery reads YAML metadata and explicit invocation returns the file.
+/// Builds a production Skill Factory with an isolated unused home directory.
+fn factory(
+    global_root: PathBuf,
+    rules: Vec<SkillSelectionRule>,
+) -> FilesystemSkillFactory {
+    let user_home = global_root.join("test-home");
+    FilesystemSkillFactory::builder()
+        .global_root(global_root)
+        .user_home(user_home)
+        .rules(rules)
+        .build()
+}
+
+/// Recursive discovery reads metadata and explicit invocation returns the expanded body.
 #[test]
 fn discovers_and_invokes_nested_skills() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -38,7 +52,7 @@ fn discovers_and_invokes_nested_skills() {
         "---\nname: \"code-review\"\ndescription: >-\n  Review Rust code with\n  ownership awareness\n---\n\n# Steps\nInspect carefully.\n",
     );
 
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(request(&workspace.path().join("project")))
         .expect("Skills should load");
     let descriptor = catalog
@@ -47,13 +61,18 @@ fn discovers_and_invokes_nested_skills() {
     let content = catalog
         .invoke("code-review")
         .expect("Skill should be invoked");
+    let expected = format!(
+        "<skill name=\"code-review\" location=\"{}\">\nReferences are relative to {}.\n\n# Steps\nInspect carefully.\n</skill>",
+        skill_file.display(),
+        skill_file.parent().expect("Skill directory").display()
+    );
 
     assert_eq!(
         descriptor.description,
         "Review Rust code with ownership awareness"
     );
-    assert!(content.contains("# Steps"));
-    assert!(content.contains("Inspect carefully."));
+    assert_eq!(content, expected);
+    assert!(!content.contains("description:"));
 }
 
 /// Pi-compatible roots load direct Markdown files as standalone Skills.
@@ -68,7 +87,7 @@ fn discovers_direct_markdown_skills_at_each_root() {
         "---\nname: review\ndescription: Review direct Markdown\n---\nreview\n",
     );
 
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(request(&cwd))
         .expect("direct Markdown Skill should load");
 
@@ -108,7 +127,7 @@ fn ignored_skill_directories_are_not_discovered() {
     fs::write(skills.join(".fdignore"), "fd-ignored/\n")
         .expect("write fd Skill ignore file");
 
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(request(&cwd))
         .expect("Skill discovery");
 
@@ -128,7 +147,7 @@ fn disabled_model_invocation_skills_stay_out_of_system_prompt() {
         &global.join("skills/manual/SKILL.md"),
         "---\nname: manual\ndescription: Manual only\ndisable-model-invocation: true\n---\nmanual\n",
     );
-    let catalog = FilesystemSkillFactory::new(global.clone(), Vec::new())
+    let catalog = factory(global.clone(), Vec::new())
         .create(request(&cwd))
         .expect("Skill discovery");
     assert!(catalog.get("manual").is_some());
@@ -167,15 +186,18 @@ fn invalid_skills_are_skipped_with_diagnostics() {
         "---\nname: [\n---\ninvalid\n",
     );
 
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(request(&cwd))
         .expect("invalid automatic Skill should not block Session resources");
 
     assert!(catalog.get("valid").is_some());
     assert_eq!(catalog.descriptors().len(), 1);
     assert!(catalog.diagnostics().iter().any(|diagnostic| {
-        diagnostic.contains("invalid/SKILL.md")
-            && diagnostic.contains("invalid Skill")
+        diagnostic.code == SkillDiagnosticCode::FrontmatterInvalid
+            && diagnostic
+                .path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("invalid/SKILL.md"))
     }));
 }
 
@@ -201,25 +223,27 @@ fn earlier_session_skill_roots_win_name_collisions() {
     let mut resource_request = request(&cwd);
     resource_request.extension_skill_paths = vec![extension];
 
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(resource_request)
         .expect("Skills should load");
 
     assert_eq!(
         catalog.get("shared").expect("shared Skill").description,
-        "User version"
+        "Project version"
     );
     assert!(
         catalog
             .invoke("shared")
             .expect("invoke Skill")
-            .contains("user")
+            .contains("project")
     );
     assert_eq!(
         catalog
             .diagnostics()
             .iter()
-            .filter(|diagnostic| diagnostic.contains("collision"))
+            .filter(|diagnostic| {
+                diagnostic.code == SkillDiagnosticCode::NameCollision
+            })
             .count(),
         2
     );
@@ -246,7 +270,7 @@ fn project_trust_denial_keeps_global_skills_only() {
     let mut resource_request = request(&cwd);
     resource_request.project_resources_allowed = false;
 
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(resource_request)
         .expect("Skills should load");
     let names: Vec<_> = catalog
@@ -301,7 +325,7 @@ fn skill_rules_apply_in_order_and_report_invalid_selectors() {
         },
     ];
 
-    let catalog = FilesystemSkillFactory::new(global, rules)
+    let catalog = factory(global, rules)
         .create(request(&cwd))
         .expect("Skills should load");
     let names: Vec<_> = catalog
@@ -325,7 +349,7 @@ fn skill_commands_expand_with_pi_literal_space_semantics() {
         &skill_file,
         "---\nname: rust-patterns\ndescription: Rust patterns\n---\n\nUse ownership carefully.\n",
     );
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(request(&cwd))
         .expect("Skills should load");
     let expected = format!(
@@ -335,28 +359,20 @@ fn skill_commands_expand_with_pi_literal_space_semantics() {
     );
 
     assert_eq!(
-        catalog
-            .expand_command("/skill:rust-patterns fix borrow")
-            .expect("expand Skill"),
-        Some(expected)
+        catalog.expand_command("/skill:rust-patterns fix borrow"),
+        SkillCommandExpansion::Expanded(expected)
     );
     assert_eq!(
-        catalog
-            .expand_command("/skill:rust-patterns\tfix")
-            .expect("unknown tab command"),
-        None
+        catalog.expand_command("/skill:rust-patterns\tfix"),
+        SkillCommandExpansion::NotSkillCommand
     );
     assert_eq!(
-        catalog
-            .expand_command("/skill:rust-patterns\nfix")
-            .expect("unknown newline command"),
-        None
+        catalog.expand_command("/skill:rust-patterns\nfix"),
+        SkillCommandExpansion::NotSkillCommand
     );
     assert_eq!(
-        catalog
-            .expand_command("/skill:missing argument")
-            .expect("unknown Skill"),
-        None
+        catalog.expand_command("/skill:missing argument"),
+        SkillCommandExpansion::NotSkillCommand
     );
 }
 
@@ -371,13 +387,19 @@ fn skill_command_reports_unreadable_skill_files() {
         &skill_file,
         "---\nname: removed\ndescription: Removed Skill\n---\nbody\n",
     );
-    let catalog = FilesystemSkillFactory::new(global, Vec::new())
+    let catalog = factory(global, Vec::new())
         .create(request(&cwd))
         .expect("Skills should load");
     fs::remove_file(skill_file).expect("remove Skill after discovery");
 
-    assert!(matches!(
-        catalog.expand_command("/skill:removed"),
-        Err(SkillError::Io(_))
-    ));
+    let expansion = catalog.expand_command("/skill:removed");
+    let SkillCommandExpansion::Failed {
+        original,
+        diagnostic,
+    } = expansion
+    else {
+        panic!("removed Skill should return a typed expansion failure");
+    };
+    assert_eq!(original, "/skill:removed");
+    assert_eq!(diagnostic.code, SkillDiagnosticCode::FileReadFailed);
 }

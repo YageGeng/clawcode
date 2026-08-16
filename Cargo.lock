@@ -3218,6 +3218,7 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror",
+ "typed-builder",
 ]
 
 [[package]]

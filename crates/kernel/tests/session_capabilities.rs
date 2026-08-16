@@ -23,7 +23,7 @@ use protocol::{
     IdGenerator, IdKind, McpConnectionState, McpServerInfo, MessageContent,
     ModelFailure, ModelFinal, ModelProfile, ModelRequest,
     ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
-    SessionId, SessionTitle, StopReason, TimestampMs,
+    SessionId, SessionTitle, SkillDiagnosticCode, StopReason, TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -336,7 +336,10 @@ impl ExtensionHandler<SessionBeforeSwitchPoint> for RecordingExtension {
 
 /// Rejects project trust and records whether resource discovery was attempted.
 #[derive(Clone)]
-struct DenyProjectResources(Arc<Mutex<Vec<&'static str>>>);
+struct DenyProjectResources {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    skill_path: PathBuf,
+}
 
 impl ExtensionModule for DenyProjectResources {
     /// Declares the trust-boundary fixture identity.
@@ -349,7 +352,7 @@ impl ExtensionModule for DenyProjectResources {
         }
     }
 
-    /// Registers trust evaluation and the discovery hook that must be skipped.
+    /// Registers trust evaluation and independently owned Extension resources.
     fn register(
         &self,
         registrar: &mut ExtensionRegistrar,
@@ -367,7 +370,7 @@ impl ExtensionHandler<ProjectTrustPoint> for DenyProjectResources {
         _event: &protocol::ProjectTrustEvent,
         _context: &ExtensionContext,
     ) -> Result<protocol::ProjectTrustResult, ExtensionError> {
-        self.0
+        self.events
             .lock()
             .expect("trust event lock")
             .push("project_trust");
@@ -380,17 +383,20 @@ impl ExtensionHandler<ProjectTrustPoint> for DenyProjectResources {
 
 #[async_trait]
 impl ExtensionHandler<ResourcesDiscoverPoint> for DenyProjectResources {
-    /// Records an invalid call so the test can prove denial short-circuits discovery.
+    /// Contributes a non-project Skill even when project resources are denied.
     async fn handle(
         &self,
         _event: &protocol::ResourcesDiscoverEvent,
         _context: &ExtensionContext,
     ) -> Result<protocol::ResourcesDiscoverResult, ExtensionError> {
-        self.0
+        self.events
             .lock()
             .expect("trust event lock")
             .push("resources_discover");
-        Ok(protocol::ResourcesDiscoverResult::default())
+        Ok(protocol::ResourcesDiscoverResult {
+            skill_paths: vec![self.skill_path.clone()],
+            prompt_paths: Vec::new(),
+        })
     }
 }
 
@@ -492,14 +498,20 @@ fn build_kernel(
         )));
     let factory = match skill_root {
         Some(skill_root) => builder
-            .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
-                skill_root,
-                Vec::new(),
-            ))))
+            .skill_factory(Some(Arc::new(filesystem_skill_factory(skill_root))))
             .build(),
         None => builder.build(),
     };
     Arc::new(factory.build().expect("build kernel"))
+}
+
+/// Builds a filesystem Skill Factory with an isolated unused home root.
+fn filesystem_skill_factory(global_root: PathBuf) -> FilesystemSkillFactory {
+    let user_home = global_root.join("test-home");
+    FilesystemSkillFactory::builder()
+        .global_root(global_root)
+        .user_home(user_home)
+        .build()
 }
 
 /// Session creation, metadata changes, and resume dispatch their declared hooks.
@@ -590,7 +602,7 @@ async fn session_management_dispatches_declared_extension_hooks() {
     }
 }
 
-/// Project trust denial preserves global resources and excludes all project roots.
+/// Project trust denial excludes project roots without suppressing Extension resources.
 #[tokio::test]
 async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
     let root = tempfile::tempdir().expect("store root");
@@ -598,10 +610,16 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
     let cwd = root.path().join("workspace");
     let global_skill = config_root.join("skills/global/SKILL.md");
     let project_skill = cwd.join(".pi/skills/project/SKILL.md");
+    let extension_skill =
+        root.path().join("extension/skills/extension/SKILL.md");
     fs::create_dir_all(global_skill.parent().expect("global Skill parent"))
         .expect("create global Skill parent");
     fs::create_dir_all(project_skill.parent().expect("project Skill parent"))
         .expect("create project Skill parent");
+    fs::create_dir_all(
+        extension_skill.parent().expect("Extension Skill parent"),
+    )
+    .expect("create Extension Skill parent");
     fs::write(
         &global_skill,
         "---\nname: global\ndescription: Global Skill\n---\nglobal\n",
@@ -612,6 +630,11 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
         "---\nname: project\ndescription: Project Skill\n---\nproject\n",
     )
     .expect("write project Skill");
+    fs::write(
+        &extension_skill,
+        "---\nname: extension\ndescription: Extension Skill\n---\nextension\n",
+    )
+    .expect("write Extension Skill");
     fs::write(config_root.join("AGENTS.md"), "GLOBAL INSTRUCTION")
         .expect("write global instruction");
     fs::write(cwd.join("AGENTS.md"), "PROJECT INSTRUCTION")
@@ -620,6 +643,7 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
     let model = Arc::new(PromptCaptureModel(Mutex::new(Vec::new())));
     let trust_events = Arc::new(Mutex::new(Vec::new()));
     let module_events = Arc::clone(&trust_events);
+    let module_skill = extension_skill.clone();
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(6_000)));
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(StaticModelFactory(
@@ -633,8 +657,10 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             protocol::StaticExtensionRegistration::default(),
             vec![Arc::new(move || {
-                Ok(Arc::new(DenyProjectResources(Arc::clone(&module_events)))
-                    as Arc<dyn ExtensionModule>)
+                Ok(Arc::new(DenyProjectResources {
+                    events: Arc::clone(&module_events),
+                    skill_path: module_skill.clone(),
+                }) as Arc<dyn ExtensionModule>)
             })],
         )))
         .clock(clock)
@@ -643,10 +669,7 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
             config_root.clone(),
             protocol::PromptPolicy::default(),
         )))
-        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
-            config_root,
-            Vec::new(),
-        ))))
+        .skill_factory(Some(Arc::new(filesystem_skill_factory(config_root))))
         .build()
         .build()
         .expect("build kernel");
@@ -673,16 +696,17 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
 
     assert_eq!(
         *trust_events.lock().expect("trust event lock"),
-        vec!["project_trust"]
+        vec!["project_trust", "resources_discover"]
     );
     assert_eq!(
         kernel
             .skills(&session_id)
             .expect("effective Skills")
+            .skills
             .into_iter()
             .map(|skill| skill.name)
             .collect::<Vec<_>>(),
-        vec!["global"]
+        vec!["extension", "global"]
     );
     let requests = model.0.lock().expect("request lock");
     let system = requests[0]
@@ -749,10 +773,7 @@ async fn available_commands_merge_session_sources_deterministically() {
             config_root.clone(),
             protocol::PromptPolicy::default(),
         )))
-        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
-            config_root,
-            Vec::new(),
-        ))))
+        .skill_factory(Some(Arc::new(filesystem_skill_factory(config_root))))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             protocol::StaticExtensionRegistration::default(),
             vec![
@@ -973,6 +994,7 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
 
     let queued = kernel
         .queue_message(&session_id, QueueKind::FollowUp, "next".to_string())
+        .await
         .expect("queue");
     assert!(!queued.message.identity.turn_id.as_str().is_empty());
     kernel.cancel_session(&session_id).expect("cancel");
@@ -1042,9 +1064,8 @@ async fn queued_messages_expand_session_resources_before_persistence() {
                 config_root.clone(),
                 protocol::PromptPolicy::default(),
             )))
-            .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
+            .skill_factory(Some(Arc::new(filesystem_skill_factory(
                 config_root,
-                Vec::new(),
             ))))
             .extension_factory(Arc::new(StaticExtensionFactory::new(
                 protocol::StaticExtensionRegistration::default(),
@@ -1089,6 +1110,7 @@ async fn queued_messages_expand_session_resources_before_persistence() {
             QueueKind::Steering,
             "/skill:queued alpha".to_string(),
         )
+        .await
         .expect("queue expanded Skill");
     let follow_up = kernel
         .queue_message(
@@ -1096,6 +1118,7 @@ async fn queued_messages_expand_session_resources_before_persistence() {
             QueueKind::FollowUp,
             "/queued beta".to_string(),
         )
+        .await
         .expect("queue expanded Template");
     let error = kernel
         .queue_message(
@@ -1103,6 +1126,7 @@ async fn queued_messages_expand_session_resources_before_persistence() {
             QueueKind::FollowUp,
             "/not-queueable later".to_string(),
         )
+        .await
         .expect_err("Extension command cannot be queued");
     assert!(matches!(
         error,
@@ -1266,10 +1290,10 @@ async fn skills_return_metadata_without_file_bodies() {
         .expect("create session");
 
     let skills = kernel.skills(&session_id).expect("Session Skills");
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].name, "review");
-    assert_eq!(skills[0].description, "Review code");
-    assert_eq!(skills[0].path, skill_path);
+    assert_eq!(skills.skills.len(), 1);
+    assert_eq!(skills.skills[0].name, "review");
+    assert_eq!(skills.skills[0].description, "Review code");
+    assert_eq!(skills.skills[0].path, skill_path);
     assert!(
         !serde_json::to_string(&skills)
             .expect("serialize")
@@ -1281,6 +1305,80 @@ async fn skills_return_metadata_without_file_bodies() {
             .expect("invoke Session Skill")
             .contains("SECRET BODY")
     );
+}
+
+/// Automatic Skill read failures preserve input and emit a Turn-correlated diagnostic.
+#[tokio::test]
+async fn skill_expansion_failure_preserves_input_and_emits_diagnostic() {
+    let root = tempfile::tempdir().expect("store root");
+    let skill_root = tempfile::tempdir().expect("skill root");
+    let skill_path = skill_root.path().join("skills/review/SKILL.md");
+    fs::create_dir_all(skill_path.parent().expect("Skill parent"))
+        .expect("create Skill parent");
+    fs::write(
+        &skill_path,
+        "---\nname: review\ndescription: Review code\n---\nreview body\n",
+    )
+    .expect("write Skill");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(35_000)));
+    let model = Arc::new(PromptCaptureModel(Mutex::new(Vec::new())));
+    let kernel = build_kernel(
+        root.path().to_path_buf(),
+        Arc::clone(&model) as Arc<dyn Model>,
+        clock,
+        Arc::new(SequentialIds(AtomicU64::new(0))),
+        Some(skill_root.path().to_path_buf()),
+    );
+    let session_id =
+        SessionId::try_from("session-skill-read-failure").expect("session id");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    fs::remove_file(&skill_path).expect("remove Skill after discovery");
+    let sink = Arc::new(RecordingSink::default());
+
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "/skill:review inspect this".to_string(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("run with preserved Skill input");
+
+    let requests = model.0.lock().expect("request lock");
+    assert!(requests[0].messages.iter().any(|message| {
+        matches!(
+            &message.content,
+            MessageContent::User { blocks }
+                if blocks.iter().any(|block| {
+                    block.text() == Some("/skill:review inspect this")
+                })
+        )
+    }));
+    let events = sink.0.lock().expect("event lock");
+    let diagnostic = events.iter().find_map(|event| match &event.payload {
+        AgentEventPayload::SkillDiagnostic { diagnostic } => Some((
+            &event.metadata.turn_id,
+            &event.metadata.timestamp_ms,
+            diagnostic,
+        )),
+        _ => None,
+    });
+    let (turn_id, timestamp_ms, diagnostic) =
+        diagnostic.expect("Skill diagnostic event");
+    assert!(!turn_id.as_ref().is_empty());
+    assert!(timestamp_ms.get() > 0);
+    assert_eq!(diagnostic.code, SkillDiagnosticCode::FileReadFailed);
 }
 
 /// Kernel retains the session factory's MCP status without reconnecting on reads.

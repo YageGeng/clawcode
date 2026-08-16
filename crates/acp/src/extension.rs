@@ -119,6 +119,7 @@ impl AcpExtensionDispatcher {
                         QueueKind::FollowUp,
                         input.input,
                     )
+                    .await
                     .map_err(
                         agent_client_protocol::Error::into_internal_error,
                     )?;

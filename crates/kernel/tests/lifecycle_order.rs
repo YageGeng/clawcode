@@ -512,10 +512,12 @@ async fn prompt_order_matches_pi_before_agent_lifecycle() {
             config_root.clone(),
             protocol::PromptPolicy::default(),
         )))
-        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
-            config_root,
-            Vec::new(),
-        ))))
+        .skill_factory(Some(Arc::new(
+            FilesystemSkillFactory::builder()
+                .user_home(config_root.join("test-home"))
+                .global_root(config_root)
+                .build(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
             vec![Arc::new(move || {

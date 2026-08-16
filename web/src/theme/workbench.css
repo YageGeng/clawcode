@@ -1416,6 +1416,140 @@
   margin-top: 9px;
 }
 
+.skill-card__heading,
+.skill-card__badges,
+.skill-diagnostics > header,
+.skill-diagnostics article > div {
+  display: flex;
+  align-items: center;
+}
+
+.skill-card__heading {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.skill-card__badges {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.capability-badge {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.capability-badge[data-scope="user"] {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.capability-badge[data-scope="extension"],
+.capability-badge[data-tone="manual"] {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.skill-card__paths,
+.skill-diagnostics dl {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.skill-card__paths > div,
+.skill-diagnostics dl > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.skill-card__paths dt,
+.skill-diagnostics dt {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.skill-card__paths dd,
+.skill-diagnostics dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-card > .form-error {
+  margin-top: 9px;
+}
+
+.skill-diagnostics {
+  max-width: 880px;
+  margin: 0 auto 14px;
+  padding: 13px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-medium);
+  background: var(--warning-soft);
+}
+
+.skill-diagnostics > header {
+  gap: 7px;
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.skill-diagnostics > header span {
+  margin-left: auto;
+}
+
+.skill-diagnostics__list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.skill-diagnostics article {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.skill-diagnostics article > div {
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.skill-diagnostics article p {
+  margin: 7px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.skill-diagnostics article small {
+  display: block;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mcp-card__heading {
   display: flex;
   align-items: center;

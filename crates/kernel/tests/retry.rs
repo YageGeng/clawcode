@@ -442,6 +442,7 @@ async fn cancellation_during_backoff_settles_and_preserves_follow_up() {
             QueueKind::FollowUp,
             "later".to_string(),
         )
+        .await
         .expect("queue follow-up");
     fixture
         .kernel

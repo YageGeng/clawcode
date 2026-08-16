@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 
-use protocol::{SkillResourceRequest, SkillSelectionRule};
+use protocol::{
+    SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
+    SkillResourceRequest, SkillSelectionRule,
+};
 
 use crate::SkillError;
 use crate::catalog::SkillCatalog;
-use crate::discovery::{SkillDiscovery, resolve_skill_path};
+use crate::discovery::SkillDiscovery;
+use crate::source::{SkillPathResolver, SkillSourcePlan};
 
 /// Factory interface for Session-scoped immutable Skill catalogs.
 pub trait SkillFactory: Send + Sync {
@@ -17,46 +20,40 @@ pub trait SkillFactory: Send + Sync {
     ) -> Result<SkillCatalog, SkillError>;
 }
 
-/// Filesystem Skill factory with immutable global root and ordered rules.
-#[derive(Debug, Clone)]
+/// Filesystem Skill factory with immutable user roots and selection policy.
+#[derive(Debug, Clone, typed_builder::TypedBuilder)]
 pub struct FilesystemSkillFactory {
+    /// Product-specific user configuration directory.
     global_root: PathBuf,
+    /// User home used for portable `.agents/skills` discovery.
+    user_home: PathBuf,
+    /// Explicit Skill files or directories in configured order.
+    #[builder(default)]
+    configured_paths: Vec<PathBuf>,
+    /// Ordered enable and disable rules applied after discovery.
+    #[builder(default)]
     rules: Vec<SkillSelectionRule>,
 }
 
-impl FilesystemSkillFactory {
-    /// Creates a factory using the global config root and ordered selection rules.
-    #[must_use]
-    pub fn new(global_root: PathBuf, rules: Vec<SkillSelectionRule>) -> Self {
-        Self { global_root, rules }
-    }
-}
-
 impl SkillFactory for FilesystemSkillFactory {
-    /// Builds one catalog from global, trusted project, and Extension roots.
+    /// Builds one catalog from configured, project, user, and Extension sources.
     fn create(
         &self,
         request: SkillResourceRequest,
     ) -> Result<SkillCatalog, SkillError> {
-        let cwd = fs::canonicalize(&request.cwd)?;
-        let mut roots = vec![self.global_root.join("skills")];
-        if request.project_resources_allowed {
-            roots.push(cwd.join(".pi/skills"));
-            roots.push(cwd.join(".agents/skills"));
-        }
-        roots.extend(request.extension_skill_paths.into_iter().map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                cwd.join(path)
-            }
-        }));
-
+        let cwd = std::fs::canonicalize(&request.cwd)?;
+        let sources = SkillSourcePlan::builder()
+            .cwd(cwd.clone())
+            .global_root(self.global_root.clone())
+            .user_home(self.user_home.clone())
+            .configured_paths(self.configured_paths.clone())
+            .project_resources_allowed(request.project_resources_allowed)
+            .extension_paths(request.extension_skill_paths)
+            .build()
+            .into_sources()?;
         let mut discovery = SkillDiscovery::default();
-        for root in roots {
-            if root.exists() {
-                discovery.visit(&root, true);
-            }
+        for source in &sources {
+            discovery.visit(source);
         }
         let (mut skills, mut diagnostics) = discovery.into_parts();
         let mut enabled: BTreeMap<_, _> =
@@ -64,7 +61,11 @@ impl SkillFactory for FilesystemSkillFactory {
         for (index, rule) in self.rules.iter().enumerate() {
             match (&rule.path, &rule.name) {
                 (Some(path), None) => {
-                    let selected_path = resolve_skill_path(path, &cwd);
+                    let selected_path =
+                        SkillPathResolver::new(&cwd, &self.user_home)
+                            .resolve(path);
+                    let selected_path =
+                        std::fs::canonicalize(&selected_path).unwrap_or(selected_path);
                     for (name, skill) in &skills {
                         if skill.path == selected_path {
                             enabled.insert(name.clone(), rule.enabled);
@@ -76,9 +77,15 @@ impl SkillFactory for FilesystemSkillFactory {
                         enabled.insert(selected_name.clone(), rule.enabled);
                     }
                 }
-                _ => diagnostics.push(format!(
-                    "Skill rule {index} must configure exactly one of path or name"
-                )),
+                _ => diagnostics.push(
+                    SkillDiagnostic::builder()
+                        .severity(SkillDiagnosticSeverity::Warning)
+                        .code(SkillDiagnosticCode::SelectionRuleInvalid)
+                        .message(format!(
+                            "Skill rule {index} must configure exactly one of path or name"
+                        ))
+                        .build(),
+                ),
             }
         }
         skills

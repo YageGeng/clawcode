@@ -185,10 +185,12 @@ fn integration_kernel(root: &Path) -> Arc<Kernel> {
             root.join("config"),
             protocol::PromptPolicy::default(),
         )))
-        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
-            root.join("config"),
-            Vec::new(),
-        ))))
+        .skill_factory(Some(Arc::new(
+            FilesystemSkillFactory::builder()
+                .global_root(root.join("config"))
+                .user_home(root.join("home"))
+                .build(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(NanoidIdGenerator))
@@ -425,13 +427,21 @@ async fn skill_extensions_are_session_scoped() {
     let workspace = tempfile::tempdir().expect("workspace directory");
     let state = tempfile::tempdir().expect("store directory");
     let skill = state.path().join("config/skills/review/SKILL.md");
+    let project_skill = workspace.path().join(".pi/skills/review/SKILL.md");
     std::fs::create_dir_all(skill.parent().expect("Skill parent"))
         .expect("create Skill parent");
+    std::fs::create_dir_all(project_skill.parent().expect("Skill parent"))
+        .expect("create project Skill parent");
     std::fs::write(
         &skill,
         "---\nname: review\ndescription: Review code\n---\nREVIEW BODY\n",
     )
     .expect("write Skill");
+    std::fs::write(
+        &project_skill,
+        "---\nname: review\ndescription: Project review\n---\nPROJECT REVIEW BODY\n",
+    )
+    .expect("write project Skill");
     let kernel = integration_kernel(state.path());
     let session = send_request(
         Arc::clone(&kernel),
@@ -453,8 +463,18 @@ async fn skill_extensions_are_session_scoped() {
     )
     .await
     .expect("list Session Skills");
-    assert_eq!(listed[0]["name"], "review");
-    assert!(listed[0].get("content").is_none());
+    assert_eq!(listed["skills"][0]["name"], "review");
+    assert_eq!(listed["skills"][0]["source"]["scope"], "project");
+    assert!(listed["skills"][0].get("content").is_none());
+    assert_eq!(listed["diagnostics"][0]["code"], "name_collision");
+    assert_eq!(
+        listed["diagnostics"][0]["collision"]["winnerPath"],
+        project_skill.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        listed["diagnostics"][0]["collision"]["loserPath"],
+        skill.to_string_lossy().as_ref()
+    );
 
     let invoked = send_request(
         Arc::clone(&kernel),
@@ -472,7 +492,7 @@ async fn skill_extensions_are_session_scoped() {
     assert!(
         invoked["content"]
             .as_str()
-            .is_some_and(|content| { content.contains("REVIEW BODY") })
+            .is_some_and(|content| { content.contains("PROJECT REVIEW BODY") })
     );
 
     let error = send_request(

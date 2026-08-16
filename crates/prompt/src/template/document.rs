@@ -57,6 +57,12 @@ impl MarkdownDocument {
             .map_err(|error| PromptError::Frontmatter(error.to_string()))
     }
 
+    /// Reports whether parsing found a complete YAML frontmatter block.
+    #[must_use]
+    pub fn has_frontmatter(&self) -> bool {
+        self.frontmatter.is_some()
+    }
+
     /// Returns the normalized Markdown body without valid frontmatter.
     #[must_use]
     pub fn body(&self) -> &str {
