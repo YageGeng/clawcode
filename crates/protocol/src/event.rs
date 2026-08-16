@@ -180,6 +180,12 @@ pub enum AgentEventPayload {
         title: String,
     },
 
+    /// The complete Session command snapshot changed.
+    AvailableCommandsChanged {
+        /// Effective commands after runtime precedence and collision handling.
+        commands: Vec<crate::AvailableAgentCommand>,
+    },
+
     /// A model-backed context compaction operation started.
     CompactionStart {
         /// Run-shaped operation identifier used for event correlation.

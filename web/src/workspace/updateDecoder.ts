@@ -1,6 +1,7 @@
 import { AcpProtocol } from "../acp/protocol";
 import type { MessageId, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type {
+  AvailableCommandEntity,
   AssistantDiagnostics,
   CompactionReason,
   EventOrder,
@@ -58,7 +59,13 @@ export class SessionUpdateDecoder {
       actions.push({ type: "event/received", event });
     }
 
-    if ((kind === "agent_message_chunk" || kind === "user_message_chunk") && typeof update.messageId === "string" && typeof update.content === "object" && update.content !== null) {
+    if (kind === "available_commands_update") {
+      const decoded = this.decodeAvailableCommands(update.availableCommands);
+      if (decoded.commands !== undefined) {
+        actions.push({ type: "commands/replaced", commands: decoded.commands });
+      }
+      actions.push(...decoded.diagnostics.map((message): WorkspaceAction => ({ type: "diagnostic/added", message })));
+    } else if ((kind === "agent_message_chunk" || kind === "user_message_chunk") && typeof update.messageId === "string" && typeof update.content === "object" && update.content !== null) {
       const content = update.content as Record<string, unknown>;
       const contentMeta = AcpProtocol.eventMeta(content._meta, this.namespace) ?? meta;
       if (typeof content.text === "string" && contentMeta !== undefined) {
@@ -186,6 +193,52 @@ export class SessionUpdateDecoder {
     }
 
     return { scope: "session", actions, refreshRuntime: false };
+  }
+
+  /** Decodes one complete ACP command snapshot while isolating malformed entries. */
+  private decodeAvailableCommands(value: unknown): Readonly<{
+    commands: readonly AvailableCommandEntity[] | undefined;
+    diagnostics: readonly string[];
+  }> {
+    if (!Array.isArray(value)) {
+      return {
+        // A malformed envelope cannot authoritatively replace the last valid snapshot.
+        commands: undefined,
+        diagnostics: ["Available Commands update must contain an array"]
+      };
+    }
+    const commands: AvailableCommandEntity[] = [];
+    const diagnostics: string[] = [];
+    value.forEach((item, index) => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        diagnostics.push(`Available command ${index} must be an object`);
+        return;
+      }
+      const command = item as Record<string, unknown>;
+      if (typeof command.name !== "string" || typeof command.description !== "string") {
+        diagnostics.push(`Available command ${index} must contain string name and description`);
+        return;
+      }
+      if (command.input === undefined) {
+        commands.push({ name: command.name, description: command.description });
+        return;
+      }
+      if (typeof command.input !== "object" || command.input === null || Array.isArray(command.input)) {
+        diagnostics.push(`Available command ${index} input must be a text input`);
+        return;
+      }
+      const input = command.input as Record<string, unknown>;
+      if (input.type !== "text" || typeof input.hint !== "string") {
+        diagnostics.push(`Available command ${index} input must contain text type and string hint`);
+        return;
+      }
+      commands.push({
+        name: command.name,
+        description: command.description,
+        argumentHint: input.hint
+      });
+    });
+    return { commands, diagnostics };
   }
 
   /** Decodes exact string token fields carried in product metadata. */

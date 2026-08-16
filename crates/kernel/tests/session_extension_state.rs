@@ -11,6 +11,7 @@ use kernel::{
     KernelFactory, Model, ModelCatalog, ModelError, ModelFactory,
     NanoidIdGenerator,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     ExtensionCommandDefinition, ExtensionDescriptor, ExtensionId,
     ExtensionSnapshot, ModelFinal, ModelProfile, ModelRequest,
@@ -172,6 +173,7 @@ impl ExtensionModule for StateModule {
             ExtensionCommandDefinition {
                 name: "state".to_string(),
                 description: None,
+                argument_hint: None,
             },
             StateCommand {
                 snapshots: Arc::clone(&self.snapshots),
@@ -194,6 +196,10 @@ async fn extension_session_state_is_persisted_and_restored() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::new(SystemClock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),

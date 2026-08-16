@@ -10,7 +10,8 @@
 use config::{
     ApiKeyConfig, AppConfig, ConfigValidationError, LoggingConfig, load_from,
 };
-use std::path::PathBuf;
+use protocol::PromptContentSource;
+use std::path::{Path, PathBuf};
 
 /// Supplies complete configuration documents for cross-field validation tests.
 struct ConfigFixture;
@@ -116,6 +117,73 @@ color = true
 
     assert_eq!(config.logging.filter, "warn,kernel=debug,provider=trace");
     assert!(config.logging.color);
+}
+
+/// Prompt resource policy loads tagged content sources and discovery switches.
+#[test]
+fn prompt_policy_loads_from_toml() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        let document = format!(
+            "{}{}",
+            ConfigFixture::valid(),
+            r#"
+[prompt]
+load_project_instructions = true
+load_templates = false
+system_prompt = { type = "path", value = "SYSTEM.custom.md" }
+append_system_prompts = [
+  { type = "text", value = "First appendix" },
+  { type = "path", value = "APPEND_SYSTEM.md" },
+]
+template_paths = ["prompts"]
+"#,
+        );
+        jail.create_file("claw.toml", &document)?;
+
+        let config = load_from([PathBuf::from("claw.toml")])
+            .expect("load prompt config");
+
+        assert!(!config.current().prompt.load_templates);
+        assert_eq!(
+            config.current().prompt.system_prompt,
+            Some(PromptContentSource::Path(PathBuf::from("SYSTEM.custom.md")))
+        );
+        assert_eq!(config.current().prompt.append_system_prompts.len(), 2);
+        assert_eq!(
+            config.current().prompt.template_paths,
+            vec![PathBuf::from("prompts")]
+        );
+        Ok(())
+    });
+}
+
+/// Skill selection rules deserialize directly into the shared protocol type.
+#[test]
+fn skill_rules_load_from_toml() {
+    let config: AppConfig = toml::from_str(
+        r#"
+[skills]
+include_instructions = false
+
+[[skills.rules]]
+name = "review"
+enabled = false
+
+[[skills.rules]]
+path = "/skills/review/SKILL.md"
+enabled = true
+"#,
+    )
+    .expect("parse Skill rules");
+
+    assert!(!config.skills.include_instructions);
+    assert_eq!(config.skills.rules.len(), 2);
+    assert_eq!(config.skills.rules[0].name.as_deref(), Some("review"));
+    assert_eq!(
+        config.skills.rules[1].path.as_deref(),
+        Some(Path::new("/skills/review/SKILL.md"))
+    );
 }
 
 /// Missing extension settings keep the production command guard enabled.

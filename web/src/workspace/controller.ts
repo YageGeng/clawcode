@@ -57,7 +57,7 @@ export class WorkspaceController {
     const [tree, pending, skills, servers] = await Promise.all([
       this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId }),
       this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
-      this.requireConnection().request<readonly SkillInfo[]>(this.methods.skillList, {}),
+      this.requireConnection().request<readonly SkillInfo[]>(this.methods.skillList, { sessionId }),
       this.requireConnection().request<readonly McpServerInfo[]>(this.methods.mcpStatus, { sessionId })
     ]);
     if (!this.isCurrentSessionOpen(sessionId, revision)) return;
@@ -165,7 +165,9 @@ export class WorkspaceController {
   }
 
   async invokeSkill(name: string, userInput: string): Promise<void> {
-    const result = await this.requireConnection().request<Readonly<{ name: string; content: string }>>(this.methods.invokeSkill, { name });
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    const result = await this.requireConnection().request<Readonly<{ name: string; content: string }>>(this.methods.invokeSkill, { sessionId, name });
     const prompt = [result.content, userInput.trim()].filter((part) => part.length > 0).join("\n\nUser request:\n");
     await this.send({ text: prompt, resources: [] });
   }

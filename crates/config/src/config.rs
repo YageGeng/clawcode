@@ -7,6 +7,7 @@ use crate::extensions::ExtensionsConfig;
 use crate::llm::{LlmModel, LlmProvider};
 use crate::logging::LoggingConfig;
 use crate::mcp::McpServerConfig;
+use crate::prompt::PromptPolicy;
 use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
 use crate::tools::ToolsConfig;
@@ -128,6 +129,9 @@ pub struct AppConfig {
     /// Immutable process logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Prompt resource discovery and rendering policy.
+    #[serde(default)]
+    pub prompt: PromptPolicy,
     /// Configured LLM providers.
     #[serde(default)]
     pub providers: Vec<LlmProvider>,
@@ -171,6 +175,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             logging: LoggingConfig::default(),
+            prompt: PromptPolicy::default(),
             providers: Vec::new(),
             active_model: default_active_model(),
             approval: ApprovalMode::default(),

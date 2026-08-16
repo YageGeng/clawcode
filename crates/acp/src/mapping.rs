@@ -202,6 +202,28 @@ impl AcpEventMapper {
                         .meta(metadata),
                 )]
             }
+            AgentEventPayload::AvailableCommandsChanged { commands } => {
+                let commands = commands
+                    .iter()
+                    .map(|command| {
+                        let available = wire::AvailableCommand::new(
+                            command.name.clone(),
+                            command.description.clone(),
+                        );
+                        match &command.argument_hint {
+                            Some(hint) => available.input(
+                                wire::AvailableCommandInput::Text(
+                                    wire::TextCommandInput::new(hint.clone()),
+                                ),
+                            ),
+                            None => available,
+                        }
+                    })
+                    .collect();
+                vec![wire::SessionUpdate::AvailableCommandsUpdate(
+                    wire::AvailableCommandsUpdate::new(commands).meta(metadata),
+                )]
+            }
             AgentEventPayload::UsageUpdated {
                 usage,
                 context_window,
@@ -295,6 +317,7 @@ impl AcpEventMapper {
             | AgentEventPayload::ToolExecutionUpdate { .. }
             | AgentEventPayload::ToolExecutionEnd { .. }
             | AgentEventPayload::SessionTitleChanged { .. }
+            | AgentEventPayload::AvailableCommandsChanged { .. }
             | AgentEventPayload::RetryScheduled { .. }
             | AgentEventPayload::RetryStart { .. }
             | AgentEventPayload::RetryEnd { .. }

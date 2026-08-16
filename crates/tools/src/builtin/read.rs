@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use base64::Engine as _;
 use protocol::{
-    ContentBlock, ToolCall, ToolDefinition, ToolResult, ToolResultDetails,
-    TruncationLimit,
+    ContentBlock, ToolCall, ToolDefinition, ToolPromptContribution, ToolResult,
+    ToolResultDetails, TruncationLimit,
 };
 use serde::Deserialize;
 
@@ -109,6 +109,16 @@ impl AgentTool for ReadTool {
                 },
                 "required": ["path"]
             }),
+        }
+    }
+
+    /// Contributes pi's read capability and file-inspection guideline.
+    fn prompt_contribution(&self) -> ToolPromptContribution {
+        ToolPromptContribution {
+            snippet: Some("Read file contents".to_string()),
+            guidelines: vec![
+                "Use read to examine files instead of cat or sed.".to_string(),
+            ],
         }
     }
 

@@ -1,9 +1,41 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use protocol::{ContentBlock, SessionId, ToolCallId, ToolResult, TurnId};
+use async_trait::async_trait;
+use protocol::{
+    ContentBlock, SessionId, ToolCall, ToolCallId, ToolDefinition,
+    ToolPromptContribution, ToolResult, TurnId,
+};
 use tokio_util::sync::CancellationToken;
-use tools::{ToolError, ToolExecutionContext, ToolUpdateSink};
+use tools::{AgentTool, ToolError, ToolExecutionContext, ToolUpdateSink};
+
+/// Minimal custom tool used to verify the default Prompt contribution contract.
+struct CustomTool;
+
+#[async_trait]
+impl AgentTool for CustomTool {
+    /// Returns one inert custom tool definition.
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "custom".to_string(),
+            description: "Custom tool".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    /// Returns one successful empty result without external side effects.
+    async fn execute(
+        &self,
+        call: ToolCall,
+        _context: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(Vec::new())
+            .is_error(false)
+            .build())
+    }
+}
 
 /// Captures replaceable tool snapshots without depending on the kernel event sink.
 #[derive(Default)]
@@ -68,4 +100,13 @@ fn execution_context_publishes_partial_results() {
     let captured = updates.0.lock().expect("updates lock");
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].blocks[0].text(), Some("partial"));
+}
+
+/// Custom tools remain absent from System Prompt text unless they opt in.
+#[test]
+fn custom_tools_default_to_no_prompt_contribution() {
+    assert_eq!(
+        CustomTool.prompt_contribution(),
+        ToolPromptContribution::default()
+    );
 }

@@ -12,6 +12,7 @@ Agent Client Protocol（ACP）v2 提供 stdio、HTTP/SSE 和 WebSocket，并包�
 | `protocol` | 公共类型、Turn/消息事件与集中式产品标识 |
 | `config` | 启动时读取的不可变 TOML 配置 |
 | `provider` | LLM API 适配与 provider factory |
+| `prompt` | 不可变的 pi 兼容 System Prompt、指令与 Template 资源 |
 | `kernel` | Session 所有权、串行运行、Turn 循环和工具编排 |
 | `tools` | 公共 `AgentTool` 接口、registry 与 pi 兼容编码工具 |
 | `mcp` | Session 级 MCP stdio 与 Streamable HTTP 工具 |
@@ -67,12 +68,34 @@ enabled = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
 
+[prompt]
+load_project_instructions = true
+load_templates = true
+template_paths = []
+
 [[mcp_servers]]
 enabled = false
 name = "example"
 command = "example-mcp-server"
 args = []
 ```
+
+## Prompt 资源
+
+每个新 Session 会冻结一份 pi 兼容 Prompt 快照，资源文件不支持热更新。项目可用
+`.pi/SYSTEM.md` 替换内置 System Prompt，用 `.pi/APPEND_SYSTEM.md` 追加指令；项目
+文件不存在时，会读取用户产品配置目录下的同名文件。
+
+指令先读取用户配置目录，再按文件系统根目录到 Session cwd 的顺序读取项目祖先目录。
+每个目录按 `AGENTS.override.md`、`AGENTS.md`、`AGENTS.MD`、`CLAUDE.md`、
+`CLAUDE.MD` 的优先级选择第一个可读文件。
+
+Prompt Template 从用户配置目录的 `prompts/` 与项目 `.pi/prompts/` 发现。Markdown
+Template 可在 YAML frontmatter 中声明 `description` 和 `argument-hint`。正文支持
+`$1` 至 `$9`、`$@`、`${@:N}` 和 `${@:N:L}` 参数语法；缺失的位置参数会替换为空字符串。
+例如 `/review README.md` 由服务端展开 `review.md`。Skill 使用 `/skill:name`，也只在
+服务端展开。WebUI 命令面板只展示 ACP v2 Available Commands 快照，不读取或展开
+Prompt 资源。
 
 ## 运行
 
@@ -121,8 +144,9 @@ length stop 会移除失败 Assistant 的活动上下文，压缩后最多恢复
 ACP 原生能力继续使用标准 `session/new`、`session/list`、`session/resume`、
 `session/prompt`、`session/cancel` 与 `session/close`。pi 中没有 ACP 原生对应项的
 Tree、Navigate、Branch、Fork、Compact、队列、Skill 和 MCP 状态使用集中定义的
-ACP v2 扩展方法与 `SessionUpdate::Other`。Agent 不声明或调用客户端文件系统和
-terminal callback。
+ACP v2 扩展方法与 `SessionUpdate::Other`。Extension Command、Skill 和 Prompt
+Template 使用 ACP v2 原生 `available_commands_update`。Agent 不声明或调用客户端
+文件系统和 terminal callback。
 
 ## 验证
 

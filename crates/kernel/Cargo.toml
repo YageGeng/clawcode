@@ -11,6 +11,7 @@ workspace = true
 config = { workspace = true }
 extension = { workspace = true }
 mcp = { workspace = true }
+prompt = { workspace = true }
 protocol = { workspace = true }
 provider = { workspace = true }
 skill = { workspace = true }

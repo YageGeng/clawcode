@@ -36,7 +36,6 @@ pub(super) struct SessionExtensionHost {
     kernel: super::super::Kernel,
     clock: Arc<dyn store::Clock>,
     id_generator: Arc<dyn protocol::IdGenerator>,
-    system_prompt_factory: Arc<dyn crate::SystemPromptFactory>,
 }
 
 impl SessionExtensionHost {
@@ -79,6 +78,34 @@ impl SessionExtensionHost {
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
+        Ok(())
+    }
+
+    /// Emits the complete command snapshot when this Session has a live client sink.
+    async fn publish_available_commands(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ExtensionHostError> {
+        let sink = self
+            .session
+            .event_sink
+            .lock()
+            .map_err(|_poison_error| {
+                ExtensionHostError::Operation(
+                    "event sink lock poisoned".to_string(),
+                )
+            })?
+            .as_ref()
+            .map(Arc::clone);
+        if let Some(sink) = sink {
+            let event =
+                self.kernel.available_commands_event(session_id).map_err(
+                    |error| ExtensionHostError::Operation(error.to_string()),
+                )?;
+            sink.emit(event).await.map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
+        }
         Ok(())
     }
 }
@@ -171,12 +198,8 @@ impl ExtensionHost for SessionExtensionHost {
     /// Builds the current complete system prompt without mutating history.
     fn system_prompt(
         &self,
-        invocation: &ExtensionInvocation,
+        _invocation: &ExtensionInvocation,
     ) -> Result<String, ExtensionHostError> {
-        let turn_id = invocation
-            .turn_id
-            .clone()
-            .unwrap_or_else(|| TurnId::system(&invocation.session_id));
         let tools = self
             .session
             .tool_state
@@ -185,34 +208,10 @@ impl ExtensionHost for SessionExtensionHost {
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
-        let skills = self
-            .session
-            .skills
-            .read()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "skill catalog lock poisoned".to_string(),
-                )
-            })?
-            .as_ref()
-            .map(skill::SkillCatalog::descriptors)
-            .unwrap_or_default();
-        let message = self
-            .system_prompt_factory
-            .create(
-                crate::SystemPromptContext::builder()
-                    .cwd(self.session.cwd.clone())
-                    .turn_id(turn_id)
-                    .timestamp_ms(self.clock.now())
-                    .tools(tools.definitions())
-                    .skills(skills)
-                    .project(self.session.project_context.clone())
-                    .build(),
-            )
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        Ok(message.content.text_content().unwrap_or_default())
+        self.session
+            .build_system_prompt(&tools, self.kernel.include_skill_instructions)
+            .map(|prompt| prompt.text)
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Persists and emits one complete extension message.
@@ -602,10 +601,31 @@ impl ExtensionHost for SessionExtensionHost {
         // The host repeats ownership binding so direct trait callers cannot
         // replace commands belonging to another extension identity.
         let command = command.bind_owner(&invocation.extension_id);
-        self.session
+        self.session.commands.upsert(command).map_err(|error| {
+            ExtensionHostError::Operation(error.to_string())
+        })?;
+        self.publish_available_commands(&invocation.session_id)
+            .await
+    }
+
+    /// Removes one caller-owned command and publishes the replacement snapshot.
+    async fn unregister_command(
+        &self,
+        invocation: &ExtensionInvocation,
+        name: &str,
+    ) -> Result<(), ExtensionHostError> {
+        let removed = self
+            .session
             .commands
-            .upsert(command)
-            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
+            .remove(&invocation.extension_id, name)
+            .map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
+        if removed {
+            self.publish_available_commands(&invocation.session_id)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Persists and selects one configured model for future Turn snapshots.

@@ -1,8 +1,9 @@
 use std::convert::TryFrom;
 
 use protocol::{
-    AgentEvent, AgentEventPayload, ContentBlock, EventMetadata, MessageId,
-    RunId, Sequence, TimestampMs, ToolCall, ToolCallId, ToolResult, TurnId,
+    AgentEvent, AgentEventPayload, AvailableAgentCommand,
+    AvailableAgentCommandKind, ContentBlock, EventMetadata, MessageId, RunId,
+    Sequence, TimestampMs, ToolCall, ToolCallId, ToolResult, TurnId,
 };
 
 /// Every streamed event carries an exact turn id, timestamp, and ordered sequence.
@@ -86,4 +87,33 @@ fn tool_execution_update_serializes_partial_result() {
     assert_eq!(value["event"], "tool_execution_update");
     assert_eq!(value["result"]["tool_call_id"], "call-tool");
     assert_eq!(value["result"]["blocks"][0]["text"], "partial");
+}
+
+/// Available Commands use the standard event envelope and preserve typed metadata.
+#[test]
+fn available_commands_changed_round_trips() {
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: TurnId::try_from("turn-commands").expect("turn id"),
+            timestamp_ms: TimestampMs::from(1_725_000_001_001),
+            sequence: Sequence::try_from(10_u64).expect("sequence"),
+        },
+        payload: AgentEventPayload::AvailableCommandsChanged {
+            commands: vec![
+                AvailableAgentCommand::builder()
+                    .name("review".to_string())
+                    .description("Review changes".to_string())
+                    .argument_hint(Some("<path>".to_string()))
+                    .kind(AvailableAgentCommandKind::PromptTemplate)
+                    .build(),
+            ],
+        },
+    };
+
+    let value = serde_json::to_value(&event).expect("serialize Commands event");
+    assert_eq!(value["event"], "available_commands_changed");
+    assert_eq!(value["commands"][0]["argument_hint"], "<path>");
+    let decoded: AgentEvent =
+        serde_json::from_value(value).expect("decode Commands event");
+    assert_eq!(decoded, event);
 }

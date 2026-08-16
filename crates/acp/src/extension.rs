@@ -14,6 +14,7 @@ use protocol::{
 };
 
 use crate::server::AcpEventSink;
+use crate::server::AcpServer;
 
 /// Converts any parameter decoding failure into the ACP invalid-parameters category.
 fn invalid_parameters(
@@ -196,6 +197,8 @@ impl AcpExtensionDispatcher {
                             agent_client_protocol::Error::into_internal_error,
                         )?,
                 };
+                AcpServer::new(Arc::clone(&self.kernel))
+                    .send_available_commands(&fork_id, &self.connection)?;
                 serde_json::json!({ "sessionId": fork_id.to_string() })
             }
             AcpExtensionMethod::Compact => {
@@ -271,15 +274,25 @@ impl AcpExtensionDispatcher {
                 let input: AcpSkillParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                let content = self.kernel.invoke_skill(&input.name).map_err(
-                    agent_client_protocol::Error::into_internal_error,
-                )?;
+                let content = self
+                    .kernel
+                    .invoke_skill(&input.session_id, &input.name)
+                    .map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?;
                 serde_json::json!({ "name": input.name, "content": content })
             }
-            AcpExtensionMethod::SkillList => serde_json::to_value(
-                self.kernel.skills(),
-            )
-            .map_err(agent_client_protocol::Error::into_internal_error)?,
+            AcpExtensionMethod::SkillList => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.skills(&input.session_id).map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
             AcpExtensionMethod::McpStatus => {
                 let input: AcpSessionParameters =
                     serde_json::from_value(request.parameters)

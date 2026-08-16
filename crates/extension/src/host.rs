@@ -205,6 +205,15 @@ pub trait ExtensionHost: Send + Sync {
         Err(ExtensionHostError::Unsupported("register_command"))
     }
 
+    /// Removes one command owned by the invoking Extension.
+    async fn unregister_command(
+        &self,
+        _invocation: &ExtensionInvocation,
+        _name: &str,
+    ) -> Result<(), ExtensionHostError> {
+        Err(ExtensionHostError::Unsupported("unregister_command"))
+    }
+
     /// Selects a configured model for future turns.
     async fn set_model(
         &self,

@@ -103,7 +103,6 @@ impl Kernel {
             .kernel(self.clone())
             .clock(Arc::clone(&self.clock))
             .id_generator(Arc::clone(&self.id_generator))
-            .system_prompt_factory(Arc::clone(&self.system_prompt_factory))
             .build();
 
         Ok(ExtensionContext::builder()

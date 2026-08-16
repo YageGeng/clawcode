@@ -120,8 +120,10 @@ pub struct AcpSessionRenameParameters {
 
 /// Parameters for explicitly loading one discovered skill.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AcpSkillParameters {
+    /// Session whose immutable Skill catalog is queried.
+    pub session_id: SessionId,
     /// Discovered skill name.
     pub name: String,
 }

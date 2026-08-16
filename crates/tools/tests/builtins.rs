@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use protocol::{SessionId, ToolCall, ToolCallId, TurnId};
+use protocol::{
+    SessionId, ToolCall, ToolCallId, ToolPromptContribution, TurnId,
+};
 use tokio_util::sync::CancellationToken;
 use tools::{
     BuiltinToolFactory, DiscardToolUpdates, ToolError, ToolExecutionContext,
@@ -27,6 +29,60 @@ fn builtin_factory_registers_only_pi_coding_tools() {
         .expect("built-ins should register");
 
     assert_eq!(registry.names(), vec!["bash", "edit", "read", "write"]);
+}
+
+/// Built-in tools expose pi's exact System Prompt contributions.
+#[test]
+fn builtin_tools_expose_pi_prompt_contributions() {
+    let registry = BuiltinToolFactory::new()
+        .create()
+        .expect("built-ins should register");
+    let contributions: std::collections::BTreeMap<_, _> = registry
+        .prompt_tools()
+        .into_iter()
+        .map(|tool| (tool.name, tool.contribution))
+        .collect();
+
+    assert_eq!(
+        contributions.get("read"),
+        Some(&ToolPromptContribution {
+            snippet: Some("Read file contents".to_string()),
+            guidelines: vec![
+                "Use read to examine files instead of cat or sed.".to_string()
+            ],
+        })
+    );
+    assert_eq!(
+        contributions.get("write"),
+        Some(&ToolPromptContribution {
+            snippet: Some("Create or overwrite files".to_string()),
+            guidelines: vec![
+                "Use write only for new files or complete rewrites."
+                    .to_string()
+            ],
+        })
+    );
+    assert_eq!(
+        contributions.get("edit"),
+        Some(&ToolPromptContribution {
+            snippet: Some("Make precise file edits with exact text replacement, including multiple disjoint edits in one call".to_string()),
+            guidelines: vec![
+                "Use edit for precise changes (edits[].oldText must match exactly)".to_string(),
+                "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls".to_string(),
+                "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.".to_string(),
+                "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.".to_string(),
+            ],
+        })
+    );
+    assert_eq!(
+        contributions.get("bash"),
+        Some(&ToolPromptContribution {
+            snippet: Some(
+                "Execute bash commands (ls, grep, find, etc.)".to_string()
+            ),
+            guidelines: Vec::new(),
+        })
+    );
 }
 
 /// Factory switches can disable filesystem and shell groups independently.

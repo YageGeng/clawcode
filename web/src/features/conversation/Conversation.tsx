@@ -53,6 +53,7 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
         running={state.running}
         outcomeUnknown={state.outcomeUnknown}
         pending={state.pending}
+        availableCommands={state.availableCommands}
         controller={controller}
       />
     </section>

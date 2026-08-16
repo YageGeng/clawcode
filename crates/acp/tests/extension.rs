@@ -11,7 +11,9 @@ use kernel::{
     Kernel, KernelFactory, Model, ModelError, ModelFactory, ModelStream,
     NanoidIdGenerator,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{AcpExtensionMethod, ModelProfile, ModelRequest, SessionId};
+use skill::FilesystemSkillFactory;
 use store::{JsonlStoreFactory, SystemClock};
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
@@ -91,6 +93,9 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == SESSION_LIST_METHOD
             || method == SESSION_DELETE_METHOD
             || method == AcpExtensionMethod::Compact.as_str()
+            || method == AcpExtensionMethod::Fork.as_str()
+            || method == AcpExtensionMethod::InvokeSkill.as_str()
+            || method == AcpExtensionMethod::SkillList.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
     }
 
@@ -120,6 +125,15 @@ impl JsonRpcMessage for IntegrationRequest {
             }
             method if method == AcpExtensionMethod::UserBash.as_str() => {
                 AcpExtensionMethod::UserBash.as_str()
+            }
+            method if method == AcpExtensionMethod::Fork.as_str() => {
+                AcpExtensionMethod::Fork.as_str()
+            }
+            method if method == AcpExtensionMethod::InvokeSkill.as_str() => {
+                AcpExtensionMethod::InvokeSkill.as_str()
+            }
+            method if method == AcpExtensionMethod::SkillList.as_str() => {
+                AcpExtensionMethod::SkillList.as_str()
             }
             _ => {
                 return Err(agent_client_protocol::Error::method_not_found());
@@ -167,6 +181,14 @@ fn integration_kernel(root: &Path) -> Arc<Kernel> {
             root,
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
+            root.join("config"),
+            Vec::new(),
+        ))))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(NanoidIdGenerator))
@@ -395,4 +417,225 @@ async fn user_bash_extension_executes_and_persists_on_the_server() {
         protocol::MessageContent::BashExecution { bash }
             if bash.exclude_from_context && bash.result.output == "acp bash"
     ));
+}
+
+/// ACP Skill methods require a Session and resolve its frozen catalog.
+#[tokio::test]
+async fn skill_extensions_are_session_scoped() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let skill = state.path().join("config/skills/review/SKILL.md");
+    std::fs::create_dir_all(skill.parent().expect("Skill parent"))
+        .expect("create Skill parent");
+    std::fs::write(
+        &skill,
+        "---\nname: review\ndescription: Review code\n---\nREVIEW BODY\n",
+    )
+    .expect("write Skill");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let listed = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::SkillList.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("list Session Skills");
+    assert_eq!(listed[0]["name"], "review");
+    assert!(listed[0].get("content").is_none());
+
+    let invoked = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::InvokeSkill.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "name": "review"
+            }),
+        ),
+    )
+    .await
+    .expect("invoke Session Skill");
+    assert_eq!(invoked["name"], "review");
+    assert!(
+        invoked["content"]
+            .as_str()
+            .is_some_and(|content| { content.contains("REVIEW BODY") })
+    );
+
+    let error = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::SkillList.as_str(),
+            serde_json::json!({}),
+        ),
+    )
+    .await
+    .expect_err("missing Session id");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+}
+
+/// New, Resume, and Fork each publish a complete native command snapshot.
+#[tokio::test]
+async fn session_activation_publishes_available_commands() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let prompt = state.path().join("config/prompts/review.md");
+    std::fs::create_dir_all(prompt.parent().expect("Prompt parent"))
+        .expect("create Prompt parent");
+    std::fs::write(
+        prompt,
+        "---\ndescription: Review changes\nargument-hint: <path>\n---\nreview\n",
+    )
+    .expect("write Prompt Template");
+    let kernel = integration_kernel(state.path());
+    let server =
+        AcpServerFactory::new(Arc::clone(&kernel), Arc::new(NanoidIdGenerator))
+            .component(AcpTransportKind::Stdio);
+    let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |notification: wire::UpdateSessionNotification,
+                    _connection| {
+            updates_tx.send(notification).map_err(|_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("notification receiver closed"),
+                )
+            })?;
+            Ok(())
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+
+    client
+        .connect_with(server, async move |connection| {
+            connection
+                .send_request(wire::InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    wire::Implementation::new("commands-test", "0.1.0"),
+                ))
+                .block_task()
+                .await?;
+            let created = connection
+                .send_request(wire::NewSessionRequest::new(
+                    workspace.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            let session_id =
+                SessionId::try_from(created.session_id.to_string())
+                    .expect("Session id");
+            let first = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                updates_rx.recv(),
+            )
+            .await
+            .expect("New command snapshot")
+            .expect("New notification");
+            assert_eq!(first.session_id.to_string(), session_id.as_str());
+            let wire::SessionUpdate::AvailableCommandsUpdate(commands) =
+                first.update
+            else {
+                panic!("Available Commands update expected after New");
+            };
+            assert_eq!(commands.available_commands[0].name, "review");
+            assert_eq!(
+                commands.available_commands[0].input.as_ref().and_then(
+                    |input| match input {
+                        wire::AvailableCommandInput::Text(input) => {
+                            Some(input.hint.as_str())
+                        }
+                        _ => None,
+                    }
+                ),
+                Some("<path>")
+            );
+
+            kernel
+                .close_session(&session_id)
+                .await
+                .map_err(agent_client_protocol::Error::into_internal_error)?;
+            connection
+                .send_request(wire::ResumeSessionRequest::new(
+                    session_id.to_string(),
+                    workspace.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            let resumed = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                updates_rx.recv(),
+            )
+            .await
+            .expect("Resume command snapshot")
+            .expect("Resume notification");
+            assert_eq!(resumed.session_id.to_string(), session_id.as_str());
+            assert!(matches!(
+                resumed.update,
+                wire::SessionUpdate::AvailableCommandsUpdate(_)
+            ));
+
+            connection
+                .send_request(IntegrationRequest::new(
+                    AcpExtensionMethod::UserBash.as_str(),
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "command": "printf 'fork source'",
+                        "excludeFromContext": true
+                    }),
+                ))
+                .block_task()
+                .await?;
+            let entry_id = kernel
+                .session_tree(&session_id)
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+                .entries
+                .into_iter()
+                .find(|entry| entry.kind == "message")
+                .expect("fork source entry")
+                .entry_id;
+            let fork_id = "session-command-fork";
+            connection
+                .send_request(IntegrationRequest::new(
+                    AcpExtensionMethod::Fork.as_str(),
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "entryId": entry_id,
+                        "cwd": workspace.path(),
+                        "newSessionId": fork_id
+                    }),
+                ))
+                .block_task()
+                .await?;
+            loop {
+                let notification = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    updates_rx.recv(),
+                )
+                .await
+                .expect("Fork command snapshot")
+                .expect("Fork notification");
+                if matches!(
+                    notification.update,
+                    wire::SessionUpdate::AvailableCommandsUpdate(_)
+                ) {
+                    assert_eq!(notification.session_id.to_string(), fork_id);
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .expect("Available Commands lifecycle");
 }

@@ -7,21 +7,23 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use extension::{
-    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
-    ExtensionRegistrar, ModelSelectPoint, ProjectTrustPoint,
-    ResourcesDiscoverPoint, SessionBeforeSwitchPoint, SessionInfoChangedPoint,
-    SessionStartPoint, StaticExtensionFactory, ThinkingLevelSelectPoint,
+    ExtensionCommandContext, ExtensionCommandHandler, ExtensionContext,
+    ExtensionError, ExtensionHandler, ExtensionModule, ExtensionRegistrar,
+    ModelSelectPoint, ProjectTrustPoint, ResourcesDiscoverPoint,
+    SessionBeforeSwitchPoint, SessionInfoChangedPoint, SessionStartPoint,
+    StaticExtensionFactory, ThinkingLevelSelectPoint,
 };
 use futures::{Stream, stream};
 use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, ExtensionDescriptor, ExtensionId,
-    IdGenerator, IdKind, McpConnectionState, McpServerInfo, ModelFailure,
-    ModelFinal, ModelProfile, ModelRequest, ModelRetryDisposition,
-    ModelStreamEvent, ModelUsage, QueueKind, RunRequest, SessionId,
-    SessionTitle, StopReason, TimestampMs,
+    IdGenerator, IdKind, McpConnectionState, McpServerInfo, MessageContent,
+    ModelFailure, ModelFinal, ModelProfile, ModelRequest,
+    ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
+    SessionId, SessionTitle, StopReason, TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -177,6 +179,34 @@ impl Model for ScriptedModel {
     }
 }
 
+/// Records complete provider requests while returning successful empty responses.
+struct PromptCaptureModel(Mutex<Vec<ModelRequest>>);
+
+#[async_trait]
+impl Model for PromptCaptureModel {
+    /// Returns the shared profile used by Session Prompt assertions.
+    fn profile(&self) -> &ModelProfile {
+        &TEST_MODEL_PROFILE
+    }
+
+    /// Confirms that Prompt capture requires no external provider.
+    async fn preflight(&self) -> Result<(), ModelError> {
+        Ok(())
+    }
+
+    /// Captures the complete request before ending the current Turn.
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<TestModelStream, ModelError> {
+        self.0.lock().expect("request lock").push(request);
+        Ok(Box::pin(stream::iter([Ok(ScriptedModel::finished(
+            StopReason::EndTurn,
+        ))])))
+    }
+}
+
 /// Records domain events for title-notification assertions.
 #[derive(Default)]
 struct RecordingSink(Mutex<Vec<AgentEvent>>);
@@ -304,6 +334,140 @@ impl ExtensionHandler<SessionBeforeSwitchPoint> for RecordingExtension {
     }
 }
 
+/// Rejects project trust and records whether resource discovery was attempted.
+#[derive(Clone)]
+struct DenyProjectResources(Arc<Mutex<Vec<&'static str>>>);
+
+impl ExtensionModule for DenyProjectResources {
+    /// Declares the trust-boundary fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("deny-project-resources")
+                .expect("extension id"),
+            name: "Deny project resources".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers trust evaluation and the discovery hook that must be skipped.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<ProjectTrustPoint, _>(self.clone())?;
+        registrar.on::<ResourcesDiscoverPoint, _>(self.clone())
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<ProjectTrustPoint> for DenyProjectResources {
+    /// Rejects project-controlled Prompt, Skill, and Extension resource roots.
+    async fn handle(
+        &self,
+        _event: &protocol::ProjectTrustEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::ProjectTrustResult, ExtensionError> {
+        self.0
+            .lock()
+            .expect("trust event lock")
+            .push("project_trust");
+        Ok(protocol::ProjectTrustResult {
+            trusted: protocol::ProjectTrustDecision::No,
+            remember: false,
+        })
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<ResourcesDiscoverPoint> for DenyProjectResources {
+    /// Records an invalid call so the test can prove denial short-circuits discovery.
+    async fn handle(
+        &self,
+        _event: &protocol::ResourcesDiscoverEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::ResourcesDiscoverResult, ExtensionError> {
+        self.0
+            .lock()
+            .expect("trust event lock")
+            .push("resources_discover");
+        Ok(protocol::ResourcesDiscoverResult::default())
+    }
+}
+
+/// No-op command used to prove Extension commands cannot enter a run queue.
+struct QueueRejectedCommand;
+
+#[async_trait]
+impl ExtensionCommandHandler for QueueRejectedCommand {
+    /// Completes immediately if invoked outside the queue path.
+    async fn handle(
+        &self,
+        _arguments: &str,
+        _parameters: &serde_json::Value,
+        _context: &ExtensionCommandContext,
+    ) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+}
+
+/// Registers the Extension command reserved by the queue rejection test.
+struct QueueCommandModule;
+
+impl ExtensionModule for QueueCommandModule {
+    /// Declares the queue command fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("queue-command").expect("extension id"),
+            name: "Queue command".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers one command that must execute immediately or be rejected.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.register_command(
+            protocol::ExtensionCommandDefinition {
+                name: "not-queueable".to_string(),
+                description: None,
+                argument_hint: None,
+            },
+            QueueRejectedCommand,
+        )
+    }
+}
+
+/// Registers a fixed group of commands under one Extension identity.
+struct AvailableCommandModule {
+    id: &'static str,
+    commands: Vec<protocol::ExtensionCommandDefinition>,
+}
+
+impl ExtensionModule for AvailableCommandModule {
+    /// Declares the command projection fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from(self.id).expect("extension id"),
+            name: self.id.to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers every fixed command with a no-op handler.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        for command in &self.commands {
+            registrar
+                .register_command(command.clone(), QueueRejectedCommand)?;
+        }
+        Ok(())
+    }
+}
+
 /// Builds one kernel with deterministic storage, tools, clocks, and identifiers.
 fn build_kernel(
     root: PathBuf,
@@ -316,17 +480,22 @@ fn build_kernel(
         .model_factory(Arc::new(StaticModelFactory(model)))
         .tool_factory(Arc::new(BuiltinToolFactory::new()))
         .store_factory(Arc::new(JsonlStoreFactory::new(
-            root,
+            root.clone(),
             Arc::clone(&clock),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
-        .id_generator(ids);
+        .id_generator(ids)
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.join("config"),
+            protocol::PromptPolicy::default(),
+        )));
     let factory = match skill_root {
         Some(skill_root) => builder
-            .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(vec![
+            .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
                 skill_root,
-            ]))))
+                Vec::new(),
+            ))))
             .build(),
         None => builder.build(),
     };
@@ -364,6 +533,10 @@ async fn session_management_dispatches_declared_extension_hooks() {
         )))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .build()
         .build()
         .expect("build kernel");
@@ -415,6 +588,348 @@ async fn session_management_dispatches_declared_extension_hooks() {
     ] {
         assert!(events.contains(&expected), "missing {expected}");
     }
+}
+
+/// Project trust denial preserves global resources and excludes all project roots.
+#[tokio::test]
+async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
+    let root = tempfile::tempdir().expect("store root");
+    let config_root = root.path().join("config");
+    let cwd = root.path().join("workspace");
+    let global_skill = config_root.join("skills/global/SKILL.md");
+    let project_skill = cwd.join(".pi/skills/project/SKILL.md");
+    fs::create_dir_all(global_skill.parent().expect("global Skill parent"))
+        .expect("create global Skill parent");
+    fs::create_dir_all(project_skill.parent().expect("project Skill parent"))
+        .expect("create project Skill parent");
+    fs::write(
+        &global_skill,
+        "---\nname: global\ndescription: Global Skill\n---\nglobal\n",
+    )
+    .expect("write global Skill");
+    fs::write(
+        &project_skill,
+        "---\nname: project\ndescription: Project Skill\n---\nproject\n",
+    )
+    .expect("write project Skill");
+    fs::write(config_root.join("AGENTS.md"), "GLOBAL INSTRUCTION")
+        .expect("write global instruction");
+    fs::write(cwd.join("AGENTS.md"), "PROJECT INSTRUCTION")
+        .expect("write project instruction");
+
+    let model = Arc::new(PromptCaptureModel(Mutex::new(Vec::new())));
+    let trust_events = Arc::new(Mutex::new(Vec::new()));
+    let module_events = Arc::clone(&trust_events);
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(6_000)));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(DenyProjectResources(Arc::clone(&module_events)))
+                    as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            config_root.clone(),
+            protocol::PromptPolicy::default(),
+        )))
+        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
+            config_root,
+            Vec::new(),
+        ))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-untrusted-project").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create untrusted project Session");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "inspect resources".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("run untrusted project Session");
+
+    assert_eq!(
+        *trust_events.lock().expect("trust event lock"),
+        vec!["project_trust"]
+    );
+    assert_eq!(
+        kernel
+            .skills(&session_id)
+            .expect("effective Skills")
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect::<Vec<_>>(),
+        vec!["global"]
+    );
+    let requests = model.0.lock().expect("request lock");
+    let system = requests[0]
+        .messages
+        .iter()
+        .find_map(|message| match &message.content {
+            MessageContent::System { blocks } => blocks[0].text(),
+            _ => None,
+        })
+        .expect("System Prompt");
+    assert!(system.contains("GLOBAL INSTRUCTION"));
+    assert!(!system.contains("PROJECT INSTRUCTION"));
+}
+
+/// Available Commands preserve execution precedence, aliases, and metadata.
+#[tokio::test]
+async fn available_commands_merge_session_sources_deterministically() {
+    let root = tempfile::tempdir().expect("store root");
+    let config_root = root.path().join("config");
+    let cwd = root.path().join("workspace");
+    let skill = config_root.join("skills/review/SKILL.md");
+    let prompts = config_root.join("prompts");
+    fs::create_dir_all(skill.parent().expect("Skill parent"))
+        .expect("create Skill parent");
+    fs::create_dir_all(&prompts).expect("create Prompt root");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    fs::write(
+        &skill,
+        "---\nname: review\ndescription: Review Skill\n---\nreview\n",
+    )
+    .expect("write Skill");
+    fs::write(
+        prompts.join("review.md"),
+        "---\ndescription: Review Template\nargument-hint: <file>\n---\ntemplate\n",
+    )
+    .expect("write review Template");
+    fs::write(
+        prompts.join("skill:review.md"),
+        "---\ndescription: Shadowed Template\n---\nshadowed\n",
+    )
+    .expect("write shadowed Template");
+    fs::write(
+        prompts.join("inspect.md"),
+        "---\ndescription: Shadowed inspect\n---\nshadowed\n",
+    )
+    .expect("write inspect Template");
+    fs::write(
+        prompts.join("shared.md"),
+        "---\ndescription: Unreachable shared Template\n---\nshadowed\n",
+    )
+    .expect("write shared Template");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(6_500)));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            config_root.clone(),
+            protocol::PromptPolicy::default(),
+        )))
+        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
+            config_root,
+            Vec::new(),
+        ))))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![
+                Arc::new(|| {
+                    Ok(Arc::new(AvailableCommandModule {
+                        id: "first",
+                        commands: vec![
+                            protocol::ExtensionCommandDefinition {
+                                name: "inspect".to_string(),
+                                description: Some("Inspect state".to_string()),
+                                argument_hint: Some("<target>".to_string()),
+                            },
+                            protocol::ExtensionCommandDefinition {
+                                name: "shared".to_string(),
+                                description: Some("First shared".to_string()),
+                                argument_hint: None,
+                            },
+                        ],
+                    }) as Arc<dyn ExtensionModule>)
+                }),
+                Arc::new(|| {
+                    Ok(Arc::new(AvailableCommandModule {
+                        id: "second",
+                        commands: vec![protocol::ExtensionCommandDefinition {
+                            name: "shared".to_string(),
+                            description: Some("Second shared".to_string()),
+                            argument_hint: None,
+                        }],
+                    }) as Arc<dyn ExtensionModule>)
+                }),
+            ],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-available-commands").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+
+    let commands = kernel
+        .available_commands(&session_id)
+        .expect("Available Commands");
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "first/inspect",
+            "first/shared",
+            "inspect",
+            "second/shared",
+            "skill:review",
+            "review",
+        ]
+    );
+    let inspect = commands
+        .iter()
+        .find(|command| command.name == "inspect")
+        .expect("short Extension alias");
+    assert_eq!(inspect.description, "Inspect state");
+    assert_eq!(inspect.argument_hint.as_deref(), Some("<target>"));
+    let skill = commands
+        .iter()
+        .find(|command| command.name == "skill:review")
+        .expect("Skill command");
+    assert_eq!(skill.description, "Review Skill");
+    assert_eq!(skill.argument_hint.as_deref(), Some("[arguments]"));
+    let template = commands
+        .iter()
+        .find(|command| command.name == "review")
+        .expect("Template command");
+    assert_eq!(template.argument_hint.as_deref(), Some("<file>"));
+}
+
+/// Active Sessions freeze Prompt resources while resume builds a fresh snapshot.
+#[tokio::test]
+async fn prompt_snapshot_is_stable_until_session_resume() {
+    let root = tempfile::tempdir().expect("store root");
+    let config_root = root.path().join("config");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&config_root).expect("create config root");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let instruction_path = config_root.join("AGENTS.md");
+    fs::write(&instruction_path, "INITIAL PRIVATE INSTRUCTION")
+        .expect("write initial instruction");
+    let model = Arc::new(PromptCaptureModel(Mutex::new(Vec::new())));
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(7_000)));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            config_root,
+            protocol::PromptPolicy::default(),
+        )))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-prompt-snapshot").expect("session id");
+    let session_path = kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+    fs::write(&instruction_path, "UPDATED PRIVATE INSTRUCTION")
+        .expect("update instruction");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "first".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("run active Session");
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close Session");
+    kernel
+        .resume_session(session_id.clone(), cwd)
+        .await
+        .expect("resume Session");
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "second".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("run resumed Session");
+
+    let requests = model.0.lock().expect("request lock");
+    let system_prompts = requests
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .find_map(|message| match &message.content {
+                    MessageContent::System { blocks } => blocks[0].text(),
+                    _ => None,
+                })
+                .expect("System Prompt")
+        })
+        .collect::<Vec<_>>();
+    assert!(system_prompts[0].contains("INITIAL PRIVATE INSTRUCTION"));
+    assert!(!system_prompts[0].contains("UPDATED PRIVATE INSTRUCTION"));
+    assert!(system_prompts[1].contains("UPDATED PRIVATE INSTRUCTION"));
+    let persisted = fs::read_to_string(session_path).expect("read Session");
+    assert!(!persisted.contains("INITIAL PRIVATE INSTRUCTION"));
+    assert!(!persisted.contains("UPDATED PRIVATE INSTRUCTION"));
 }
 
 /// Follow-up records survive runtime release until explicitly cancelled by QueueId.
@@ -488,6 +1003,146 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
             .follow_up
             .is_empty()
     );
+}
+
+/// Steer and Follow-up queue entries share Prompt expansion and reject commands.
+#[tokio::test]
+async fn queued_messages_expand_session_resources_before_persistence() {
+    let root = tempfile::tempdir().expect("store root");
+    let config_root = root.path().join("config");
+    let cwd = root.path().join("workspace");
+    let skill = config_root.join("skills/queued/SKILL.md");
+    let template = config_root.join("prompts/queued.md");
+    fs::create_dir_all(skill.parent().expect("Skill parent"))
+        .expect("create Skill parent");
+    fs::create_dir_all(template.parent().expect("Template parent"))
+        .expect("create Template parent");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    fs::write(
+        &skill,
+        "---\nname: queued\ndescription: Queued Skill\n---\nQUEUED SKILL\n",
+    )
+    .expect("write Skill");
+    fs::write(&template, "QUEUED TEMPLATE: $ARGUMENTS")
+        .expect("write Template");
+    let entered = Arc::new(Notify::new());
+    let model: Arc<dyn Model> = Arc::new(PendingModel {
+        entered: Arc::clone(&entered),
+    });
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(15_000)));
+    let kernel = Arc::new(
+        KernelFactory::builder()
+            .model_factory(Arc::new(StaticModelFactory(model)))
+            .tool_factory(Arc::new(BuiltinToolFactory::new()))
+            .store_factory(Arc::new(JsonlStoreFactory::new(
+                root.path(),
+                Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                config_root.clone(),
+                protocol::PromptPolicy::default(),
+            )))
+            .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
+                config_root,
+                Vec::new(),
+            ))))
+            .extension_factory(Arc::new(StaticExtensionFactory::new(
+                protocol::StaticExtensionRegistration::default(),
+                vec![Arc::new(|| {
+                    Ok(Arc::new(QueueCommandModule) as Arc<dyn ExtensionModule>)
+                })],
+            )))
+            .clock(clock)
+            .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+            .build()
+            .build()
+            .expect("build kernel"),
+    );
+    let session_id =
+        SessionId::try_from("session-queue-expansion").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+    let running_kernel = Arc::clone(&kernel);
+    let running_session = session_id.clone();
+    let run = tokio::spawn(async move {
+        running_kernel
+            .run(
+                RunRequest {
+                    session_id: running_session,
+                    input: "hold".to_string(),
+                },
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+    });
+    entered.notified().await;
+
+    let steering = kernel
+        .queue_message(
+            &session_id,
+            QueueKind::Steering,
+            "/skill:queued alpha".to_string(),
+        )
+        .expect("queue expanded Skill");
+    let follow_up = kernel
+        .queue_message(
+            &session_id,
+            QueueKind::FollowUp,
+            "/queued beta".to_string(),
+        )
+        .expect("queue expanded Template");
+    let error = kernel
+        .queue_message(
+            &session_id,
+            QueueKind::FollowUp,
+            "/not-queueable later".to_string(),
+        )
+        .expect_err("Extension command cannot be queued");
+    assert!(matches!(
+        error,
+        kernel::KernelError::ExtensionCommandCannotQueue(name)
+            if name == "not-queueable"
+    ));
+    let MessageContent::User {
+        blocks: steering_blocks,
+    } = &steering.message.content
+    else {
+        panic!("Steering User message expected");
+    };
+    assert!(
+        steering_blocks[0]
+            .text()
+            .is_some_and(|text| text.contains("QUEUED SKILL"))
+    );
+    assert!(
+        steering_blocks[0]
+            .text()
+            .is_some_and(|text| text.ends_with("alpha"))
+    );
+    let MessageContent::User {
+        blocks: follow_up_blocks,
+    } = &follow_up.message.content
+    else {
+        panic!("Follow-up User message expected");
+    };
+    assert_eq!(follow_up_blocks[0].text(), Some("QUEUED TEMPLATE: beta"));
+    assert_eq!(
+        kernel
+            .pending_messages(&session_id)
+            .expect("pending queue")
+            .steering,
+        vec![steering]
+    );
+    kernel
+        .cancel_session(&session_id)
+        .expect("cancel active Run");
+    run.await.expect("join Run").expect("settle Run");
 }
 
 /// First user content creates a title event while a later manual name remains authoritative.
@@ -578,7 +1233,9 @@ async fn first_user_message_sets_default_title_and_manual_rename_wins() {
 async fn skills_return_metadata_without_file_bodies() {
     let root = tempfile::tempdir().expect("store root");
     let skill_root = tempfile::tempdir().expect("skill root");
-    let skill_path = skill_root.path().join("SKILL.md");
+    let skill_path = skill_root.path().join("skills/review/SKILL.md");
+    fs::create_dir_all(skill_path.parent().expect("Skill parent"))
+        .expect("create Skill parent");
     fs::write(
         &skill_path,
         "---\nname: review\ndescription: Review code\n---\nSECRET BODY\n",
@@ -596,8 +1253,19 @@ async fn skills_return_metadata_without_file_bodies() {
         ids,
         Some(skill_root.path().to_path_buf()),
     );
+    let session_id = SessionId::try_from("session-skills").expect("session id");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
 
-    let skills = kernel.skills();
+    let skills = kernel.skills(&session_id).expect("Session Skills");
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "review");
     assert_eq!(skills[0].description, "Review code");
@@ -606,6 +1274,12 @@ async fn skills_return_metadata_without_file_bodies() {
         !serde_json::to_string(&skills)
             .expect("serialize")
             .contains("SECRET")
+    );
+    assert!(
+        kernel
+            .invoke_skill(&session_id, "review")
+            .expect("invoke Session Skill")
+            .contains("SECRET BODY")
     );
 }
 
@@ -628,6 +1302,10 @@ async fn mcp_status_is_available_from_the_registered_session() {
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
         .mcp_factory(Some(Arc::new(StaticMcpFactory)))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .build()
         .build()
         .expect("build kernel");

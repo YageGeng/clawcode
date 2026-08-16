@@ -16,6 +16,7 @@ use kernel::{
     EventSink, KernelFactory, Model, ModelError, ModelFactory,
     NanoidIdGenerator,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentMessage, BeforeAgentStartEvent, BeforeAgentStartResult,
     ExtensionCommandDefinition, ExtensionDescriptor, ExtensionId,
@@ -24,6 +25,7 @@ use protocol::{
     ModelUsage, QueueKind, ResourcesDiscoverEvent, ResourcesDiscoverResult,
     RunRequest, SessionId, StaticExtensionRegistration, StopReason,
 };
+use skill::FilesystemSkillFactory;
 use store::{JsonlStoreFactory, SessionCreateOptions, SystemClock};
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
@@ -184,6 +186,101 @@ impl ExtensionCommandHandler for SendUserCommand {
     }
 }
 
+/// Records slash-command arguments without entering the Agent lifecycle.
+struct PromptOrderCommand(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl ExtensionCommandHandler for PromptOrderCommand {
+    /// Records the textual argument tail supplied by slash dispatch.
+    async fn handle(
+        &self,
+        arguments: &str,
+        _parameters: &serde_json::Value,
+        _context: &ExtensionCommandContext,
+    ) -> Result<(), ExtensionError> {
+        self.0
+            .lock()
+            .expect("prompt order lock")
+            .push(format!("command:{arguments}"));
+        Ok(())
+    }
+}
+
+/// Transforms sentinel inputs and records the prompt observed before Agent start.
+#[derive(Clone)]
+struct PromptOrderModule(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl ExtensionHandler<InputPoint> for PromptOrderModule {
+    /// Records raw input and transforms only the Skill and Template sentinels.
+    async fn handle(
+        &self,
+        event: &InputEvent,
+        _context: &ExtensionContext,
+    ) -> Result<InputResult, ExtensionError> {
+        self.0
+            .lock()
+            .expect("prompt order lock")
+            .push(format!("input:{}", event.text));
+        Ok(match event.text.as_str() {
+            "/raw-skill" => InputResult::Transform {
+                text: "/skill:order argument".to_string(),
+            },
+            "/raw-template" => InputResult::Transform {
+                text: "/template value".to_string(),
+            },
+            _ => InputResult::Continue,
+        })
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<BeforeAgentStartPoint> for PromptOrderModule {
+    /// Records the fully expanded prompt presented to the pre-Agent hook.
+    async fn handle(
+        &self,
+        event: &BeforeAgentStartEvent,
+        _context: &ExtensionContext,
+    ) -> Result<BeforeAgentStartResult, ExtensionError> {
+        let mut events = self.0.lock().expect("prompt order lock");
+        events.push(format!(
+            "options:{}:{}",
+            event.system_prompt_options.cwd.display(),
+            event.system_prompt_options.selected_tools.join(",")
+        ));
+        events.push(format!("before:{}", event.prompt));
+        Ok(BeforeAgentStartResult::default())
+    }
+}
+
+impl ExtensionModule for PromptOrderModule {
+    /// Declares the input-order fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("prompt-order").expect("extension id"),
+            name: "Prompt order".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers slash dispatch, raw input transformation, and pre-Agent observation.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.register_command(
+            ExtensionCommandDefinition {
+                name: "handled".to_string(),
+                description: None,
+                argument_hint: None,
+            },
+            PromptOrderCommand(Arc::clone(&self.0)),
+        )?;
+        registrar.on::<InputPoint, _>(self.clone())?;
+        registrar.on::<BeforeAgentStartPoint, _>(self.clone())
+    }
+}
+
 #[async_trait]
 impl ExtensionHandler<BeforeAgentStartPoint> for LifecycleRecorder {
     /// Records the pre-agent transformation point without changing the prompt.
@@ -242,6 +339,7 @@ impl ExtensionModule for LifecycleRecorder {
             ExtensionCommandDefinition {
                 name: "send".to_string(),
                 description: None,
+                argument_hint: None,
             },
             SendUserCommand,
         )
@@ -262,6 +360,10 @@ async fn run_dispatches_pi_lifecycle_order() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::new(SystemClock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
@@ -330,6 +432,10 @@ async fn idle_extension_user_message_uses_the_normal_input_pipeline() {
             root.path(),
             Arc::new(SystemClock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
             vec![Arc::new(move || {
@@ -373,6 +479,140 @@ async fn idle_extension_user_message_uses_the_normal_input_pipeline() {
     }));
 }
 
+/// Slash dispatch, input hooks, Skill expansion, and Template expansion follow pi order.
+#[tokio::test]
+async fn prompt_order_matches_pi_before_agent_lifecycle() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    let config_root = root.path().join("config");
+    let skill = config_root.join("skills/order/SKILL.md");
+    let template = config_root.join("prompts/template.md");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    std::fs::create_dir_all(skill.parent().expect("Skill parent"))
+        .expect("create Skill parent");
+    std::fs::create_dir_all(template.parent().expect("Template parent"))
+        .expect("create Template parent");
+    std::fs::write(
+        &skill,
+        "---\nname: order\ndescription: Order Skill\n---\nSKILL EXPANDED\n",
+    )
+    .expect("write Skill");
+    std::fs::write(&template, "TEMPLATE EXPANDED: $ARGUMENTS")
+        .expect("write Template");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let module_events = Arc::clone(&events);
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::new(SystemClock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            config_root.clone(),
+            protocol::PromptPolicy::default(),
+        )))
+        .skill_factory(Some(Arc::new(FilesystemSkillFactory::new(
+            config_root,
+            Vec::new(),
+        ))))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(PromptOrderModule(Arc::clone(&module_events)))
+                    as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-prompt-order").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let handled = kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "/handled alpha beta".to_string(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("dispatch Extension command");
+    assert!(handled.messages.is_empty());
+    assert!(handled.turns.is_empty());
+    assert_eq!(
+        *events.lock().expect("prompt order lock"),
+        vec!["command:alpha beta"]
+    );
+
+    events.lock().expect("prompt order lock").clear();
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "/raw-skill".to_string(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("run transformed Skill");
+    let skill_events = events.lock().expect("prompt order lock").clone();
+    assert_eq!(skill_events[0], "input:/raw-skill");
+    assert!(skill_events[1].starts_with("options:"));
+    assert!(skill_events[1].contains("read"));
+    assert!(skill_events[2].starts_with("before:<skill name=\"order\""));
+    assert!(skill_events[2].contains("SKILL EXPANDED"));
+    assert!(skill_events[2].ends_with("argument"));
+
+    events.lock().expect("prompt order lock").clear();
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "/raw-template".to_string(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("run transformed Template");
+    let template_events = events.lock().expect("prompt order lock").clone();
+    assert_eq!(template_events[0], "input:/raw-template");
+    assert!(template_events[1].starts_with("options:"));
+    assert_eq!(template_events[2], "before:TEMPLATE EXPANDED: value");
+
+    events.lock().expect("prompt order lock").clear();
+    let unknown = kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "/unknown".to_string(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("run unknown slash command");
+    let unknown_events = events.lock().expect("prompt order lock").clone();
+    assert_eq!(unknown_events[0], "input:/unknown");
+    assert!(unknown_events[1].starts_with("options:"));
+    assert_eq!(unknown_events[2], "before:/unknown");
+    assert!(matches!(
+        &unknown.messages[0].content,
+        protocol::MessageContent::User { blocks }
+            if blocks[0].text() == Some("/unknown")
+    ));
+}
+
 /// Startup module that contributes one prompt directory selected by the test.
 struct ResourceModule(PathBuf);
 
@@ -411,9 +651,9 @@ impl ExtensionModule for ResourceModule {
     }
 }
 
-/// Failed startup removes its live registration and newly created persistence.
+/// Unreadable discovered templates remain non-fatal and surface as Session diagnostics.
 #[tokio::test]
-async fn failed_session_startup_can_retry_the_same_identity() {
+async fn unreadable_extension_resource_is_reported_without_aborting_startup() {
     let root = tempfile::tempdir().expect("store root");
     let cwd = root.path().join("workspace");
     let prompts = root.path().join("prompts");
@@ -428,6 +668,10 @@ async fn failed_session_startup_can_retry_the_same_identity() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::new(SystemClock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
@@ -446,23 +690,24 @@ async fn failed_session_startup_can_retry_the_same_identity() {
     kernel
         .create_session(SessionCreateOptions {
             session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
-        .await
-        .expect_err("invalid extension resource must fail startup");
-    std::fs::write(prompt, "valid prompt").expect("repair prompt");
-    kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
             cwd,
             parent_session_id: None,
         })
         .await
-        .expect("retry session startup");
+        .expect("diagnostic-only resource failure must not abort startup");
 
-    kernel
-        .session_tree(&session_id)
-        .expect("retried session tree");
+    let diagnostics = kernel
+        .prompt_diagnostics(&session_id)
+        .expect("prompt diagnostics");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .source
+            .path
+            .as_ref()
+            .is_some_and(|path| path == &prompt)
+            && diagnostic
+                .message
+                .contains("failed to read Prompt Template")
+    }));
     assert_eq!(kernel.list_sessions(None).expect("list sessions").len(), 1);
 }

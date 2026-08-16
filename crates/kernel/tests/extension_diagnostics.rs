@@ -12,6 +12,7 @@ use futures::{Stream, stream};
 use kernel::{
     EventSink, KernelFactory, Model, ModelError, ModelFactory, SinkError,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, EntryId, ExtensionDescriptor, ExtensionId,
     InputEvent, InputResult, LaneId, ModelFinal, ModelProfile, ModelRequest,
@@ -354,6 +355,10 @@ async fn diagnostic_infrastructure_failures_are_logged() {
         .store_factory(Arc::new(FailingDiagnosticStoreFactory {
             inner: JsonlStoreFactory::new(root.path(), Arc::clone(&clock)),
         }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
             vec![Arc::new(|| {

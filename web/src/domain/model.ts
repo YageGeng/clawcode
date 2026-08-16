@@ -163,6 +163,12 @@ export type SkillInfo = Readonly<{
   path: string;
 }>;
 
+export type AvailableCommandEntity = Readonly<{
+  name: string;
+  description: string;
+  argumentHint?: string;
+}>;
+
 export type McpServerInfo = Readonly<{
   name: string;
   state: "connected" | "failed" | "disabled";

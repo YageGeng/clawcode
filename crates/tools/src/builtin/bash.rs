@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use protocol::{
-    ContentBlock, ToolCall, ToolCallId, ToolDefinition, ToolResult,
-    ToolResultDetails, TruncationLimit,
+    ContentBlock, ToolCall, ToolCallId, ToolDefinition, ToolPromptContribution,
+    ToolResult, ToolResultDetails, TruncationLimit,
 };
 use serde::Deserialize;
 
@@ -89,6 +89,16 @@ impl AgentTool for BashTool {
                 },
                 "required": ["command"]
             }),
+        }
+    }
+
+    /// Contributes pi's shell capability without unsupported PI environment guidance.
+    fn prompt_contribution(&self) -> ToolPromptContribution {
+        ToolPromptContribution {
+            snippet: Some(
+                "Execute bash commands (ls, grep, find, etc.)".to_string(),
+            ),
+            guidelines: Vec::new(),
         }
     }
 

@@ -9,6 +9,7 @@ mod identity;
 mod mcp;
 mod message;
 mod model;
+mod prompt;
 mod queue;
 mod scalar;
 mod session;
@@ -25,7 +26,7 @@ pub use acp::{
 pub use capability::{
     CompactionData, CompactionDetails, CompactionPolicy, CompactionReason,
     CompactionResult, McpConnectionState, McpServerInfo, McpToolInfo,
-    ModelProfile, RetryPolicy, SessionTitle, SkillInfo,
+    ModelProfile, RetryPolicy, SessionTitle, SkillInfo, SkillSelectionRule,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
@@ -68,6 +69,14 @@ pub use message::{
 pub use model::{
     ModelFailure, ModelFinal, ModelRequest, ModelRetryDisposition,
     ModelStreamEvent,
+};
+pub use prompt::{
+    AvailableAgentCommand, AvailableAgentCommandKind, ProjectInstruction,
+    PromptCollision, PromptContentSource, PromptDiagnostic,
+    PromptDiagnosticSeverity, PromptPolicy, PromptResourceRequest,
+    PromptSourceInfo, PromptSourceKind, PromptSourceScope, PromptTemplateInfo,
+    SkillResourceRequest, SystemPromptBuildOptions, SystemPromptTool,
+    ToolPromptContribution,
 };
 pub use queue::{PendingMessages, QueueKind, QueuedMessage};
 pub use scalar::{

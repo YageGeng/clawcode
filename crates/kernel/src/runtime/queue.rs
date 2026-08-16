@@ -27,6 +27,36 @@ impl Kernel {
             .ok_or_else(|| {
                 KernelError::SessionNotRunning(session_id.clone())
             })?;
+        if let Ok(invocation) =
+            ::extension::ExtensionCommandInvocation::try_from(input.as_str())
+        {
+            match session
+                .commands
+                .snapshot()
+                .map_err(|error| {
+                    KernelError::ExtensionBlocked(error.to_string())
+                })?
+                .resolve(&invocation.name)
+            {
+                Ok(_command) => {
+                    return Err(KernelError::ExtensionCommandCannotQueue(
+                        invocation.name,
+                    ));
+                }
+                Err(::extension::DynamicRegistryError::CommandNotFound(_)) => {}
+                Err(::extension::DynamicRegistryError::AmbiguousCommand(
+                    name,
+                )) => {
+                    return Err(KernelError::ExtensionCommandAmbiguous(name));
+                }
+                Err(error) => {
+                    return Err(KernelError::ExtensionBlocked(
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+        let input = session.expand_prompt_input(session_id, &input)?;
         let timestamp = self.clock.now();
         let queued = QueuedMessage::builder()
             .queue_id(

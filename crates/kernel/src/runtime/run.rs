@@ -16,6 +16,24 @@ impl Kernel {
             return Ok(result);
         }
         let session = self.session(&request.session_id)?;
+        let command_input = match self
+            .dispatch_extension_command_input(&session, &request.input)
+            .await?
+        {
+            input::CommandInputDisposition::Handled => {
+                return Ok(RunResult {
+                    run_id: RunId::try_from(
+                        self.id_generator.next(IdKind::Run),
+                    )
+                    .map_err(|error| {
+                        KernelError::Protocol(error.to_string())
+                    })?,
+                    messages: Vec::new(),
+                    turns: Vec::new(),
+                });
+            }
+            input::CommandInputDisposition::Continue(input) => input,
+        };
         let _run_guard = session.acquire_operation().await?;
         let cancellation = CancellationToken::new();
         *session
@@ -53,7 +71,7 @@ impl Kernel {
             .extensions
             .emit_input(
                 protocol::InputEvent {
-                    text: request.input.clone(),
+                    text: command_input.clone(),
                     source: input_source,
                     streaming_behavior: None,
                 },
@@ -61,7 +79,7 @@ impl Kernel {
             )
             .await;
         let run_input = match input {
-            protocol::InputResult::Continue => request.input.clone(),
+            protocol::InputResult::Continue => command_input,
             protocol::InputResult::Transform { text } => text,
             protocol::InputResult::Handled => {
                 tracing::info!(
@@ -76,13 +94,9 @@ impl Kernel {
                 });
             }
         };
-        // Pi expands prompt templates only after extensions have transformed input.
-        let run_input = session
-            .prompt_templates
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .expand(&run_input)
-            .unwrap_or(run_input);
+        // Pi expands Skills before Templates after extensions transform input.
+        let run_input =
+            session.expand_prompt_input(&request.session_id, &run_input)?;
         emitter
             .emit(
                 first_turn_id.clone(),
@@ -100,31 +114,19 @@ impl Kernel {
         let execution: Result<RunCompletion, KernelError> = async {
             let initial_tools = session.tool_state.snapshot()?.active_registry()?;
             let initial_skills = session
-                .skills
-                .read()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .as_ref()
-                .map(skill::SkillCatalog::descriptors)
-                .unwrap_or_default();
-            let initial_system_prompt = self.system_prompt_factory.create(
-                SystemPromptContext::builder()
-                    .cwd(session.cwd.clone())
-                    .turn_id(first_turn_id.clone())
-                    .timestamp_ms(self.clock.now())
-                    .tools(initial_tools.definitions())
-                    .skills(initial_skills.clone())
-                    .project(session.project_context.clone())
-                    .build(),
+                .skill_catalog()?
+                .map_or_else(Vec::new, |catalog| catalog.descriptors());
+            let initial_system_prompt = session.build_system_prompt(
+                &initial_tools,
+                self.include_skill_instructions,
             )?;
             let before_agent = session
                 .extensions
                 .emit_before_agent_start(
                     protocol::BeforeAgentStartEvent {
                         prompt: run_input.clone(),
-                        system_prompt: initial_system_prompt
-                            .content
-                            .text_content()
-                            .unwrap_or_default(),
+                        system_prompt: initial_system_prompt.text,
+                        system_prompt_options: initial_system_prompt.options,
                         skills: initial_skills
                             .into_iter()
                             .map(|skill| skill.name)
@@ -133,6 +135,8 @@ impl Kernel {
                     &extension_context,
                 )
                 .await;
+            let system_prompt_override = before_agent.system_prompt;
+            let mut before_agent_messages = Some(before_agent.messages);
             session
                 .extensions
                 .emit_agent_start(
@@ -146,40 +150,8 @@ impl Kernel {
                 .map_err(|_poison_error| KernelError::Poisoned)?
                 .clone();
 
-        let pre_prompt_compaction = {
-            let history = session
-                .history
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            let latest_assistant = history.iter().rev().find_map(|message| {
-                if let MessageContent::Assistant { metadata, .. } =
-                    &message.content
-                {
-                    Some((message, metadata))
-                } else {
-                    None
-                }
-            });
-            latest_assistant
-                .and_then(|(message, metadata)| {
-                    self.compaction_policy
-                        .overflow_recovery(metadata, initial_model.profile())
-                        .map(|recovery| {
-                            let excluded = (recovery
-                                == OverflowRecovery::CompactAndRetry)
-                                .then(|| message.identity.message_id.clone());
-                            (CompactionReason::Overflow, excluded)
-                        })
-                })
-                .or_else(|| {
-                    ContextUsageEstimate::from_history(&history)
-                        .should_compact(
-                            initial_model.profile().context_tokens,
-                            self.compaction_policy,
-                        )
-                        .then_some((CompactionReason::Threshold, None))
-                })
-        };
+        let pre_prompt_compaction = self
+            .pre_prompt_compaction(&session, initial_model.profile())?;
         if let Some((reason, excluded_message_id)) = pre_prompt_compaction {
             // Pi checks the previous Assistant before persisting a newly
             // submitted user message, preventing an avoidable overflow call.
@@ -199,7 +171,6 @@ impl Kernel {
         let mut produced_messages = Vec::new();
         let mut turns = Vec::new();
         let mut next_initial_input = Some(run_input.clone());
-            let mut before_agent = Some(before_agent);
         let mut next_queued_item = None;
         let mut next_turn_id = Some(first_turn_id.clone());
         let mut retry_state = RetryState::default();
@@ -381,30 +352,21 @@ impl Kernel {
             // One immutable registry snapshot defines the complete Turn.
             let turn_tools =
                 Arc::new(session.tool_state.snapshot()?.active_registry()?);
-            let skill_descriptors = session
-                .skills
-                .read()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .as_ref()
-                .map(skill::SkillCatalog::descriptors)
-                .unwrap_or_default();
-            let mut system_prompt = self.system_prompt_factory.create(
-                SystemPromptContext::builder()
-                    .cwd(session.cwd.clone())
-                    .turn_id(turn_id.clone())
-                    .timestamp_ms(turn_started_at)
-                    .tools(turn_tools.definitions())
-                    .skills(skill_descriptors.clone())
-                    .project(session.project_context.clone())
-                    .build(),
+            let mut system_prompt = self.system_prompt_message(
+                &session,
+                turn_id.clone(),
+                turn_started_at,
+                &turn_tools,
             )?;
-            if let Some(before_agent) = before_agent.take() {
-                if let Some(replacement) = before_agent.system_prompt {
-                    system_prompt.content = MessageContent::System {
-                        blocks: vec![ContentBlock::Text { text: replacement }],
-                    };
-                }
-                for draft in before_agent.messages {
+            if let Some(replacement) = system_prompt_override.as_ref() {
+                system_prompt.content = MessageContent::System {
+                    blocks: vec![ContentBlock::Text {
+                        text: replacement.clone(),
+                    }],
+                };
+            }
+            if let Some(messages) = before_agent_messages.take() {
+                for draft in messages {
                     let message = self
                         .materialize_extension_message(&turn_id, draft)?;
                     session

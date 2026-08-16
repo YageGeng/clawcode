@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use protocol::{
-    AcpNavigateParameters, AcpSessionParameters, AcpWorkingDirectory, IdKind,
-    SessionId,
+    AcpNavigateParameters, AcpSessionParameters, AcpSkillParameters,
+    AcpWorkingDirectory, IdKind, SessionId,
 };
 
 /// Verifies that shared identifier categories expose stable persisted prefixes.
@@ -34,6 +34,14 @@ fn acp_parameters_use_domain_identifiers() {
         navigation.entry_id.expect("entry identifier").as_str(),
         "entry-1"
     );
+
+    let skill: AcpSkillParameters = serde_json::from_value(serde_json::json!({
+        "sessionId": "session-1",
+        "name": "review"
+    }))
+    .expect("Skill parameters");
+    assert_eq!(skill.session_id.as_str(), "session-1");
+    assert_eq!(skill.name, "review");
 }
 
 /// Verifies that the shared ACP working-directory type rejects relative paths.

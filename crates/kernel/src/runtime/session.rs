@@ -530,8 +530,10 @@ impl Kernel {
                 &context,
             )
             .await;
-        if trust.trusted != protocol::ProjectTrustDecision::No {
-            let resources = session
+        let project_resources_allowed =
+            trust.trusted != protocol::ProjectTrustDecision::No;
+        let resources = if project_resources_allowed {
+            session
                 .extensions
                 .emit_resources_discover(
                     &protocol::ResourcesDiscoverEvent {
@@ -540,42 +542,39 @@ impl Kernel {
                     },
                     &context,
                 )
-                .await;
-            let skill_paths = resources
-                .skill_paths
-                .into_iter()
-                .map(|path| {
-                    if path.is_absolute() {
-                        path
-                    } else {
-                        session.cwd.join(path)
-                    }
+                .await
+        } else {
+            protocol::ResourcesDiscoverResult::default()
+        };
+        let skills = self
+            .skill_factory
+            .as_ref()
+            .map(|factory| {
+                factory.create(protocol::SkillResourceRequest {
+                    cwd: session.cwd.clone(),
+                    project_resources_allowed,
+                    extension_skill_paths: resources.skill_paths,
                 })
-                .collect::<Vec<_>>();
-            if let Some(factory) = &self.skill_factory {
-                *session
-                    .skills
-                    .write()
-                    .map_err(|_poison_error| KernelError::Poisoned)? =
-                    Some(factory.create_with_roots(skill_paths)?);
-            }
-            let prompt_paths = resources
-                .prompt_paths
-                .into_iter()
-                .map(|path| {
-                    if path.is_absolute() {
-                        path
-                    } else {
-                        session.cwd.join(path)
-                    }
-                })
-                .collect::<Vec<_>>();
-            *session
-                .prompt_templates
-                .write()
-                .map_err(|_poison_error| KernelError::Poisoned)? =
-                crate::PromptTemplateCatalog::discover(&prompt_paths)?;
-        }
+            })
+            .transpose()?
+            .map(Arc::new);
+        session.skills.set(skills).map_err(|_skills| {
+            KernelError::Protocol(
+                "session Skill resources already initialized".to_string(),
+            )
+        })?;
+        let prompt =
+            self.prompt_factory
+                .create(protocol::PromptResourceRequest {
+                    cwd: session.cwd.clone(),
+                    project_resources_allowed,
+                    extension_prompt_paths: resources.prompt_paths,
+                })?;
+        session.prompt.set(Arc::new(prompt)).map_err(|_prompt| {
+            KernelError::Protocol(
+                "session Prompt resources already initialized".to_string(),
+            )
+        })?;
         let restored_model = session
             .model
             .read()
@@ -652,13 +651,6 @@ impl Kernel {
         let initial_event_sequence =
             u64::try_from(store.entries().len()).unwrap_or(u64::MAX);
         let queue = PendingQueue::from_records(&store.records())?;
-        let project_context =
-            self.system_prompt_factory.project_context(&cwd)?;
-        let session_skills = self
-            .skill_factory
-            .as_ref()
-            .map(|factory| factory.create())
-            .transpose()?;
         let commands =
             DynamicCommandRegistry::new(extension_registry.commands())
                 .map_err(|error| {
@@ -704,11 +696,8 @@ impl Kernel {
                 .lane(lane)
                 .cwd(cwd)
                 .mcp_servers(Arc::from(mcp_servers))
-                .project_context(project_context)
-                .skills(RwLock::new(session_skills))
-                .prompt_templates(RwLock::new(
-                    crate::PromptTemplateCatalog::default(),
-                ))
+                .prompt(OnceLock::new())
+                .skills(OnceLock::new())
                 .extensions(extensions)
                 .tool_state(tool_state)
                 .commands(commands)

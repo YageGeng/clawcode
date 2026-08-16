@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use protocol::{ContentBlock, ToolCall, ToolDefinition, ToolResult};
+use protocol::{
+    ContentBlock, ToolCall, ToolDefinition, ToolPromptContribution, ToolResult,
+};
 use serde::Deserialize;
 
 use super::mutation::with_file_mutation;
@@ -50,6 +52,17 @@ impl AgentTool for WriteTool {
                 },
                 "required": ["path", "content"]
             }),
+        }
+    }
+
+    /// Contributes pi's complete-file writing capability and usage guideline.
+    fn prompt_contribution(&self) -> ToolPromptContribution {
+        ToolPromptContribution {
+            snippet: Some("Create or overwrite files".to_string()),
+            guidelines: vec![
+                "Use write only for new files or complete rewrites."
+                    .to_string(),
+            ],
         }
     }
 

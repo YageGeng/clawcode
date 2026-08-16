@@ -9,10 +9,17 @@ workspace = true
 
 [dependencies]
 # workspace crates
+prompt = { workspace = true }
 protocol = { workspace = true }
 
 # error
 thiserror = { workspace = true }
+
+# fs
+ignore = { workspace = true }
+
+# serde
+serde = { workspace = true }
 
 [dev-dependencies]
 # fs
