@@ -8,6 +8,14 @@ pub(super) enum CommandInputDisposition {
     Continue(String),
 }
 
+/// Server-expanded prompt text plus an optional recoverable Skill diagnostic.
+pub(super) struct PromptInputExpansion {
+    /// Text that continues through Prompt Template expansion.
+    pub(super) text: String,
+    /// Skill read failure emitted by the active Kernel Run when present.
+    pub(super) diagnostic: Option<protocol::SkillDiagnostic>,
+}
+
 impl Kernel {
     /// Dispatches a recognized slash command before acquiring the Session run gate.
     pub(super) async fn dispatch_extension_command_input(
@@ -73,22 +81,32 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
         input: &str,
-    ) -> Result<String, KernelError> {
-        let skill_expanded = match self.skill_catalog()? {
+    ) -> Result<PromptInputExpansion, KernelError> {
+        let (skill_expanded, diagnostic) = match self.skill_catalog()? {
             Some(skills) => match skills.expand_command(input) {
-                Ok(Some(expanded)) => expanded,
-                Ok(None) => input.to_string(),
-                Err(error) => {
+                skill::SkillCommandExpansion::Expanded(expanded) => {
+                    (expanded, None)
+                }
+                skill::SkillCommandExpansion::NotSkillCommand => {
+                    (input.to_string(), None)
+                }
+                skill::SkillCommandExpansion::Failed {
+                    original,
+                    diagnostic,
+                } => {
                     tracing::warn!(
                         "failed to expand Skill command for session {}: {}",
                         session_id,
-                        error
+                        diagnostic.message
                     );
-                    input.to_string()
+                    (original, Some(*diagnostic))
                 }
             },
-            None => input.to_string(),
+            None => (input.to_string(), None),
         };
-        Ok(self.prompt_session()?.expand_template(&skill_expanded))
+        Ok(PromptInputExpansion {
+            text: self.prompt_session()?.expand_template(&skill_expanded),
+            diagnostic,
+        })
     }
 }

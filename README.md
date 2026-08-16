@@ -73,6 +73,14 @@ load_project_instructions = true
 load_templates = true
 template_paths = []
 
+[skills]
+include_instructions = true
+paths = ["./team-skills"]
+
+[[skills.rules]]
+name = "manual-review"
+enabled = false
+
 [[mcp_servers]]
 name = "example"
 command = "example-mcp-server"
@@ -100,6 +108,28 @@ arguments expand to empty strings. For example, `/review README.md` expands the
 `review.md` Template on the server. Skills are exposed as `/skill:name` and are
 also expanded only by the server. The WebUI command palette displays the ACP
 v2 Available Commands snapshot but never reads or expands Prompt resources.
+
+## Skill resources
+
+Each Session also freezes an immutable Skill catalog. Winner-first discovery
+order is: configured `skills.paths`, project `.pi/skills`, `.agents/skills`
+from the Session cwd upward to the Git root, the user configuration `skills/`
+directory, `~/.agents/skills`, and Extension paths. Project sources require
+project trust. Relative configured paths and rule paths resolve from the
+Session cwd; a leading `~` resolves from the user home.
+
+Pi-style sources accept root Markdown files and nested `SKILL.md` files.
+`.agents/skills` accepts only nested `SKILL.md`. Discovery follows supported
+ignore files, de-duplicates canonical paths, keeps the first name collision,
+and returns structured diagnostics containing source and winner/loser paths.
+Invalid names and overlong descriptions warn without hiding an otherwise
+loadable Skill; missing descriptions and invalid frontmatter skip that Skill.
+
+`disable-model-invocation: true` keeps a Skill out of the model-visible System
+Prompt catalog while preserving explicit invocation. The WebUI Skill page
+shows provenance, reference directories, manual-only state, and discovery
+diagnostics. Skill bodies are read again when invoked and are never returned by
+the list method.
 
 ## Running
 

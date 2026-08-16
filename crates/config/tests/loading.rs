@@ -186,6 +186,27 @@ enabled = true
     );
 }
 
+/// Explicit Skill paths retain configured order and default to an empty list.
+#[test]
+fn skill_paths_load_from_toml_and_default_empty() {
+    let config: AppConfig = toml::from_str(
+        r#"
+[skills]
+paths = ["./skills", "/opt/agent/review/SKILL.md"]
+"#,
+    )
+    .expect("parse Skill paths");
+
+    assert_eq!(
+        config.skills.paths,
+        vec![
+            PathBuf::from("./skills"),
+            PathBuf::from("/opt/agent/review/SKILL.md")
+        ]
+    );
+    assert!(AppConfig::default().skills.paths.is_empty());
+}
+
 /// Missing extension settings keep the production command guard enabled.
 #[test]
 fn extensions_default_to_command_guard() {

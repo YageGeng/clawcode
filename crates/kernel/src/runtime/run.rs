@@ -95,8 +95,6 @@ impl Kernel {
             }
         };
         // Pi expands Skills before Templates after extensions transform input.
-        let run_input =
-            session.expand_prompt_input(&request.session_id, &run_input)?;
         emitter
             .emit(
                 first_turn_id.clone(),
@@ -105,6 +103,17 @@ impl Kernel {
                 },
             )
             .await?;
+        let expanded_input =
+            session.expand_prompt_input(&request.session_id, &run_input)?;
+        if let Some(diagnostic) = expanded_input.diagnostic {
+            emitter
+                .emit(
+                    first_turn_id.clone(),
+                    AgentEventPayload::SkillDiagnostic { diagnostic },
+                )
+                .await?;
+        }
+        let run_input = expanded_input.text;
         self.record_operation(
             &session,
             &run_id,

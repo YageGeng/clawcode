@@ -254,7 +254,8 @@ impl AcpEventMapper {
             ],
             AgentEventPayload::CompactionStart { .. }
             | AgentEventPayload::CompactionEnd { .. }
-            | AgentEventPayload::ExtensionHandlerFailed { .. } => {
+            | AgentEventPayload::ExtensionHandlerFailed { .. }
+            | AgentEventPayload::SkillDiagnostic { .. } => {
                 vec![Self::extension_update(&event)?]
             }
             AgentEventPayload::TurnStart { .. }
@@ -324,6 +325,7 @@ impl AcpEventMapper {
             | AgentEventPayload::CompactionStart { .. }
             | AgentEventPayload::CompactionEnd { .. }
             | AgentEventPayload::ExtensionHandlerFailed { .. }
+            | AgentEventPayload::SkillDiagnostic { .. }
             | AgentEventPayload::AgentSettled { .. } => {}
         }
         Ok(wire::Meta::from_iter([(

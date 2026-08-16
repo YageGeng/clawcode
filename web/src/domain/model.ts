@@ -161,6 +161,46 @@ export type SkillInfo = Readonly<{
   name: string;
   description: string;
   path: string;
+  referenceDir: string;
+  source: SkillSource;
+  disableModelInvocation: boolean;
+}>;
+
+export type SkillSource = Readonly<{
+  kind: "configured" | "pi" | "agents" | "extension";
+  scope: "configured" | "project" | "user" | "extension";
+  root: string;
+  originBaseDir: string;
+  discoveryMode: "pi" | "agents";
+}>;
+
+export type SkillCollision = Readonly<{
+  name: string;
+  winnerPath: string;
+  loserPath: string;
+}>;
+
+export type SkillDiagnostic = Readonly<{
+  severity: "warning" | "error";
+  code:
+    | "path_not_found"
+    | "unsupported_path"
+    | "file_info_failed"
+    | "directory_read_failed"
+    | "file_read_failed"
+    | "frontmatter_invalid"
+    | "metadata_invalid"
+    | "name_collision"
+    | "selection_rule_invalid";
+  message: string;
+  path?: string;
+  source?: SkillSource;
+  collision?: SkillCollision;
+}>;
+
+export type SkillListResult = Readonly<{
+  skills: readonly SkillInfo[];
+  diagnostics: readonly SkillDiagnostic[];
 }>;
 
 export type AvailableCommandEntity = Readonly<{

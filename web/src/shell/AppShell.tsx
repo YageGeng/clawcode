@@ -103,7 +103,7 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
           </button>
         </header>
         {section === "sessions" ? <Conversation bootstrap={bootstrap} controller={controller} /> : null}
-        {section === "skills" ? <SkillsPanel skills={state.skills} hasSession={state.activeSessionId !== undefined} controller={controller} /> : null}
+        {section === "skills" ? <SkillsPanel skills={state.skills} diagnostics={state.skillDiagnostics} hasSession={state.activeSessionId !== undefined} controller={controller} /> : null}
         {section === "mcp" ? <McpPanel servers={state.mcpServers} /> : null}
         {section === "about" ? <section className="conversation-placeholder"><div className="empty-state"><h2>{bootstrap.product.name}</h2><p>基于 ACP v2 WebSocket 的本机 Agent 工作台。当前模型：{bootstrap.activeModel.displayName}。</p></div></section> : null}
       </main>

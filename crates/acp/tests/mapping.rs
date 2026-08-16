@@ -5,7 +5,8 @@ use protocol::{
     AssistantMetadata, AvailableAgentCommand, AvailableAgentCommandKind,
     BashExecutionMessage, ContentBlock, EventMetadata, MessageContent,
     MessageId, MessageIdentity, MessageTiming, ModelUsage, ProductIdentity,
-    RunId, Sequence, StopReason, TimestampMs, ToolCallId, ToolResult,
+    RunId, Sequence, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiagnosticSeverity, StopReason, TimestampMs, ToolCallId, ToolResult,
     ToolResultDetails, TurnId, UserBashDisposition, UserBashResult,
 };
 
@@ -61,6 +62,36 @@ fn turn_start_maps_to_acp_v2_other_session_update() {
     assert_eq!(value["sessionUpdate"], "_clawcode/event");
     assert_eq!(value["payload"]["event"], "turn_start");
     assert_eq!(value["payload"]["run_id"], "run-1");
+}
+
+/// Skill diagnostics use the reserved ACP extension update with exact Turn timing.
+#[test]
+fn skill_diagnostic_maps_to_acp_v2_other_session_update() {
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: TurnId::try_from("turn-skill").expect("turn id"),
+            timestamp_ms: TimestampMs::from(2_050),
+            sequence: Sequence::try_from(5).expect("sequence"),
+        },
+        payload: AgentEventPayload::SkillDiagnostic {
+            diagnostic: SkillDiagnostic::builder()
+                .severity(SkillDiagnosticSeverity::Warning)
+                .code(SkillDiagnosticCode::FileReadFailed)
+                .message("Skill file disappeared".to_string())
+                .path(Some("/skills/review/SKILL.md".into()))
+                .build(),
+        },
+    };
+
+    let updates = AcpEventMapper::map(event).expect("map Skill diagnostic");
+    let value =
+        serde_json::to_value(updates.first()).expect("serialize update");
+
+    assert_eq!(value["sessionUpdate"], "_clawcode/event");
+    assert_eq!(value["payload"]["event"], "skill_diagnostic");
+    assert_eq!(value["payload"]["diagnostic"]["code"], "file_read_failed");
+    assert_eq!(value["_meta"]["clawcode"]["turnId"], "turn-skill");
+    assert_eq!(value["_meta"]["clawcode"]["timestampMs"], "2050");
 }
 
 /// User-bash replay preserves typed policy disposition in the ACP extension update.

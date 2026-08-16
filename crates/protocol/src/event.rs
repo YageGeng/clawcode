@@ -215,6 +215,12 @@ pub enum AgentEventPayload {
         /// Sanitized human-readable diagnostic.
         message: String,
     },
+
+    /// A Skill resource failed during automatic user-input expansion.
+    SkillDiagnostic {
+        /// Structured failure without the Skill body or user prompt.
+        diagnostic: crate::SkillDiagnostic,
+    },
 }
 
 /// Streamed runtime event with mandatory turn, timestamp, and sequence fields.

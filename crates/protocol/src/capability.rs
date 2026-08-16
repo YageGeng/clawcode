@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{AgentMessage, EntryId, ScalarError, TimestampMs, TurnId};
@@ -192,44 +190,6 @@ impl From<SessionTitle> for String {
     fn from(value: SessionTitle) -> Self {
         value.0
     }
-}
-
-/// Read-only metadata for one effective discovered skill.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    typed_builder::TypedBuilder,
-)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillInfo {
-    /// Conflict-resolved invocation name.
-    pub name: String,
-    /// Human-readable purpose from the skill frontmatter.
-    pub description: String,
-    /// Source SKILL.md path used for diagnostics and display.
-    pub path: PathBuf,
-    /// Whether the Skill is available only through explicit user invocation.
-    #[serde(default)]
-    #[builder(default)]
-    pub disable_model_invocation: bool,
-}
-
-/// Ordered enable or disable rule targeting one Skill by path or name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct SkillSelectionRule {
-    /// Optional exact SKILL.md path selector.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Optional declared Skill name selector.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Whether matching Skills remain in the effective catalog.
-    pub enabled: bool,
 }
 
 /// Connection state retained for one configured MCP server.

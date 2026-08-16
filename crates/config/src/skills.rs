@@ -1,5 +1,7 @@
 //! Skill subsystem configuration types.
 
+use std::path::PathBuf;
+
 pub use protocol::SkillSelectionRule;
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,10 @@ pub struct SkillsConfig {
     /// Whether to inject the skill catalog block into the system prompt.
     #[serde(default = "default_true")]
     pub include_instructions: bool,
+
+    /// Explicit Skill files or directories resolved for each Session cwd.
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
 
     /// Per-skill enable/disable rules.  Rules later in the list override
     /// earlier ones when their selectors match the same skill.
@@ -24,6 +30,7 @@ impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
             include_instructions: true,
+            paths: Vec::new(),
             rules: Vec::new(),
         }
     }

@@ -12,7 +12,9 @@ import type {
   SessionEvent,
   SessionSummary,
   SessionTree,
+  SkillDiagnostic,
   SkillInfo,
+  SkillListResult,
   ToolCallEntity,
   TranscriptEntry,
   RetryStatus
@@ -40,6 +42,7 @@ export type WorkspaceState = Readonly<{
   pending: PendingMessages;
   tree: SessionTree | undefined;
   skills: readonly SkillInfo[];
+  skillDiagnostics: readonly SkillDiagnostic[];
   availableCommands: readonly AvailableCommandEntity[];
   mcpServers: readonly McpServerInfo[];
   running: boolean;
@@ -66,7 +69,7 @@ export type WorkspaceAction =
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
   | { readonly type: "tree/replaced"; readonly tree: SessionTree }
-  | { readonly type: "skills/replaced"; readonly skills: readonly SkillInfo[] }
+  | { readonly type: "skills/replaced"; readonly result: SkillListResult }
   | { readonly type: "commands/replaced"; readonly commands: readonly AvailableCommandEntity[] }
   | { readonly type: "mcp/replaced"; readonly servers: readonly McpServerInfo[] }
   | { readonly type: "running/changed"; readonly running: boolean }
@@ -89,6 +92,7 @@ export const initialWorkspaceState: WorkspaceState = {
   pending: { steering: [], followUp: [] },
   tree: undefined,
   skills: [],
+  skillDiagnostics: [],
   availableCommands: [],
   mcpServers: [],
   running: false,
@@ -119,6 +123,8 @@ export function reduceWorkspace(
         events: [],
         pending: { steering: [], followUp: [] },
         tree: undefined,
+        skills: [],
+        skillDiagnostics: [],
         availableCommands: [],
         mcpServers: [],
         running: false,
@@ -132,7 +138,24 @@ export function reduceWorkspace(
       ...state,
       sessions: state.sessions.map((session) => session.sessionId === action.sessionId ? { ...session, title: action.title } : session)
     };
-    case "transcript/cleared": return { ...state, messages: new Map(), transcript: [], tools: new Map(), bashExecutions: new Map(), extensions: new Map(), events: [], availableCommands: [], contextUsage: undefined, retry: undefined, compaction: { type: "idle" } };
+    case "transcript/cleared": return {
+      ...state,
+      messages: new Map(),
+      transcript: [],
+      tools: new Map(),
+      bashExecutions: new Map(),
+      extensions: new Map(),
+      events: [],
+      skills: [],
+      skillDiagnostics: [],
+      availableCommands: [],
+      // Runtime state belongs to the previous Session and must not influence
+      // prompt routing while the next Session snapshot is loading.
+      running: false,
+      contextUsage: undefined,
+      retry: undefined,
+      compaction: { type: "idle" }
+    };
     case "message/upserted": {
       const messages = new Map(state.messages);
       const exists = messages.has(action.message.messageId);
@@ -188,7 +211,7 @@ export function reduceWorkspace(
     case "event/received": return { ...state, events: [...state.events, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
     case "queue/replaced": return { ...state, pending: action.pending };
     case "tree/replaced": return { ...state, tree: action.tree };
-    case "skills/replaced": return { ...state, skills: action.skills };
+    case "skills/replaced": return { ...state, skills: action.result.skills, skillDiagnostics: action.result.diagnostics };
     case "commands/replaced": return { ...state, availableCommands: action.commands };
     case "mcp/replaced": return { ...state, mcpServers: action.servers };
     case "running/changed": return action.running

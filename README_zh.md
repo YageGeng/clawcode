@@ -73,6 +73,14 @@ load_project_instructions = true
 load_templates = true
 template_paths = []
 
+[skills]
+include_instructions = true
+paths = ["./team-skills"]
+
+[[skills.rules]]
+name = "manual-review"
+enabled = false
+
 [[mcp_servers]]
 enabled = false
 name = "example"
@@ -96,6 +104,23 @@ Template 可在 YAML frontmatter 中声明 `description` 和 `argument-hint`。�
 例如 `/review README.md` 由服务端展开 `review.md`。Skill 使用 `/skill:name`，也只在
 服务端展开。WebUI 命令面板只展示 ACP v2 Available Commands 快照，不读取或展开
 Prompt 资源。
+
+## Skill 资源
+
+每个 Session 同样会冻结一份不可变 Skill Catalog。固定的优先级为：配置中的
+`skills.paths`、项目 `.pi/skills`、从 Session cwd 向 Git 根逐级查找的
+`.agents/skills`、用户产品配置目录的 `skills/`、`~/.agents/skills`，最后是
+Extension 路径。项目来源必须通过项目可信判断。配置和规则中的相对路径基于
+Session cwd 解析，开头的 `~` 基于用户 home 解析。
+
+Pi 模式来源允许根目录 Markdown 和嵌套 `SKILL.md`；`.agents/skills` 只接受嵌套
+`SKILL.md`。发现过程遵守 ignore 文件，按 canonical path 去重，同名冲突保留先发现
+资源，并返回包含来源及 winner/loser 路径的结构化诊断。非法名称和超长描述只警告，
+不会隐藏其他方面可加载的 Skill；描述缺失或 frontmatter 非法时跳过该 Skill。
+
+`disable-model-invocation: true` 只会阻止 Skill 进入模型可见的 System Prompt 清单，
+不影响用户显式调用。WebUI Skill 页面展示来源、引用基准目录、仅手动调用状态和发现
+诊断。Skill 正文只在实际调用时重新读取，列表接口不会返回正文。
 
 ## 运行
 

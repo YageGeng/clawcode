@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use protocol::{
     AgentMessage, ContentBlock, EntryId, IdKind, MessageContent,
@@ -8,11 +9,11 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 use store::{NewRecord, RecordKind, SessionRecord};
 
-use super::{Kernel, KernelError, SessionRuntime};
+use super::{EventEmitter, Kernel, KernelError, SessionRuntime};
 
 impl Kernel {
     /// Persists and queues a complete user message for the active run.
-    pub fn queue_message(
+    pub async fn queue_message(
         &self,
         session_id: &SessionId,
         kind: QueueKind,
@@ -56,7 +57,41 @@ impl Kernel {
                 }
             }
         }
-        let input = session.expand_prompt_input(session_id, &input)?;
+        let expanded = session.expand_prompt_input(session_id, &input)?;
+        if let Some(diagnostic) = expanded.diagnostic {
+            let sink = session
+                .event_sink
+                .lock()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .clone()
+                .ok_or_else(|| {
+                    KernelError::Protocol(
+                        "active run is missing its event sink".to_string(),
+                    )
+                })?;
+            let turn_id = session
+                .diagnostic_turn_id
+                .lock()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .clone()
+                .ok_or_else(|| {
+                    KernelError::Protocol(
+                        "active run is missing its diagnostic TurnId"
+                            .to_string(),
+                    )
+                })?;
+            EventEmitter {
+                clock: Arc::clone(&self.clock),
+                sink,
+                session: Arc::clone(&session),
+            }
+            .emit(
+                turn_id,
+                protocol::AgentEventPayload::SkillDiagnostic { diagnostic },
+            )
+            .await?;
+        }
+        let input = expanded.text;
         let timestamp = self.clock.now();
         let queued = QueuedMessage::builder()
             .queue_id(

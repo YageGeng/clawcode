@@ -13,6 +13,7 @@ mod prompt;
 mod queue;
 mod scalar;
 mod session;
+mod skill;
 mod tool;
 mod turn;
 
@@ -26,7 +27,7 @@ pub use acp::{
 pub use capability::{
     CompactionData, CompactionDetails, CompactionPolicy, CompactionReason,
     CompactionResult, McpConnectionState, McpServerInfo, McpToolInfo,
-    ModelProfile, RetryPolicy, SessionTitle, SkillInfo, SkillSelectionRule,
+    ModelProfile, RetryPolicy, SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
@@ -86,6 +87,11 @@ pub use scalar::{
 pub use session::{
     RunRequest, RunResult, SessionSummary, SessionTreeEntry,
     SessionTreeSnapshot, UserBashInput, UserBashRequest,
+};
+pub use skill::{
+    SkillCollision, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiagnosticSeverity, SkillDiscoveryMode, SkillInfo, SkillListResult,
+    SkillSelectionRule, SkillSource, SkillSourceKind, SkillSourceScope,
 };
 pub use tool::{
     ToolCall, ToolDefinition, ToolResult, ToolResultDetails, TruncationDetails,

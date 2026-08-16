@@ -264,11 +264,14 @@ impl Kernel {
     pub fn skills(
         &self,
         session_id: &SessionId,
-    ) -> Result<Vec<protocol::SkillInfo>, KernelError> {
-        Ok(self
-            .session(session_id)?
-            .skill_catalog()?
-            .map_or_else(Vec::new, |catalog| catalog.descriptors()))
+    ) -> Result<protocol::SkillListResult, KernelError> {
+        Ok(self.session(session_id)?.skill_catalog()?.map_or_else(
+            protocol::SkillListResult::default,
+            |catalog| protocol::SkillListResult {
+                skills: catalog.descriptors(),
+                diagnostics: catalog.diagnostics().to_vec(),
+            },
+        ))
     }
 
     /// Returns the immutable MCP status captured while building this session.

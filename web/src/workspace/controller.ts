@@ -4,7 +4,7 @@ import type { AcpExtensionMethods } from "../acp/extensions";
 import { AcpProtocol } from "../acp/protocol";
 import type { InitializeResult, NewSessionResult, SessionId, SessionInfo, SessionListResult, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
-import type { McpServerInfo, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillInfo } from "../domain/model";
+import type { McpServerInfo, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { useWorkspaceStore } from "./store";
 import type { WorkspaceAction } from "./state";
 import { SessionUpdateRouter } from "./updateRouter";
@@ -57,13 +57,13 @@ export class WorkspaceController {
     const [tree, pending, skills, servers] = await Promise.all([
       this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId }),
       this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
-      this.requireConnection().request<readonly SkillInfo[]>(this.methods.skillList, { sessionId }),
+      this.requireConnection().request<SkillListResult>(this.methods.skillList, { sessionId }),
       this.requireConnection().request<readonly McpServerInfo[]>(this.methods.mcpStatus, { sessionId })
     ]);
     if (!this.isCurrentSessionOpen(sessionId, revision)) return;
     this.dispatch({ type: "tree/replaced", tree });
     this.dispatch({ type: "queue/replaced", pending });
-    this.dispatch({ type: "skills/replaced", skills });
+    this.dispatch({ type: "skills/replaced", result: skills });
     this.dispatch({ type: "mcp/replaced", servers });
   }
 
@@ -165,11 +165,18 @@ export class WorkspaceController {
   }
 
   async invokeSkill(name: string, userInput: string): Promise<void> {
-    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    const state = useWorkspaceStore.getState();
+    const sessionId = state.activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
+    // Explicit Skill content is intentionally persisted for replay, but it is
+    // too large and unstable to serve as a newly created Session title.
+    const shouldSetSkillTitle = state.sessions.some((session) => (
+      session.sessionId === sessionId && session.title === sessionId
+    ));
     const result = await this.requireConnection().request<Readonly<{ name: string; content: string }>>(this.methods.invokeSkill, { sessionId, name });
     const prompt = [result.content, userInput.trim()].filter((part) => part.length > 0).join("\n\nUser request:\n");
     await this.send({ text: prompt, resources: [] });
+    if (shouldSetSkillTitle) await this.renameSession(sessionId, `/skill:${result.name}`);
   }
 
   cancel(): void {
