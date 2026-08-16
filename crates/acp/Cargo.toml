@@ -36,6 +36,8 @@ agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] 
 [dev-dependencies]
 # workspace crates
 extension = { workspace = true }
+prompt = { workspace = true }
+skill = { workspace = true }
 store = { workspace = true }
 tools = { workspace = true }
 

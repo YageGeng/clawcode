@@ -1,15 +1,17 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use extension::{
-    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
-    ExtensionRegistrar, StaticExtensionFactory, ToolCallPoint,
+    BeforeAgentStartPoint, ExtensionContext, ExtensionError, ExtensionHandler,
+    ExtensionModule, ExtensionRegistrar, StaticExtensionFactory, ToolCallPoint,
     ToolExecutionUpdatePoint,
 };
 use futures::{Stream, stream};
 use kernel::{EventSink, KernelFactory, Model, ModelError, ModelFactory};
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentOutcome, ContentBlock, EntryId,
     ExtensionDescriptor, ExtensionId, IdGenerator, IdKind, LaneId,
@@ -142,6 +144,85 @@ impl ModelFactory for StaticModelFactory {
     /// Returns the shared deterministic model used by this kernel test.
     fn create(&self) -> Result<Arc<dyn Model>, ModelError> {
         Ok(Arc::clone(&self.0))
+    }
+}
+
+/// Captures provider requests while consuming deterministic multi-Turn scripts.
+struct SystemPromptCaptureModel {
+    scripts: Mutex<VecDeque<ScriptedResponse>>,
+    requests: Mutex<Vec<ModelRequest>>,
+}
+
+#[async_trait]
+impl Model for SystemPromptCaptureModel {
+    /// Returns the shared profile used by System Prompt lifecycle assertions.
+    fn profile(&self) -> &ModelProfile {
+        &TEST_MODEL_PROFILE
+    }
+
+    /// Confirms that the capture model has no external provider dependency.
+    async fn preflight(&self) -> Result<(), ModelError> {
+        Ok(())
+    }
+
+    /// Captures one complete request and streams the next deterministic response.
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<TestModelStream, ModelError> {
+        self.requests.lock().expect("request lock").push(request);
+        let response = self
+            .scripts
+            .lock()
+            .expect("script lock")
+            .pop_front()
+            .expect("System Prompt script");
+        match response {
+            ScriptedResponse::Stream(events) => {
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+    }
+}
+
+/// Replaces the System Prompt for only the first Agent Run in one Session.
+#[derive(Clone)]
+struct RunScopedPromptOverride(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ExtensionHandler<BeforeAgentStartPoint> for RunScopedPromptOverride {
+    /// Returns one replacement on the first Run and no replacement thereafter.
+    async fn handle(
+        &self,
+        _event: &protocol::BeforeAgentStartEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::BeforeAgentStartResult, ExtensionError> {
+        let first_run = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+        Ok(protocol::BeforeAgentStartResult {
+            messages: Vec::new(),
+            system_prompt: first_run.then(|| "replacement-system".to_string()),
+        })
+    }
+}
+
+impl ExtensionModule for RunScopedPromptOverride {
+    /// Declares the Run-scoped System Prompt fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("run-prompt-override")
+                .expect("extension id"),
+            name: "Run Prompt override".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the pre-Agent replacement handler.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<BeforeAgentStartPoint, _>(self.clone())
     }
 }
 
@@ -464,6 +545,10 @@ async fn preflight_failure_emits_and_persists_terminal_run_state() {
         .store_factory(
             Arc::clone(&store_factory) as Arc<dyn SessionStoreFactory>
         )
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
@@ -542,6 +627,10 @@ async fn streamed_response_produces_one_timed_turn() {
             temporary.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
@@ -616,6 +705,115 @@ async fn streamed_response_produces_one_timed_turn() {
     ));
 }
 
+/// A pre-Agent replacement applies to every Turn of its Run and not later Runs.
+#[tokio::test]
+async fn system_prompt_override_is_scoped_to_the_complete_run() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_250)));
+    let model = Arc::new(SystemPromptCaptureModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("override-tool")
+                        .expect("tool id"),
+                    name: "delayed_text".to_string(),
+                    arguments: serde_json::json!({
+                        "delay_ms": 0,
+                        "text": "tool result"
+                    }),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::TextDelta("first run done".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::TextDelta("second run done".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let extension_calls = Arc::new(AtomicUsize::new(0));
+    let module_calls = Arc::clone(&extension_calls);
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(DelayedToolFactory))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(RunScopedPromptOverride(Arc::clone(&module_calls)))
+                    as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-prompt-override").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "first run".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("first Run");
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "second run".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("second Run");
+
+    let requests = model.requests.lock().expect("request lock");
+    let system_prompts = requests
+        .iter()
+        .map(|request| {
+            request
+                .messages
+                .iter()
+                .find_map(|message| match &message.content {
+                    MessageContent::System { blocks } => blocks[0].text(),
+                    _ => None,
+                })
+                .expect("System Prompt")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(system_prompts[0], "replacement-system");
+    assert_eq!(system_prompts[1], "replacement-system");
+    assert_ne!(system_prompts[2], "replacement-system");
+    assert_eq!(extension_calls.load(Ordering::SeqCst), 2);
+}
+
 /// Stream failures persist complete Assistant messages with and without partial output.
 #[tokio::test]
 async fn stream_failures_persist_complete_error_assistants() {
@@ -642,6 +840,10 @@ async fn stream_failures_persist_complete_error_assistants() {
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 temporary.path(),
                 Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                temporary.path().join("config"),
+                protocol::PromptPolicy::default(),
             )))
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
@@ -749,6 +951,10 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
             temporary.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
@@ -848,6 +1054,10 @@ async fn blocked_tool_result_preserves_policy_outcome() {
             temporary.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             protocol::StaticExtensionRegistration::default(),
             vec![Arc::new(|| {
@@ -923,6 +1133,10 @@ async fn tool_partial_update_precedes_final_result() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             temporary.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             protocol::StaticExtensionRegistration::default(),
@@ -1028,6 +1242,10 @@ async fn tool_updates_coalesce_to_the_latest_snapshot() {
             temporary.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
@@ -1102,6 +1320,10 @@ async fn cancellation_settles_pending_turn_as_cancelled() {
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 temporary.path(),
                 Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                temporary.path().join("config"),
+                protocol::PromptPolicy::default(),
             )))
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
@@ -1184,6 +1406,10 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             temporary.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
@@ -1274,6 +1500,10 @@ async fn resume_rejects_assistant_without_metadata_as_invalid_session() {
         .model_factory(Arc::new(StaticModelFactory(model)))
         .tool_factory(Arc::new(BuiltinToolFactory::new()))
         .store_factory(store_factory)
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(Mutex::new(0))))

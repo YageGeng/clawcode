@@ -13,6 +13,7 @@ use axum::http::{Request, StatusCode};
 use extension::StaticExtensionFactory;
 use futures::stream;
 use kernel::{KernelFactory, Model, ModelError, ModelFactory, ModelStream};
+use prompt::FilesystemPromptFactory;
 use protocol::{
     IdGenerator, IdKind, ModelProfile, ModelRequest, ProductIdentity,
 };
@@ -110,6 +111,10 @@ impl WebFixture {
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 store_root.path(),
                 Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                store_root.path().join("config"),
+                protocol::PromptPolicy::default(),
             )))
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)

@@ -170,6 +170,7 @@ fn registrar_rejects_duplicate_commands_within_one_extension() {
             let command = ExtensionCommandDefinition {
                 name: "inspect".to_string(),
                 description: None,
+                argument_hint: None,
             };
             registrar.register_command(command.clone(), CommandHandler)?;
             registrar.register_command(command, CommandHandler)

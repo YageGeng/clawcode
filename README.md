@@ -12,6 +12,7 @@ WebSocket and includes a local, light-themed Agent WebUI.
 | `protocol` | Shared domain types, Turn/message events, and product identity |
 | `config` | Immutable TOML configuration |
 | `provider` | LLM API adapters and provider factory |
+| `prompt` | Immutable pi-compatible System Prompt, instruction, and Template resources |
 | `kernel` | Session ownership, serialized per-session runs, Turn loop, and tool orchestration |
 | `tools` | Public `AgentTool` interface, registry, and pi-compatible coding tools |
 | `mcp` | Session-scoped MCP stdio and Streamable HTTP tools |
@@ -67,11 +68,38 @@ enabled = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
 
+[prompt]
+load_project_instructions = true
+load_templates = true
+template_paths = []
+
 [[mcp_servers]]
 name = "example"
 command = "example-mcp-server"
 args = []
 ```
+
+## Prompt resources
+
+Each new Session freezes a pi-compatible Prompt snapshot; resource files are
+not hot-reloaded. The project may provide `.pi/SYSTEM.md` to replace the
+built-in System Prompt and `.pi/APPEND_SYSTEM.md` to append guidance. If a
+project file is absent, the same names under the product's user configuration
+directory are used.
+
+Instructions are loaded first from the user configuration directory and then
+from project ancestors, from filesystem root to the Session cwd. Each directory
+uses the first readable candidate in this order: `AGENTS.override.md`,
+`AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`.
+
+Prompt Templates are discovered from the user `prompts/` directory and the
+project `.pi/prompts/` directory. A Markdown Template can declare
+`description` and `argument-hint` in YAML frontmatter. `$1` through `$9`, `$@`,
+`${@:N}`, and `${@:N:L}` expand submitted arguments; missing positional
+arguments expand to empty strings. For example, `/review README.md` expands the
+`review.md` Template on the server. Skills are exposed as `/skill:name` and are
+also expanded only by the server. The WebUI command palette displays the ACP
+v2 Available Commands snapshot but never reads or expands Prompt resources.
 
 ## Running
 
@@ -127,7 +155,9 @@ Pi concepts without native ACP equivalents use ACP v2 extension methods and
 `SessionUpdate::Other` values under the product namespace. Native
 `session/new`, `session/list`, `session/resume`, `session/prompt`,
 `session/cancel`, and `session/close` remain standard ACP methods. The agent
-does not advertise or invoke client filesystem or terminal callbacks.
+uses native ACP v2 `available_commands_update` for Extension Commands, Skills,
+and Prompt Templates. It does not advertise or invoke client filesystem or
+terminal callbacks.
 
 ## Validation
 

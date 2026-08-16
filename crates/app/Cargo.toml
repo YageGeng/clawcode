@@ -14,6 +14,7 @@ extension = { workspace = true }
 extensions = { workspace = true }
 kernel = { workspace = true }
 mcp = { workspace = true }
+prompt = { workspace = true }
 protocol = { workspace = true }
 skill = { workspace = true }
 store = { workspace = true }

@@ -11,6 +11,7 @@ use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
     RetryClassifier,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, IdGenerator, IdKind, MessageContent,
     ModelFailure, ModelFinal, ModelProfile, ModelRequest,
@@ -217,6 +218,10 @@ impl RetryFixture {
                 .store_factory(Arc::new(JsonlStoreFactory::new(
                     root.path(),
                     Arc::clone(&clock),
+                )))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
                 )))
                 .extension_factory(Arc::new(StaticExtensionFactory::default()))
                 .clock(clock)

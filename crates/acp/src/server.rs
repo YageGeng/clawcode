@@ -16,6 +16,44 @@ use crate::extension::{AcpExtensionDispatcher, AcpExtensionRequest};
 use crate::trace::AcpTraceFactory;
 use crate::{AcpEventMapper, AcpMappingError};
 
+/// Cohesive ACP notification operations backed by one shared Kernel.
+pub(crate) struct AcpServer {
+    kernel: Arc<Kernel>,
+}
+
+impl AcpServer {
+    /// Binds ACP notification operations to one Kernel instance.
+    pub(crate) fn new(kernel: Arc<Kernel>) -> Self {
+        Self { kernel }
+    }
+
+    /// Sends the complete Session command snapshot through native ACP v2.
+    pub(crate) fn send_available_commands(
+        &self,
+        session_id: &SessionId,
+        connection: &ConnectionTo<Client>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let event = self
+            .kernel
+            .available_commands_event(session_id)
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let metadata = AcpEventMapper::metadata(&event)
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        for update in AcpEventMapper::map(event)
+            .map_err(agent_client_protocol::Error::into_internal_error)?
+        {
+            connection.send_notification(
+                wire::UpdateSessionNotification::new(
+                    session_id.to_string(),
+                    update,
+                )
+                .meta(metadata.clone()),
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Factory that creates an isolated ACP v2 connection over a shared kernel.
 pub struct AcpServerFactory {
     kernel: Arc<Kernel>,
@@ -119,7 +157,7 @@ impl AcpServerFactory {
             .on_receive_request(
                 async move |request: wire::NewSessionRequest,
                             responder: Responder<wire::NewSessionResponse>,
-                            _connection: ConnectionTo<Client>| {
+                            connection: ConnectionTo<Client>| {
                     let trace_factory = session_traces.clone();
                     let kernel = Arc::clone(&session_kernel);
                     let operation =
@@ -138,7 +176,9 @@ impl AcpServerFactory {
                             .map_err(agent_client_protocol::Error::into_internal_error)?;
                         responder.respond(wire::NewSessionResponse::new(
                             session_id.to_string(),
-                        ))
+                        ))?;
+                        AcpServer::new(kernel)
+                            .send_available_commands(&session_id, &connection)
                     }).await
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -261,6 +301,8 @@ impl AcpServerFactory {
                                 }
                             }
                         }
+                        AcpServer::new(Arc::clone(&kernel))
+                            .send_available_commands(&session_id, &connection)?;
                         responder.respond(wire::ResumeSessionResponse::new())
                     }).await
                 },

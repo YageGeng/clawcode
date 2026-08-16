@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use extension::{
-    DynamicCommandRegistry, ExtensionCommandContext, ExtensionCommandHandler,
-    ExtensionError, RegisteredCommand,
+    DynamicCommandRegistry, DynamicRegistryError, ExtensionCommandContext,
+    ExtensionCommandHandler, ExtensionCommandInvocation, ExtensionError,
+    RegisteredCommand,
 };
 use protocol::{ExtensionCommandDefinition, ExtensionId};
 
@@ -31,6 +32,7 @@ fn command(extension_id: &str, name: &str) -> RegisteredCommand {
         definition: ExtensionCommandDefinition {
             name: name.to_string(),
             description: None,
+            argument_hint: None,
         },
         handler: Arc::new(CommandHandler),
     }
@@ -63,6 +65,26 @@ fn dynamic_commands_are_versioned_and_qualified() {
         .resolve("second/inspect")
         .expect("second qualified command");
 
+    commands
+        .remove(
+            &ExtensionId::try_from("first").expect("extension id"),
+            "inspect",
+        )
+        .expect("remove first command");
+    let removed = commands.snapshot().expect("removed snapshot");
+    assert!(removed.resolve("first/inspect").is_err());
+    assert_eq!(
+        removed
+            .resolve("inspect")
+            .expect("remaining short command")
+            .extension_id
+            .as_str(),
+        "second"
+    );
+    current
+        .resolve("first/inspect")
+        .expect("pre-remove snapshot remains stable");
+
     assert_eq!(
         old.resolve("inspect")
             .expect("old snapshot remains unique")
@@ -70,4 +92,27 @@ fn dynamic_commands_are_versioned_and_qualified() {
             .as_str(),
         "first"
     );
+}
+
+/// Slash parsing uses only one ordinary space as pi's command delimiter.
+#[test]
+fn extension_command_invocation_preserves_non_space_name_characters() {
+    let invocation =
+        ExtensionCommandInvocation::try_from("/first/inspect   alpha beta  ")
+            .expect("command invocation");
+    assert_eq!(invocation.name, "first/inspect");
+    assert_eq!(invocation.arguments, "alpha beta");
+
+    let tabbed = ExtensionCommandInvocation::try_from("/inspect\talpha")
+        .expect("tabbed invocation");
+    assert_eq!(tabbed.name, "inspect\talpha");
+    assert!(tabbed.arguments.is_empty());
+
+    for invalid in ["inspect", "/"] {
+        assert!(matches!(
+            ExtensionCommandInvocation::try_from(invalid),
+            Err(DynamicRegistryError::InvalidCommandInvocation(value))
+                if value == invalid
+        ));
+    }
 }

@@ -19,6 +19,7 @@ use protocol::{
 struct RecordingHost {
     calls: AtomicUsize,
     command_owners: Mutex<Vec<(String, String)>>,
+    command_removals: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
@@ -67,6 +68,19 @@ impl ExtensionHost for RecordingHost {
                 invocation.extension_id.to_string(),
                 command.extension_id.to_string(),
             ));
+        Ok(())
+    }
+
+    /// Records the invocation owner and unqualified command selected for removal.
+    async fn unregister_command(
+        &self,
+        invocation: &ExtensionInvocation,
+        name: &str,
+    ) -> Result<(), ExtensionHostError> {
+        self.command_removals
+            .lock()
+            .expect("command removal lock")
+            .push((invocation.extension_id.to_string(), name.to_string()));
         Ok(())
     }
 }
@@ -173,6 +187,7 @@ async fn context_prevents_cross_extension_command_mutation() {
             definition: ExtensionCommandDefinition {
                 name: "inspect".to_string(),
                 description: None,
+                argument_hint: None,
             },
             handler: Arc::new(CommandHandler),
         })
@@ -181,5 +196,13 @@ async fn context_prevents_cross_extension_command_mutation() {
     assert_eq!(
         *host.command_owners.lock().expect("command owner lock"),
         vec![("audit".to_string(), "audit".to_string())]
+    );
+    context
+        .unregister_command("inspect")
+        .await
+        .expect("unregister owned command");
+    assert_eq!(
+        *host.command_removals.lock().expect("command removal lock"),
+        vec![("audit".to_string(), "inspect".to_string())]
     );
 }

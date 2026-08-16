@@ -6,11 +6,9 @@ mod web;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kernel::{
-    Kernel, KernelFactory, NanoidIdGenerator, PiSystemPromptFactory,
-    ProviderModelFactory,
-};
+use kernel::{Kernel, KernelFactory, NanoidIdGenerator, ProviderModelFactory};
 use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
+use prompt::FilesystemPromptFactory;
 use protocol::{IdGenerator, ProductIdentity};
 use skill::FilesystemSkillFactory;
 use store::{JsonlStoreFactory, SystemClock};
@@ -126,11 +124,6 @@ impl ApplicationFactory {
                 display_name: model_profile.display_name,
             })
             .build();
-        let skill_roots = vec![
-            config_root.join("skills"),
-            cwd.join(".pi").join("skills"),
-            cwd.join(".agents").join("skills"),
-        ];
         let mcp_servers = snapshot
             .mcp_servers
             .clone()
@@ -141,8 +134,10 @@ impl ApplicationFactory {
             .filesystem_enabled(snapshot.tools.enable_fs)
             .shell_enabled(snapshot.tools.enable_shell);
         let skill_factory = snapshot.tools.enable_skill.then(|| {
-            Arc::new(FilesystemSkillFactory::new(skill_roots))
-                as Arc<dyn skill::SkillFactory>
+            Arc::new(FilesystemSkillFactory::new(
+                config_root.clone(),
+                snapshot.skills.rules.clone(),
+            )) as Arc<dyn skill::SkillFactory>
         });
         let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
         let id_generator: Arc<dyn IdGenerator> = Arc::new(NanoidIdGenerator);
@@ -158,14 +153,16 @@ impl ApplicationFactory {
             .extension_factory(Arc::new(extension_factory))
             .clock(clock)
             .id_generator(Arc::clone(&id_generator))
-            .system_prompt_factory(Arc::new(PiSystemPromptFactory::new(
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
                 config_root,
+                snapshot.prompt.clone(),
             )))
             .mcp_factory(Some(Arc::new(SessionMcpFactory::new(
                 mcp_servers,
                 Arc::new(RmcpConnector),
             ))))
             .skill_factory(skill_factory)
+            .include_skill_instructions(snapshot.skills.include_instructions)
             .compaction_policy(snapshot.compaction)
             .retry_policy(snapshot.retry.agent)
             .build()

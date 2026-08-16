@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, ModelRequest, TimestampMs, ToolCall, ToolResult, TurnRecord,
+    AgentMessage, ModelRequest, SystemPromptBuildOptions, TimestampMs,
+    ToolCall, ToolResult, TurnRecord,
 };
 
 /// Origin of user input entering the extension chain.
@@ -44,6 +45,8 @@ pub struct BeforeAgentStartEvent {
     pub prompt: String,
     /// Current complete system prompt.
     pub system_prompt: String,
+    /// Structured inputs used to build the current system prompt.
+    pub system_prompt_options: SystemPromptBuildOptions,
     /// Skill names available to the session.
     pub skills: Vec<String>,
 }

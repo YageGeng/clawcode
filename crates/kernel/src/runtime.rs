@@ -1,7 +1,10 @@
 mod attempt;
+mod command;
 mod compaction;
 mod extension;
+mod input;
 mod lifecycle;
+mod prompt;
 mod queue;
 mod retry;
 mod run;
@@ -19,7 +22,7 @@ use lifecycle::SessionLifecycle;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use ::extension::{
@@ -36,8 +39,8 @@ use protocol::{
     ModelRequest, ModelRetryDisposition, ModelStreamEvent, QueueId, RecordId,
     RetryPolicy, RunId, RunRequest, RunResult, Sequence, SessionId,
     SessionSummary, SessionTitle, SessionTreeEntry, SessionTreeSnapshot,
-    SkillInfo, StopReason, ThinkingLevel, TimestampMs, ToolCall, ToolResult,
-    TurnId, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming, UserBashInput,
+    StopReason, ThinkingLevel, TimestampMs, ToolCall, ToolResult, TurnId,
+    TurnIdentity, TurnOutcome, TurnRecord, TurnTiming, UserBashInput,
     UserBashRequest, UserBashResult,
 };
 use store::{
@@ -52,9 +55,7 @@ use tools::{
 };
 
 use crate::{
-    EventSink, Model, ModelCatalog, ModelError, ModelFactory,
-    PiSystemPromptFactory, ProjectContext, SinkError, SystemPromptContext,
-    SystemPromptFactory,
+    EventSink, Model, ModelCatalog, ModelError, ModelFactory, SinkError,
 };
 use attempt::{
     AssistantAttempt, AssistantAttemptResult, AssistantAttemptSettlement,
@@ -92,9 +93,9 @@ pub enum KernelError {
     /// Skill discovery or invocation failed.
     #[error("skill subsystem failed: {0}")]
     Skill(#[from] skill::SkillError),
-    /// System prompt construction or project context discovery failed.
+    /// Prompt resource discovery or rendering failed.
     #[error("system prompt failed: {0}")]
-    Prompt(#[from] crate::PromptError),
+    Prompt(#[from] ::prompt::PromptError),
     /// A live event consumer failed.
     #[error(transparent)]
     Sink(#[from] SinkError),
@@ -131,6 +132,12 @@ pub enum KernelError {
     /// A requested extension command was not registered.
     #[error("extension command not found: {0}")]
     ExtensionCommandNotFound(String),
+    /// A short extension command resolved to more than one owner.
+    #[error("extension command name is ambiguous: {0}")]
+    ExtensionCommandAmbiguous(String),
+    /// Extension commands execute immediately and cannot enter a run queue.
+    #[error("extension command cannot be queued: {0}")]
+    ExtensionCommandCannotQueue(String),
     /// Queue insertion requires a run that has already become active.
     #[error("session is not running: {0}")]
     SessionNotRunning(SessionId),
@@ -148,15 +155,17 @@ pub struct KernelFactory {
     extension_factory: Arc<dyn ExtensionFactory>,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
-    /// Creates system messages and immutable project context snapshots.
-    #[builder(default = Arc::new(PiSystemPromptFactory::default()))]
-    system_prompt_factory: Arc<dyn SystemPromptFactory>,
+    /// Creates immutable Session Prompt resource snapshots.
+    prompt_factory: Arc<dyn ::prompt::PromptFactory>,
     /// Optional session-scoped MCP tool factory.
     #[builder(default)]
     mcp_factory: Option<Arc<dyn mcp::McpFactory>>,
     /// Optional pi-compatible skill discovery factory.
     #[builder(default)]
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
+    /// Controls whether effective Skills are listed in System Prompts.
+    #[builder(default = true)]
+    include_skill_instructions: bool,
     /// Bounds accidental endless tool loops while remaining configurable.
     #[builder(default = 64)]
     max_turns: usize,
@@ -178,11 +187,6 @@ impl KernelFactory {
         let models =
             Arc::new(self.model_factory.create_catalog(&static_extensions)?);
         let tools = Arc::new(self.tool_factory.create()?);
-        let skills = self
-            .skill_factory
-            .as_ref()
-            .map(|factory| factory.create())
-            .transpose()?;
         Ok(Kernel::builder()
             .models(models)
             .static_extensions(static_extensions)
@@ -191,10 +195,10 @@ impl KernelFactory {
             .extension_factory(self.extension_factory)
             .clock(self.clock)
             .id_generator(self.id_generator)
-            .system_prompt_factory(self.system_prompt_factory)
+            .prompt_factory(self.prompt_factory)
             .mcp_factory(self.mcp_factory)
             .skill_factory(self.skill_factory)
-            .skills(skills)
+            .include_skill_instructions(self.include_skill_instructions)
             .max_turns(self.max_turns)
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
@@ -214,13 +218,12 @@ pub struct Kernel {
     extension_factory: Arc<dyn ExtensionFactory>,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
-    system_prompt_factory: Arc<dyn SystemPromptFactory>,
+    prompt_factory: Arc<dyn ::prompt::PromptFactory>,
     #[builder(default)]
     mcp_factory: Option<Arc<dyn mcp::McpFactory>>,
     #[builder(default)]
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
-    #[builder(default)]
-    skills: Option<skill::SkillCatalog>,
+    include_skill_instructions: bool,
     max_turns: usize,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
@@ -245,20 +248,27 @@ impl Kernel {
     }
 
     /// Invokes one discovered skill explicitly and returns its complete source.
-    pub fn invoke_skill(&self, name: &str) -> Result<String, KernelError> {
-        self.skills
-            .as_ref()
+    pub fn invoke_skill(
+        &self,
+        session_id: &SessionId,
+        name: &str,
+    ) -> Result<String, KernelError> {
+        self.session(session_id)?
+            .skill_catalog()?
             .ok_or_else(|| skill::SkillError::NotFound(name.to_string()))?
             .invoke(name)
             .map_err(KernelError::from)
     }
 
     /// Lists effective skill metadata without reading or returning skill bodies.
-    #[must_use]
-    pub fn skills(&self) -> Vec<SkillInfo> {
-        self.skills
-            .as_ref()
-            .map_or_else(Vec::new, |catalog| catalog.descriptors())
+    pub fn skills(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<protocol::SkillInfo>, KernelError> {
+        Ok(self
+            .session(session_id)?
+            .skill_catalog()?
+            .map_or_else(Vec::new, |catalog| catalog.descriptors()))
     }
 
     /// Returns the immutable MCP status captured while building this session.
@@ -331,9 +341,8 @@ struct SessionRuntime {
     lane: LaneId,
     cwd: PathBuf,
     mcp_servers: Arc<[McpServerInfo]>,
-    project_context: ProjectContext,
-    skills: RwLock<Option<skill::SkillCatalog>>,
-    prompt_templates: RwLock<crate::PromptTemplateCatalog>,
+    prompt: OnceLock<Arc<::prompt::PromptSession>>,
+    skills: OnceLock<Option<Arc<skill::SkillCatalog>>>,
     extensions: Arc<ExtensionRuntime>,
     tool_state: SessionToolState,
     commands: DynamicCommandRegistry,

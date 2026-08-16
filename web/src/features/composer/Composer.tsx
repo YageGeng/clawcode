@@ -2,8 +2,10 @@ import { Link2, Send, Square, Trash2, X } from "lucide-react";
 import { useState } from "react";
 
 import type { SessionId } from "../../acp/protocol";
-import type { PendingMessages, PromptInput, PromptResourceLink, QueuedMessage } from "../../domain/model";
+import type { AvailableCommandEntity, PendingMessages, PromptInput, PromptResourceLink, QueuedMessage } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
+import { CommandPalette } from "./CommandPalette";
+import { CommandPaletteModel } from "./commandPaletteModel";
 
 export type ComposerProps = Readonly<{
   productSlug: string;
@@ -11,6 +13,7 @@ export type ComposerProps = Readonly<{
   running: boolean;
   outcomeUnknown: boolean;
   pending: PendingMessages;
+  availableCommands: readonly AvailableCommandEntity[];
   controller: WorkspaceController;
 }>;
 
@@ -49,7 +52,7 @@ const QueuedMessageView = {
   }
 } as const;
 
-export function Composer({ productSlug, sessionId, running, outcomeUnknown, pending, controller }: ComposerProps) {
+export function Composer({ productSlug, sessionId, running, outcomeUnknown, pending, availableCommands, controller }: ComposerProps) {
   const storageKey = `${productSlug}:agent-draft:${sessionId}`;
   const initial = DraftCodec.parse(sessionStorage.getItem(storageKey));
   const [text, setText] = useState(initial.text);
@@ -59,7 +62,13 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const [showResourceForm, setShowResourceForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const queued = [...pending.steering, ...pending.followUp];
+  const commandQuery = text.startsWith("/") && !/\s/.test(text) ? text.slice(1) : undefined;
+  const matchingCommands = commandQuery === undefined ? [] : CommandPaletteModel.matches(availableCommands, commandQuery);
+  const paletteOpen = commandQuery !== undefined && !paletteDismissed;
+  const activeCommandIndex = matchingCommands.length === 0 ? 0 : selectedCommandIndex % matchingCommands.length;
 
   const persist = (draft: StoredDraft) => {
     sessionStorage.setItem(storageKey, JSON.stringify(draft));
@@ -78,6 +87,16 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
     } finally {
       setSubmitting(false);
     }
+  };
+
+  /** Writes one discovered command into the draft without expanding it in the browser. */
+  const selectCommand = (command: AvailableCommandEntity) => {
+    persist({
+      text: `/${command.name}${command.argumentHint === undefined ? "" : " "}`,
+      resources
+    });
+    setSelectedCommandIndex(0);
+    setPaletteDismissed(true);
   };
 
   return (
@@ -102,14 +121,47 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
             setError(reason instanceof Error ? reason.message : String(reason));
           }
         }}>添加</button></div> : null}
+        {paletteOpen && commandQuery !== undefined ? (
+          <CommandPalette
+            commands={availableCommands}
+            query={commandQuery}
+            selectedIndex={activeCommandIndex}
+            onSelect={selectCommand}
+          />
+        ) : null}
         <textarea
           aria-label="消息"
+          aria-controls={paletteOpen ? "command-palette" : undefined}
+          aria-expanded={paletteOpen}
+          aria-activedescendant={paletteOpen && matchingCommands.length > 0 ? `command-option-${activeCommandIndex}` : undefined}
           placeholder={running ? "当前 Turn 运行中；发送内容将加入 follow-up…" : "发送消息…"}
           rows={3}
           value={text}
-          onChange={(event) => persist({ text: event.target.value, resources })}
+          onChange={(event) => {
+            persist({ text: event.target.value, resources });
+            setSelectedCommandIndex(0);
+            setPaletteDismissed(false);
+          }}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !submitting) void submit({ text, resources });
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+              if (!submitting) void submit({ text, resources });
+              return;
+            }
+            if (!paletteOpen) return;
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setPaletteDismissed(true);
+            } else if (matchingCommands.length > 0 && event.key === "ArrowDown") {
+              event.preventDefault();
+              setSelectedCommandIndex((activeCommandIndex + 1) % matchingCommands.length);
+            } else if (matchingCommands.length > 0 && event.key === "ArrowUp") {
+              event.preventDefault();
+              setSelectedCommandIndex((activeCommandIndex - 1 + matchingCommands.length) % matchingCommands.length);
+            } else if (matchingCommands.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
+              event.preventDefault();
+              const command = matchingCommands[activeCommandIndex];
+              if (command !== undefined) selectCommand(command);
+            }
           }}
         />
         {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}

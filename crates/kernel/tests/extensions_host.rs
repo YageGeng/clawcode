@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use extension::{
     ExtensionCommandContext, ExtensionCommandHandler, ExtensionContext,
     ExtensionError, ExtensionHandler, ExtensionHostError, ExtensionModule,
-    ExtensionRegistrar, InputPoint, SessionBeforeTreePoint,
+    ExtensionRegistrar, InputPoint, RegisteredCommand, SessionBeforeTreePoint,
     SessionShutdownPoint, SessionStartPoint, StaticExtensionFactory,
     UserBashPoint,
 };
@@ -13,6 +13,7 @@ use futures::{Stream, stream};
 use kernel::{
     EventSink, KernelFactory, Model, ModelCatalog, ModelError, ModelFactory,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, ContentBlock, ExtensionCommandDefinition, ExtensionDescriptor,
     ExtensionEntryData, ExtensionEventData, ExtensionFlagDefinition,
@@ -141,6 +142,90 @@ impl EventSink for DiscardSink {
     }
 }
 
+/// Event sink that retains emitted runtime events for command snapshot assertions.
+struct RecordingSink {
+    events: Arc<Mutex<Vec<AgentEvent>>>,
+}
+
+#[async_trait]
+impl EventSink for RecordingSink {
+    /// Records each emitted event in delivery order.
+    async fn emit(&self, event: AgentEvent) -> Result<(), kernel::SinkError> {
+        self.events.lock().expect("event sink lock").push(event);
+        Ok(())
+    }
+}
+
+/// Dynamic command body that is registered only long enough to inspect snapshots.
+struct TemporaryCommand;
+
+#[async_trait]
+impl ExtensionCommandHandler for TemporaryCommand {
+    /// Completes without side effects because dispatch is outside this test's scope.
+    async fn handle(
+        &self,
+        _arguments: &str,
+        _parameters: &serde_json::Value,
+        _context: &ExtensionCommandContext,
+    ) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+}
+
+/// Input hook that exercises both dynamic command mutation notifications.
+struct DynamicCommandMutation;
+
+#[async_trait]
+impl ExtensionHandler<InputPoint> for DynamicCommandMutation {
+    /// Registers and removes one command while the active Run sink is installed.
+    async fn handle(
+        &self,
+        _event: &InputEvent,
+        context: &ExtensionContext,
+    ) -> Result<InputResult, ExtensionError> {
+        context
+            .register_command(RegisteredCommand {
+                extension_id: ExtensionId::try_from("placeholder")
+                    .expect("placeholder extension id"),
+                definition: ExtensionCommandDefinition {
+                    name: "temporary".to_string(),
+                    description: Some("Temporary command".to_string()),
+                    argument_hint: Some("[value]".to_string()),
+                },
+                handler: Arc::new(TemporaryCommand),
+            })
+            .await
+            .map_err(|error| ExtensionError::Handler(error.to_string()))?;
+        context
+            .unregister_command("temporary")
+            .await
+            .map_err(|error| ExtensionError::Handler(error.to_string()))?;
+        Ok(InputResult::Continue)
+    }
+}
+
+/// Extension module that mutates its Session command registry during input.
+struct DynamicCommandModule;
+
+impl ExtensionModule for DynamicCommandModule {
+    /// Declares the owner used to qualify the temporary command.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("dynamic-command").expect("extension id"),
+            name: "Dynamic command".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the input hook that changes command availability.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<InputPoint, _>(DynamicCommandMutation)
+    }
+}
+
 #[async_trait]
 impl ExtensionCommandHandler for HostCommand {
     /// Exercises persisted, session-creation, and application-shutdown host actions.
@@ -245,6 +330,7 @@ impl ExtensionModule for HostModule {
             ExtensionCommandDefinition {
                 name: "manage".to_string(),
                 description: None,
+                argument_hint: None,
             },
             HostCommand,
         )?;
@@ -555,6 +641,10 @@ fn static_extensions_are_frozen_before_models_and_remain_queryable() {
             root.path(),
             Arc::new(SystemClock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             registration.clone(),
             Vec::new(),
@@ -595,6 +685,10 @@ async fn shutdown_reentrant_operations_are_rejected() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
@@ -656,6 +750,10 @@ async fn dynamically_registered_tool_is_active_in_its_session() {
             root.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
             vec![Arc::new(|| {
@@ -704,6 +802,88 @@ async fn dynamically_registered_tool_is_active_in_its_session() {
     assert!(!requests[1].iter().any(|name| name == "session_dynamic"));
 }
 
+/// Dynamic command changes emit complete ordered snapshots through the active Run sink.
+#[tokio::test]
+async fn dynamic_command_changes_publish_available_command_events() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(HostModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            vec![Arc::new(|| {
+                Ok(Arc::new(DynamicCommandModule) as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(kernel::NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("dynamic-command-session").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    let events = Arc::new(Mutex::new(Vec::new()));
+
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "publish command changes".to_string(),
+            },
+            Arc::new(RecordingSink {
+                events: Arc::clone(&events),
+            }),
+        )
+        .await
+        .expect("run agent");
+
+    let events = events.lock().expect("event sink lock");
+    let snapshots = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            protocol::AgentEventPayload::AvailableCommandsChanged {
+                commands,
+            } => Some((event.metadata.sequence.get(), commands)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots[0].0 < snapshots[1].0);
+    assert!(snapshots[0].1.iter().any(|command| {
+        command.name == "dynamic-command/temporary"
+            && command.argument_hint.as_deref() == Some("[value]")
+    }));
+    assert!(
+        snapshots[0]
+            .1
+            .iter()
+            .any(|command| command.name == "temporary")
+    );
+    assert!(snapshots[1].1.iter().all(|command| {
+        command.name != "dynamic-command/temporary"
+            && command.name != "temporary"
+    }));
+}
+
 /// Kernel-backed command actions persist data, create sessions, and signal shutdown.
 #[tokio::test]
 async fn command_context_uses_complete_kernel_host() {
@@ -718,6 +898,10 @@ async fn command_context_uses_complete_kernel_host() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
@@ -783,6 +967,10 @@ async fn navigation_uses_extension_branch_summary() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
@@ -855,6 +1043,10 @@ async fn extension_handler_failure_is_persisted_for_replay() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),
@@ -941,6 +1133,10 @@ async fn user_bash_uses_hooks_and_preserves_context_exclusion() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::new(
             StaticExtensionRegistration::default(),

@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use protocol::{SessionId, ToolCall, ToolDefinition, ToolResult, TurnId};
+use protocol::{
+    SessionId, SystemPromptTool, ToolCall, ToolDefinition,
+    ToolPromptContribution, ToolResult, TurnId,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Receives replaceable partial snapshots from streaming tools.
@@ -94,6 +97,11 @@ pub trait AgentTool: Send + Sync {
     /// Returns the model-facing name, description, and argument schema.
     fn definition(&self) -> ToolDefinition;
 
+    /// Returns optional text contributed to the dynamic System Prompt.
+    fn prompt_contribution(&self) -> ToolPromptContribution {
+        ToolPromptContribution::default()
+    }
+
     /// Validates a parsed call before any side-effectful execution begins.
     fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
         let definition = self.definition();
@@ -161,6 +169,18 @@ impl ToolRegistry {
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|tool| tool.definition()).collect()
+    }
+
+    /// Projects selected tool names and explicit Prompt contributions in lexical order.
+    #[must_use]
+    pub fn prompt_tools(&self) -> Vec<SystemPromptTool> {
+        self.tools
+            .iter()
+            .map(|(name, tool)| SystemPromptTool {
+                name: name.clone(),
+                contribution: tool.prompt_contribution(),
+            })
+            .collect()
     }
 
     /// Builds an immutable registry containing only requested existing tool names.

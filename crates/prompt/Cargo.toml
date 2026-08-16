@@ -1,0 +1,26 @@
+[package]
+name = "prompt"
+edition.workspace = true
+version.workspace = true
+description = "Prompt resource discovery and rendering for the agent runtime"
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+protocol = { workspace = true }
+
+# error
+thiserror = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+# serde
+serde = { workspace = true }
+serde_yaml_ng = { workspace = true }
+
+[dev-dependencies]
+# fs
+tempfile = { workspace = true }

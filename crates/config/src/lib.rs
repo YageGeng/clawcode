@@ -8,6 +8,7 @@ pub mod llm;
 pub mod loader;
 pub mod logging;
 pub mod mcp;
+pub mod prompt;
 pub mod retry;
 pub mod skills;
 pub mod tools;
@@ -26,6 +27,7 @@ pub use llm::{
 pub use loader::{ConfigError, ConfigHandle, load, load_from};
 pub use logging::LoggingConfig;
 pub use mcp::{McpConfigError, McpOAuthConfig, McpServerConfig};
+pub use prompt::PromptPolicy;
 pub use retry::{ProviderRetryConfig, RetryConfig};
-pub use skills::SkillsConfig;
+pub use skills::{SkillSelectionRule, SkillsConfig};
 pub use tools::ToolsConfig;

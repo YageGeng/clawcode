@@ -12,6 +12,7 @@ use kernel::{
     Kernel, KernelFactory, Model, ModelError, ModelFactory, ModelStream,
     NanoidIdGenerator,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     IdGenerator, IdKind, ModelFinal, ModelProfile, ModelRequest,
     ModelStreamEvent, ModelUsage, StopReason,
@@ -145,6 +146,10 @@ fn traced_kernel(root: &Path, reached: Arc<Notify>) -> Arc<Kernel> {
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 root,
                 Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.join("config"),
+                protocol::PromptPolicy::default(),
             )))
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)

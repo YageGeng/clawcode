@@ -2,10 +2,11 @@ use acp::AcpEventMapper;
 use agent_client_protocol::schema::v2::SessionUpdate;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
-    AssistantMetadata, BashExecutionMessage, ContentBlock, EventMetadata,
-    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelUsage,
-    ProductIdentity, RunId, Sequence, StopReason, TimestampMs, ToolCallId,
-    ToolResult, ToolResultDetails, TurnId, UserBashDisposition, UserBashResult,
+    AssistantMetadata, AvailableAgentCommand, AvailableAgentCommandKind,
+    BashExecutionMessage, ContentBlock, EventMetadata, MessageContent,
+    MessageId, MessageIdentity, MessageTiming, ModelUsage, ProductIdentity,
+    RunId, Sequence, StopReason, TimestampMs, ToolCallId, ToolResult,
+    ToolResultDetails, TurnId, UserBashDisposition, UserBashResult,
 };
 
 /// Native ACP chunks retain mandatory Turn and timestamp metadata in `_meta`.
@@ -146,6 +147,55 @@ fn title_change_maps_to_native_session_info_update() {
     assert_eq!(
         value["_meta"]["clawcode"]["timestampMs"],
         "9007199254740999"
+    );
+}
+
+/// Available Commands map to ACP v2's native complete command snapshot.
+#[test]
+fn available_commands_map_to_native_acp_v2_update() {
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: TurnId::try_from("turn-commands").expect("turn id"),
+            timestamp_ms: TimestampMs::from(9_007_199_254_740_999),
+            sequence: Sequence::try_from(12).expect("sequence"),
+        },
+        payload: AgentEventPayload::AvailableCommandsChanged {
+            commands: vec![
+                AvailableAgentCommand::builder()
+                    .name("review".to_string())
+                    .description("Review changes".to_string())
+                    .argument_hint(Some("<path>".to_string()))
+                    .kind(AvailableAgentCommandKind::PromptTemplate)
+                    .build(),
+            ],
+        },
+    };
+
+    let updates = AcpEventMapper::map(event).expect("map Commands event");
+    assert!(matches!(
+        updates.first(),
+        Some(SessionUpdate::AvailableCommandsUpdate(_))
+    ));
+    let value = serde_json::to_value(&updates[0]).expect("serialize update");
+    assert_eq!(value["sessionUpdate"], "available_commands_update");
+    assert_eq!(value["availableCommands"][0]["name"], "review");
+    assert_eq!(
+        value["availableCommands"][0]["description"],
+        "Review changes"
+    );
+    assert_eq!(value["availableCommands"][0]["input"]["type"], "text");
+    assert_eq!(value["availableCommands"][0]["input"]["hint"], "<path>");
+    assert_eq!(
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]["turnId"],
+        "turn-commands"
+    );
+    assert_eq!(
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]["timestampMs"],
+        "9007199254740999"
+    );
+    assert_eq!(
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]["sequence"],
+        12
     );
 }
 

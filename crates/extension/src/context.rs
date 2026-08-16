@@ -252,6 +252,16 @@ impl ExtensionContext {
             .await
     }
 
+    /// Removes one session-local command owned by this Extension.
+    pub async fn unregister_command(
+        &self,
+        name: &str,
+    ) -> Result<(), ExtensionHostError> {
+        self.active_host()?
+            .unregister_command(&self.invocation, name)
+            .await
+    }
+
     /// Selects a configured model for future turns.
     pub async fn set_model(
         &self,

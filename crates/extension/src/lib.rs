@@ -18,6 +18,7 @@ pub use context::{
 };
 pub use dynamic::{
     CommandRegistry, DynamicCommandRegistry, DynamicRegistryError,
+    ExtensionCommandInvocation,
 };
 pub use error::ExtensionError;
 pub use factory::{

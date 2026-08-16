@@ -83,6 +83,19 @@ impl ExtensionModule for MyExtension {
 | Tool | `tool_result` | 持久化前替换 Blocks、Details、错误状态或 Usage。 |
 | Tool | `user_bash` | 拦截服务器端 `!`/`!!`；首个完整替代结果生效，否则使用 Built-in Bash 的执行器。 |
 
+## Prompt 相关 Hook 数据
+
+`resources_discover` 在 Session 的 Prompt 与 Skill 快照创建前运行。Handler 返回的
+`ResourcesDiscoverResult.prompt_paths` 按 Hook 注册顺序追加到 Prompt Template 来源；
+路径可指向单个 Markdown 文件或目录。相对路径由 Extension 自行根据事件中的
+`cwd` 构造，Kernel 不在浏览器侧读取这些资源。结果只影响当前 Session，资源不热更新。
+
+`before_agent_start` 接收 `BeforeAgentStartEvent.system_prompt_options`，其中包含 cwd、
+选中工具及其 Prompt contribution、按顺序加载的项目指令、Skills，以及 System/Append
+资源。`system_prompt` 是由这些结构化选项生成并经过前序 Handler 修改后的当前文本。
+Handler 可返回新的 `BeforeAgentStartResult.system_prompt`，后续 Handler 和本次 Run 的
+所有 Turn 都会使用该替换；下一个 Run 会重新从 Session 快照构建，不继承上次替换。
+
 ## 组合与失败规则
 
 - 观察点按注册顺序运行，返回 `()`。

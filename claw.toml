@@ -7,6 +7,11 @@ color = true
 [extensions]
 enabled = ["command-guard"]
 
+[prompt]
+load_project_instructions = true
+load_templates = true
+template_paths = []
+
 # Approval strategy to use.
 approval = "yolo"
 

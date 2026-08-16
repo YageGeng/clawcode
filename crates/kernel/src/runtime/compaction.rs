@@ -36,6 +36,46 @@ pub(in crate::runtime) struct SummaryGeneration<'a> {
 }
 
 impl Kernel {
+    /// Selects pre-prompt compaction from the persisted active history and model limits.
+    pub(super) fn pre_prompt_compaction(
+        &self,
+        session: &SessionRuntime,
+        profile: &ModelProfile,
+    ) -> Result<Option<(CompactionReason, Option<MessageId>)>, KernelError>
+    {
+        let history = session
+            .history
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let latest_assistant = history.iter().rev().find_map(|message| {
+            if let MessageContent::Assistant { metadata, .. } = &message.content
+            {
+                Some((message, metadata))
+            } else {
+                None
+            }
+        });
+        Ok(latest_assistant
+            .and_then(|(message, metadata)| {
+                self.compaction_policy
+                    .overflow_recovery(metadata, profile)
+                    .map(|recovery| {
+                        let excluded = (recovery
+                            == OverflowRecovery::CompactAndRetry)
+                            .then(|| message.identity.message_id.clone());
+                        (CompactionReason::Overflow, excluded)
+                    })
+            })
+            .or_else(|| {
+                ContextUsageEstimate::from_history(&history)
+                    .should_compact(
+                        profile.context_tokens,
+                        self.compaction_policy,
+                    )
+                    .then_some((CompactionReason::Threshold, None))
+            }))
+    }
+
     /// Generates and persists one model-backed pi v4 compaction atomically on failure.
     pub async fn compact_session(
         &self,

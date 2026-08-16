@@ -6,6 +6,7 @@ members = [
   "crates/extension",
   "crates/kernel",
   "crates/mcp",
+  "crates/prompt",
   "crates/protocol",
   "crates/provider",
   "crates/skill",
@@ -66,6 +67,7 @@ extension = { path = "crates/extension" }
 extensions = { path = "extensions" }
 kernel = { path = "crates/kernel" }
 mcp = { path = "crates/mcp" }
+prompt = { path = "crates/prompt" }
 protocol = { path = "crates/protocol" }
 provider = { path = "crates/provider" }
 skill = { path = "crates/skill" }
@@ -116,12 +118,13 @@ reqwest = { version = "0.13", default-features = false }
 reqwest-middleware = { version = "0.5", default-features = false }
 
 # serde
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
-schemars = "1"
-quick-xml = "0.41"
-serde_path_to_error = "0.1"
 figment = { version = "0.10", features = ["toml", "env"] }
+quick-xml = "0.41"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+serde_yaml_ng = "0.10"
 
 # builder
 typed-builder = "0.23"
@@ -133,11 +136,12 @@ wasm-bindgen-futures = "0.4"
 chrono = { version = "0.4", default-features = false }
 
 # fs
-toml = "1"
+assert_fs = "1"
+ignore = "0.4"
 mime = "0.3.17"
 mime_guess = "2.0.5"
-assert_fs = "1"
 tempfile = "3"
+toml = "1"
 
 # protocol
 agent-client-protocol = "2"

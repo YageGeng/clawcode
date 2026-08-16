@@ -10,6 +10,7 @@ use kernel::{
     ContextUsageEstimate, EventSink, Kernel, KernelFactory, Model, ModelError,
     ModelFactory,
 };
+use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AssistantMetadata,
     CompactionPolicy, ContentBlock, IdGenerator, IdKind, MessageContent,
@@ -290,6 +291,10 @@ impl CompactionFixture {
                     root.path(),
                     Arc::clone(&clock),
                 )))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
+                )))
                 .extension_factory(Arc::new(StaticExtensionFactory::default()))
                 .clock(clock)
                 .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
@@ -491,6 +496,10 @@ async fn threshold_usage_compacts_without_repeating_assistant_call() {
             root.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
@@ -582,6 +591,10 @@ impl OverflowFixture {
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 root.path(),
                 Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.path().join("config"),
+                protocol::PromptPolicy::default(),
             )))
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
@@ -757,6 +770,10 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
             root.path(),
             Arc::clone(&clock),
         )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(Arc::clone(&clock))
         .id_generator(Arc::new(SequentialIds(AtomicU64::new(100))))
@@ -811,6 +828,10 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
         .store_factory(Arc::new(JsonlStoreFactory::new(
             root.path(),
             Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
         .clock(clock)

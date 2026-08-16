@@ -20,6 +20,9 @@ pub struct ExtensionCommandDefinition {
     pub name: String,
     /// Human-readable command description.
     pub description: Option<String>,
+    /// Optional textual argument shape displayed by protocol clients.
+    #[serde(default)]
+    pub argument_hint: Option<String>,
 }
 
 /// Supported non-UI CLI flag value types.
