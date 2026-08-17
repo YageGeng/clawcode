@@ -26,6 +26,7 @@ fn execution_context() -> ToolExecutionContext {
     ToolExecutionContext::builder()
         .session_id(SessionId::try_from("session-1").expect("session id"))
         .turn_id(TurnId::try_from("turn-1").expect("turn id"))
+        .trace_id(protocol::TraceId::try_from("trace-1").expect("trace id"))
         .cwd(std::env::current_dir().expect("current directory"))
         .cancellation(CancellationToken::new())
         .updates(Arc::new(DiscardToolUpdates))

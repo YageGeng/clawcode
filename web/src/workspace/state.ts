@@ -6,7 +6,9 @@ import type {
   ContextUsage,
   EventOrder,
   ExtensionEntity,
-  McpServerInfo,
+  McpElicitation,
+  McpElicitationSnapshot,
+  McpSessionSnapshot,
   MessageEntity,
   PendingMessages,
   SessionEvent,
@@ -44,7 +46,8 @@ export type WorkspaceState = Readonly<{
   skills: readonly SkillInfo[];
   skillDiagnostics: readonly SkillDiagnostic[];
   availableCommands: readonly AvailableCommandEntity[];
-  mcpServers: readonly McpServerInfo[];
+  mcpSnapshot: McpSessionSnapshot;
+  mcpElicitations: ReadonlyMap<SessionId, ReadonlyMap<string, McpElicitation>>;
   running: boolean;
   contextUsage: ContextUsage | undefined;
   retry: RetryStatus | undefined;
@@ -71,7 +74,10 @@ export type WorkspaceAction =
   | { readonly type: "tree/replaced"; readonly tree: SessionTree }
   | { readonly type: "skills/replaced"; readonly result: SkillListResult }
   | { readonly type: "commands/replaced"; readonly commands: readonly AvailableCommandEntity[] }
-  | { readonly type: "mcp/replaced"; readonly servers: readonly McpServerInfo[] }
+  | { readonly type: "mcp/replaced"; readonly snapshot: McpSessionSnapshot }
+  | { readonly type: "mcp/elicitations-replaced"; readonly snapshot: McpElicitationSnapshot }
+  | { readonly type: "mcp/elicitation-requested"; readonly request: McpElicitation }
+  | { readonly type: "mcp/elicitation-resolved"; readonly sessionId: SessionId; readonly requestId: string }
   | { readonly type: "running/changed"; readonly running: boolean }
   | { readonly type: "usage/changed"; readonly usage: ContextUsage | undefined }
   | { readonly type: "retry/changed"; readonly retry: RetryStatus | undefined }
@@ -94,7 +100,8 @@ export const initialWorkspaceState: WorkspaceState = {
   skills: [],
   skillDiagnostics: [],
   availableCommands: [],
-  mcpServers: [],
+  mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
+  mcpElicitations: new Map(),
   running: false,
   contextUsage: undefined,
   retry: undefined,
@@ -109,7 +116,13 @@ export function reduceWorkspace(
 ): WorkspaceState {
   switch (action.type) {
     case "connection/changed": return { ...state, connection: action.connection };
-    case "session/listed": return { ...state, sessions: action.sessions };
+    case "session/listed": {
+      const sessionIds = new Set(action.sessions.map((session) => session.sessionId));
+      const mcpElicitations = new Map(
+        [...state.mcpElicitations].filter(([sessionId]) => sessionIds.has(sessionId))
+      );
+      return { ...state, sessions: action.sessions, mcpElicitations };
+    }
     case "session/activated": return { ...state, activeSessionId: action.sessionId };
     case "session/deactivated": {
       return {
@@ -126,7 +139,7 @@ export function reduceWorkspace(
         skills: [],
         skillDiagnostics: [],
         availableCommands: [],
-        mcpServers: [],
+        mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
         running: false,
         contextUsage: undefined,
         retry: undefined,
@@ -149,6 +162,7 @@ export function reduceWorkspace(
       skills: [],
       skillDiagnostics: [],
       availableCommands: [],
+      mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
       // Runtime state belongs to the previous Session and must not influence
       // prompt routing while the next Session snapshot is loading.
       running: false,
@@ -213,7 +227,33 @@ export function reduceWorkspace(
     case "tree/replaced": return { ...state, tree: action.tree };
     case "skills/replaced": return { ...state, skills: action.result.skills, skillDiagnostics: action.result.diagnostics };
     case "commands/replaced": return { ...state, availableCommands: action.commands };
-    case "mcp/replaced": return { ...state, mcpServers: action.servers };
+    case "mcp/replaced": return action.snapshot.revision < state.mcpSnapshot.revision
+      ? state
+      : { ...state, mcpSnapshot: action.snapshot };
+    case "mcp/elicitations-replaced": {
+      const mcpElicitations = new Map(state.mcpElicitations);
+      mcpElicitations.set(
+        action.snapshot.sessionId,
+        new Map(action.snapshot.requests.map((request) => [request.requestId, request]))
+      );
+      return { ...state, mcpElicitations };
+    }
+    case "mcp/elicitation-requested": {
+      const mcpElicitations = new Map(state.mcpElicitations);
+      const sessionElicitations = new Map(
+        mcpElicitations.get(action.request.context.sessionId)
+      );
+      sessionElicitations.set(action.request.requestId, action.request);
+      mcpElicitations.set(action.request.context.sessionId, sessionElicitations);
+      return { ...state, mcpElicitations };
+    }
+    case "mcp/elicitation-resolved": {
+      const mcpElicitations = new Map(state.mcpElicitations);
+      const sessionElicitations = new Map(mcpElicitations.get(action.sessionId));
+      sessionElicitations.delete(action.requestId);
+      mcpElicitations.set(action.sessionId, sessionElicitations);
+      return { ...state, mcpElicitations };
+    }
     case "running/changed": return action.running
       ? { ...state, running: true }
       : {

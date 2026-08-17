@@ -5,6 +5,7 @@ import type {
   AssistantDiagnostics,
   CompactionReason,
   EventOrder,
+  McpElicitation,
   MessageEntity,
   ModelUsage,
   SessionEvent,
@@ -171,6 +172,21 @@ export class SessionUpdateDecoder {
           }
         } else if (event === "extension_handler_failed" && meta !== undefined && typeof payload.extension_id === "string" && typeof payload.point === "string" && typeof payload.message === "string") {
           actions.push({ type: "extension/upserted", extension: { id: `error:${meta.turnId}:${meta.sequence}`, turnId: meta.turnId, extensionId: payload.extension_id, customType: payload.point, blocks: [], message: payload.message, timestampMs: meta.timestampMs, kind: "error" }, order });
+        } else if (event === "mcp_elicitation_requested" && typeof payload.request === "object" && payload.request !== null && !Array.isArray(payload.request)) {
+          const request = payload.request as Record<string, unknown>;
+          const context = typeof request.context === "object" && request.context !== null && !Array.isArray(request.context) ? request.context as Record<string, unknown> : undefined;
+          const mode = typeof request.mode === "object" && request.mode !== null && !Array.isArray(request.mode) ? request.mode as Record<string, unknown> : undefined;
+          const typedMode = mode?.type === "form" && typeof mode.message === "string"
+            ? { type: "form" as const, message: mode.message, requestedSchema: mode.requestedSchema }
+            : mode?.type === "url" && typeof mode.message === "string" && typeof mode.url === "string" && typeof mode.elicitationId === "string"
+              ? { type: "url" as const, message: mode.message, url: mode.url, elicitationId: mode.elicitationId }
+              : undefined;
+          if (typeof request.requestId === "string" && context !== undefined && typedMode !== undefined && typeof context.serverId === "string" && typeof context.sessionId === "string" && typeof context.turnId === "string" && typeof context.traceId === "string" && typeof context.requestedAtMs === "string") {
+            const elicitation: McpElicitation = { requestId: request.requestId, context: { serverId: context.serverId, sessionId: context.sessionId as McpElicitation["context"]["sessionId"], turnId: context.turnId as McpElicitation["context"]["turnId"], traceId: context.traceId, requestedAtMs: context.requestedAtMs as TimestampMs }, mode: typedMode };
+            actions.push({ type: "mcp/elicitation-requested", request: elicitation });
+          }
+        } else if (event === "mcp_elicitation_resolved" && typeof payload.request_id === "string") {
+          actions.push({ type: "mcp/elicitation-resolved", sessionId: notification.sessionId, requestId: payload.request_id });
         } else if (event === "retry_scheduled" && meta !== undefined && typeof payload.attempt === "number" && typeof payload.max_attempts === "number" && typeof payload.delay_ms === "number" && typeof payload.error === "string") {
           actions.push({ type: "retry/changed", retry: { type: "waiting", attempt: payload.attempt, maxAttempts: payload.max_attempts, scheduledAtMs: meta.timestampMs, delayMs: payload.delay_ms, error: payload.error } });
         } else if (event === "retry_start" && typeof payload.attempt === "number" && typeof payload.max_attempts === "number") {

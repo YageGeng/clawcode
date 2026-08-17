@@ -60,7 +60,22 @@ thinking = { type = "enabled" }
 reasoning_effort = "high"
 
 [[mcp_servers]]
-enabled = false
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+enabled = true
+name = "legacy-reference"
+protocol = "2025-11-25"
+command = "cargo"
+args = ["run", "--quiet", "-p", "mcp", "--example", "legacy_stdio"]
+startup_timeout_sec = 30
+request_timeout_sec = 120
+mrtr_max_rounds = 8
+mrtr_total_timeout_sec = 300
+
+[[mcp_servers]]
+enabled = true
+name = "modern-reference"
+protocol = "2026-07-28"
+url = "http://127.0.0.1:39128/mcp"
+startup_timeout_sec = 30
+request_timeout_sec = 120
+mrtr_max_rounds = 8
+mrtr_total_timeout_sec = 300

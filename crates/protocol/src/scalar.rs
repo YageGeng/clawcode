@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +137,15 @@ impl TurnId {
 pub struct TimestampMs(u64);
 
 impl TimestampMs {
+    /// Captures the current Unix time as a precision-safe millisecond scalar.
+    #[must_use]
+    pub fn now() -> Self {
+        let milliseconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        Self(u64::try_from(milliseconds).unwrap_or(u64::MAX))
+    }
+
     /// Returns the parsed millisecond value for arithmetic and ordering.
     #[must_use]
     pub const fn get(self) -> u64 {

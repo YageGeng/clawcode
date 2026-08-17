@@ -1565,7 +1565,7 @@
   text-transform: capitalize;
 }
 
-.mcp-card[data-state="connected"] .mcp-card__heading span {
+.mcp-card[data-state="ready"] .mcp-card__heading span {
   color: var(--success);
 }
 
@@ -1583,18 +1583,66 @@
   overflow-wrap: anywhere;
 }
 
-.mcp-tools {
+.mcp-card__protocol,
+.mcp-card__revision {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.mcp-card > button,
+.mcp-oauth button,
+.mcp-oauth a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.mcp-oauth {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.mcp-oauth > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-oauth label {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.mcp-oauth input {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: 10px var(--font-mono);
+}
+
+.mcp-catalog {
   margin-top: 12px;
 }
 
-.mcp-tools details {
+.mcp-catalog details {
   margin-top: 6px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
 }
 
-.mcp-tools summary {
+.mcp-catalog summary {
   padding: 8px 9px;
   cursor: pointer;
   font-family: "SFMono-Regular", Consolas, monospace;
@@ -1602,8 +1650,100 @@
   overflow-wrap: anywhere;
 }
 
-.mcp-tools details p {
+.mcp-catalog summary span {
+  display: inline-block;
+  min-width: 58px;
+  margin-right: 7px;
+  color: var(--accent-strong);
+  font-family: var(--font-sans);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.mcp-catalog details p {
   padding: 0 9px 8px;
+}
+
+.mcp-catalog pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 8px 9px;
+  overflow: auto;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 9px;
+}
+
+.mcp-catalog__form {
+  display: grid;
+  gap: 8px;
+  padding: 0 9px 9px;
+}
+
+.mcp-catalog__form label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.mcp-catalog__form label > span {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.mcp-catalog__form input {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: 10px var(--font-mono);
+}
+
+.mcp-candidate {
+  justify-self: start;
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.mcp-elicitation header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.mcp-elicitation header h2,
+.mcp-elicitation header p {
+  margin: 0;
+}
+
+.mcp-elicitation > p,
+.mcp-elicitation > a,
+.mcp-elicitation label {
+  display: block;
+  margin-top: 14px;
+}
+
+.mcp-elicitation textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px;
+  resize: vertical;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+  font: 11px var(--font-mono);
+}
+
+.mcp-elicitation footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
 }
 
 .dialog-backdrop {

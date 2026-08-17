@@ -94,9 +94,6 @@ where
         .merge(Env::prefixed(ProductIdentity::CONFIG_ENV_PREFIX).split("__"));
     let cfg: AppConfig = fig.extract()?;
     cfg.validate()?;
-    for server in &cfg.mcp_servers {
-        server.validate()?;
-    }
     Ok(ConfigHandle::from_config(cfg))
 }
 

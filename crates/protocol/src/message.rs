@@ -214,6 +214,22 @@ pub struct AssistantMetadata {
     pub error: Option<String>,
 }
 
+/// Text or binary payload embedded by an MCP Resource content block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EmbeddedResourceContent {
+    /// UTF-8 resource text.
+    Text {
+        /// Complete text payload.
+        text: String,
+    },
+    /// Base64-encoded resource bytes.
+    Blob {
+        /// Base64 payload without a data-URL prefix.
+        data: String,
+    },
+}
+
 /// One ordered content block carried by a standard message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -239,6 +255,54 @@ pub enum ContentBlock {
         mime_type: String,
     },
 
+    /// Base64-encoded audio returned by a user, model, or Tool operation.
+    Audio {
+        /// Base64 media payload without a data-URL prefix.
+        data: String,
+
+        /// MIME type describing the encoded audio payload.
+        mime_type: String,
+    },
+
+    /// Complete text or binary Resource embedded in the message.
+    EmbeddedResource {
+        /// Original Resource URI used for routing and provenance.
+        uri: String,
+
+        /// Optional MIME type declared by the MCP Server.
+        mime_type: Option<String>,
+
+        /// Typed text or binary Resource payload.
+        content: EmbeddedResourceContent,
+    },
+
+    /// Link to a Resource that remains available from its owning MCP Server.
+    ResourceLink {
+        /// Original Resource URI.
+        uri: String,
+
+        /// Server-provided Resource name.
+        name: String,
+
+        /// Optional user-facing title.
+        title: Option<String>,
+
+        /// Optional Resource description.
+        description: Option<String>,
+
+        /// Optional declared MIME type.
+        mime_type: Option<String>,
+
+        /// Optional Resource size in bytes.
+        size: Option<u64>,
+    },
+
+    /// Structured JSON returned alongside displayable MCP content.
+    Structured {
+        /// Complete JSON value preserved without a text conversion.
+        value: serde_json::Value,
+    },
+
     /// A tool invocation requested by the assistant.
     ToolCall {
         /// Stable tool call identifier.
@@ -260,6 +324,10 @@ impl ContentBlock {
             Self::Text { text } => Some(text),
             Self::Reasoning { .. }
             | Self::Image { .. }
+            | Self::Audio { .. }
+            | Self::EmbeddedResource { .. }
+            | Self::ResourceLink { .. }
+            | Self::Structured { .. }
             | Self::ToolCall { .. } => None,
         }
     }

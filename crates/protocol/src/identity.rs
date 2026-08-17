@@ -60,6 +60,13 @@ impl ProductIdentity {
     /// ACP v2 extension stop reason used when foreground work fails.
     pub const ACP_ERROR_STOP_REASON: &str = "_clawcode/error";
 
+    /// ACP v2 custom content discriminator for structured MCP Tool output.
+    pub const ACP_STRUCTURED_CONTENT_BLOCK: &str =
+        "_clawcode/structured_content";
+
+    /// ACP v2 extension notification for an updated MCP Session snapshot revision.
+    pub const ACP_MCP_UPDATE_NOTIFICATION: &str = "_clawcode/mcp/update";
+
     /// Prefix used by product-specific environment variables.
     pub const CONFIG_ENV_PREFIX: &str = "CLAW_";
 
@@ -129,6 +136,20 @@ pub enum AcpExtensionMethod {
     SkillList,
     /// Reads immutable MCP connection and tool status for one session.
     McpStatus,
+    /// Explicitly reconnects one configured MCP Server.
+    McpReconnect,
+    /// Retrieves one discovered MCP Prompt.
+    McpPromptGet,
+    /// Reads one discovered MCP Resource.
+    McpResourceRead,
+    /// Completes one MCP Prompt or Resource Template argument.
+    McpComplete,
+    /// Continues one pending MCP OAuth browser round.
+    McpOAuthContinue,
+    /// Lists pending Turn-scoped MCP elicitations for one Session.
+    McpElicitationList,
+    /// Resolves one pending Turn-scoped MCP elicitation.
+    McpElicitationRespond,
     /// Dispatches a registered extension command.
     ExtensionCommand,
     /// Executes a user-authored shell command entirely on the server.
@@ -162,6 +183,13 @@ impl AcpExtensionMethod {
             Self::InvokeSkill => "_clawcode/skill/invoke",
             Self::SkillList => "_clawcode/skill/list",
             Self::McpStatus => "_clawcode/mcp/status",
+            Self::McpReconnect => "_clawcode/mcp/reconnect",
+            Self::McpPromptGet => "_clawcode/mcp/prompt/get",
+            Self::McpResourceRead => "_clawcode/mcp/resource/read",
+            Self::McpComplete => "_clawcode/mcp/complete",
+            Self::McpOAuthContinue => "_clawcode/mcp/oauth/continue",
+            Self::McpElicitationList => "_clawcode/mcp/elicitation/list",
+            Self::McpElicitationRespond => "_clawcode/mcp/elicitation/respond",
             Self::ExtensionCommand => "_clawcode/extension/command",
             Self::UserBash => "_clawcode/session/bash",
         }
@@ -183,6 +211,13 @@ impl AcpExtensionMethod {
             Self::InvokeSkill,
             Self::SkillList,
             Self::McpStatus,
+            Self::McpReconnect,
+            Self::McpPromptGet,
+            Self::McpResourceRead,
+            Self::McpComplete,
+            Self::McpOAuthContinue,
+            Self::McpElicitationList,
+            Self::McpElicitationRespond,
             Self::ExtensionCommand,
             Self::UserBash,
         ]

@@ -7,6 +7,7 @@ import { SessionSidebar } from "../features/sessions/SessionSidebar";
 import { Conversation } from "../features/conversation/Conversation";
 import { Inspector } from "../features/inspector/Inspector";
 import { McpPanel } from "../features/mcp/McpPanel";
+import { McpElicitationDialog } from "../features/mcp/McpElicitationDialog";
 import { SkillsPanel } from "../features/skills/SkillsPanel";
 import { useWorkspaceStore } from "../workspace/store";
 import type { WorkspaceController } from "../workspace/controller";
@@ -46,6 +47,9 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   }, [state.retry]);
 
   const activeSession = state.sessions.find((session) => session.sessionId === state.activeSessionId);
+  const pendingElicitation = state.activeSessionId === undefined
+    ? undefined
+    : state.mcpElicitations.get(state.activeSessionId)?.values().next().value;
   const connectionLabel = state.connection.type === "ready" ? "已连接" :
     state.connection.type === "connecting" ? `正在连接 · 第 ${state.connection.attempt} 次` :
     state.connection.type === "initializing" ? "正在初始化 ACP" :
@@ -104,7 +108,7 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
         </header>
         {section === "sessions" ? <Conversation bootstrap={bootstrap} controller={controller} /> : null}
         {section === "skills" ? <SkillsPanel skills={state.skills} diagnostics={state.skillDiagnostics} hasSession={state.activeSessionId !== undefined} controller={controller} /> : null}
-        {section === "mcp" ? <McpPanel servers={state.mcpServers} /> : null}
+        {section === "mcp" ? <McpPanel snapshot={state.mcpSnapshot} controller={controller} /> : null}
         {section === "about" ? <section className="conversation-placeholder"><div className="empty-state"><h2>{bootstrap.product.name}</h2><p>基于 ACP v2 WebSocket 的本机 Agent 工作台。当前模型：{bootstrap.activeModel.displayName}。</p></div></section> : null}
       </main>
 
@@ -121,6 +125,9 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
           }}
         />
       ) : null}
+      {pendingElicitation === undefined ? null : (
+        <McpElicitationDialog controller={controller} request={pendingElicitation} />
+      )}
     </div>
   );
 }

@@ -6,6 +6,8 @@ use protocol::{
     ProductIdentity, ToolResultDetails,
 };
 
+use crate::content::AcpContentMapper;
+
 /// Conversion failures at the runtime-to-ACP v2 boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum AcpMappingError {
@@ -61,7 +63,7 @@ impl AcpEventMapper {
                                 wire::AgentMessage::new(message_id.clone())
                                     .content(Self::message_blocks(
                                         blocks, &metadata,
-                                    ))
+                                    )?)
                                     .meta(metadata.clone()),
                             )];
                         let reasoning = blocks
@@ -75,6 +77,10 @@ impl AcpEventMapper {
                                 }
                                 ContentBlock::Text { .. }
                                 | ContentBlock::Image { .. }
+                                | ContentBlock::Audio { .. }
+                                | ContentBlock::EmbeddedResource { .. }
+                                | ContentBlock::ResourceLink { .. }
+                                | ContentBlock::Structured { .. }
                                 | ContentBlock::ToolCall { .. } => None,
                             })
                             .collect::<Vec<_>>();
@@ -111,7 +117,7 @@ impl AcpEventMapper {
                             wire::UserMessage::new(
                                 message.identity.message_id.to_string(),
                             )
-                            .content(Self::message_blocks(blocks, &metadata))
+                            .content(Self::message_blocks(blocks, &metadata)?)
                             .meta(metadata),
                         )]
                     }
@@ -125,7 +131,7 @@ impl AcpEventMapper {
                             blocks,
                             details.as_ref(),
                             &metadata,
-                        );
+                        )?;
                         vec![wire::SessionUpdate::ToolCallUpdate(
                             wire::ToolCallUpdate::new(tool_call_id.to_string())
                                 .status(if *is_error {
@@ -162,7 +168,7 @@ impl AcpEventMapper {
                             &result.blocks,
                             result.details.as_ref(),
                             &metadata,
-                        ))
+                        )?)
                         .raw_output(serde_json::to_value(result)?)
                         .meta(metadata),
                 )]
@@ -172,7 +178,7 @@ impl AcpEventMapper {
                     &result.blocks,
                     result.details.as_ref(),
                     &metadata,
-                );
+                )?;
                 let status = if result.is_error {
                     wire::ToolCallStatus::Failed
                 } else {
@@ -255,7 +261,9 @@ impl AcpEventMapper {
             AgentEventPayload::CompactionStart { .. }
             | AgentEventPayload::CompactionEnd { .. }
             | AgentEventPayload::ExtensionHandlerFailed { .. }
-            | AgentEventPayload::SkillDiagnostic { .. } => {
+            | AgentEventPayload::SkillDiagnostic { .. }
+            | AgentEventPayload::McpElicitationRequested { .. }
+            | AgentEventPayload::McpElicitationResolved { .. } => {
                 vec![Self::extension_update(&event)?]
             }
             AgentEventPayload::TurnStart { .. }
@@ -326,6 +334,8 @@ impl AcpEventMapper {
             | AgentEventPayload::CompactionEnd { .. }
             | AgentEventPayload::ExtensionHandlerFailed { .. }
             | AgentEventPayload::SkillDiagnostic { .. }
+            | AgentEventPayload::McpElicitationRequested { .. }
+            | AgentEventPayload::McpElicitationResolved { .. }
             | AgentEventPayload::AgentSettled { .. } => {}
         }
         Ok(wire::Meta::from_iter([(
@@ -356,23 +366,14 @@ impl AcpEventMapper {
     fn message_blocks(
         blocks: &[ContentBlock],
         metadata: &wire::Meta,
-    ) -> Vec<wire::ContentBlock> {
-        blocks
+    ) -> Result<Vec<wire::ContentBlock>, AcpMappingError> {
+        Ok(blocks
             .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(wire::ContentBlock::Text(
-                    wire::TextContent::new(text).meta(metadata.clone()),
-                )),
-                ContentBlock::Image { data, mime_type } => {
-                    Some(wire::ContentBlock::Image(
-                        wire::ImageContent::new(data, mime_type)
-                            .meta(metadata.clone()),
-                    ))
-                }
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolCall { .. } => None,
-            })
-            .collect()
+            .map(|block| AcpContentMapper::message(block, metadata))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     /// Converts model-visible tool blocks and typed edit diagnostics to native ACP content.
@@ -380,30 +381,13 @@ impl AcpEventMapper {
         blocks: &[ContentBlock],
         details: Option<&ToolResultDetails>,
         metadata: &wire::Meta,
-    ) -> Vec<wire::ToolCallContent> {
+    ) -> Result<Vec<wire::ToolCallContent>, AcpMappingError> {
         let mut content = blocks
             .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => {
-                    Some(wire::ToolCallContent::Content(Box::new(
-                        wire::Content::new(wire::ContentBlock::Text(
-                            wire::TextContent::new(text).meta(metadata.clone()),
-                        ))
-                        .meta(metadata.clone()),
-                    )))
-                }
-                ContentBlock::Image { data, mime_type } => {
-                    Some(wire::ToolCallContent::Content(Box::new(
-                        wire::Content::new(wire::ContentBlock::Image(
-                            wire::ImageContent::new(data, mime_type)
-                                .meta(metadata.clone()),
-                        ))
-                        .meta(metadata.clone()),
-                    )))
-                }
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolCall { .. } => None,
-            })
+            .map(|block| AcpContentMapper::tool_result(block, metadata))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>();
         if let Some(ToolResultDetails::Edit { path, patch, .. }) = details {
             // Pi stores a standard unified patch; ACP v2's native `git_patch`
@@ -417,6 +401,6 @@ impl AcpEventMapper {
                 .meta(metadata.clone()),
             ));
         }
-        content
+        Ok(content)
     }
 }

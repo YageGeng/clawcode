@@ -31,6 +31,7 @@ fn execution_context(
     ToolExecutionContext::builder()
         .session_id(SessionId::try_from("session-bash").expect("session id"))
         .turn_id(TurnId::try_from("turn-bash").expect("turn id"))
+        .trace_id(protocol::TraceId::try_from("trace-bash").expect("trace id"))
         .cwd(cwd.to_path_buf())
         .cancellation(cancellation)
         .updates(updates)

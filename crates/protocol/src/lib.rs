@@ -26,8 +26,7 @@ pub use acp::{
 };
 pub use capability::{
     CompactionData, CompactionDetails, CompactionPolicy, CompactionReason,
-    CompactionResult, McpConnectionState, McpServerInfo, McpToolInfo,
-    ModelProfile, RetryPolicy, SessionTitle,
+    CompactionResult, ModelProfile, RetryPolicy, SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
@@ -61,15 +60,34 @@ pub use identity::{
     AcpExtensionMethod, ConfigOverridePath, ConfigOverridePathError,
     ProductIdentity,
 };
-pub use mcp::{McpCallResult, McpToolDescriptor};
+pub use mcp::{
+    McpArgumentInfo, McpAuthorizationContinueRequest, McpAuthorizationRequest,
+    McpAuthorizationResult, McpCapabilityCounts, McpCatalog,
+    McpCatalogRevisions, McpCompletionRequest, McpCompletionResult,
+    McpCompletionTarget, McpElicitationAction, McpElicitationMode,
+    McpElicitationRequest, McpElicitationResponseRequest, McpElicitationResult,
+    McpElicitationSnapshot, McpFailureStage, McpHostRequest, McpHostResponse,
+    McpIdentityError, McpOAuthState, McpOAuthStatus, McpPromptInfo,
+    McpPromptMessage, McpPromptRef, McpPromptRequest, McpPromptResult,
+    McpProtocolVersion, McpProtocolVersionError, McpReconnectRequest,
+    McpRequestContext, McpResourceInfo, McpResourceRef, McpResourceRequest,
+    McpResourceResult, McpResourceTemplateInfo, McpRoot, McpRootsRequest,
+    McpRootsResult, McpSamplingRequest, McpSamplingResult,
+    McpServerCapabilities, McpServerFailure, McpServerId,
+    McpServerImplementation, McpServerState, McpServerStatus, McpSessionChange,
+    McpSessionCompletionRequest, McpSessionPromptRequest,
+    McpSessionResourceRequest, McpSessionRevisionNotification,
+    McpSessionSnapshot, McpTaskState, McpTaskStatus, McpToolInfo, McpToolRef,
+    McpToolRequest, McpToolResult, McpTransportKind,
+};
 pub use message::{
     AgentMessage, AssistantMetadata, BashExecutionMessage, ContentBlock,
-    ExtensionMessage, MessageContent, MessageIdentity, MessageTiming,
-    MessageTimingError, ModelUsage, Role,
+    EmbeddedResourceContent, ExtensionMessage, MessageContent, MessageIdentity,
+    MessageTiming, MessageTimingError, ModelUsage, Role,
 };
 pub use model::{
-    ModelFailure, ModelFinal, ModelRequest, ModelRetryDisposition,
-    ModelStreamEvent,
+    ModelFailure, ModelFinal, ModelRequest, ModelRequestOptions,
+    ModelRetryDisposition, ModelStreamEvent,
 };
 pub use prompt::{
     AvailableAgentCommand, AvailableAgentCommandKind, ProjectInstruction,

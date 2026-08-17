@@ -11,7 +11,7 @@ use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
 use prompt::FilesystemPromptFactory;
 use protocol::{IdGenerator, ProductIdentity};
 use skill::FilesystemSkillFactory;
-use store::{JsonlStoreFactory, SystemClock};
+use store::{FileSecretStore, JsonlStoreFactory, SystemClock};
 use tools::BuiltinToolFactory;
 
 pub use logging::{LoggingError, LoggingFactory};
@@ -42,6 +42,10 @@ pub enum ApplicationError {
     /// Process working-directory lookup failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// Restricted OAuth credential storage could not be initialized.
+    #[error(transparent)]
+    SecretStore(#[from] store::SecretStoreError),
 
     /// No platform data directory was available and no override was configured.
     #[error("no platform data directory is available")]
@@ -100,13 +104,15 @@ impl ApplicationFactory {
         // unavailable runtime selection fails startup without side effects.
         let extension_factory = extensions::compiled_extensions()?
             .select(&snapshot.extensions.enabled)?;
-        let sessions_root = match &snapshot.session_persistence.data_home {
-            Some(data_home) => PathBuf::from(data_home).join("sessions"),
+        let data_root = match &snapshot.session_persistence.data_home {
+            Some(data_home) => PathBuf::from(data_home),
             None => dirs::data_local_dir()
                 .ok_or(ApplicationError::MissingDataDirectory)?
-                .join(ProductIdentity::CONFIG_DIR_NAME)
-                .join("sessions"),
+                .join(ProductIdentity::CONFIG_DIR_NAME),
         };
+        let sessions_root = data_root.join("sessions");
+        let secret_store: Arc<dyn store::SecretStore> =
+            Arc::new(FileSecretStore::new(data_root.join("credentials"))?);
         let config_root = dirs::config_dir()
             .ok_or(ApplicationError::MissingConfigDirectory)?
             .join(ProductIdentity::CONFIG_DIR_NAME);
@@ -173,7 +179,7 @@ impl ApplicationFactory {
             )))
             .mcp_factory(Some(Arc::new(SessionMcpFactory::new(
                 mcp_servers,
-                Arc::new(RmcpConnector),
+                Arc::new(RmcpConnector::new(secret_store)),
             ))))
             .skill_factory(skill_factory)
             .include_skill_instructions(snapshot.skills.include_instructions)

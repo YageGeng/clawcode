@@ -1,5 +1,6 @@
 //! ACP v2 adaptation and stdio, HTTP/SSE, and WebSocket transports.
 
+mod content;
 mod extension;
 mod mapping;
 mod server;

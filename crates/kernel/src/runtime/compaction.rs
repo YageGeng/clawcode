@@ -379,6 +379,7 @@ impl Kernel {
         let request = ModelRequest {
             messages: request_messages,
             tools: Vec::new(),
+            options: Default::default(),
         };
         let completion_hooks =
             self.completion_hooks(session, run_id, turn_id)?;
@@ -751,8 +752,51 @@ impl EstimatedTokens for AgentMessage {
             let block_characters = match block {
                 ContentBlock::Text { text }
                 | ContentBlock::Reasoning { text } => text.chars().count(),
-                // Pi assigns each image a fixed 4,800-character estimate.
-                ContentBlock::Image { .. } => 4_800,
+                // Binary media uses Pi's fixed image estimate instead of
+                // counting base64 bytes that are not sent as plain text.
+                ContentBlock::Image { .. } | ContentBlock::Audio { .. } => {
+                    4_800
+                }
+                ContentBlock::EmbeddedResource {
+                    uri,
+                    mime_type,
+                    content,
+                } => {
+                    let metadata = uri.chars().count().saturating_add(
+                        mime_type
+                            .as_deref()
+                            .map_or(0_usize, |value| value.chars().count()),
+                    );
+                    metadata.saturating_add(match content {
+                        protocol::EmbeddedResourceContent::Text { text } => {
+                            text.chars().count()
+                        }
+                        protocol::EmbeddedResourceContent::Blob { .. } => 4_800,
+                    })
+                }
+                ContentBlock::ResourceLink {
+                    uri,
+                    name,
+                    title,
+                    description,
+                    mime_type,
+                    ..
+                } => [
+                    Some(uri.as_str()),
+                    Some(name.as_str()),
+                    title.as_deref(),
+                    description.as_deref(),
+                    mime_type.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .fold(0_usize, |count, value| {
+                    count.saturating_add(value.chars().count())
+                }),
+                ContentBlock::Structured { value } => {
+                    serde_json::to_string(value)
+                        .map_or(0_usize, |value| value.chars().count())
+                }
                 ContentBlock::ToolCall {
                     name, arguments, ..
                 } => name.chars().count().saturating_add(

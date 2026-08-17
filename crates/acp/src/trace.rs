@@ -101,6 +101,7 @@ impl AcpTraceFactory {
                 description,
                 parameters,
             },
+            trace_id,
             span,
             started_at: Instant::now(),
         })
@@ -118,11 +119,17 @@ struct AcpOperationIdentity {
 #[derive(Clone)]
 pub(crate) struct AcpOperationTrace {
     identity: AcpOperationIdentity,
+    trace_id: TraceId,
     span: tracing::Span,
     started_at: Instant,
 }
 
 impl AcpOperationTrace {
+    /// Returns the typed ingress Trace propagated into Kernel request contexts.
+    pub(crate) fn trace_id(&self) -> &TraceId {
+        &self.trace_id
+    }
+
     /// Logs that the operation entered application handling under its root span.
     pub(crate) fn start(&self) {
         self.span.in_scope(|| {

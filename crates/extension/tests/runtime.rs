@@ -239,6 +239,7 @@ async fn runtime_applies_typed_composition_rules() {
                 request: ModelRequest {
                     messages: vec![user_message("message-initial", "initial")],
                     tools: Vec::new(),
+                    options: Default::default(),
                 },
             },
             &context,

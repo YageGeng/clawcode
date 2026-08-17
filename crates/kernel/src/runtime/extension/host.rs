@@ -320,6 +320,12 @@ impl ExtensionHost for SessionExtensionHost {
                     },
                     Arc::new(DiscardEventSink),
                     protocol::InputSource::Extension,
+                    protocol::TraceId::try_from(
+                        self.kernel.id_generator.next(protocol::IdKind::Trace),
+                    )
+                    .map_err(|error| {
+                        ExtensionHostError::Operation(error.to_string())
+                    })?,
                 )
                 .await
                 .map_err(|error| {
