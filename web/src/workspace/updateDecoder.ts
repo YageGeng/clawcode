@@ -1,14 +1,18 @@
 import { AcpProtocol } from "../acp/protocol";
-import type { MessageId, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
+import type { EntryId, MessageId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   AssistantDiagnostics,
+  CompactionEntity,
   CompactionReason,
   EventOrder,
   McpElicitation,
   MessageEntity,
   ModelUsage,
   SessionEvent,
+  SlashCommandAliasKind,
+  SlashCommandMessageMeta,
+  SlashCommandSource,
   ToolCallEntity
 } from "../domain/model";
 import type { WorkspaceAction, WorkspaceState } from "./state";
@@ -87,8 +91,9 @@ export class SessionUpdateDecoder {
         ? update.content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null && !Array.isArray(block)).map((block) => typeof block.text === "string" ? block.text : "").join("")
         : "";
       const assistant = kind === "agent_message" ? this.decodeAssistantDiagnostics(productMeta?.assistant) : undefined;
+      const slashCommand = this.decodeSlashCommandMetadata(productMeta?.slashCommand);
       const timing = this.decodeMessageTiming(productMeta?.messageTiming);
-      const message: MessageEntity = { messageId, turnId: meta.turnId, role: kind === "user_message" ? "user" : "assistant", text, reasoning: existing?.reasoning ?? "", timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false, ...(assistant === undefined ? (existing?.assistant === undefined ? {} : { assistant: existing.assistant }) : { assistant }) };
+      const message: MessageEntity = { messageId, turnId: meta.turnId, role: kind === "user_message" ? "user" : "assistant", text, reasoning: existing?.reasoning ?? "", timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false, ...(assistant === undefined ? (existing?.assistant === undefined ? {} : { assistant: existing.assistant }) : { assistant }), ...(slashCommand === undefined ? (existing?.slashCommand === undefined ? {} : { slashCommand: existing.slashCommand }) : { slashCommand }) };
       actions.push({ type: "message/upserted", message, order });
     } else if (kind === "agent_thought" && typeof update.messageId === "string" && meta !== undefined) {
       const messageId = update.messageId as MessageId;
@@ -198,9 +203,31 @@ export class SessionUpdateDecoder {
           if (reason !== undefined) actions.push({ type: "compaction/changed", compaction: { type: "running", reason, startedAtMs: meta.timestampMs } });
         } else if (event === "compaction_end" && meta !== undefined) {
           const reason = this.decodeCompactionReason(payload.reason);
-          if (reason !== undefined) {
-            actions.push({ type: "compaction/changed", compaction: { type: "finished", reason, endedAtMs: meta.timestampMs } });
-            actions.push({ type: "usage/changed", usage: undefined });
+          const outcome = typeof payload.outcome === "object" && payload.outcome !== null && !Array.isArray(payload.outcome)
+            ? payload.outcome as Record<string, unknown>
+            : undefined;
+          if (reason !== undefined && outcome?.status === "completed" && typeof outcome.result === "object" && outcome.result !== null && !Array.isArray(outcome.result)) {
+            const result = outcome.result as Record<string, unknown>;
+            const usage = result.usage === undefined ? undefined : this.decodeModelUsage(result.usage);
+            if (typeof result.entryId === "string" && typeof result.turnId === "string" && typeof result.summary === "string" && typeof result.tokensBefore === "string" && typeof result.startedAtMs === "string" && typeof result.endedAtMs === "string" && (result.usage === undefined || usage !== undefined)) {
+              const compaction: CompactionEntity = {
+                entryId: result.entryId as EntryId,
+                turnId: result.turnId as TurnId,
+                reason,
+                summary: result.summary,
+                tokensBefore: result.tokensBefore,
+                ...(usage === undefined ? {} : { usage }),
+                startedAtMs: result.startedAtMs as TimestampMs,
+                endedAtMs: result.endedAtMs as TimestampMs
+              };
+              actions.push({ type: "compaction/upserted", compaction, order });
+              actions.push({ type: "compaction/changed", compaction: { type: "finished", reason, entryId: compaction.entryId, endedAtMs: compaction.endedAtMs } });
+              actions.push({ type: "usage/changed", usage: undefined });
+            }
+          } else if (reason !== undefined && outcome?.status === "failed" && typeof outcome.message === "string") {
+            actions.push({ type: "compaction/changed", compaction: { type: "failed", reason, message: outcome.message, endedAtMs: meta.timestampMs } });
+          } else if (reason !== undefined && outcome?.status === "cancelled") {
+            actions.push({ type: "compaction/changed", compaction: { type: "cancelled", reason, endedAtMs: meta.timestampMs } });
           }
         }
       }
@@ -235,8 +262,20 @@ export class SessionUpdateDecoder {
         diagnostics.push(`Available command ${index} must contain string name and description`);
         return;
       }
+      const commandProductMeta = AcpProtocol.productMeta(command._meta, this.namespace);
+      const slash = typeof commandProductMeta?.slashCommand === "object" && commandProductMeta.slashCommand !== null && !Array.isArray(commandProductMeta.slashCommand)
+        ? commandProductMeta.slashCommand as Record<string, unknown>
+        : undefined;
+      const source: SlashCommandSource | undefined = slash?.source === "builtin" || slash?.source === "extension" || slash?.source === "skill" || slash?.source === "prompt_template" ? slash.source : undefined;
+      const qualifiedName = typeof slash?.qualifiedName === "string" ? slash.qualifiedName : undefined;
+      const aliasKind: SlashCommandAliasKind | undefined = slash?.aliasKind === "canonical" || slash?.aliasKind === "short" ? slash.aliasKind : undefined;
+      const metadata: Readonly<{ source?: SlashCommandSource; qualifiedName?: string; aliasKind?: SlashCommandAliasKind }> = {
+        ...(source === undefined ? {} : { source }),
+        ...(qualifiedName === undefined ? {} : { qualifiedName }),
+        ...(aliasKind === undefined ? {} : { aliasKind })
+      };
       if (command.input === undefined) {
-        commands.push({ name: command.name, description: command.description });
+        commands.push({ name: command.name, description: command.description, ...metadata });
         return;
       }
       if (typeof command.input !== "object" || command.input === null || Array.isArray(command.input)) {
@@ -251,7 +290,8 @@ export class SessionUpdateDecoder {
       commands.push({
         name: command.name,
         description: command.description,
-        argumentHint: input.hint
+        argumentHint: input.hint,
+        ...metadata
       });
     });
     return { commands, diagnostics };
@@ -280,6 +320,22 @@ export class SessionUpdateDecoder {
     const usage = this.decodeModelUsage(assistant.usage);
     if (typeof assistant.provider_id !== "string" || typeof assistant.model_id !== "string" || typeof assistant.stop_reason !== "string" || usage === undefined) return undefined;
     return { providerId: assistant.provider_id, modelId: assistant.model_id, stopReason: assistant.stop_reason, usage, ...(typeof assistant.raw_stop_reason === "string" ? { rawStopReason: assistant.raw_stop_reason } : {}), ...(typeof assistant.error === "string" ? { error: assistant.error } : {}) };
+  }
+
+  /** Decodes product Slash Command metadata without affecting baseline ACP messages. */
+  private decodeSlashCommandMetadata(value: unknown): SlashCommandMessageMeta | undefined {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const command = value as Record<string, unknown>;
+    if (typeof command.name !== "string") return undefined;
+    if (command.source !== "builtin" && command.source !== "extension" && command.source !== "skill" && command.source !== "prompt_template") return undefined;
+    if (command.messageKind !== "invocation" && command.messageKind !== "output" && command.messageKind !== "expansion") return undefined;
+    if (command.status !== undefined && command.status !== "succeeded" && command.status !== "failed") return undefined;
+    return {
+      name: command.name,
+      source: command.source,
+      messageKind: command.messageKind,
+      ...(command.status === undefined ? {} : { status: command.status })
+    };
   }
 
   /** Narrows the three persisted pi-compatible compaction reasons. */

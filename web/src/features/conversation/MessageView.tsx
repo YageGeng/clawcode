@@ -6,6 +6,7 @@ import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import type { MessageEntity } from "../../domain/model";
+import { CommandMessageCard } from "./CommandMessageCard";
 import { ReasoningBlock } from "./ReasoningBlock";
 
 export type MessageViewProps = Readonly<{
@@ -51,6 +52,9 @@ const MarkdownUrlPolicy = {
 } as const;
 
 export function MessageView({ message }: MessageViewProps) {
+  if (message.slashCommand !== undefined) {
+    return <CommandMessageCard message={message} />;
+  }
   const assistant = message.assistant;
   return (
     <article className="message" data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"}>

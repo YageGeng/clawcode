@@ -29,7 +29,8 @@ use protocol::{
     IdGenerator, IdKind, McpProtocolVersion, McpServerId, McpServerState,
     MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
     ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
-    SessionId, SessionTitle, SkillDiagnosticCode, StopReason, TimestampMs,
+    SessionId, SessionTitle, SkillDiagnosticCode, SlashCommandSource,
+    StopReason, TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -715,7 +716,7 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "inspect resources".to_string(),
+                input: "inspect resources".into(),
             },
             Arc::new(RecordingSink::default()),
         )
@@ -859,10 +860,13 @@ async fn available_commands_merge_session_sources_deterministically() {
             .map(|command| command.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "first/inspect",
-            "first/shared",
+            "compact",
+            "name",
+            "session",
+            "first:inspect",
+            "first:shared",
             "inspect",
-            "second/shared",
+            "second:shared",
             "skill:review",
             "review",
         ]
@@ -873,6 +877,7 @@ async fn available_commands_merge_session_sources_deterministically() {
         .expect("short Extension alias");
     assert_eq!(inspect.description, "Inspect state");
     assert_eq!(inspect.argument_hint.as_deref(), Some("<target>"));
+    assert_eq!(inspect.source, SlashCommandSource::Extension);
     let skill = commands
         .iter()
         .find(|command| command.name == "skill:review")
@@ -934,7 +939,7 @@ async fn prompt_snapshot_is_stable_until_session_resume() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "first".to_string(),
+                input: "first".into(),
             },
             Arc::new(RecordingSink::default()),
         )
@@ -952,7 +957,7 @@ async fn prompt_snapshot_is_stable_until_session_resume() {
         .run(
             RunRequest {
                 session_id,
-                input: "second".to_string(),
+                input: "second".into(),
             },
             Arc::new(RecordingSink::default()),
         )
@@ -1012,7 +1017,7 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
             .run(
                 RunRequest {
                     session_id: running_session,
-                    input: "hold".to_string(),
+                    input: "hold".into(),
                 },
                 Arc::new(RecordingSink::default()),
             )
@@ -1124,7 +1129,7 @@ async fn queued_messages_expand_session_resources_before_persistence() {
             .run(
                 RunRequest {
                     session_id: running_session,
-                    input: "hold".to_string(),
+                    input: "hold".into(),
                 },
                 Arc::new(RecordingSink::default()),
             )
@@ -1158,32 +1163,39 @@ async fn queued_messages_expand_session_resources_before_persistence() {
         .expect_err("Extension command cannot be queued");
     assert!(matches!(
         error,
-        kernel::KernelError::ExtensionCommandCannotQueue(name)
+        kernel::KernelError::SlashCommandCannotQueue {
+            name,
+            command_source,
+        }
             if name == "not-queueable"
+                && command_source == protocol::SlashCommandSource::Extension
     ));
-    let MessageContent::User {
-        blocks: steering_blocks,
+    let MessageContent::ExpandedUser {
+        expansion: steering_expansion,
     } = &steering.message.content
     else {
-        panic!("Steering User message expected");
+        panic!("Steering expanded User message expected");
     };
     assert!(
-        steering_blocks[0]
+        steering_expansion.model_blocks[0]
             .text()
             .is_some_and(|text| text.contains("QUEUED SKILL"))
     );
     assert!(
-        steering_blocks[0]
+        steering_expansion.model_blocks[0]
             .text()
             .is_some_and(|text| text.ends_with("alpha"))
     );
-    let MessageContent::User {
-        blocks: follow_up_blocks,
+    let MessageContent::ExpandedUser {
+        expansion: follow_up_expansion,
     } = &follow_up.message.content
     else {
-        panic!("Follow-up User message expected");
+        panic!("Follow-up expanded User message expected");
     };
-    assert_eq!(follow_up_blocks[0].text(), Some("QUEUED TEMPLATE: beta"));
+    assert_eq!(
+        follow_up_expansion.model_blocks[0].text(),
+        Some("QUEUED TEMPLATE: beta")
+    );
     assert_eq!(
         kernel
             .pending_messages(&session_id)
@@ -1228,7 +1240,7 @@ async fn first_user_message_sets_default_title_and_manual_rename_wins() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "  First line\nsecond line".to_string(),
+                input: "  First line\nsecond line".into(),
             },
             sink.clone(),
         )
@@ -1376,7 +1388,7 @@ async fn skill_expansion_failure_preserves_input_and_emits_diagnostic() {
         .run(
             RunRequest {
                 session_id,
-                input: "/skill:review inspect this".to_string(),
+                input: "/skill:review inspect this".into(),
             },
             Arc::clone(&sink) as Arc<dyn EventSink>,
         )

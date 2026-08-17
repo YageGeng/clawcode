@@ -50,7 +50,11 @@ impl TreeNavigationPlan {
                 serde_json::Value::Object(target.payload.clone()),
             )
             .is_ok_and(|message| {
-                matches!(message.content, MessageContent::User { .. })
+                matches!(
+                    message.content,
+                    MessageContent::User { .. }
+                        | MessageContent::ExpandedUser { .. }
+                )
             }) {
             target.parent_id
         } else {
@@ -224,10 +228,13 @@ impl Kernel {
                             .timestamp(self.clock.now())
                             .messages(messages)
                             .cancellation(&cancellation)
-                            .instruction(&instruction)
+                            .protocol(SummaryProtocol::Branch {
+                                instruction: &instruction,
+                            })
                             .build(),
                     )
-                    .await?,
+                    .await?
+                    .text,
                 )
             }
         } else {

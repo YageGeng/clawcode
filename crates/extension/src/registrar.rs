@@ -79,7 +79,7 @@ impl ExtensionRegistrar {
             .current_extension
             .clone()
             .ok_or(ExtensionError::MissingModule)?;
-        let qualified_name = format!("{extension_id}/{}", definition.name);
+        let qualified_name = format!("{extension_id}:{}", definition.name);
         if self.registry.commands.contains_key(&qualified_name) {
             return Err(ExtensionError::DuplicateCommand {
                 extension_id,

@@ -8,6 +8,7 @@ import { MessageView } from "./MessageView";
 import { ExtensionCard } from "./ExtensionCard";
 import { ToolCallCard } from "./ToolCallCard";
 import { BashExecutionCard } from "./BashExecutionCard";
+import { CompactionCard } from "./CompactionCard";
 
 export type ConversationProps = Readonly<{
   bootstrap: UiBootstrap;
@@ -20,7 +21,7 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
   useEffect(() => {
     const container = transcript.current;
     if (container !== null) container.scrollTop = container.scrollHeight;
-  }, [state.bashExecutions, state.extensions, state.messages, state.tools, state.transcript.length]);
+  }, [state.bashExecutions, state.compactions, state.extensions, state.messages, state.tools, state.transcript.length]);
 
   if (state.activeSessionId === undefined) {
     return <section className="conversation-placeholder"><div className="empty-state"><h2>开始一个 Agent 会话</h2><p>从左侧恢复会话，或创建一个使用本机工作目录的新会话。</p></div></section>;
@@ -42,9 +43,16 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
             const bash = state.bashExecutions.get(entry.messageId);
             return bash === undefined ? null : <BashExecutionCard key={`bash:${entry.messageId}`} bash={bash} />;
           }
+          if (entry.type === "compaction") {
+            const compaction = state.compactions.get(entry.entryId);
+            return compaction === undefined ? null : <CompactionCard key={`compaction:${entry.entryId}`} compaction={compaction} />;
+          }
           const tool = state.tools.get(entry.toolCallId);
           return tool === undefined ? null : <ToolCallCard key={`tool:${entry.toolCallId}`} tool={tool} />;
         })}
+        {state.compaction.type === "running" ? <div className="compaction-activity" role="status"><span className="compaction-activity__pulse" />正在压缩上下文…</div> : null}
+        {state.compaction.type === "failed" ? <div className="compaction-activity" data-tone="danger" role="alert">上下文压缩失败：{state.compaction.message}</div> : null}
+        {state.compaction.type === "cancelled" ? <div className="compaction-activity" role="status">已取消上下文压缩</div> : null}
       </div>
       <Composer
         key={state.activeSessionId}

@@ -8,11 +8,11 @@ use kernel::{
     Model, ModelError, ModelFactory, ProviderModel, ProviderModelFactory,
 };
 use protocol::{
-    AgentMessage, BashExecutionMessage, ContentBlock, EmbeddedResourceContent,
-    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelProfile,
-    ModelRequest, ModelRequestOptions, ModelStreamEvent,
-    StaticExtensionRegistration, StopReason, TimestampMs, TurnId,
-    UserBashResult,
+    AgentMessage, BashExecutionMessage, CompactionSummaryMessage, ContentBlock,
+    EmbeddedResourceContent, EntryId, MessageContent, MessageId,
+    MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
+    ModelRequestOptions, ModelStreamEvent, StaticExtensionRegistration,
+    StopReason, TimestampMs, TurnId, UserBashResult,
 };
 use provider::completion::{CompletionError, CompletionRequest, Usage};
 use provider::factory::{
@@ -267,6 +267,58 @@ async fn model_request_options_reach_provider_request() {
     let captured = llm.last_request().expect("captured provider request");
     assert_eq!(captured.max_tokens, Some(64));
     assert_eq!(captured.temperature, Some(0.25));
+}
+
+/// Compaction checkpoints become pi's User summary wrapper only at the provider boundary.
+#[tokio::test]
+async fn compaction_summary_reaches_provider_as_user_context() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let llm =
+        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
+    let model = ProviderModel::new(
+        sample_profile(),
+        Arc::clone(&llm) as Arc<dyn Llm>,
+        config::ProviderRetryConfig::default(),
+    );
+    let timestamp = TimestampMs::from(150);
+    let request = ModelRequest {
+        messages: vec![AgentMessage {
+            identity: MessageIdentity {
+                message_id: MessageId::try_from("message-summary")
+                    .expect("message id"),
+                turn_id: TurnId::try_from("turn-summary").expect("turn id"),
+            },
+            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
+                .expect("message timing"),
+            content: MessageContent::CompactionSummary {
+                compaction: CompactionSummaryMessage::builder()
+                    .entry_id(
+                        EntryId::try_from("entry-summary").expect("entry id"),
+                    )
+                    .summary("checkpoint body".to_string())
+                    .tokens_before(42_000)
+                    .build(),
+            },
+        }],
+        tools: Vec::new(),
+        options: Default::default(),
+    };
+
+    let _stream = model
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("provider stream");
+    let value = serde_json::to_value(
+        llm.last_request().expect("captured provider request"),
+    )
+    .expect("serialize provider request");
+    let history = &value["chat_history"][0];
+
+    assert_eq!(history["role"], "user");
+    assert_eq!(
+        history["content"][0]["text"],
+        "The conversation history before this point was compacted into the following summary:\n\n<summary>\ncheckpoint body\n</summary>"
+    );
 }
 
 /// Provider EOF without an explicit Final becomes a stream protocol failure.

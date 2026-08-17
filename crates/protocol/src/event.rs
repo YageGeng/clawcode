@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, CompactionReason, CompactionResult, ExtensionId,
+    AgentMessage, CompactionOutcome, CompactionReason, ExtensionId,
     McpElicitationRequest, McpElicitationResult, MessageId, ModelUsage, RunId,
-    Sequence, TimestampMs, ToolCall, ToolResult, TurnId, TurnRecord,
+    Sequence, SlashCommandDefinition, SlashCommandInvocation,
+    SlashCommandStatus, TimestampMs, ToolCall, ToolResult, TurnId, TurnRecord,
 };
 
 /// Typed terminal result shared by run lifecycle events and ACP mapping.
@@ -174,6 +175,22 @@ pub enum AgentEventPayload {
         outcome: AgentOutcome,
     },
 
+    /// A directly handled Slash Command has started.
+    SlashCommandStart {
+        /// Run-shaped operation identifier used for command correlation.
+        run_id: RunId,
+        /// Exact invocation selected by the Kernel router.
+        invocation: SlashCommandInvocation,
+    },
+
+    /// A directly handled Slash Command reached a terminal state.
+    SlashCommandEnd {
+        /// Run-shaped operation identifier used for command correlation.
+        run_id: RunId,
+        /// Stable terminal status used by ACP and WebUI.
+        status: SlashCommandStatus,
+    },
+
     /// The persisted display title for this session changed.
     SessionTitleChanged {
         /// New normalized session title.
@@ -183,7 +200,7 @@ pub enum AgentEventPayload {
     /// The complete Session command snapshot changed.
     AvailableCommandsChanged {
         /// Effective commands after runtime precedence and collision handling.
-        commands: Vec<crate::AvailableAgentCommand>,
+        commands: Vec<SlashCommandDefinition>,
     },
 
     /// A model-backed context compaction operation started.
@@ -202,8 +219,8 @@ pub enum AgentEventPayload {
         /// Cause that initiated this compaction.
         reason: CompactionReason,
 
-        /// Persisted compaction identity and timing.
-        result: CompactionResult,
+        /// Typed terminal outcome shared by live and replay projections.
+        outcome: CompactionOutcome,
     },
 
     /// An extension handler failed and normal lifecycle processing continued.

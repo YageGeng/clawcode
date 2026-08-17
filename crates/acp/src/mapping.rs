@@ -121,6 +121,20 @@ impl AcpEventMapper {
                             .meta(metadata),
                         )]
                     }
+                    MessageContent::ExpandedUser { expansion } => {
+                        vec![wire::SessionUpdate::UserMessage(
+                            wire::UserMessage::new(
+                                message.identity.message_id.to_string(),
+                            )
+                            .content(vec![wire::ContentBlock::Text(
+                                wire::TextContent::new(
+                                    expansion.invocation.original.clone(),
+                                )
+                                .meta(metadata.clone()),
+                            )])
+                            .meta(metadata),
+                        )]
+                    }
                     MessageContent::ToolResult {
                         tool_call_id,
                         blocks,
@@ -146,8 +160,40 @@ impl AcpEventMapper {
                     }
                     MessageContent::System { .. }
                     | MessageContent::BashExecution { .. }
-                    | MessageContent::Extension { .. } => {
+                    | MessageContent::Extension { .. }
+                    | MessageContent::CompactionSummary { .. } => {
                         vec![Self::extension_update(&event)?]
+                    }
+                    MessageContent::SlashCommand { message: command } => {
+                        match command {
+                            protocol::SlashCommandMessage::Invocation {
+                                invocation,
+                                ..
+                            } => vec![wire::SessionUpdate::UserMessage(
+                                wire::UserMessage::new(
+                                    message.identity.message_id.to_string(),
+                                )
+                                .content(vec![wire::ContentBlock::Text(
+                                    wire::TextContent::new(
+                                        invocation.original.clone(),
+                                    )
+                                    .meta(metadata.clone()),
+                                )])
+                                .meta(metadata),
+                            )],
+                            protocol::SlashCommandMessage::Output(output) => {
+                                vec![wire::SessionUpdate::AgentMessage(
+                                    wire::AgentMessage::new(
+                                        message.identity.message_id.to_string(),
+                                    )
+                                    .content(Self::message_blocks(
+                                        &output.blocks,
+                                        &metadata,
+                                    )?)
+                                    .meta(metadata),
+                                )]
+                            }
+                        }
                     }
                 }
             }
@@ -201,6 +247,30 @@ impl AcpEventMapper {
             AgentEventPayload::RunEnd { .. } => {
                 vec![Self::extension_update(&event)?]
             }
+            AgentEventPayload::SlashCommandStart { .. } => vec![
+                Self::extension_update(&event)?,
+                wire::SessionUpdate::StateUpdate(wire::StateUpdate::Running(
+                    wire::RunningStateUpdate::new().meta(metadata),
+                )),
+            ],
+            AgentEventPayload::SlashCommandEnd { status, .. } => vec![
+                Self::extension_update(&event)?,
+                wire::SessionUpdate::StateUpdate(wire::StateUpdate::Idle(
+                    wire::IdleStateUpdate::new()
+                        .stop_reason(match status {
+                            protocol::SlashCommandStatus::Succeeded => {
+                                wire::StopReason::EndTurn
+                            }
+                            protocol::SlashCommandStatus::Failed => {
+                                wire::StopReason::Other(
+                                    ProductIdentity::ACP_ERROR_STOP_REASON
+                                        .to_string(),
+                                )
+                            }
+                        })
+                        .meta(metadata),
+                )),
+            ],
             AgentEventPayload::SessionTitleChanged { title } => {
                 vec![wire::SessionUpdate::SessionInfoUpdate(
                     wire::SessionInfoUpdate::new()
@@ -215,7 +285,17 @@ impl AcpEventMapper {
                         let available = wire::AvailableCommand::new(
                             command.name.clone(),
                             command.description.clone(),
-                        );
+                        )
+                        .meta(wire::Meta::from_iter([(
+                            ProductIdentity::ACP_NAMESPACE.to_string(),
+                            serde_json::json!({
+                                ProductIdentity::ACP_SLASH_COMMAND_METADATA: {
+                                    "source": command.source,
+                                    "qualifiedName": command.qualified_name,
+                                    "aliasKind": command.alias_kind,
+                                }
+                            }),
+                        )]));
                         match &command.argument_hint {
                             Some(hint) => available.input(
                                 wire::AvailableCommandInput::Text(
@@ -310,6 +390,51 @@ impl AcpEventMapper {
                         serde_json::to_value(metadata)?,
                     );
                 }
+                match &message.content {
+                    MessageContent::ExpandedUser { expansion } => {
+                        product.insert(
+                            ProductIdentity::ACP_SLASH_COMMAND_METADATA
+                                .to_string(),
+                            serde_json::json!({
+                                "name": expansion.invocation.name,
+                                "source": expansion.source,
+                                "messageKind": "expansion",
+                            }),
+                        );
+                    }
+                    MessageContent::SlashCommand { message } => {
+                        let slash_command = match message {
+                            protocol::SlashCommandMessage::Invocation {
+                                invocation,
+                                source,
+                            } => serde_json::json!({
+                                "name": invocation.name,
+                                "source": source,
+                                "messageKind": "invocation",
+                            }),
+                            protocol::SlashCommandMessage::Output(output) => {
+                                serde_json::json!({
+                                    "name": output.command,
+                                    "source": output.source,
+                                    "status": output.status,
+                                    "messageKind": "output",
+                                })
+                            }
+                        };
+                        product.insert(
+                            ProductIdentity::ACP_SLASH_COMMAND_METADATA
+                                .to_string(),
+                            slash_command,
+                        );
+                    }
+                    MessageContent::System { .. }
+                    | MessageContent::User { .. }
+                    | MessageContent::Assistant { .. }
+                    | MessageContent::ToolResult { .. }
+                    | MessageContent::BashExecution { .. }
+                    | MessageContent::Extension { .. }
+                    | MessageContent::CompactionSummary { .. } => {}
+                }
             }
             AgentEventPayload::UsageUpdated { usage, .. } => {
                 product
@@ -317,6 +442,7 @@ impl AcpEventMapper {
             }
             AgentEventPayload::RunStart { .. }
             | AgentEventPayload::RunEnd { .. }
+            | AgentEventPayload::SlashCommandStart { .. }
             | AgentEventPayload::TurnStart { .. }
             | AgentEventPayload::TurnEnd { .. }
             | AgentEventPayload::MessageStart { .. }
@@ -337,6 +463,12 @@ impl AcpEventMapper {
             | AgentEventPayload::McpElicitationRequested { .. }
             | AgentEventPayload::McpElicitationResolved { .. }
             | AgentEventPayload::AgentSettled { .. } => {}
+            AgentEventPayload::SlashCommandEnd { status, .. } => {
+                product.insert(
+                    ProductIdentity::ACP_SLASH_COMMAND_METADATA.to_string(),
+                    serde_json::json!({ "status": status }),
+                );
+            }
         }
         Ok(wire::Meta::from_iter([(
             ProductIdentity::ACP_NAMESPACE.to_string(),

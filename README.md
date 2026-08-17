@@ -109,6 +109,14 @@ arguments expand to empty strings. For example, `/review README.md` expands the
 also expanded only by the server. The WebUI command palette displays the ACP
 v2 Available Commands snapshot but never reads or expands Prompt resources.
 
+The unified Slash Command catalog has four ordered sources: Kernel Builtins,
+Extension commands, Skills, and Prompt Templates. Builtins are `/compact
+[custom instructions]`, `/name [name]`, and `/session`. Extension canonical
+names use `/extension-id:command`; an unambiguous short alias is advertised
+separately. Commands are submitted through standard ACP `session/prompt`.
+Direct command input and output, and frozen Skill or Template expansions,
+retain their Turn and millisecond timing for replay.
+
 ## Skill resources
 
 Each Session also freezes an immutable Skill catalog. Winner-first discovery
@@ -185,9 +193,10 @@ Pi concepts without native ACP equivalents use ACP v2 extension methods and
 `SessionUpdate::Other` values under the product namespace. Native
 `session/new`, `session/list`, `session/resume`, `session/prompt`,
 `session/cancel`, and `session/close` remain standard ACP methods. The agent
-uses native ACP v2 `available_commands_update` for Extension Commands, Skills,
-and Prompt Templates. It does not advertise or invoke client filesystem or
-terminal callbacks.
+uses native ACP v2 `available_commands_update` for Builtins, Extension
+Commands, Skills, and Prompt Templates. Product metadata records each source,
+qualified alias, and command-message status. It does not advertise or invoke
+client filesystem or terminal callbacks.
 
 ## Validation
 

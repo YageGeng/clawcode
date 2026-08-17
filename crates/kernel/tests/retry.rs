@@ -262,7 +262,7 @@ impl RetryFixture {
                 .run(
                     RunRequest {
                         session_id,
-                        input: "hello".to_string(),
+                        input: "hello".into(),
                     },
                     sink,
                 )

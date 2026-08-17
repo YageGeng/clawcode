@@ -63,8 +63,8 @@ use attempt::{
 };
 pub use compaction::ContextUsageEstimate;
 use compaction::{
-    CompactionExecution, CompactionPolicyExt, OverflowRecovery,
-    SummaryGeneration,
+    CompactionExecution, CompactionIdentity, CompactionPolicyExt,
+    OverflowRecovery, SummaryGeneration, SummaryProtocol,
 };
 use queue::{PendingQueue, PendingQueueItem, QueueCancellationReason};
 pub use retry::RetryClassifier;
@@ -133,12 +133,18 @@ pub enum KernelError {
     /// A requested extension command was not registered.
     #[error("extension command not found: {0}")]
     ExtensionCommandNotFound(String),
-    /// A short extension command resolved to more than one owner.
-    #[error("extension command name is ambiguous: {0}")]
-    ExtensionCommandAmbiguous(String),
-    /// Extension commands execute immediately and cannot enter a run queue.
-    #[error("extension command cannot be queued: {0}")]
-    ExtensionCommandCannotQueue(String),
+    /// A recognized Slash Command produced a stable domain rejection.
+    #[error(transparent)]
+    SlashCommandRejected(#[from] protocol::SlashCommandError),
+    /// The active branch has no model-visible history before its retention boundary.
+    #[error("there is no context to compact")]
+    NoContextToCompact,
+    /// Direct commands execute immediately and cannot enter a run queue.
+    #[error("Slash Command cannot be queued: /{name} ({command_source:?})")]
+    SlashCommandCannotQueue {
+        name: String,
+        command_source: protocol::SlashCommandSource,
+    },
     /// Queue insertion requires a run that has already become active.
     #[error("session is not running: {0}")]
     SessionNotRunning(SessionId),

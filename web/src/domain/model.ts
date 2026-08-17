@@ -65,7 +65,20 @@ export type CompactionReason = "manual" | "threshold" | "overflow";
 export type CompactionStatus =
   | Readonly<{ type: "idle" }>
   | Readonly<{ type: "running"; reason: CompactionReason; startedAtMs: TimestampMs }>
-  | Readonly<{ type: "finished"; reason: CompactionReason; endedAtMs: TimestampMs }>;
+  | Readonly<{ type: "finished"; reason: CompactionReason; entryId: EntryId; endedAtMs: TimestampMs }>
+  | Readonly<{ type: "failed"; reason: CompactionReason; message: string; endedAtMs: TimestampMs }>
+  | Readonly<{ type: "cancelled"; reason: CompactionReason; endedAtMs: TimestampMs }>;
+
+export type CompactionEntity = Readonly<{
+  entryId: EntryId;
+  turnId: TurnId;
+  reason: CompactionReason;
+  summary: string;
+  tokensBefore: string;
+  usage?: ModelUsage;
+  startedAtMs: TimestampMs;
+  endedAtMs: TimestampMs;
+}>;
 
 export type MessageEntity = Readonly<{
   messageId: MessageId;
@@ -78,6 +91,18 @@ export type MessageEntity = Readonly<{
   endedAtMs: TimestampMs;
   streaming: boolean;
   assistant?: AssistantDiagnostics;
+  slashCommand?: SlashCommandMessageMeta;
+}>;
+
+export type SlashCommandSource = "builtin" | "extension" | "skill" | "prompt_template";
+
+export type SlashCommandAliasKind = "canonical" | "short";
+
+export type SlashCommandMessageMeta = Readonly<{
+  name: string;
+  source: SlashCommandSource;
+  messageKind: "invocation" | "output" | "expansion";
+  status?: "succeeded" | "failed";
 }>;
 
 export type ToolCallEntity = Readonly<{
@@ -207,6 +232,9 @@ export type AvailableCommandEntity = Readonly<{
   name: string;
   description: string;
   argumentHint?: string;
+  source?: SlashCommandSource;
+  qualifiedName?: string;
+  aliasKind?: SlashCommandAliasKind;
 }>;
 
 export type McpToolInfo = Readonly<{
@@ -318,4 +346,5 @@ export type TranscriptEntry =
   | Readonly<{ type: "message"; messageId: MessageId; order: EventOrder }>
   | Readonly<{ type: "tool"; toolCallId: ToolCallId; order: EventOrder }>
   | Readonly<{ type: "bash"; messageId: MessageId; order: EventOrder }>
-  | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>;
+  | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>
+  | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>;

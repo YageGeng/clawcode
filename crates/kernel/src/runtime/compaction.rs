@@ -1,9 +1,24 @@
 use protocol::{
-    AgentMessage, AssistantMetadata, CompactionPolicy, ContentBlock,
-    MessageContent, ModelProfile, ModelUsage, StopReason,
+    AgentMessage, ContentBlock, MessageContent, ModelProfile,
+    ModelRequestOptions, ModelUsage, StopReason,
 };
 
 use super::*;
+
+mod context;
+mod lifecycle;
+mod prompt;
+
+pub use context::ContextUsageEstimate;
+pub(in crate::runtime) use context::{
+    CompactionPolicyExt, CompactionPreparation, EstimatedTokens,
+    OverflowRecovery,
+};
+use lifecycle::CompactionLifecycle;
+pub(in crate::runtime) use prompt::{
+    GeneratedSummary, SummaryGeneration, SummaryProtocol,
+};
+use prompt::{SUMMARIZATION_SYSTEM_PROMPT, SummaryPrompt, SummaryTemplate};
 
 /// Borrowed execution context shared by manual, threshold, and overflow compaction paths.
 #[derive(typed_builder::TypedBuilder)]
@@ -21,18 +36,35 @@ pub(super) struct CompactionExecution<'a> {
     /// Failed or truncated Assistant omitted from recovered active context.
     #[builder(default)]
     excluded_message_id: Option<&'a MessageId>,
+    /// Optional identity supplied by a containing Slash Command operation.
+    #[builder(default)]
+    identity: Option<CompactionIdentity>,
+    /// Optional caller-provided model instruction for manual compaction.
+    #[builder(default)]
+    instruction: Option<String>,
 }
 
-/// Immutable inputs for one tool-free model summary request.
-#[derive(typed_builder::TypedBuilder)]
-pub(in crate::runtime) struct SummaryGeneration<'a> {
-    session: &'a Arc<SessionRuntime>,
-    run_id: &'a RunId,
-    turn_id: &'a TurnId,
-    timestamp: TimestampMs,
-    messages: Vec<AgentMessage>,
-    cancellation: &'a CancellationToken,
-    instruction: &'a str,
+/// Stable operation identity used by every compaction lifecycle event.
+#[derive(Clone)]
+pub(in crate::runtime) struct CompactionIdentity {
+    run_id: RunId,
+    turn_id: TurnId,
+    started_at_ms: TimestampMs,
+}
+
+impl CompactionIdentity {
+    /// Creates a compaction identity from already validated operation values.
+    pub(in crate::runtime) fn new(
+        run_id: RunId,
+        turn_id: TurnId,
+        started_at_ms: TimestampMs,
+    ) -> Self {
+        Self {
+            run_id,
+            turn_id,
+            started_at_ms,
+        }
+    }
 }
 
 impl Kernel {
@@ -47,8 +79,22 @@ impl Kernel {
             .history
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?;
+        let latest_compaction_started_at =
+            history.iter().rev().find_map(|message| {
+                matches!(
+                    message.content,
+                    MessageContent::CompactionSummary { .. }
+                )
+                .then_some(message.timing.started_at_ms)
+            });
+        // Retained-tail messages are ordered after the synthetic summary but
+        // retain their original timing, so stale provider metadata must not
+        // initiate another overflow recovery after the same compaction.
         let latest_assistant = history.iter().rev().find_map(|message| {
             if let MessageContent::Assistant { metadata, .. } = &message.content
+                && latest_compaction_started_at.is_none_or(|boundary| {
+                    message.timing.ended_at_ms > boundary
+                })
             {
                 Some((message, metadata))
             } else {
@@ -129,14 +175,59 @@ impl Kernel {
             reason,
             cancellation,
             excluded_message_id,
+            identity,
+            instruction,
         } = execution;
-        let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let turn_id = TurnId::try_from(self.id_generator.next(IdKind::Turn))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let mut compacted_history = session
+            .history
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .clone();
+        // Failed and explicitly excluded Assistant attempts stay replayable in
+        // Store but never become part of a recovered active model context.
+        compacted_history.retain(|message| {
+            !matches!(
+                &message.content,
+                MessageContent::Assistant { metadata, .. }
+                    if metadata.error.is_some()
+                        || excluded_message_id
+                            .is_some_and(|id| id == &message.identity.message_id)
+            )
+        });
+        let preparation = CompactionPreparation::from_history(
+            &compacted_history,
+            self.compaction_policy,
+        );
+        // Direct command records are intentionally model-invisible. Rejecting
+        // before lifecycle hooks and records prevents a false compaction run.
+        if !preparation
+            .summarized
+            .iter()
+            .chain(&preparation.turn_prefix)
+            .any(|message| message.estimated_tokens() > 0)
+        {
+            return Err(KernelError::NoContextToCompact);
+        }
+        let identity = match identity {
+            Some(identity) => identity,
+            None => CompactionIdentity::new(
+                RunId::try_from(self.id_generator.next(IdKind::Run)).map_err(
+                    |error| KernelError::Protocol(error.to_string()),
+                )?,
+                TurnId::try_from(self.id_generator.next(IdKind::Turn))
+                    .map_err(|error| {
+                        KernelError::Protocol(error.to_string())
+                    })?,
+                self.clock.now(),
+            ),
+        };
+        let CompactionIdentity {
+            run_id,
+            turn_id,
+            started_at_ms,
+        } = identity;
         let entry_id = EntryId::try_from(self.id_generator.next(IdKind::Entry))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let started_at_ms = self.clock.now();
         let will_retry = reason == CompactionReason::Overflow
             && excluded_message_id.is_some();
         let extension_context =
@@ -165,14 +256,23 @@ impl Kernel {
             sink,
             session: Arc::clone(session),
         };
+        let source_leaf_id = session
+            .store
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .lane(&session.lane)
+            .cloned();
         self.record_operation(
             session,
             &run_id,
             RecordKind::OperationStarted,
-            serde_json::json!({
-                "operation": "compaction",
-                "resultEntryId": entry_id,
-            }),
+            serde_json::to_value(protocol::CompactionOperationStarted {
+                source_leaf_id,
+                intent: protocol::CompactionOperationIntent::new(
+                    instruction.clone(),
+                    entry_id.clone(),
+                ),
+            })?,
         )?;
         emitter
             .emit_at(
@@ -184,153 +284,304 @@ impl Kernel {
                 },
             )
             .await?;
-        let mut compacted_history = session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .clone();
-        // Failed and explicitly excluded Assistant attempts stay replayable in
-        // Store but never become part of a recovered active model context.
-        compacted_history.retain(|message| {
-            !matches!(
-                &message.content,
-                MessageContent::Assistant { metadata, .. }
-                    if metadata.error.is_some()
-                        || excluded_message_id
-                            .is_some_and(|id| id == &message.identity.message_id)
-            )
-        });
-        let preparation = CompactionPreparation::from_history(
-            &compacted_history,
-            self.compaction_policy,
-        );
-        let from_extension = extension_compaction.is_some();
-        let (summary, retained_tail, tokens_before) =
-            if let Some(compaction) = extension_compaction {
-                (
-                    compaction.summary,
-                    compaction.retained_tail,
-                    compaction.tokens_before,
-                )
-            } else {
-                let summary = match self
-                    .generate_compaction_summary(
-                        SummaryGeneration::builder()
-                            .session(session)
-                            .run_id(&run_id)
-                            .turn_id(&turn_id)
-                            .timestamp(started_at_ms)
-                            .messages(preparation.summarized)
-                            .cancellation(cancellation)
-                            .instruction(COMPACTION_INSTRUCTION)
-                            .build(),
-                    )
-                    .await
-                {
-                    Ok(summary) => summary,
-                    Err(error) => {
-                        self.record_operation(
-                            session,
-                            &run_id,
-                            RecordKind::OperationFinished,
-                            serde_json::json!({
-                                "status": "failed",
-                                "error": error.to_string(),
-                            }),
-                        )?;
-                        return Err(error);
-                    }
-                };
-                (
-                    summary,
-                    preparation.retained_tail,
-                    preparation.tokens_before,
-                )
-            };
-        let ended_at_ms = self.clock.now();
-        let details = CompactionDetails::builder()
+        let lifecycle = CompactionLifecycle::builder()
+            .kernel(self)
+            .session(session.as_ref())
+            .emitter(&emitter)
+            .run_id(&run_id)
+            .turn_id(&turn_id)
             .reason(reason)
-            .turn_id(turn_id.clone())
-            .started_at_ms(started_at_ms)
-            .ended_at_ms(ended_at_ms)
             .build();
-        let data = CompactionData::builder()
-            .summary(summary.clone())
-            .retained_tail(retained_tail.clone())
-            .tokens_before(tokens_before)
-            .details(Some(details.clone()))
-            .build();
-        session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .append_entry(
-                &session.lane,
-                NewEntry {
-                    id: entry_id.clone(),
-                    kind: EntryKind::Compaction,
-                    payload: serde_json::to_value(&data)?,
-                },
+        let from_extension = extension_compaction.is_some();
+        let compaction_result: Result<CompactionResult, KernelError> = async {
+            self.record_operation(
+                session,
+                &run_id,
+                RecordKind::StepAttempt,
+                serde_json::to_value(
+                    protocol::CompactionStepAttempt::builder()
+                        .step(protocol::CompactionStep::Compaction)
+                        .attempt(1)
+                        .result_entry_id(entry_id.clone())
+                        .compaction_reason(reason)
+                        .build(),
+                )?,
             )?;
-        let summary_message = AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from(format!(
-                    "compaction-summary-{entry_id}"
+            let CompactionPreparation {
+                summarized,
+                turn_prefix,
+                retained_tail,
+                tokens_before,
+                previous_summary,
+                file_operations,
+            } = preparation;
+            let (summary, retained_tail, tokens_before, summary_usage) =
+                if let Some(compaction) = extension_compaction {
+                    (
+                        compaction.summary,
+                        compaction.retained_tail,
+                        compaction.tokens_before,
+                        None,
+                    )
+                } else {
+                    let generated = async {
+                        if turn_prefix.is_empty() {
+                            return self
+                                .generate_compaction_summary(
+                                    SummaryGeneration::builder()
+                                        .session(session)
+                                        .run_id(&run_id)
+                                        .turn_id(&turn_id)
+                                        .timestamp(started_at_ms)
+                                        .messages(summarized)
+                                        .cancellation(cancellation)
+                                        .protocol(SummaryProtocol::Compaction {
+                                            previous_summary:
+                                                previous_summary.as_deref(),
+                                            custom_instructions:
+                                                instruction.as_deref(),
+                                        })
+                                        .build(),
+                                )
+                                .await;
+                        }
+                        let history_summary = if summarized.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                self.generate_compaction_summary(
+                                    SummaryGeneration::builder()
+                                        .session(session)
+                                        .run_id(&run_id)
+                                        .turn_id(&turn_id)
+                                        .timestamp(started_at_ms)
+                                        .messages(summarized)
+                                        .cancellation(cancellation)
+                                        .protocol(SummaryProtocol::Compaction {
+                                            previous_summary:
+                                                previous_summary.as_deref(),
+                                            custom_instructions:
+                                                instruction.as_deref(),
+                                        })
+                                        .build(),
+                                )
+                                .await?,
+                            )
+                        };
+                        let prefix_summary = self
+                            .generate_compaction_summary(
+                                SummaryGeneration::builder()
+                                    .session(session)
+                                    .run_id(&run_id)
+                                    .turn_id(&turn_id)
+                                    .timestamp(started_at_ms)
+                                    .messages(turn_prefix)
+                                    .cancellation(cancellation)
+                                    .protocol(SummaryProtocol::TurnPrefix)
+                                    .build(),
+                            )
+                            .await?;
+                        let history_text = history_summary
+                            .as_ref()
+                            .map_or("No prior history.", |summary| {
+                                summary.text.as_str()
+                            });
+                        let usage = history_summary.as_ref().map_or_else(
+                            || prefix_summary.usage.clone(),
+                            |history| {
+                                ModelUsage::builder()
+                                    .input_tokens(
+                                        history
+                                            .usage
+                                            .input_tokens
+                                            .saturating_add(
+                                                prefix_summary.usage.input_tokens,
+                                            ),
+                                    )
+                                    .output_tokens(
+                                        history
+                                            .usage
+                                            .output_tokens
+                                            .saturating_add(
+                                                prefix_summary.usage.output_tokens,
+                                            ),
+                                    )
+                                    .cache_read_tokens(
+                                        history
+                                            .usage
+                                            .cache_read_tokens
+                                            .saturating_add(
+                                                prefix_summary
+                                                    .usage
+                                                    .cache_read_tokens,
+                                            ),
+                                    )
+                                    .cache_write_tokens(
+                                        history
+                                            .usage
+                                            .cache_write_tokens
+                                            .saturating_add(
+                                                prefix_summary
+                                                    .usage
+                                                    .cache_write_tokens,
+                                            ),
+                                    )
+                                    .reasoning_tokens(match (
+                                        history.usage.reasoning_tokens,
+                                        prefix_summary.usage.reasoning_tokens,
+                                    ) {
+                                        (None, None) => None,
+                                        (left, right) => Some(
+                                            left.unwrap_or(0)
+                                                .saturating_add(right.unwrap_or(0)),
+                                        ),
+                                    })
+                                    .total_tokens(
+                                        history
+                                            .usage
+                                            .total_tokens
+                                            .saturating_add(
+                                                prefix_summary.usage.total_tokens,
+                                            ),
+                                    )
+                                    .build()
+                            },
+                        );
+                        Ok(GeneratedSummary {
+                            text: format!(
+                                "{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{}",
+                                prefix_summary.text
+                            ),
+                            usage,
+                            stop_reason: prefix_summary.stop_reason,
+                        })
+                    }
+                    .await;
+                    let generated = generated?;
+                    self.record_operation(
+                        session,
+                        &run_id,
+                        RecordKind::Usage,
+                        serde_json::to_value(
+                            protocol::CompactionUsageRecord::builder()
+                                .cause(protocol::CompactionUsageCause::Compaction)
+                                .entry_id(entry_id.clone())
+                                .attempt(1)
+                                .stop_reason(generated.stop_reason)
+                                .usage(generated.usage.clone())
+                                .build(),
+                        )?,
+                    )?;
+                    (
+                        generated.text,
+                        retained_tail,
+                        tokens_before,
+                        Some(generated.usage),
+                    )
+                };
+            let read_files = file_operations.read_files();
+            let modified_files = file_operations.modified_files();
+            // Pi keeps cumulative file operations in both typed details and the
+            // model-visible summary so future Turns retain filesystem context.
+            let mut summary = summary;
+            if !read_files.is_empty() {
+                summary.push_str("\n\n<read-files>\n");
+                summary.push_str(&read_files.join("\n"));
+                summary.push_str("\n</read-files>");
+            }
+            if !modified_files.is_empty() {
+                summary.push_str("\n\n<modified-files>\n");
+                summary.push_str(&modified_files.join("\n"));
+                summary.push_str("\n</modified-files>");
+            }
+            let ended_at_ms = self.clock.now();
+            let details = CompactionDetails::builder()
+                .reason(reason)
+                .run_id(run_id.clone())
+                .turn_id(turn_id.clone())
+                .started_at_ms(started_at_ms)
+                .ended_at_ms(ended_at_ms)
+                .read_files(read_files)
+                .modified_files(modified_files)
+                .build();
+            let data = CompactionData::builder()
+                .summary(summary.clone())
+                .retained_tail(retained_tail.clone())
+                .tokens_before(tokens_before)
+                .usage(summary_usage.clone())
+                .details(Some(details.clone()))
+                .build();
+            session
+                .store
+                .lock()
+                .map_err(|_poison_error| KernelError::Poisoned)?
+                .append_entry(
+                    &session.lane,
+                    NewEntry {
+                        id: entry_id.clone(),
+                        kind: EntryKind::Compaction,
+                        payload: serde_json::to_value(&data)?,
+                    },
+                )?;
+            let summary_message = AgentMessage {
+                identity: MessageIdentity {
+                    message_id: MessageId::try_from(format!(
+                        "compaction-summary-{entry_id}"
+                    ))
+                    .map_err(|error| KernelError::Protocol(error.to_string()))?,
+                    turn_id: turn_id.clone(),
+                },
+                timing: MessageTiming::try_from((
+                    started_at_ms,
+                    started_at_ms,
+                    ended_at_ms,
                 ))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
-                turn_id: turn_id.clone(),
-            },
-            timing: MessageTiming::try_from((
-                started_at_ms,
-                started_at_ms,
-                ended_at_ms,
-            ))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?,
-            content: MessageContent::System {
-                blocks: vec![ContentBlock::Text { text: summary }],
-            },
-        };
-        let mut context =
-            Vec::with_capacity(retained_tail.len().saturating_add(1));
-        context.push(summary_message);
-        context.extend(retained_tail);
-        *session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? = context;
-        let result = CompactionResult::builder()
-            .entry_id(entry_id.clone())
-            .turn_id(turn_id.clone())
-            .started_at_ms(started_at_ms)
-            .ended_at_ms(ended_at_ms)
-            .build();
-        self.record_operation(
-            session,
-            &run_id,
-            RecordKind::StepAttempt,
-            serde_json::json!({
-                "step": "compaction",
-                "resultEntryId": entry_id,
-                "compactionReason": reason,
-            }),
-        )?;
-        self.record_operation(
-            session,
-            &run_id,
-            RecordKind::OperationFinished,
-            serde_json::json!({ "status": "completed" }),
-        )?;
-        emitter
-            .emit_at(
-                turn_id.clone(),
-                ended_at_ms,
-                AgentEventPayload::CompactionEnd {
-                    run_id,
-                    reason,
-                    result: result.clone(),
+                content: MessageContent::CompactionSummary {
+                    compaction: protocol::CompactionSummaryMessage::builder()
+                        .entry_id(entry_id.clone())
+                        .summary(summary.clone())
+                        .tokens_before(tokens_before)
+                        .read_files(details.read_files.clone())
+                        .modified_files(details.modified_files.clone())
+                        .build(),
                 },
-            )
-            .await?;
+            };
+            let mut context =
+                Vec::with_capacity(retained_tail.len().saturating_add(1));
+            context.push(summary_message);
+            context.extend(retained_tail);
+            *session
+                .history
+                .lock()
+                .map_err(|_poison_error| KernelError::Poisoned)? = context;
+            let result = CompactionResult::builder()
+                .entry_id(entry_id.clone())
+                .turn_id(turn_id.clone())
+                .summary(summary)
+                .tokens_before(tokens_before)
+                .usage(summary_usage)
+                .started_at_ms(started_at_ms)
+                .ended_at_ms(ended_at_ms)
+                .build();
+                Ok(result)
+        }
+        .await;
+        let result = match compaction_result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(terminal_error) = lifecycle.fail(&error).await {
+                    tracing::error!(
+                        "failed to settle compaction Run {} after execution failure {}: {}",
+                        run_id,
+                        error,
+                        terminal_error
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let terminal_result = lifecycle.complete(&result).await;
         session
             .extensions
             .emit_session_compact(
@@ -343,6 +594,7 @@ impl Kernel {
                 &extension_context,
             )
             .await;
+        terminal_result?;
         Ok(result)
     }
 
@@ -350,7 +602,7 @@ impl Kernel {
     pub(in crate::runtime) async fn generate_compaction_summary(
         &self,
         generation: SummaryGeneration<'_>,
-    ) -> Result<String, KernelError> {
+    ) -> Result<GeneratedSummary, KernelError> {
         let SummaryGeneration {
             session,
             run_id,
@@ -358,9 +610,54 @@ impl Kernel {
             timestamp,
             messages,
             cancellation,
-            instruction,
+            protocol,
         } = generation;
-        let instruction = AgentMessage {
+        let (system_prompt, user_prompt, max_tokens) = match protocol {
+            SummaryProtocol::Compaction {
+                previous_summary,
+                custom_instructions,
+            } => (
+                SUMMARIZATION_SYSTEM_PROMPT,
+                Some(
+                    SummaryPrompt {
+                        messages: &messages,
+                        previous_summary,
+                        custom_instructions,
+                        template: SummaryTemplate::Checkpoint,
+                    }
+                    .render(),
+                ),
+                Some(
+                    self.compaction_policy
+                        .reserve_tokens
+                        .saturating_mul(8)
+                        .checked_div(10)
+                        .unwrap_or(0),
+                ),
+            ),
+            SummaryProtocol::TurnPrefix => (
+                SUMMARIZATION_SYSTEM_PROMPT,
+                Some(
+                    SummaryPrompt {
+                        messages: &messages,
+                        previous_summary: None,
+                        custom_instructions: None,
+                        template: SummaryTemplate::TurnPrefix,
+                    }
+                    .render(),
+                ),
+                Some(
+                    self.compaction_policy
+                        .reserve_tokens
+                        .checked_div(2)
+                        .unwrap_or(0),
+                ),
+            ),
+            SummaryProtocol::Branch { instruction } => {
+                (instruction, None, None)
+            }
+        };
+        let system_message = AgentMessage {
             identity: MessageIdentity {
                 message_id: self.message_id()?,
                 turn_id: turn_id.clone(),
@@ -369,18 +666,29 @@ impl Kernel {
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
             content: MessageContent::System {
                 blocks: vec![ContentBlock::Text {
-                    text: instruction.to_string(),
+                    text: system_prompt.to_string(),
                 }],
             },
         };
         let mut request_messages = Vec::with_capacity(messages.len() + 1);
-        request_messages.push(instruction);
-        request_messages.extend(messages);
-        let request = ModelRequest {
-            messages: request_messages,
-            tools: Vec::new(),
-            options: Default::default(),
-        };
+        request_messages.push(system_message);
+        if let Some(user_prompt) = user_prompt {
+            request_messages.push(AgentMessage {
+                identity: MessageIdentity {
+                    message_id: self.message_id()?,
+                    turn_id: turn_id.clone(),
+                },
+                timing: MessageTiming::try_from((
+                    timestamp, timestamp, timestamp,
+                ))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?,
+                content: MessageContent::User {
+                    blocks: vec![ContentBlock::Text { text: user_prompt }],
+                },
+            });
+        } else {
+            request_messages.extend(messages);
+        }
         let completion_hooks =
             self.completion_hooks(session, run_id, turn_id)?;
         // Compaction uses one immutable model snapshot just like a normal Turn.
@@ -390,9 +698,19 @@ impl Kernel {
             .map_err(|_poison_error| KernelError::Poisoned)?
             .clone();
         model.preflight().await?;
+        let max_tokens = max_tokens
+            .map(|tokens| tokens.min(model.profile().max_output_tokens));
+        let request = ModelRequest {
+            messages: request_messages,
+            tools: Vec::new(),
+            options: ModelRequestOptions {
+                max_tokens,
+                temperature: None,
+            },
+        };
         let mut retry_state = RetryState::default();
         loop {
-            let result: Result<String, ModelError> = async {
+            let result: Result<GeneratedSummary, ModelError> = async {
                 let mut stream = model
                     .stream_with_hooks(
                         request.clone(),
@@ -401,6 +719,7 @@ impl Kernel {
                     )
                     .await?;
                 let mut summary = String::new();
+                let mut final_result = None;
                 loop {
                     let item = tokio::select! {
                         () = cancellation.cancelled() => {
@@ -415,8 +734,10 @@ impl Kernel {
                         ModelStreamEvent::TextDelta(delta) => {
                             summary.push_str(&delta);
                         }
-                        ModelStreamEvent::ReasoningDelta(_)
-                        | ModelStreamEvent::Finished(_) => {}
+                        ModelStreamEvent::ReasoningDelta(_) => {}
+                        ModelStreamEvent::Finished(result) => {
+                            final_result = Some(result);
+                        }
                         ModelStreamEvent::ToolCall(_call) => {
                             return Err(ModelError::Protocol(
                                 "compaction model returned a tool call"
@@ -431,7 +752,33 @@ impl Kernel {
                         "compaction summary was empty".to_string(),
                     ));
                 }
-                Ok(summary)
+                let final_result = final_result.ok_or_else(|| {
+                    ModelError::Protocol(
+                        "compaction model returned no terminal usage"
+                            .to_string(),
+                    )
+                })?;
+                match final_result.stop_reason {
+                    StopReason::Cancelled => return Err(ModelError::Cancelled),
+                    StopReason::Error | StopReason::Refusal => {
+                        return Err(ModelError::Protocol(
+                            "compaction model returned an error outcome"
+                                .to_string(),
+                        ));
+                    }
+                    StopReason::ToolUse => {
+                        return Err(ModelError::Protocol(
+                            "compaction model returned a tool-use outcome"
+                                .to_string(),
+                        ));
+                    }
+                    StopReason::EndTurn | StopReason::MaxTokens => {}
+                }
+                Ok(GeneratedSummary {
+                    text: summary,
+                    usage: final_result.usage,
+                    stop_reason: final_result.stop_reason,
+                })
             }
             .await;
 
@@ -466,346 +813,5 @@ impl Kernel {
                 () = &mut delay => {}
             }
         }
-    }
-}
-
-/// Fixed model instruction used for provider-neutral context summarization.
-const COMPACTION_INSTRUCTION: &str = "Summarize the conversation context for another agent. Preserve user requirements, decisions, completed work, unresolved problems, exact identifiers, and important technical details. Return only the summary.";
-
-/// Provides kernel-specific overflow classification for shared compaction policy data.
-pub(super) trait CompactionPolicyExt {
-    /// Classifies pi-compatible overflow signals and whether they need one resumed Turn.
-    fn overflow_recovery(
-        &self,
-        metadata: &AssistantMetadata,
-        profile: &ModelProfile,
-    ) -> Option<OverflowRecovery>;
-}
-
-impl CompactionPolicyExt for CompactionPolicy {
-    /// Classifies pi-compatible overflow signals and whether they need one resumed Turn.
-    fn overflow_recovery(
-        &self,
-        metadata: &AssistantMetadata,
-        profile: &ModelProfile,
-    ) -> Option<OverflowRecovery> {
-        if !self.enabled
-            || metadata.provider_id != profile.provider_id
-            || metadata.model_id != profile.model_id
-        {
-            return None;
-        }
-
-        let input_tokens = metadata
-            .usage
-            .input_tokens
-            .saturating_add(metadata.usage.cache_read_tokens);
-        if metadata.stop_reason == StopReason::EndTurn
-            && input_tokens > profile.context_tokens
-        {
-            return Some(OverflowRecovery::CompactOnly);
-        }
-        if metadata.stop_reason == StopReason::MaxTokens
-            && (metadata.usage.output_tokens < profile.max_output_tokens
-                || input_tokens.saturating_mul(100)
-                    >= profile.context_tokens.saturating_mul(99))
-        {
-            return Some(OverflowRecovery::CompactAndRetry);
-        }
-        if metadata.stop_reason != StopReason::Error {
-            return None;
-        }
-
-        let error = metadata.error.as_deref()?.to_ascii_lowercase();
-        if [
-            "throttling error:",
-            "service unavailable:",
-            "rate limit",
-            "too many requests",
-        ]
-        .iter()
-        .any(|pattern| error.contains(pattern))
-        {
-            return None;
-        }
-        [
-            "prompt is too long",
-            "request_too_large",
-            "input is too long for requested model",
-            "exceeds the context window",
-            "maximum context length",
-            "input token count",
-            "maximum prompt length",
-            "reduce the length of the messages",
-            "maximum allowed input length",
-            "exceeds the available context size",
-            "greater than the context length",
-            "context window exceeds limit",
-            "exceeded model token limit",
-            "too large for model with",
-            "configured context size",
-            "model_context_window_exceeded",
-            "prompt too long",
-            "range of input length should be",
-            "context_length_exceeded",
-            "context length exceeded",
-            "too many tokens",
-            "token limit exceeded",
-            "400 status code (no body)",
-            "413 status code (no body)",
-        ]
-        .iter()
-        .any(|pattern| error.contains(pattern))
-        .then_some(OverflowRecovery::CompactAndRetry)
-    }
-}
-
-/// Bounded recovery action inferred from one completed Assistant attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OverflowRecovery {
-    /// Compact a silently over-window successful response without repeating it.
-    CompactOnly,
-    /// Remove the failed/truncated Assistant, compact, and start one new Turn.
-    CompactAndRetry,
-}
-
-/// Provider-grounded estimate of the current active context size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContextUsageEstimate {
-    /// Estimated complete context tokens.
-    pub tokens: u64,
-    /// Tokens reported by the latest valid Assistant usage block.
-    pub usage_tokens: u64,
-    /// Estimated tokens after the usage-providing Assistant.
-    pub trailing_tokens: u64,
-    /// Message index that supplied usage, or `None` when no valid usage exists.
-    pub last_usage_index: Option<usize>,
-}
-
-impl ContextUsageEstimate {
-    /// Uses the latest successful Assistant usage plus estimated trailing messages.
-    #[must_use]
-    pub fn from_history(history: &[AgentMessage]) -> Self {
-        let compaction_timestamp = history.iter().rev().find_map(|message| {
-            matches!(message.content, MessageContent::System { .. })
-                .then_some(message.timing.timestamp_ms)
-        });
-        let latest =
-            history
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(index, message)| match &message.content {
-                    MessageContent::Assistant { metadata, .. }
-                        if !matches!(
-                            metadata.stop_reason,
-                            StopReason::Error | StopReason::Cancelled
-                        ) && metadata.usage.context_tokens() > 0
-                            && compaction_timestamp.is_none_or(
-                                |boundary| {
-                                    message.timing.timestamp_ms > boundary
-                                },
-                            ) =>
-                    {
-                        Some((index, metadata.usage.context_tokens()))
-                    }
-                    MessageContent::System { .. }
-                    | MessageContent::User { .. }
-                    | MessageContent::Assistant { .. }
-                    | MessageContent::ToolResult { .. }
-                    | MessageContent::BashExecution { .. }
-                    | MessageContent::Extension { .. } => None,
-                });
-
-        if let Some((index, usage_tokens)) = latest {
-            let trailing_tokens = history
-                .get(index.saturating_add(1)..)
-                .unwrap_or_default()
-                .iter()
-                .fold(0_u64, |total, message| {
-                    total.saturating_add(message.estimated_tokens())
-                });
-            return Self {
-                tokens: usage_tokens.saturating_add(trailing_tokens),
-                usage_tokens,
-                trailing_tokens,
-                last_usage_index: Some(index),
-            };
-        }
-
-        let estimated = history.iter().fold(0_u64, |total, message| {
-            total.saturating_add(message.estimated_tokens())
-        });
-        Self {
-            tokens: estimated,
-            usage_tokens: 0,
-            trailing_tokens: estimated,
-            last_usage_index: None,
-        }
-    }
-
-    /// Returns whether usage crossed the configured context reserve threshold.
-    #[must_use]
-    pub fn should_compact(
-        &self,
-        context_window: u64,
-        policy: CompactionPolicy,
-    ) -> bool {
-        policy.enabled
-            && self.tokens
-                > context_window.saturating_sub(policy.reserve_tokens)
-    }
-}
-
-/// Model input partition and deterministic pre-compaction token estimate.
-struct CompactionPreparation {
-    summarized: Vec<AgentMessage>,
-    retained_tail: Vec<AgentMessage>,
-    tokens_before: u64,
-}
-
-impl CompactionPreparation {
-    /// Retains approximately the configured recent tokens without splitting a Turn.
-    fn from_history(
-        history: &[AgentMessage],
-        policy: CompactionPolicy,
-    ) -> Self {
-        let split = if policy.keep_recent_tokens == 0 {
-            history.len()
-        } else {
-            let mut retained_tokens = 0_u64;
-            let mut boundary_turn = None;
-            for message in history.iter().rev() {
-                retained_tokens =
-                    retained_tokens.saturating_add(message.estimated_tokens());
-                boundary_turn = Some(message.identity.turn_id.clone());
-                if retained_tokens >= policy.keep_recent_tokens {
-                    break;
-                }
-            }
-            boundary_turn.map_or(0, |turn_id| {
-                history
-                    .iter()
-                    .position(|message| message.identity.turn_id == turn_id)
-                    .unwrap_or(0)
-            })
-        };
-        let (summarized, retained_tail) =
-            history.split_at_checked(split).unwrap_or((history, &[]));
-
-        Self {
-            summarized: summarized.to_vec(),
-            retained_tail: retained_tail.to_vec(),
-            tokens_before: ContextUsageEstimate::from_history(history).tokens,
-        }
-    }
-}
-
-/// Token-accounting projection for provider usage.
-trait ContextTokens {
-    /// Returns provider total tokens or a checked component fallback.
-    fn context_tokens(&self) -> u64;
-}
-
-impl ContextTokens for ModelUsage {
-    fn context_tokens(&self) -> u64 {
-        if self.total_tokens > 0 {
-            self.total_tokens
-        } else {
-            self.input_tokens
-                .saturating_add(self.output_tokens)
-                .saturating_add(self.cache_read_tokens)
-                .saturating_add(self.cache_write_tokens)
-        }
-    }
-}
-
-/// Conservative four-characters-per-token projection for trailing messages.
-trait EstimatedTokens {
-    /// Estimates one complete message without provider tokenizer access.
-    fn estimated_tokens(&self) -> u64;
-}
-
-impl EstimatedTokens for AgentMessage {
-    fn estimated_tokens(&self) -> u64 {
-        let blocks = match &self.content {
-            MessageContent::System { blocks }
-            | MessageContent::User { blocks }
-            | MessageContent::Assistant { blocks, .. }
-            | MessageContent::ToolResult { blocks, .. } => blocks,
-            MessageContent::BashExecution { bash } => {
-                if bash.exclude_from_context {
-                    return 0;
-                }
-                let characters = bash.model_text().chars().count();
-                return u64::try_from(characters.div_ceil(4))
-                    .unwrap_or(u64::MAX);
-            }
-            MessageContent::Extension { extension } => {
-                let characters = serde_json::to_string(extension)
-                    .map_or(0_usize, |value| value.chars().count());
-                return u64::try_from(characters.div_ceil(4))
-                    .unwrap_or(u64::MAX);
-            }
-        };
-        let characters = blocks.iter().fold(0_usize, |total, block| {
-            let block_characters = match block {
-                ContentBlock::Text { text }
-                | ContentBlock::Reasoning { text } => text.chars().count(),
-                // Binary media uses Pi's fixed image estimate instead of
-                // counting base64 bytes that are not sent as plain text.
-                ContentBlock::Image { .. } | ContentBlock::Audio { .. } => {
-                    4_800
-                }
-                ContentBlock::EmbeddedResource {
-                    uri,
-                    mime_type,
-                    content,
-                } => {
-                    let metadata = uri.chars().count().saturating_add(
-                        mime_type
-                            .as_deref()
-                            .map_or(0_usize, |value| value.chars().count()),
-                    );
-                    metadata.saturating_add(match content {
-                        protocol::EmbeddedResourceContent::Text { text } => {
-                            text.chars().count()
-                        }
-                        protocol::EmbeddedResourceContent::Blob { .. } => 4_800,
-                    })
-                }
-                ContentBlock::ResourceLink {
-                    uri,
-                    name,
-                    title,
-                    description,
-                    mime_type,
-                    ..
-                } => [
-                    Some(uri.as_str()),
-                    Some(name.as_str()),
-                    title.as_deref(),
-                    description.as_deref(),
-                    mime_type.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .fold(0_usize, |count, value| {
-                    count.saturating_add(value.chars().count())
-                }),
-                ContentBlock::Structured { value } => {
-                    serde_json::to_string(value)
-                        .map_or(0_usize, |value| value.chars().count())
-                }
-                ContentBlock::ToolCall {
-                    name, arguments, ..
-                } => name.chars().count().saturating_add(
-                    serde_json::to_string(arguments)
-                        .map_or(0_usize, |value| value.chars().count()),
-                ),
-            };
-            total.saturating_add(block_characters)
-        });
-        u64::try_from(characters.div_ceil(4)).unwrap_or(u64::MAX)
     }
 }

@@ -611,7 +611,7 @@ async fn preflight_failure_emits_and_persists_terminal_run_state() {
         .run(
             RunRequest {
                 session_id,
-                input: "hello".to_string(),
+                input: "hello".into(),
             },
             sink.clone(),
         )
@@ -693,7 +693,7 @@ async fn streamed_response_produces_one_timed_turn() {
         .run(
             RunRequest {
                 session_id,
-                input: "say hello".to_string(),
+                input: "say hello".into(),
             },
             sink.clone(),
         )
@@ -800,7 +800,7 @@ async fn traced_run_propagates_trace_to_tools() {
         .run_traced(
             RunRequest {
                 session_id,
-                input: "capture trace".to_string(),
+                input: "capture trace".into(),
             },
             Arc::new(RecordingSink::default()),
             trace_id.clone(),
@@ -886,7 +886,7 @@ async fn system_prompt_override_is_scoped_to_the_complete_run() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "first run".to_string(),
+                input: "first run".into(),
             },
             Arc::new(RecordingSink::default()),
         )
@@ -896,7 +896,7 @@ async fn system_prompt_override_is_scoped_to_the_complete_run() {
         .run(
             RunRequest {
                 session_id,
-                input: "second run".to_string(),
+                input: "second run".into(),
             },
             Arc::new(RecordingSink::default()),
         )
@@ -979,7 +979,7 @@ async fn stream_failures_persist_complete_error_assistants() {
             .run(
                 RunRequest {
                     session_id: session_id.clone(),
-                    input: "trigger stream failure".to_string(),
+                    input: "trigger stream failure".into(),
                 },
                 Arc::new(RecordingSink::default()),
             )
@@ -1086,7 +1086,7 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
         .run(
             RunRequest {
                 session_id,
-                input: "run tools".to_string(),
+                input: "run tools".into(),
             },
             sink.clone(),
         )
@@ -1193,7 +1193,7 @@ async fn blocked_tool_result_preserves_policy_outcome() {
         .run(
             RunRequest {
                 session_id,
-                input: "run blocked tool".to_string(),
+                input: "run blocked tool".into(),
             },
             Arc::new(RecordingSink::default()),
         )
@@ -1279,7 +1279,7 @@ async fn tool_partial_update_precedes_final_result() {
         .run(
             RunRequest {
                 session_id,
-                input: "stream tool".to_string(),
+                input: "stream tool".into(),
             },
             sink.clone(),
         )
@@ -1378,7 +1378,7 @@ async fn tool_updates_coalesce_to_the_latest_snapshot() {
         kernel.run(
             RunRequest {
                 session_id,
-                input: "run burst tool".to_string(),
+                input: "run burst tool".into(),
             },
             sink.clone(),
         ),
@@ -1458,7 +1458,7 @@ async fn cancellation_settles_pending_turn_as_cancelled() {
             .run(
                 RunRequest {
                     session_id: running_session_id,
-                    input: "wait".to_string(),
+                    input: "wait".into(),
                 },
                 Arc::new(RecordingSink::default()),
             )

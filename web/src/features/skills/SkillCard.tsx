@@ -51,7 +51,11 @@ export function SkillCard({ skill, hasSession, controller }: SkillCardProps) {
         onClick={() => {
           setBusy(true);
           setError(undefined);
-          void controller.invokeSkill(skill.name, input)
+          const arguments_ = input.trim();
+          void controller.send({
+            text: `/skill:${skill.name}${arguments_.length === 0 ? "" : ` ${arguments_}`}`,
+            resources: []
+          })
             .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
             .finally(() => setBusy(false));
         }}

@@ -15,60 +15,25 @@ pub enum DynamicRegistryError {
     #[error("extension command not found: {0}")]
     CommandNotFound(String),
     /// More than one extension owns the requested short command name.
-    #[error("extension command name is ambiguous: {0}")]
-    AmbiguousCommand(String),
-    /// Slash input could not be represented as a command name and argument tail.
-    #[error("invalid extension command invocation: {0}")]
-    InvalidCommandInvocation(String),
+    #[error(
+        "extension command name is ambiguous: {name}; use one of: {candidates:?}"
+    )]
+    AmbiguousCommand {
+        /// Ambiguous short command name.
+        name: String,
+        /// Stable qualified command alternatives.
+        candidates: Vec<String>,
+    },
     /// A dynamic registry lock was poisoned by a panicking writer.
     #[error("extension dynamic registry lock poisoned")]
     Poisoned,
-}
-
-/// Parsed pi-compatible slash command using only U+0020 as the delimiter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtensionCommandInvocation {
-    /// Qualified or short command name without the leading slash.
-    pub name: String,
-    /// Trimmed textual argument tail passed to the command handler.
-    pub arguments: String,
-}
-
-impl TryFrom<&str> for ExtensionCommandInvocation {
-    type Error = DynamicRegistryError;
-
-    /// Parses one slash command while preserving tabs and newlines in its name.
-    fn try_from(input: &str) -> Result<Self, Self::Error> {
-        let command = input.strip_prefix('/').ok_or_else(|| {
-            DynamicRegistryError::InvalidCommandInvocation(input.to_string())
-        })?;
-        let (name, arguments) = match command.find(' ') {
-            Some(index) => (
-                command.get(..index).unwrap_or_default(),
-                command
-                    .get(index.saturating_add(1)..)
-                    .unwrap_or_default()
-                    .trim(),
-            ),
-            None => (command, ""),
-        };
-        if name.is_empty() {
-            return Err(DynamicRegistryError::InvalidCommandInvocation(
-                input.to_string(),
-            ));
-        }
-        Ok(Self {
-            name: name.to_string(),
-            arguments: arguments.to_string(),
-        })
-    }
 }
 
 impl RegisteredCommand {
     /// Returns the stable extension-qualified command name.
     #[must_use]
     pub fn qualified_name(&self) -> String {
-        format!("{}/{}", self.extension_id, self.definition.name)
+        format!("{}:{}", self.extension_id, self.definition.name)
     }
 }
 
@@ -112,9 +77,13 @@ impl CommandRegistry {
         match matches.as_slice() {
             [command] => Ok((*command).clone()),
             [] => Err(DynamicRegistryError::CommandNotFound(name.to_string())),
-            _many => {
-                Err(DynamicRegistryError::AmbiguousCommand(name.to_string()))
-            }
+            many => Err(DynamicRegistryError::AmbiguousCommand {
+                name: name.to_string(),
+                candidates: many
+                    .iter()
+                    .map(|command| command.qualified_name())
+                    .collect(),
+            }),
         }
     }
 
@@ -132,7 +101,7 @@ impl CommandRegistry {
     /// Removes one command only through its owning Extension-qualified key.
     fn remove(&mut self, extension_id: &ExtensionId, name: &str) -> bool {
         self.commands
-            .remove(&format!("{extension_id}/{name}"))
+            .remove(&format!("{extension_id}:{name}"))
             .is_some()
     }
 }

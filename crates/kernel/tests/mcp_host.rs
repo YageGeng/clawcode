@@ -397,7 +397,7 @@ async fn mcp_sampling_runs_through_current_session_model() {
         .run_traced(
             RunRequest {
                 session_id,
-                input: "use sampling".to_string(),
+                input: "use sampling".into(),
             },
             Arc::new(DiscardSink),
             TraceId::try_from("trace-sampling").expect("Trace id"),
@@ -502,7 +502,7 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
             .run_traced(
                 RunRequest {
                     session_id: run_session_id,
-                    input: "request elicitation".to_string(),
+                    input: "request elicitation".into(),
                 },
                 Arc::new(DiscardSink),
                 TraceId::try_from("trace-elicit").expect("Trace id"),
