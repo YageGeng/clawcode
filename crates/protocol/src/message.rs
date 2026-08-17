@@ -384,6 +384,17 @@ pub struct CompactionSummaryMessage {
     pub modified_files: Vec<String>,
 }
 
+impl CompactionSummaryMessage {
+    /// Projects this checkpoint into model context while preserving its exact original size.
+    #[must_use]
+    pub fn model_text(&self) -> String {
+        format!(
+            "The conversation history before this point was compacted from {} tokens into the following summary:\n\n<summary>\n{}\n</summary>",
+            self.tokens_before, self.summary
+        )
+    }
+}
+
 /// Pi-compatible transcript message produced by a user-authored `!` or `!!` command.
 #[derive(
     Debug,

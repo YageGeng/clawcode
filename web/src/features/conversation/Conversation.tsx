@@ -1,5 +1,3 @@
-import { useEffect, useRef } from "react";
-
 import type { UiBootstrap } from "../../bootstrap/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { useWorkspaceStore } from "../../workspace/store";
@@ -9,6 +7,7 @@ import { ExtensionCard } from "./ExtensionCard";
 import { ToolCallCard } from "./ToolCallCard";
 import { BashExecutionCard } from "./BashExecutionCard";
 import { CompactionCard } from "./CompactionCard";
+import { useTranscriptScroll } from "./useTranscriptScroll";
 
 export type ConversationProps = Readonly<{
   bootstrap: UiBootstrap;
@@ -17,18 +16,30 @@ export type ConversationProps = Readonly<{
 
 export function Conversation({ bootstrap, controller }: ConversationProps) {
   const state = useWorkspaceStore();
-  const transcript = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const container = transcript.current;
-    if (container !== null) container.scrollTop = container.scrollHeight;
-  }, [state.bashExecutions, state.compactions, state.extensions, state.messages, state.tools, state.transcript.length]);
+  // Streaming entities replace their collection identity on every update, so
+  // the scroll controller can follow new content without owning workspace state.
+  const { transcriptRef, onScroll } = useTranscriptScroll({
+    sessionId: state.activeSessionId,
+    messages: state.messages,
+    tools: state.tools,
+    bashExecutions: state.bashExecutions,
+    extensions: state.extensions,
+    compactions: state.compactions,
+    compactionStatus: state.compaction,
+    transcriptLength: state.transcript.length
+  });
 
   if (state.activeSessionId === undefined) {
     return <section className="conversation-placeholder"><div className="empty-state"><h2>开始一个 Agent 会话</h2><p>从左侧恢复会话，或创建一个使用本机工作目录的新会话。</p></div></section>;
   }
   return (
     <section className="conversation-workspace">
-      <div className="transcript" aria-live="polite" ref={transcript}>
+      <div
+        className="transcript"
+        aria-live="polite"
+        ref={transcriptRef}
+        onScroll={onScroll}
+      >
         {state.transcript.length === 0 ? <div className="empty-state transcript__empty"><h2>准备好了</h2><p>发送文本、Markdown 或资源链接开始这一会话。</p></div> : null}
         {state.transcript.map((entry) => {
           if (entry.type === "message") {

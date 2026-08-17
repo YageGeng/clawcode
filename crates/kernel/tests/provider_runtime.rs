@@ -269,7 +269,7 @@ async fn model_request_options_reach_provider_request() {
     assert_eq!(captured.temperature, Some(0.25));
 }
 
-/// Compaction checkpoints become pi's User summary wrapper only at the provider boundary.
+/// Compaction checkpoints retain their exact pre-compaction size at the provider boundary.
 #[tokio::test]
 async fn compaction_summary_reaches_provider_as_user_context() {
     let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
@@ -317,7 +317,7 @@ async fn compaction_summary_reaches_provider_as_user_context() {
     assert_eq!(history["role"], "user");
     assert_eq!(
         history["content"][0]["text"],
-        "The conversation history before this point was compacted into the following summary:\n\n<summary>\ncheckpoint body\n</summary>"
+        "The conversation history before this point was compacted from 42000 tokens into the following summary:\n\n<summary>\ncheckpoint body\n</summary>"
     );
 }
 
