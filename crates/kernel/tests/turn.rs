@@ -18,7 +18,7 @@ use protocol::{
     MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
     ModelRetryDisposition, ModelStreamEvent, ModelUsage, RunRequest, SessionId,
     StopReason, TimestampMs, ToolBlock, ToolCall, ToolCallId, ToolCallResult,
-    ToolDefinition, ToolResult,
+    ToolDefinition, ToolResult, TraceId,
 };
 use store::{
     Clock, EntryKind, JsonlStoreFactory, NewEntry, SessionCreateOptions,
@@ -329,6 +329,46 @@ impl ToolFactory for StreamingToolFactory {
     fn create(&self) -> Result<ToolRegistry, ToolError> {
         let mut registry = ToolRegistry::default();
         registry.register(Arc::new(StreamingTool))?;
+        Ok(registry)
+    }
+}
+
+struct TraceCaptureTool(Arc<Mutex<Option<TraceId>>>);
+
+#[async_trait]
+impl AgentTool for TraceCaptureTool {
+    /// Describes the no-argument Tool used to verify ingress Trace propagation.
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "capture_trace".to_string(),
+            description: "Capture the invocation Trace identifier.".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    /// Captures the exact Trace carried by the Kernel Tool execution context.
+    async fn execute(
+        &self,
+        call: ToolCall,
+        context: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        *self.0.lock().expect("Trace capture lock") =
+            Some(context.trace_id.clone());
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(Vec::new())
+            .is_error(false)
+            .build())
+    }
+}
+
+struct TraceCaptureToolFactory(Arc<Mutex<Option<TraceId>>>);
+
+impl ToolFactory for TraceCaptureToolFactory {
+    /// Registers the Tool that records one propagated ingress Trace.
+    fn create(&self) -> Result<ToolRegistry, ToolError> {
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(TraceCaptureTool(Arc::clone(&self.0))))?;
         Ok(registry)
     }
 }
@@ -703,6 +743,75 @@ async fn streamed_response_produces_one_timed_turn() {
             ..
         })
     ));
+}
+
+/// An ingress Trace remains unchanged through Kernel Tool execution.
+#[tokio::test]
+async fn traced_run_propagates_trace_to_tools() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_200)));
+    let captured = Arc::new(Mutex::new(None));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("trace-call")
+                        .expect("tool call id"),
+                    name: "capture_trace".to_string(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![ScriptedModel::finished(
+                StopReason::EndTurn,
+            )]),
+        ])),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(TraceCaptureToolFactory(Arc::clone(&captured))))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-traced-run").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    let trace_id = TraceId::try_from("trace-ingress").expect("Trace id");
+
+    kernel
+        .run_traced(
+            RunRequest {
+                session_id,
+                input: "capture trace".to_string(),
+            },
+            Arc::new(RecordingSink::default()),
+            trace_id.clone(),
+        )
+        .await
+        .expect("run Kernel");
+
+    assert_eq!(
+        captured.lock().expect("Trace capture lock").as_ref(),
+        Some(&trace_id)
+    );
 }
 
 /// A pre-Agent replacement applies to every Turn of its Run and not later Runs.

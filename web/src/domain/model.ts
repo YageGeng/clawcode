@@ -209,15 +209,102 @@ export type AvailableCommandEntity = Readonly<{
   argumentHint?: string;
 }>;
 
-export type McpServerInfo = Readonly<{
+export type McpToolInfo = Readonly<{
+  reference: Readonly<{ serverId: string; remoteName: string }>;
+  publicName: string;
+  description?: string;
+  inputSchema: unknown;
+}>;
+
+export type McpArgumentInfo = Readonly<{
   name: string;
-  state: "connected" | "failed" | "disabled";
-  error?: string;
-  tools: readonly Readonly<{
-    name: string;
-    description?: string;
-    inputSchema: unknown;
-  }>[];
+  description?: string;
+  required: boolean;
+}>;
+
+export type McpPromptInfo = Readonly<{
+  reference: Readonly<{ serverId: string; remoteName: string }>;
+  title?: string;
+  description?: string;
+  arguments: readonly McpArgumentInfo[];
+}>;
+
+export type McpResourceInfo = Readonly<{
+  reference: Readonly<{ serverId: string; remoteUri: string }>;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}>;
+
+export type McpResourceTemplateInfo = Readonly<{
+  serverId: string;
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}>;
+
+export type McpPromptResult = Readonly<{
+  description?: string;
+  messages: readonly Readonly<{ role: "user" | "assistant" | "system"; content: unknown }>[];
+}>;
+
+export type McpResourceResult = Readonly<{
+  contents: readonly unknown[];
+}>;
+
+export type McpCompletionResult = Readonly<{
+  values: readonly string[];
+  total?: number;
+  hasMore: boolean;
+}>;
+
+export type McpOAuthState = "notConfigured" | "unauthenticated" | "authorizing" | "ready" | "refreshRequired" | "failed";
+
+export type McpElicitation = Readonly<{
+  requestId: string;
+  context: Readonly<{
+    serverId: string;
+    sessionId: SessionId;
+    turnId: TurnId;
+    traceId: string;
+    requestedAtMs: TimestampMs;
+  }>;
+  mode:
+    | Readonly<{ type: "form"; message: string; requestedSchema: unknown }>
+    | Readonly<{ type: "url"; message: string; url: string; elicitationId: string }>;
+}>;
+
+export type McpElicitationSnapshot = Readonly<{
+  sessionId: SessionId;
+  requests: readonly McpElicitation[];
+}>;
+
+export type McpServerStatus = Readonly<{
+  serverId: string;
+  protocol: "2025-11-25" | "2026-07-28";
+  transport: "stdio" | "streamableHttp";
+  state: "disabled" | "starting" | "negotiating" | "discovering" | "ready" | "degraded" | "failed" | "stopping" | "stopped";
+  implementation?: Readonly<{ name: string; version: string }>;
+  revisions: Readonly<{ tools: number; prompts: number; resources: number; resourceTemplates: number }>;
+  counts: Readonly<{ tools: number; prompts: number; resources: number; resourceTemplates: number }>;
+  failure?: Readonly<{ stage: string; message: string; occurredAtMs: TimestampMs }>;
+  oauth: Readonly<{ state: McpOAuthState; scopes: readonly string[]; expiresAtMs?: TimestampMs; authorizationUrl?: string }>;
+  updatedAtMs: TimestampMs;
+}>;
+
+export type McpSessionSnapshot = Readonly<{
+  revision: number;
+  servers: readonly McpServerStatus[];
+  catalog: Readonly<{
+    tools: readonly McpToolInfo[];
+    prompts: readonly McpPromptInfo[];
+    resources: readonly McpResourceInfo[];
+    resourceTemplates: readonly McpResourceTemplateInfo[];
+  }>;
 }>;
 
 export type SessionEvent = Readonly<{

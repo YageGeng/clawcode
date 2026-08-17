@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{
-    Client, ConnectionTo, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse,
-    UntypedMessage,
+    Client, ConnectionTo, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, UntypedMessage,
 };
 use kernel::Kernel;
 use protocol::{
@@ -10,7 +11,8 @@ use protocol::{
     AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpQueueMessageParameters,
     AcpSessionParameters, AcpSessionRenameParameters, AcpSkillParameters,
-    AcpUserBashParameters, QueueKind, SessionTitle,
+    AcpUserBashParameters, McpSessionRevisionNotification, ProductIdentity,
+    QueueKind, SessionTitle,
 };
 
 use crate::server::AcpEventSink;
@@ -22,6 +24,48 @@ fn invalid_parameters(
 ) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(error.to_string())
 }
+
+/// Product-scoped realtime notification carrying one MCP snapshot revision.
+#[derive(Debug, Clone)]
+pub(crate) struct AcpMcpUpdateNotification(
+    pub(crate) McpSessionRevisionNotification,
+);
+
+impl JsonRpcMessage for AcpMcpUpdateNotification {
+    /// Matches only the centralized product MCP update notification.
+    fn matches_method(method: &str) -> bool {
+        method == ProductIdentity::ACP_MCP_UPDATE_NOTIFICATION
+    }
+
+    /// Returns the centralized product notification method.
+    fn method(&self) -> &'static str {
+        ProductIdentity::ACP_MCP_UPDATE_NOTIFICATION
+    }
+
+    /// Serializes the typed revision payload through one untyped JSON-RPC envelope.
+    fn to_untyped_message(
+        &self,
+    ) -> Result<UntypedMessage, agent_client_protocol::Error> {
+        UntypedMessage::new(self.method(), &self.0)
+    }
+
+    /// Parses one typed revision payload without accepting unknown protocol fields.
+    fn parse_message(
+        method: &str,
+        params: &impl serde::Serialize,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        if !Self::matches_method(method) {
+            return Err(agent_client_protocol::Error::method_not_found());
+        }
+        let value = serde_json::to_value(params)
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(invalid_parameters)
+    }
+}
+
+impl JsonRpcNotification for AcpMcpUpdateNotification {}
 
 /// One product-scoped ACP request that preserves method-specific JSON parameters.
 #[derive(Debug, Clone)]
@@ -98,6 +142,7 @@ impl JsonRpcResponse for AcpExtensionResponse {
 pub(crate) struct AcpExtensionDispatcher {
     pub kernel: Arc<Kernel>,
     pub connection: ConnectionTo<Client>,
+    pub mcp_watchers: Arc<Mutex<BTreeSet<protocol::SessionId>>>,
 }
 
 impl AcpExtensionDispatcher {
@@ -200,6 +245,11 @@ impl AcpExtensionDispatcher {
                 };
                 AcpServer::new(Arc::clone(&self.kernel))
                     .send_available_commands(&fork_id, &self.connection)?;
+                AcpServer::new(Arc::clone(&self.kernel)).watch_mcp(
+                    &fork_id,
+                    &self.connection,
+                    Arc::clone(&self.mcp_watchers),
+                )?;
                 serde_json::json!({ "sessionId": fork_id.to_string() })
             }
             AcpExtensionMethod::Compact => {
@@ -304,6 +354,84 @@ impl AcpExtensionDispatcher {
                     )?,
                 )
                 .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpReconnect => {
+                let input: protocol::McpReconnectRequest =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.mcp_reconnect(input).await.map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpPromptGet => {
+                let input: protocol::McpSessionPromptRequest =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.mcp_get_prompt(input).await.map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpResourceRead => {
+                let input: protocol::McpSessionResourceRequest =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.mcp_read_resource(input).await.map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpComplete => {
+                let input: protocol::McpSessionCompletionRequest =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.mcp_complete(input).await.map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpOAuthContinue => {
+                let input: protocol::McpAuthorizationContinueRequest =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel
+                        .mcp_continue_authorization(input)
+                        .await
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpElicitationList => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.mcp_elicitations(&input.session_id).map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::McpElicitationRespond => {
+                let input: protocol::McpElicitationResponseRequest =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                self.kernel.mcp_respond_elicitation(input).await.map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?;
+                serde_json::json!({ "resolved": true })
             }
             AcpExtensionMethod::ExtensionCommand => {
                 let input: AcpCommandParameters =

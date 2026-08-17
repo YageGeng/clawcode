@@ -8,10 +8,11 @@ use kernel::{
     Model, ModelError, ModelFactory, ProviderModel, ProviderModelFactory,
 };
 use protocol::{
-    AgentMessage, BashExecutionMessage, ContentBlock, MessageContent,
-    MessageId, MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
-    ModelStreamEvent, StaticExtensionRegistration, StopReason, TimestampMs,
-    TurnId, UserBashResult,
+    AgentMessage, BashExecutionMessage, ContentBlock, EmbeddedResourceContent,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelProfile,
+    ModelRequest, ModelRequestOptions, ModelStreamEvent,
+    StaticExtensionRegistration, StopReason, TimestampMs, TurnId,
+    UserBashResult,
 };
 use provider::completion::{CompletionError, CompletionRequest, Usage};
 use provider::factory::{
@@ -183,6 +184,7 @@ fn sample_request() -> ModelRequest {
             },
         }],
         tools: Vec::new(),
+        options: Default::default(),
     }
 }
 
@@ -238,6 +240,33 @@ async fn provider_final_preserves_usage_and_length_stop() {
             && final_.usage.cache_write_tokens == 2
             && final_.usage.total_tokens == 100)
     );
+}
+
+/// Request-local Sampling limits reach the mature provider request unchanged.
+#[tokio::test]
+async fn model_request_options_reach_provider_request() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let llm =
+        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
+    let model = ProviderModel::new(
+        sample_profile(),
+        Arc::clone(&llm) as Arc<dyn Llm>,
+        config::ProviderRetryConfig::default(),
+    );
+    let mut request = sample_request();
+    request.options = ModelRequestOptions {
+        max_tokens: Some(64),
+        temperature: Some(0.25),
+    };
+
+    let _stream = model
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("provider stream");
+
+    let captured = llm.last_request().expect("captured provider request");
+    assert_eq!(captured.max_tokens, Some(64));
+    assert_eq!(captured.temperature, Some(0.25));
 }
 
 /// Provider EOF without an explicit Final becomes a stream protocol failure.
@@ -447,6 +476,7 @@ async fn tool_result_image_is_preserved_in_provider_request() {
             },
         }],
         tools: Vec::new(),
+        options: Default::default(),
     };
 
     let _stream = model
@@ -470,6 +500,95 @@ async fn tool_result_image_is_preserved_in_provider_request() {
         value["chat_history"][0]["content"][0]["content"][0]["data"]["value"],
         "aW1hZ2U="
     );
+}
+
+/// Provider projection describes unsupported MCP blocks while the transcript retains typed data.
+#[tokio::test]
+async fn mcp_tool_result_content_has_stable_provider_projection() {
+    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let llm =
+        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
+    let model = ProviderModel::new(
+        sample_profile(),
+        Arc::clone(&llm) as Arc<dyn Llm>,
+        config::ProviderRetryConfig::default(),
+    );
+    let timestamp = TimestampMs::from(250);
+    let request = ModelRequest {
+        messages: vec![AgentMessage {
+            identity: MessageIdentity {
+                message_id: MessageId::try_from("message-mcp")
+                    .expect("message id"),
+                turn_id: TurnId::try_from("turn-mcp").expect("turn id"),
+            },
+            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
+                .expect("message timing"),
+            content: MessageContent::ToolResult {
+                tool_call_id: protocol::ToolCallId::try_from("tool-mcp")
+                    .expect("tool id"),
+                blocks: vec![
+                    ContentBlock::Audio {
+                        data: "must-not-enter-provider-request".to_string(),
+                        mime_type: "audio/wav".to_string(),
+                    },
+                    ContentBlock::EmbeddedResource {
+                        uri: "file:///workspace/readme.md".to_string(),
+                        mime_type: Some("text/markdown".to_string()),
+                        content: EmbeddedResourceContent::Text {
+                            text: "# Readme".to_string(),
+                        },
+                    },
+                    ContentBlock::EmbeddedResource {
+                        uri: "file:///workspace/archive.bin".to_string(),
+                        mime_type: Some("application/octet-stream".to_string()),
+                        content: EmbeddedResourceContent::Blob {
+                            data: "binary-must-not-enter-provider-request"
+                                .to_string(),
+                        },
+                    },
+                    ContentBlock::ResourceLink {
+                        uri: "file:///workspace/report.pdf".to_string(),
+                        name: "report".to_string(),
+                        title: Some("Report".to_string()),
+                        description: Some("Generated report".to_string()),
+                        mime_type: Some("application/pdf".to_string()),
+                        size: Some(4_096),
+                    },
+                    ContentBlock::Structured {
+                        value: serde_json::json!({ "count": 2 }),
+                    },
+                ],
+                is_error: false,
+                details: None,
+            },
+        }],
+        tools: Vec::new(),
+        options: Default::default(),
+    };
+
+    let _stream = model
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("provider stream");
+    let serialized = serde_json::to_string_pretty(
+        &llm.last_request().expect("captured provider request"),
+    )
+    .expect("serialize provider request");
+
+    for expected in [
+        "[Audio content: audio/wav]",
+        "[Embedded resource: file:///workspace/readme.md (text/markdown)]",
+        "# Readme",
+        "[Embedded binary resource: file:///workspace/archive.bin (application/octet-stream)]",
+        "[Resource link: report — file:///workspace/report.pdf (application/pdf)]",
+        "Generated report",
+        "[Structured content]",
+        "\\\"count\\\": 2",
+    ] {
+        assert!(serialized.contains(expected), "request: {serialized}");
+    }
+    assert!(!serialized.contains("must-not-enter-provider-request"));
+    assert!(!serialized.contains("binary-must-not-enter-provider-request"));
 }
 
 /// Provider conversion includes `!` output and omits `!!` output from model context.
@@ -521,6 +640,7 @@ async fn user_bash_context_projection_matches_pi_prefix_semantics() {
             ModelRequest {
                 messages,
                 tools: Vec::new(),
+                options: Default::default(),
             },
             CancellationToken::new(),
         )

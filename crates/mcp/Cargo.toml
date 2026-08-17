@@ -11,32 +11,70 @@ workspace = true
 # workspace crates
 config = { workspace = true }
 protocol = { workspace = true }
+store = { workspace = true }
 tools = { workspace = true }
 
 # error
 thiserror = { workspace = true }
 
+# tracing & log
+tracing = { workspace = true }
+
 # async
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["process", "rt", "sync", "time"] }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
+tokio-util = { workspace = true }
 
 # http
 http = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }
 
 # serde
+jsonschema = { workspace = true }
 serde_json = { workspace = true }
 
 # builder
 typed-builder = { workspace = true }
 
+# misc
+arc-swap = { workspace = true }
+
 # protocol
 rmcp = { workspace = true, features = [
+  "auth",
   "client",
+  "macros",
+  "reqwest",
   "transport-child-process",
   "transport-streamable-http-client-reqwest",
 ] }
 
 [dev-dependencies]
+# workspace crates
+store = { workspace = true }
+
+# http
+axum = { workspace = true }
+
+# protocol
+rmcp = { workspace = true, features = [
+  "client",
+  "server",
+  "transport-io",
+  "transport-streamable-http-server",
+] }
+
 # async
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = [
+  "io-std",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+] }
 tokio-util = { workspace = true }
+
+# fs
+tempfile = { workspace = true }

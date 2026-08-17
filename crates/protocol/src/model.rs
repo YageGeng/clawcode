@@ -1,5 +1,14 @@
 use crate::{AgentMessage, ModelUsage, StopReason, ToolCall, ToolDefinition};
 
+/// Optional generation controls applied only to one model request.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ModelRequestOptions {
+    /// Maximum provider output tokens requested by the caller.
+    pub max_tokens: Option<u64>,
+    /// Sampling temperature requested by the caller.
+    pub temperature: Option<f64>,
+}
+
 /// Complete model input assembled for one pi-compatible Turn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRequest {
@@ -7,6 +16,8 @@ pub struct ModelRequest {
     pub messages: Vec<AgentMessage>,
     /// Active tools exposed for this request.
     pub tools: Vec<ToolDefinition>,
+    /// Request-local generation controls, empty for ordinary agent Turns.
+    pub options: ModelRequestOptions,
 }
 
 /// Incremental provider-neutral output consumed by the Turn state machine.

@@ -6,7 +6,7 @@ use crate::approval::{ApprovalMode, AskForApproval};
 use crate::extensions::ExtensionsConfig;
 use crate::llm::{LlmModel, LlmProvider};
 use crate::logging::LoggingConfig;
-use crate::mcp::McpServerConfig;
+use crate::mcp::{McpConfigError, McpServerConfig};
 use crate::prompt::PromptPolicy;
 use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
@@ -25,6 +25,10 @@ pub struct SessionPersistenceConfig {
 /// Cross-field validation failures detected after TOML extraction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigValidationError {
+    /// MCP Server entries failed individual or collection validation.
+    #[error(transparent)]
+    Mcp(#[from] McpConfigError),
+
     /// The active model did not contain a provider and model identifier.
     #[error("active model '{value}' must use provider/model format")]
     MalformedActiveModel {
@@ -278,6 +282,17 @@ impl AppConfig {
                 reserve_tokens: self.compaction.reserve_tokens,
                 context_tokens: profile.context_tokens,
             });
+        }
+
+        let mut server_ids = std::collections::HashSet::new();
+        for server in &self.mcp_servers {
+            server.validate()?;
+            if !server_ids.insert(server.name.as_str()) {
+                return Err(McpConfigError::DuplicateName {
+                    server: server.name.clone(),
+                }
+                .into());
+            }
         }
 
         Ok(())

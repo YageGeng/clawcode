@@ -12,6 +12,13 @@ export type AcpExtensionMethods = Readonly<{
   invokeSkill: string;
   skillList: string;
   mcpStatus: string;
+  mcpReconnect: string;
+  mcpPromptGet: string;
+  mcpResourceRead: string;
+  mcpComplete: string;
+  mcpOAuthContinue: string;
+  mcpElicitationList: string;
+  mcpElicitationRespond: string;
   extensionCommand: string;
 }>;
 
@@ -32,10 +39,28 @@ export const AcpMethods = {
       invokeSkill: `${prefix}/skill/invoke`,
       skillList: `${prefix}/skill/list`,
       mcpStatus: `${prefix}/mcp/status`,
+      mcpReconnect: `${prefix}/mcp/reconnect`,
+      mcpPromptGet: `${prefix}/mcp/prompt/get`,
+      mcpResourceRead: `${prefix}/mcp/resource/read`,
+      mcpComplete: `${prefix}/mcp/complete`,
+      mcpOAuthContinue: `${prefix}/mcp/oauth/continue`,
+      mcpElicitationList: `${prefix}/mcp/elicitation/list`,
+      mcpElicitationRespond: `${prefix}/mcp/elicitation/respond`,
       extensionCommand: `${prefix}/extension/command`
     };
   },
   required(methods: AcpExtensionMethods): readonly string[] {
     return Object.values(methods);
+  }
+} as const;
+
+export type AcpExtensionNotifications = Readonly<{
+  mcpUpdated: string;
+}>;
+
+export const AcpNotifications = {
+  /** Builds product-scoped extension notification names from one namespace. */
+  forNamespace(namespace: string): AcpExtensionNotifications {
+    return { mcpUpdated: `_${namespace}/mcp/update` };
   }
 } as const;

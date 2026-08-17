@@ -18,6 +18,12 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
+# fs
+tempfile = { workspace = true }
+
+# misc
+base64 = { workspace = true }
+
 # builder
 typed-builder = { workspace = true }
 

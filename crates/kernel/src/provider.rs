@@ -1,3 +1,5 @@
+mod content;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,6 +24,7 @@ use provider::message::{
 };
 
 use crate::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
+use content::ProviderContentProjection;
 use tokio_util::sync::CancellationToken;
 
 /// Resolves the configured active model through the retained provider factory.
@@ -555,10 +558,13 @@ impl TryFrom<ModelRequest> for ProviderRequest {
                 parameters: tool.parameters,
             })
             .collect();
+        let options = request.options;
         Ok(Self(
             CompletionRequest::builder()
                 .chat_history(chat_history)
                 .tools(tools)
+                .temperature(options.temperature)
+                .max_tokens(options.max_tokens)
                 .build(),
         ))
     }
@@ -639,6 +645,12 @@ impl ProviderMessage {
                         | ContentBlock::ToolCall { .. } => Err(ModelError::Protocol(
                             "user messages cannot contain reasoning or tool calls".to_string(),
                         )),
+                        block @ (ContentBlock::Audio { .. }
+                        | ContentBlock::EmbeddedResource { .. }
+                        | ContentBlock::ResourceLink { .. }
+                        | ContentBlock::Structured { .. }) => {
+                            Ok(UserContent::text(block.into_provider_text()?))
+                        }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Self(Message::User {
@@ -692,6 +704,12 @@ impl ProviderMessage {
                                 ),
                             ),
                         )),
+                        block @ (ContentBlock::Audio { .. }
+                        | ContentBlock::EmbeddedResource { .. }
+                        | ContentBlock::ResourceLink { .. }
+                        | ContentBlock::Structured { .. }) => Ok(
+                            AssistantContent::text(block.into_provider_text()?),
+                        ),
                     })
                     .collect::<Result<Vec<_>, ModelError>>()?;
                 Ok(Self(Message::Assistant {
@@ -733,6 +751,12 @@ impl ProviderMessage {
                     "tool results currently support text and image blocks only"
                         .to_string(),
                 )),
+                block @ (ContentBlock::Audio { .. }
+                | ContentBlock::EmbeddedResource { .. }
+                | ContentBlock::ResourceLink { .. }
+                | ContentBlock::Structured { .. }) => {
+                    Ok(ToolResultContent::text(block.into_provider_text()?))
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self(Message::User {
@@ -762,6 +786,12 @@ impl ProviderMessage {
                         "system messages cannot contain images or tool calls"
                             .to_string(),
                     ))
+                }
+                block @ (ContentBlock::Audio { .. }
+                | ContentBlock::EmbeddedResource { .. }
+                | ContentBlock::ResourceLink { .. }
+                | ContentBlock::Structured { .. }) => {
+                    block.into_provider_text()
                 }
             })
             .collect::<Result<Vec<_>, _>>()

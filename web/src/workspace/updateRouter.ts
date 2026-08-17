@@ -25,11 +25,21 @@ export class SessionUpdateRouter {
     this.refreshSessionRuntime = refreshSessionRuntime;
   }
 
-  /** Applies global updates and isolates session-scoped updates to the active transcript. */
+  /** Applies global updates while retaining inactive Session elicitation lifecycle state. */
   apply(notification: SessionUpdateNotification): void {
     const state = this.store.getState();
     const decoded = this.decoder.decode(notification, state, ++this.receivedOrder);
-    if (decoded.scope === "session" && state.activeSessionId !== notification.sessionId) return;
+    if (decoded.scope === "session" && state.activeSessionId !== notification.sessionId) {
+      for (const action of decoded.actions) {
+        if (
+          action.type === "mcp/elicitation-requested"
+          || action.type === "mcp/elicitation-resolved"
+        ) {
+          this.store.dispatch(action);
+        }
+      }
+      return;
+    }
     for (const action of decoded.actions) this.store.dispatch(action);
     if (decoded.refreshRuntime) {
       void this.refreshSessionRuntime(notification.sessionId).catch((reason: unknown) => {

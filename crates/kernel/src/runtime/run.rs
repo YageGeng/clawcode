@@ -7,6 +7,7 @@ impl Kernel {
         request: RunRequest,
         sink: Arc<dyn EventSink>,
         input_source: protocol::InputSource,
+        trace_id: TraceId,
     ) -> Result<RunResult, KernelError> {
         // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
         if let Some(result) = self
@@ -423,6 +424,7 @@ impl Kernel {
             let mut request_for_model = ModelRequest {
                 messages: history,
                 tools: turn_tools.definitions(),
+                options: Default::default(),
             };
             if let Some(messages) = session
                 .extensions
@@ -642,6 +644,7 @@ impl Kernel {
                         .session_id(&request.session_id)
                         .run_id(&run_id)
                         .turn_id(&turn_id)
+                        .trace_id(&trace_id)
                         .session(&session)
                         .emitter(&emitter)
                         .cancellation(&cancellation)

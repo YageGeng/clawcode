@@ -192,49 +192,6 @@ impl From<SessionTitle> for String {
     }
 }
 
-/// Connection state retained for one configured MCP server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum McpConnectionState {
-    /// The server connected and returned its tool catalog.
-    Connected,
-    /// The server failed during connection or tool discovery.
-    Failed,
-    /// Configuration intentionally disabled this server.
-    Disabled,
-}
-
-/// Read-only public description of one namespaced MCP tool.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpToolInfo {
-    /// Public namespaced tool name registered with the model.
-    pub name: String,
-    /// Optional server-provided tool description.
-    pub description: Option<String>,
-    /// JSON Schema accepted by the tool input boundary.
-    pub input_schema: serde_json::Value,
-}
-
-/// Immutable connection and tool snapshot for one configured MCP server.
-#[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
-)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerInfo {
-    /// Configuration key identifying the server.
-    pub name: String,
-    /// Current session-scoped connection state.
-    pub state: McpConnectionState,
-    /// Human-readable failure detail when the state is failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default)]
-    pub error: Option<String>,
-    /// Namespaced tools successfully registered from this server.
-    #[builder(default)]
-    pub tools: Vec<McpToolInfo>,
-}
-
 /// Correlation and exact timing required to rebuild a compaction summary message.
 #[derive(
     Debug,

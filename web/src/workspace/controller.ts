@@ -1,10 +1,10 @@
 import { AcpConnection } from "../acp/connection";
-import { AcpMethods } from "../acp/extensions";
-import type { AcpExtensionMethods } from "../acp/extensions";
+import { AcpMethods, AcpNotifications } from "../acp/extensions";
+import type { AcpExtensionMethods, AcpExtensionNotifications } from "../acp/extensions";
 import { AcpProtocol } from "../acp/protocol";
 import type { InitializeResult, NewSessionResult, SessionId, SessionInfo, SessionListResult, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
-import type { McpServerInfo, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { useWorkspaceStore } from "./store";
 import type { WorkspaceAction } from "./state";
 import { SessionUpdateRouter } from "./updateRouter";
@@ -15,16 +15,19 @@ const RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 5_000] as const;
 export class WorkspaceController {
   readonly bootstrap: UiBootstrap;
   readonly methods: AcpExtensionMethods;
+  readonly notifications: AcpExtensionNotifications;
   private readonly updateRouter: SessionUpdateRouter;
   private connection: AcpConnection | undefined;
   private reconnectAttempt = 0;
   private sessionOpenRevision = 0;
   private sessionDeleteSupported = false;
+  private readonly deletingSessionIds = new Set<SessionId>();
   private stopped = false;
 
   constructor(bootstrap: UiBootstrap) {
     this.bootstrap = bootstrap;
     this.methods = AcpMethods.forNamespace(bootstrap.product.slug);
+    this.notifications = AcpNotifications.forNamespace(bootstrap.product.slug);
     const store: WorkspaceStoreAccess = {
       getState: () => useWorkspaceStore.getState(),
       dispatch: (action) => this.dispatch(action)
@@ -54,17 +57,19 @@ export class WorkspaceController {
       replayFrom: { type: "start" }
     });
     if (!this.isCurrentSessionOpen(sessionId, revision)) return;
-    const [tree, pending, skills, servers] = await Promise.all([
+    const [tree, pending, skills, mcpSnapshot, mcpElicitations] = await Promise.all([
       this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId }),
       this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
       this.requireConnection().request<SkillListResult>(this.methods.skillList, { sessionId }),
-      this.requireConnection().request<readonly McpServerInfo[]>(this.methods.mcpStatus, { sessionId })
+      this.requireConnection().request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId }),
+      this.requireConnection().request<McpElicitationSnapshot>(this.methods.mcpElicitationList, { sessionId })
     ]);
     if (!this.isCurrentSessionOpen(sessionId, revision)) return;
     this.dispatch({ type: "tree/replaced", tree });
     this.dispatch({ type: "queue/replaced", pending });
     this.dispatch({ type: "skills/replaced", result: skills });
-    this.dispatch({ type: "mcp/replaced", servers });
+    this.dispatch({ type: "mcp/replaced", snapshot: mcpSnapshot });
+    this.dispatch({ type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
   }
 
   async newSession(cwd: string): Promise<SessionId> {
@@ -85,12 +90,19 @@ export class WorkspaceController {
   /** Permanently removes a session only after ACP v2 advertised native deletion support. */
   async deleteSession(sessionId: SessionId): Promise<void> {
     if (!this.sessionDeleteSupported) throw new Error("Agent does not support session deletion");
-    await this.requireConnection().request(AcpProtocol.methods.sessionDelete, { sessionId });
-    if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-      this.sessionOpenRevision += 1;
-      this.dispatch({ type: "session/deactivated" });
+    // MCP shutdown publishes final revisions while deletion is in flight. Mark
+    // the Session first so those notifications cannot query an already removed runtime.
+    this.deletingSessionIds.add(sessionId);
+    try {
+      await this.requireConnection().request(AcpProtocol.methods.sessionDelete, { sessionId });
+      if (useWorkspaceStore.getState().activeSessionId === sessionId) {
+        this.sessionOpenRevision += 1;
+        this.dispatch({ type: "session/deactivated" });
+      }
+      await this.refreshSessions();
+    } finally {
+      this.deletingSessionIds.delete(sessionId);
     }
-    await this.refreshSessions();
   }
 
   async send(input: PromptInput): Promise<void> {
@@ -193,6 +205,82 @@ export class WorkspaceController {
     await this.connect(true);
   }
 
+  /** Explicitly reconnects one MCP Server and replaces the atomic Session snapshot. */
+  async reconnectMcp(serverId: string): Promise<void> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    const snapshot = await this.requireConnection().request<McpSessionSnapshot>(
+      this.methods.mcpReconnect,
+      { sessionId, serverId }
+    );
+    this.dispatch({ type: "mcp/replaced", snapshot });
+  }
+
+  /** Completes a pending MCP OAuth browser round and replaces the atomic snapshot. */
+  async continueMcpOAuth(serverId: string, responseUri: string): Promise<void> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    const snapshot = await this.requireConnection().request<McpSessionSnapshot>(
+      this.methods.mcpOAuthContinue,
+      { sessionId, serverId, result: { responseUri } }
+    );
+    if (useWorkspaceStore.getState().activeSessionId === sessionId) {
+      this.dispatch({ type: "mcp/replaced", snapshot });
+    }
+  }
+
+  /** Resolves one pending MCP elicitation through its Session-scoped ACP route. */
+  async respondMcpElicitation(
+    request: McpElicitation,
+    action: "accept" | "decline" | "cancel",
+    content?: unknown
+  ): Promise<void> {
+    await this.requireConnection().request(this.methods.mcpElicitationRespond, {
+      sessionId: request.context.sessionId,
+      requestId: request.requestId,
+      result: { action, ...(content === undefined ? {} : { content }) }
+    });
+    this.dispatch({
+      type: "mcp/elicitation-resolved",
+      sessionId: request.context.sessionId,
+      requestId: request.requestId
+    });
+  }
+
+  /** Retrieves one exact MCP Prompt without injecting it automatically. */
+  async getMcpPrompt(
+    serverId: string,
+    remoteName: string,
+    arguments_: Readonly<Record<string, string>>
+  ): Promise<McpPromptResult> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    return this.requireConnection().request<McpPromptResult>(this.methods.mcpPromptGet, {
+      sessionId,
+      request: { reference: { serverId, remoteName }, arguments: arguments_ }
+    });
+  }
+
+  /** Reads one exact MCP Resource while preserving its typed content blocks. */
+  async readMcpResource(serverId: string, remoteUri: string): Promise<McpResourceResult> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    return this.requireConnection().request<McpResourceResult>(this.methods.mcpResourceRead, {
+      sessionId,
+      request: { reference: { serverId, remoteUri } }
+    });
+  }
+
+  /** Completes one MCP Prompt or Resource Template argument through its owner. */
+  async completeMcpArgument(request: Readonly<Record<string, unknown>>): Promise<McpCompletionResult> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    return this.requireConnection().request<McpCompletionResult>(this.methods.mcpComplete, {
+      sessionId,
+      request
+    });
+  }
+
   close(): void {
     this.stopped = true;
     this.connection?.close();
@@ -271,6 +359,20 @@ export class WorkspaceController {
   }
 
   private notification(method: string, params: unknown): void {
+    if (method === this.notifications.mcpUpdated) {
+      const update = AcpProtocol.decodeRecord(params, "MCP revision notification");
+      const activeSessionId = useWorkspaceStore.getState().activeSessionId;
+      if (
+        typeof update.sessionId === "string"
+        && update.sessionId === activeSessionId
+        && !this.deletingSessionIds.has(update.sessionId as SessionId)
+        && typeof update.revision === "number"
+        && update.revision > useWorkspaceStore.getState().mcpSnapshot.revision
+      ) {
+        void this.refreshMcpSnapshot(update.sessionId as SessionId);
+      }
+      return;
+    }
     if (method !== AcpProtocol.methods.sessionUpdate) {
       this.dispatch({ type: "diagnostic/added", message: `Unknown notification: ${method}` });
       return;
@@ -283,6 +385,24 @@ export class WorkspaceController {
     const pending = await this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId });
     if (useWorkspaceStore.getState().activeSessionId === sessionId) {
       this.dispatch({ type: "queue/replaced", pending });
+    }
+  }
+
+  /** Reads and applies the latest atomic MCP snapshot only to its active Session. */
+  private async refreshMcpSnapshot(sessionId: SessionId): Promise<void> {
+    try {
+      const snapshot = await this.requireConnection().request<McpSessionSnapshot>(
+        this.methods.mcpStatus,
+        { sessionId }
+      );
+      if (useWorkspaceStore.getState().activeSessionId === sessionId) {
+        this.dispatch({ type: "mcp/replaced", snapshot });
+      }
+    } catch (reason: unknown) {
+      this.dispatch({
+        type: "diagnostic/added",
+        message: reason instanceof Error ? reason.message : String(reason)
+      });
     }
   }
 

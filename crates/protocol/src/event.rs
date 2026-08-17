@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, CompactionReason, CompactionResult, ExtensionId, MessageId,
-    ModelUsage, RunId, Sequence, TimestampMs, ToolCall, ToolResult, TurnId,
-    TurnRecord,
+    AgentMessage, CompactionReason, CompactionResult, ExtensionId,
+    McpElicitationRequest, McpElicitationResult, MessageId, ModelUsage, RunId,
+    Sequence, TimestampMs, ToolCall, ToolResult, TurnId, TurnRecord,
 };
 
 /// Typed terminal result shared by run lifecycle events and ACP mapping.
@@ -220,6 +220,20 @@ pub enum AgentEventPayload {
     SkillDiagnostic {
         /// Structured failure without the Skill body or user prompt.
         diagnostic: crate::SkillDiagnostic,
+    },
+
+    /// An MCP Server is waiting for Turn-scoped user interaction.
+    McpElicitationRequested {
+        /// Complete typed request including Turn and Trace correlation.
+        request: McpElicitationRequest,
+    },
+
+    /// A pending MCP interaction was resolved or cancelled.
+    McpElicitationResolved {
+        /// Session-unique request identity previously published to ACP.
+        request_id: String,
+        /// User disposition returned to the MCP Server.
+        result: McpElicitationResult,
     },
 }
 

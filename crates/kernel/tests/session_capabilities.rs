@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
 use std::fs;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use extension::{
@@ -17,11 +19,15 @@ use futures::{Stream, stream};
 use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
 };
+use mcp::{
+    McpMrtrPolicy, McpStdioTransport, McpTransport, RmcpConnector,
+    RuntimeMcpServer, SessionMcpFactory,
+};
 use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, ExtensionDescriptor, ExtensionId,
-    IdGenerator, IdKind, McpConnectionState, McpServerInfo, MessageContent,
-    ModelFailure, ModelFinal, ModelProfile, ModelRequest,
+    IdGenerator, IdKind, McpProtocolVersion, McpServerId, McpServerState,
+    MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
     ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
     SessionId, SessionTitle, SkillDiagnosticCode, StopReason, TimestampMs,
 };
@@ -29,7 +35,7 @@ use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tools::{BuiltinToolFactory, ToolRegistry};
+use tools::BuiltinToolFactory;
 
 type TestModelStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
@@ -131,17 +137,39 @@ struct StaticMcpFactory;
 
 #[async_trait]
 impl mcp::McpFactory for StaticMcpFactory {
-    /// Produces one connected server and an empty registry for status tests.
-    async fn create(&self) -> Result<mcp::McpSession, mcp::McpError> {
-        Ok(mcp::McpSession {
-            tools: ToolRegistry::default(),
-            servers: vec![
-                McpServerInfo::builder()
-                    .name("docs".to_string())
-                    .state(McpConnectionState::Connected)
+    /// Produces one disabled Server snapshot without opening an external transport.
+    async fn create(
+        &self,
+        request: mcp::McpSessionRequest,
+    ) -> Result<mcp::McpSession, mcp::McpError> {
+        SessionMcpFactory::new(
+            vec![
+                RuntimeMcpServer::builder()
+                    .server_id(
+                        McpServerId::try_from("docs").expect("Server id"),
+                    )
+                    .enabled(false)
+                    .protocol(McpProtocolVersion::V2025_11_25)
+                    .startup_timeout(Duration::from_secs(1))
+                    .request_timeout(Duration::from_secs(1))
+                    .mrtr(McpMrtrPolicy {
+                        max_rounds: NonZeroU32::new(1)
+                            .expect("non-zero rounds"),
+                        total_timeout: Duration::from_secs(1),
+                    })
+                    .transport(McpTransport::Stdio(Box::new(
+                        McpStdioTransport {
+                            command: "unused".to_string(),
+                            args: Vec::new(),
+                            env: Default::default(),
+                        },
+                    )))
                     .build(),
             ],
-        })
+            Arc::new(RmcpConnector::default()),
+        )
+        .create(request)
+        .await
     }
 }
 
@@ -1420,9 +1448,9 @@ async fn mcp_status_is_available_from_the_registered_session() {
         .expect("create session");
 
     let status = kernel.mcp_status(&session_id).expect("MCP status");
-    assert_eq!(status.len(), 1);
-    assert_eq!(status[0].name, "docs");
-    assert_eq!(status[0].state, McpConnectionState::Connected);
+    assert_eq!(status.servers.len(), 1);
+    assert_eq!(status.servers[0].server_id.as_str(), "docs");
+    assert_eq!(status.servers[0].state, McpServerState::Disabled);
 }
 
 /// Deleting an active session releases its runtime and removes persistent history.

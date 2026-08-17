@@ -96,6 +96,8 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::Fork.as_str()
             || method == AcpExtensionMethod::InvokeSkill.as_str()
             || method == AcpExtensionMethod::SkillList.as_str()
+            || method == AcpExtensionMethod::McpStatus.as_str()
+            || method == AcpExtensionMethod::McpElicitationList.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
     }
 
@@ -135,6 +137,15 @@ impl JsonRpcMessage for IntegrationRequest {
             method if method == AcpExtensionMethod::SkillList.as_str() => {
                 AcpExtensionMethod::SkillList.as_str()
             }
+            method if method == AcpExtensionMethod::McpStatus.as_str() => {
+                AcpExtensionMethod::McpStatus.as_str()
+            }
+            method
+                if method
+                    == AcpExtensionMethod::McpElicitationList.as_str() =>
+            {
+                AcpExtensionMethod::McpElicitationList.as_str()
+            }
             _ => {
                 return Err(agent_client_protocol::Error::method_not_found());
             }
@@ -143,6 +154,95 @@ impl JsonRpcMessage for IntegrationRequest {
             .map_err(agent_client_protocol::Error::into_internal_error)?;
         Ok(Self { method, parameters })
     }
+}
+
+/// ACP exposes the latest MCP snapshot and rejects extra status parameters.
+#[tokio::test]
+async fn mcp_status_is_session_scoped_and_strict() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let snapshot = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::McpStatus.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("MCP status");
+    assert_eq!(snapshot["revision"], 0);
+    assert_eq!(snapshot["servers"], serde_json::json!([]));
+    assert_eq!(snapshot["catalog"]["tools"], serde_json::json!([]));
+
+    let error = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::McpStatus.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "unexpected": true
+            }),
+        ),
+    )
+    .await
+    .expect_err("unknown status field");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+}
+
+/// ACP exposes a strict Session-scoped snapshot of transient MCP elicitations.
+#[tokio::test]
+async fn mcp_elicitation_list_is_session_scoped_and_strict() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let snapshot = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::McpElicitationList.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("MCP elicitation list");
+    assert_eq!(snapshot["sessionId"], session_id);
+    assert_eq!(snapshot["requests"], serde_json::json!([]));
+
+    let error = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::McpElicitationList.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "unexpected": true
+            }),
+        ),
+    )
+    .await
+    .expect_err("unknown elicitation list field");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
 }
 
 impl JsonRpcRequest for IntegrationRequest {

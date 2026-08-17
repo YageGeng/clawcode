@@ -58,6 +58,9 @@ fn execution_context(
             SessionId::try_from("session-contract").expect("session id"),
         )
         .turn_id(TurnId::try_from("turn-contract").expect("turn id"))
+        .trace_id(
+            protocol::TraceId::try_from("trace-contract").expect("trace id"),
+        )
         .cwd(PathBuf::from("/workspace"))
         .cancellation(cancellation)
         .updates(updates)

@@ -15,6 +15,9 @@ fn execution_context() -> ToolExecutionContext {
     ToolExecutionContext::builder()
         .session_id(SessionId::try_from("session-1").expect("valid session id"))
         .turn_id(TurnId::try_from("turn-1").expect("valid turn id"))
+        .trace_id(
+            protocol::TraceId::try_from("trace-1").expect("valid trace id"),
+        )
         .cwd(PathBuf::from("/workspace"))
         .cancellation(CancellationToken::new())
         .updates(Arc::new(DiscardToolUpdates))

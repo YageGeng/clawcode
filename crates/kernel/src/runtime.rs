@@ -4,6 +4,7 @@ mod compaction;
 mod extension;
 mod input;
 mod lifecycle;
+mod mcp;
 mod prompt;
 mod queue;
 mod retry;
@@ -35,13 +36,13 @@ use protocol::{
     BashExecutionMessage, CompactionData, CompactionDetails, CompactionPolicy,
     CompactionReason, CompactionResult, ContentBlock, EntryId, EventMetadata,
     ExtensionEventData, ExtensionFlagDefinition, IdGenerator, IdKind, LaneId,
-    McpServerInfo, MessageContent, MessageId, MessageIdentity, MessageTiming,
-    ModelRequest, ModelRetryDisposition, ModelStreamEvent, QueueId, RecordId,
-    RetryPolicy, RunId, RunRequest, RunResult, Sequence, SessionId,
-    SessionSummary, SessionTitle, SessionTreeEntry, SessionTreeSnapshot,
-    StopReason, ThinkingLevel, TimestampMs, ToolCall, ToolResult, TurnId,
-    TurnIdentity, TurnOutcome, TurnRecord, TurnTiming, UserBashInput,
-    UserBashRequest, UserBashResult,
+    McpSessionSnapshot, MessageContent, MessageId, MessageIdentity,
+    MessageTiming, ModelRequest, ModelRetryDisposition, ModelStreamEvent,
+    QueueId, RecordId, RetryPolicy, RunId, RunRequest, RunResult, Sequence,
+    SessionId, SessionSummary, SessionTitle, SessionTreeEntry,
+    SessionTreeSnapshot, StopReason, ThinkingLevel, TimestampMs, ToolCall,
+    ToolResult, TraceId, TurnId, TurnIdentity, TurnOutcome, TurnRecord,
+    TurnTiming, UserBashInput, UserBashRequest, UserBashResult,
 };
 use store::{
     Clock, EntryKind, NewEntry, NewRecord, RecordKind, SessionCreateOptions,
@@ -89,7 +90,7 @@ pub enum KernelError {
     Extension(#[from] ::extension::ExtensionError),
     /// Session-scoped MCP construction failed.
     #[error("MCP subsystem failed: {0}")]
-    Mcp(#[from] mcp::McpError),
+    Mcp(#[from] ::mcp::McpError),
     /// Skill discovery or invocation failed.
     #[error("skill subsystem failed: {0}")]
     Skill(#[from] skill::SkillError),
@@ -159,7 +160,7 @@ pub struct KernelFactory {
     prompt_factory: Arc<dyn ::prompt::PromptFactory>,
     /// Optional session-scoped MCP tool factory.
     #[builder(default)]
-    mcp_factory: Option<Arc<dyn mcp::McpFactory>>,
+    mcp_factory: Option<Arc<dyn ::mcp::McpFactory>>,
     /// Optional pi-compatible skill discovery factory.
     #[builder(default)]
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
@@ -220,7 +221,7 @@ pub struct Kernel {
     id_generator: Arc<dyn IdGenerator>,
     prompt_factory: Arc<dyn ::prompt::PromptFactory>,
     #[builder(default)]
-    mcp_factory: Option<Arc<dyn mcp::McpFactory>>,
+    mcp_factory: Option<Arc<dyn ::mcp::McpFactory>>,
     #[builder(default)]
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
     include_skill_instructions: bool,
@@ -238,8 +239,25 @@ impl Kernel {
         request: RunRequest,
         sink: Arc<dyn EventSink>,
     ) -> Result<RunResult, KernelError> {
-        self.run_with_source(request, sink, protocol::InputSource::Rpc)
-            .await
+        let trace_id = TraceId::try_from(self.id_generator.next(IdKind::Trace))
+            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        self.run_traced(request, sink, trace_id).await
+    }
+
+    /// Executes one run under an ingress Trace that remains stable through Tool calls.
+    pub async fn run_traced(
+        &self,
+        request: RunRequest,
+        sink: Arc<dyn EventSink>,
+        trace_id: TraceId,
+    ) -> Result<RunResult, KernelError> {
+        self.run_with_source(
+            request,
+            sink,
+            protocol::InputSource::Rpc,
+            trace_id,
+        )
+        .await
     }
 
     /// Waits until an extension or the embedding application requests shutdown.
@@ -274,12 +292,110 @@ impl Kernel {
         ))
     }
 
-    /// Returns the immutable MCP status captured while building this session.
+    /// Returns the latest atomically published MCP status and catalog snapshot.
     pub fn mcp_status(
         &self,
         session_id: &SessionId,
-    ) -> Result<Vec<McpServerInfo>, KernelError> {
-        Ok(self.session(session_id)?.mcp_servers.to_vec())
+    ) -> Result<McpSessionSnapshot, KernelError> {
+        Ok(self
+            .session(session_id)?
+            .mcp
+            .as_ref()
+            .map_or_else(McpSessionSnapshot::default, |session| {
+                session.snapshot().as_ref().clone()
+            }))
+    }
+
+    /// Subscribes ACP to lightweight MCP snapshot revision notifications.
+    pub fn subscribe_mcp(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<broadcast::Receiver<::mcp::McpSessionEvent>>, KernelError>
+    {
+        Ok(self
+            .session(session_id)?
+            .mcp
+            .as_ref()
+            .map(|session| session.subscribe()))
+    }
+
+    /// Explicitly reconnects one Session Server through its configured exact protocol.
+    pub async fn mcp_reconnect(
+        &self,
+        request: protocol::McpReconnectRequest,
+    ) -> Result<McpSessionSnapshot, KernelError> {
+        let session = self.session(&request.session_id)?;
+        let mcp = session.mcp.as_ref().ok_or_else(|| {
+            ::mcp::McpError::ServerNotFound(request.server_id.clone())
+        })?;
+        mcp.reconnect(&request.server_id).await?;
+        Ok(mcp.snapshot().as_ref().clone())
+    }
+
+    /// Completes one pending MCP OAuth browser round and returns the latest snapshot.
+    pub async fn mcp_continue_authorization(
+        &self,
+        request: protocol::McpAuthorizationContinueRequest,
+    ) -> Result<McpSessionSnapshot, KernelError> {
+        let session = self.session(&request.session_id)?;
+        let server_id = request.server_id.clone();
+        let mcp = session
+            .mcp
+            .as_ref()
+            .ok_or(::mcp::McpError::ServerNotFound(server_id))?;
+        mcp.continue_authorization(request).await?;
+        Ok(mcp.snapshot().as_ref().clone())
+    }
+
+    /// Resolves one pending Turn-scoped MCP elicitation for its owning Session.
+    pub async fn mcp_respond_elicitation(
+        &self,
+        request: protocol::McpElicitationResponseRequest,
+    ) -> Result<(), KernelError> {
+        let session = self.session(&request.session_id)?;
+        session.resolve_mcp_elicitation(request).await
+    }
+
+    /// Retrieves one MCP Prompt through the owning Session runtime.
+    pub async fn mcp_get_prompt(
+        &self,
+        request: protocol::McpSessionPromptRequest,
+    ) -> Result<protocol::McpPromptResult, KernelError> {
+        let session = self.session(&request.session_id)?;
+        let mcp = session.mcp.as_ref().ok_or_else(|| {
+            ::mcp::McpError::ServerNotFound(
+                request.request.reference.server_id.clone(),
+            )
+        })?;
+        Ok(mcp.get_prompt(request.request).await?)
+    }
+
+    /// Reads one MCP Resource through the owning Session runtime.
+    pub async fn mcp_read_resource(
+        &self,
+        request: protocol::McpSessionResourceRequest,
+    ) -> Result<protocol::McpResourceResult, KernelError> {
+        let session = self.session(&request.session_id)?;
+        let mcp = session.mcp.as_ref().ok_or_else(|| {
+            ::mcp::McpError::ServerNotFound(
+                request.request.reference.server_id.clone(),
+            )
+        })?;
+        Ok(mcp.read_resource(request.request).await?)
+    }
+
+    /// Completes one MCP Prompt or Resource Template argument through its Session.
+    pub async fn mcp_complete(
+        &self,
+        request: protocol::McpSessionCompletionRequest,
+    ) -> Result<protocol::McpCompletionResult, KernelError> {
+        let server_id = request.request.target.server_id().clone();
+        let session = self.session(&request.session_id)?;
+        let mcp = session
+            .mcp
+            .as_ref()
+            .ok_or(::mcp::McpError::ServerNotFound(server_id))?;
+        Ok(mcp.complete(request.request).await?)
     }
 
     /// Returns immutable command-line flag declarations from static extensions.
@@ -343,11 +459,13 @@ struct SessionRuntime {
     store: Arc<Mutex<Box<dyn SessionStore>>>,
     lane: LaneId,
     cwd: PathBuf,
-    mcp_servers: Arc<[McpServerInfo]>,
+    mcp: Option<Arc<::mcp::McpSession>>,
     prompt: OnceLock<Arc<::prompt::PromptSession>>,
     skills: OnceLock<Option<Arc<skill::SkillCatalog>>>,
     extensions: Arc<ExtensionRuntime>,
-    tool_state: SessionToolState,
+    tool_state: Arc<SessionToolState>,
+    mcp_projection: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    pending_mcp_elicitations: Mutex<HashMap<String, PendingMcpElicitation>>,
     commands: DynamicCommandRegistry,
     flags: Arc<[ExtensionFlagDefinition]>,
     models: Arc<ModelCatalog>,
@@ -364,6 +482,12 @@ struct SessionRuntime {
     idle_notify: Notify,
     cancellation: Mutex<CancellationToken>,
     event_sequence: Arc<AtomicU64>,
+}
+
+/// Retains the request payload and its one-shot response route as one state entry.
+struct PendingMcpElicitation {
+    request: protocol::McpElicitationRequest,
+    sender: tokio::sync::oneshot::Sender<protocol::McpElicitationResult>,
 }
 
 /// Clears active-run correlation on every success and error exit from `Kernel::run`.
@@ -427,6 +551,7 @@ struct ToolBatch<'a> {
     session_id: &'a SessionId,
     run_id: &'a RunId,
     turn_id: &'a TurnId,
+    trace_id: &'a TraceId,
     session: &'a Arc<SessionRuntime>,
     emitter: &'a EventEmitter,
     cancellation: &'a CancellationToken,

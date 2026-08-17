@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use protocol::{
     SessionId, SystemPromptTool, ToolCall, ToolDefinition,
-    ToolPromptContribution, ToolResult, TurnId,
+    ToolPromptContribution, ToolResult, TraceId, TurnId,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -31,6 +31,8 @@ pub struct ToolExecutionContext {
     pub session_id: SessionId,
     /// Turn that owns the invocation.
     pub turn_id: TurnId,
+    /// Trace inherited from application ingress for Host callbacks and logs.
+    pub trace_id: TraceId,
     /// Working directory selected for the turn.
     pub cwd: PathBuf,
 
@@ -157,6 +159,13 @@ impl ToolRegistry {
             self.register(tool)?;
         }
         Ok(())
+    }
+
+    /// Overlays another registry so the later semantic partition wins by name.
+    pub fn overlay(&mut self, other: &ToolRegistry) {
+        for tool in other.tools.values() {
+            self.upsert(Arc::clone(tool));
+        }
     }
 
     /// Returns registered tool names in deterministic lexical order.

@@ -143,7 +143,8 @@ impl Kernel {
             .start_extensions(&session_id, protocol::SessionStartReason::New)
             .await
         {
-            self.rollback_session_registration(&session_id, true)?;
+            self.rollback_session_registration(&session_id, true)
+                .await?;
             return Err(error);
         }
         Ok(path)
@@ -255,7 +256,8 @@ impl Kernel {
             .start_extensions(&session_id, protocol::SessionStartReason::Resume)
             .await
         {
-            self.rollback_session_registration(&session_id, false)?;
+            self.rollback_session_registration(&session_id, false)
+                .await?;
             return Err(error);
         }
         Ok(path)
@@ -287,6 +289,10 @@ impl Kernel {
                 &context,
             )
             .await;
+        if let Some(mcp) = &session.mcp {
+            mcp.shutdown().await?;
+        }
+        session.stop_mcp_projection().await?;
         session.finish_closing()?;
         session.extensions.invalidate();
         self.sessions
@@ -475,7 +481,8 @@ impl Kernel {
             )
             .await
         {
-            self.rollback_session_registration(&new_session_id, true)?;
+            self.rollback_session_registration(&new_session_id, true)
+                .await?;
             return Err(error);
         }
         Ok(path)
@@ -619,22 +626,41 @@ impl Kernel {
             registrar.register_module(module.as_ref())?;
         }
         let extension_registry = Arc::new(registrar.freeze());
-        let mut tools = (*self.tools).clone();
+        let builtins = (*self.tools).clone();
+        let mut extension_tools = ToolRegistry::default();
         let mut extension_tool_names = BTreeSet::new();
         for (_extension_id, tool) in extension_registry.tools() {
             let name = tool.definition().name;
             // The first extension registration wins while still overriding built-ins.
             if extension_tool_names.insert(name) {
-                tools.upsert(tool);
+                extension_tools.upsert(tool);
             }
         }
-        let mcp_servers = if let Some(factory) = &self.mcp_factory {
-            let mcp_session = factory.create().await?;
-            tools.merge(mcp_session.tools)?;
-            mcp_session.servers
+        let session_id = store.session_id().clone();
+        let (mcp, mcp_tools, mcp_host) = if let Some(factory) =
+            &self.mcp_factory
+        {
+            let host = Arc::new(mcp::SessionMcpHost::new(cwd.clone()));
+            let mcp_session = Arc::new(
+                factory
+                    .create(
+                        ::mcp::McpSessionRequest::builder()
+                            .session_id(session_id)
+                            .cwd(cwd.clone())
+                            .host(Arc::clone(&host) as Arc<dyn ::mcp::McpHost>)
+                            .shutdown(self.shutdown.child_token())
+                            .build(),
+                    )
+                    .await?,
+            );
+            let mcp_tools = mcp_session.tool_registry()?;
+            (Some(mcp_session), mcp_tools, Some(host))
         } else {
-            Vec::new()
+            (None, ToolRegistry::default(), None)
         };
+        let mut tools = builtins.clone();
+        tools.overlay(&extension_tools);
+        tools.overlay(&mcp_tools);
         let lane = LaneId::try_from("main")
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let settings = RestoredSessionSettings::load(
@@ -664,8 +690,12 @@ impl Kernel {
                 flags.push(flag);
             }
         }
-        let tool_state =
-            SessionToolState::new(tools.clone(), settings.active_tools)?;
+        let tool_state = Arc::new(SessionToolState::new(
+            builtins,
+            extension_tools,
+            mcp_tools,
+            settings.active_tools,
+        )?);
         let event_sink = Arc::new(Mutex::new(None));
         let diagnostic_turn_id = Arc::new(Mutex::new(None));
         let event_sequence = Arc::new(AtomicU64::new(initial_event_sequence));
@@ -688,16 +718,18 @@ impl Kernel {
                     .build(),
             ),
         ));
-        Ok(Arc::new(
+        let runtime = Arc::new(
             SessionRuntime::builder()
                 .store(store)
                 .lane(lane)
                 .cwd(cwd)
-                .mcp_servers(Arc::from(mcp_servers))
+                .mcp(mcp)
                 .prompt(OnceLock::new())
                 .skills(OnceLock::new())
                 .extensions(extensions)
                 .tool_state(tool_state)
+                .mcp_projection(AsyncMutex::new(None))
+                .pending_mcp_elicitations(Mutex::new(HashMap::new()))
                 .commands(commands)
                 .flags(Arc::from(flags))
                 .models(Arc::clone(&self.models))
@@ -715,7 +747,12 @@ impl Kernel {
                 .cancellation(Mutex::new(CancellationToken::new()))
                 .event_sequence(event_sequence)
                 .build(),
-        ))
+        );
+        if let Some(host) = mcp_host {
+            host.attach(&runtime)?;
+        }
+        runtime.start_mcp_projection().await?;
+        Ok(runtime)
     }
 
     /// Reconstructs compaction-aware model context from one persisted lane branch.
@@ -812,7 +849,7 @@ impl Kernel {
     }
 
     /// Removes a partially started runtime and optionally its new durable log.
-    fn rollback_session_registration(
+    async fn rollback_session_registration(
         &self,
         session_id: &SessionId,
         delete_persisted: bool,
@@ -824,6 +861,10 @@ impl Kernel {
             .remove(session_id);
         if let Some(runtime) = runtime {
             runtime.extensions.invalidate();
+            if let Some(mcp) = &runtime.mcp {
+                mcp.shutdown().await?;
+            }
+            runtime.stop_mcp_projection().await?;
         }
         if delete_persisted {
             self.store_factory.delete(session_id)?;

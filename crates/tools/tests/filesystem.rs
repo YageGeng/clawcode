@@ -16,6 +16,7 @@ fn execution_context(cwd: &Path) -> ToolExecutionContext {
     ToolExecutionContext::builder()
         .session_id(SessionId::try_from("session-fs").expect("session id"))
         .turn_id(TurnId::try_from("turn-fs").expect("turn id"))
+        .trace_id(protocol::TraceId::try_from("trace-fs").expect("trace id"))
         .cwd(cwd.to_path_buf())
         .cancellation(CancellationToken::new())
         .updates(Arc::new(DiscardToolUpdates))

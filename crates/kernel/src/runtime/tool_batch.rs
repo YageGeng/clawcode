@@ -115,6 +115,7 @@ impl Kernel {
             let context = ToolExecutionContext::builder()
                 .session_id(batch.session_id.clone())
                 .turn_id(batch.turn_id.clone())
+                .trace_id(batch.trace_id.clone())
                 .cwd(batch.session.cwd.clone())
                 .cancellation(batch.cancellation.clone())
                 .updates(update_channel.publisher(call.clone()))

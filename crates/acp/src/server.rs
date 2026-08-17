@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
 use agent_client_protocol::{
@@ -8,11 +9,14 @@ use async_trait::async_trait;
 use kernel::{EventSink, Kernel, SinkError};
 use protocol::{
     AcpExtensionMethod, AcpWorkingDirectory, AgentEvent, AgentEventPayload,
-    EventMetadata, IdGenerator, ProductIdentity, RunRequest, Sequence,
-    SessionId,
+    EventMetadata, IdGenerator, McpSessionChange,
+    McpSessionRevisionNotification, ProductIdentity, RunRequest, Sequence,
+    SessionId, TimestampMs,
 };
 
-use crate::extension::{AcpExtensionDispatcher, AcpExtensionRequest};
+use crate::extension::{
+    AcpExtensionDispatcher, AcpExtensionRequest, AcpMcpUpdateNotification,
+};
 use crate::trace::AcpTraceFactory;
 use crate::{AcpEventMapper, AcpMappingError};
 
@@ -52,6 +56,76 @@ impl AcpServer {
         }
         Ok(())
     }
+
+    /// Starts one deduplicated MCP revision watcher for this ACP connection and Session.
+    pub(crate) fn watch_mcp(
+        &self,
+        session_id: &SessionId,
+        connection: &ConnectionTo<Client>,
+        watched: Arc<Mutex<BTreeSet<SessionId>>>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let Some(mut events) = self
+            .kernel
+            .subscribe_mcp(session_id)
+            .map_err(agent_client_protocol::Error::into_internal_error)?
+        else {
+            return Ok(());
+        };
+        {
+            let mut sessions = watched.lock().map_err(|_poison_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("ACP MCP watcher lock poisoned"),
+                )
+            })?;
+            if !sessions.insert(session_id.clone()) {
+                return Ok(());
+            }
+        }
+        let kernel = Arc::clone(&self.kernel);
+        let session_id = session_id.clone();
+        let task_connection = connection.clone();
+        connection.spawn(async move {
+            loop {
+                let (revision, server_id, change) = match events.recv().await {
+                    Ok(event) => {
+                        (event.revision, event.server_id, event.change)
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                        _,
+                    )) => {
+                        let snapshot = kernel.mcp_status(&session_id).map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?;
+                        (snapshot.revision, None, McpSessionChange::Catalog)
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                };
+                let notification = McpSessionRevisionNotification::builder()
+                    .session_id(session_id.clone())
+                    .revision(revision)
+                    .server_id(server_id)
+                    .change(change)
+                    .timestamp_ms(TimestampMs::now())
+                    .build();
+                if task_connection
+                    .send_notification(AcpMcpUpdateNotification(notification))
+                    .is_err()
+                {
+                    break;
+                }
+                if change == McpSessionChange::Shutdown {
+                    break;
+                }
+            }
+            if let Ok(mut sessions) = watched.lock() {
+                sessions.remove(&session_id);
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
 }
 
 /// Factory that creates an isolated ACP v2 connection over a shared kernel.
@@ -86,6 +160,10 @@ impl AcpServerFactory {
         let prompt_kernel = Arc::clone(&self.kernel);
         let cancel_kernel = Arc::clone(&self.kernel);
         let extension_kernel = Arc::clone(&self.kernel);
+        let mcp_watchers = Arc::new(Mutex::new(BTreeSet::new()));
+        let session_mcp_watchers = Arc::clone(&mcp_watchers);
+        let resume_mcp_watchers = Arc::clone(&mcp_watchers);
+        let extension_mcp_watchers = mcp_watchers;
         let traces =
             AcpTraceFactory::new(Arc::clone(&self.id_generator), transport);
         let initialize_traces = traces.clone();
@@ -122,6 +200,13 @@ impl AcpServerFactory {
                         AcpExtensionMethod::InvokeSkill,
                         AcpExtensionMethod::SkillList,
                         AcpExtensionMethod::McpStatus,
+                        AcpExtensionMethod::McpReconnect,
+                        AcpExtensionMethod::McpPromptGet,
+                        AcpExtensionMethod::McpResourceRead,
+                        AcpExtensionMethod::McpComplete,
+                        AcpExtensionMethod::McpOAuthContinue,
+                        AcpExtensionMethod::McpElicitationList,
+                        AcpExtensionMethod::McpElicitationRespond,
                         AcpExtensionMethod::ExtensionCommand,
                         AcpExtensionMethod::UserBash,
                     ]
@@ -160,6 +245,7 @@ impl AcpServerFactory {
                             connection: ConnectionTo<Client>| {
                     let trace_factory = session_traces.clone();
                     let kernel = Arc::clone(&session_kernel);
+                    let mcp_watchers = Arc::clone(&session_mcp_watchers);
                     let operation =
                         trace_factory.request(&responder, &request)?;
                     operation.run(async move {
@@ -177,8 +263,13 @@ impl AcpServerFactory {
                         responder.respond(wire::NewSessionResponse::new(
                             session_id.to_string(),
                         ))?;
-                        AcpServer::new(kernel)
-                            .send_available_commands(&session_id, &connection)
+                        let server = AcpServer::new(kernel);
+                        server.send_available_commands(&session_id, &connection)?;
+                        server.watch_mcp(
+                            &session_id,
+                            &connection,
+                            mcp_watchers,
+                        )
                     }).await
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -232,6 +323,7 @@ impl AcpServerFactory {
                             connection: ConnectionTo<Client>| {
                     let trace_factory = resume_traces.clone();
                     let kernel = Arc::clone(&resume_kernel);
+                    let mcp_watchers = Arc::clone(&resume_mcp_watchers);
                     let operation =
                         trace_factory.request(&responder, &request)?;
                     operation.run(async move {
@@ -303,6 +395,11 @@ impl AcpServerFactory {
                         }
                         AcpServer::new(Arc::clone(&kernel))
                             .send_available_commands(&session_id, &connection)?;
+                        AcpServer::new(kernel).watch_mcp(
+                            &session_id,
+                            &connection,
+                            mcp_watchers,
+                        )?;
                         responder.respond(wire::ResumeSessionResponse::new())
                     }).await
                 },
@@ -365,6 +462,7 @@ impl AcpServerFactory {
                     let kernel = Arc::clone(&prompt_kernel);
                     let operation =
                         trace_factory.request(&responder, &request)?;
+                    let trace_id = operation.trace_id().clone();
                     operation.start();
                     let task_operation = operation.clone();
                     let result = operation.instrument(async move {
@@ -389,12 +487,13 @@ impl AcpServerFactory {
                                 connection: task_connection.clone(),
                             });
                             if let Err(error) = kernel
-                                .run(
+                                .run_traced(
                                     RunRequest {
                                         session_id: task_session_id.clone(),
                                         input,
                                     },
                                     sink,
+                                    trace_id,
                                 )
                                 .await
                             {
@@ -463,6 +562,7 @@ impl AcpServerFactory {
                             connection: ConnectionTo<Client>| {
                     let trace_factory = extension_traces.clone();
                     let kernel = Arc::clone(&extension_kernel);
+                    let mcp_watchers = Arc::clone(&extension_mcp_watchers);
                     let operation = trace_factory.request(
                         &responder,
                         request.parameters(),
@@ -471,6 +571,7 @@ impl AcpServerFactory {
                         let response = AcpExtensionDispatcher {
                             kernel,
                             connection,
+                            mcp_watchers,
                         }
                         .execute(request)
                         .await?;
