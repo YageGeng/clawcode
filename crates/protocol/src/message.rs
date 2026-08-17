@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ExtensionId, MessageId, StopReason, TimestampMs, ToolCallId,
+    EntryId, ExtensionId, MessageId, SlashCommandExpansion,
+    SlashCommandMessage, StopReason, TimestampMs, ToolCallId,
     ToolResultDetails, TurnId, UserBashResult,
 };
 
 /// Serde adapter for precision-safe unsigned decimal token counts.
-mod decimal_u64 {
+pub(crate) mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
     /// Serializes an unsigned token count as a decimal string.
@@ -354,6 +355,35 @@ pub struct ExtensionMessage {
     pub details: Option<serde_json::Value>,
 }
 
+/// Model-context checkpoint retained as a distinct transcript message.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionSummaryMessage {
+    /// Persisted compaction entry that owns this checkpoint.
+    pub entry_id: EntryId,
+    /// Structured summary generated for future model requests.
+    pub summary: String,
+    /// Effective context size immediately before compaction.
+    #[serde(with = "decimal_u64")]
+    pub tokens_before: u64,
+    /// Files read by tool calls represented by this cumulative checkpoint.
+    #[serde(default)]
+    #[builder(default)]
+    pub read_files: Vec<String>,
+    /// Files created or changed by tool calls represented by this checkpoint.
+    #[serde(default)]
+    #[builder(default)]
+    pub modified_files: Vec<String>,
+}
+
 /// Pi-compatible transcript message produced by a user-authored `!` or `!!` command.
 #[derive(
     Debug,
@@ -420,6 +450,12 @@ pub enum MessageContent {
         blocks: Vec<ContentBlock>,
     },
 
+    /// User-authored Skill or Prompt Template invocation with frozen model content.
+    ExpandedUser {
+        /// Original invocation and its model-facing expansion.
+        expansion: SlashCommandExpansion,
+    },
+
     /// Complete assistant output with its provider result metadata.
     Assistant {
         /// Ordered text, reasoning, and tool-call content blocks.
@@ -455,6 +491,19 @@ pub enum MessageContent {
         /// Opaque extension message.
         extension: ExtensionMessage,
     },
+
+    /// Direct Slash Command input or server-authored output excluded from model context.
+    SlashCommand {
+        /// Typed command message retained for native ACP replay.
+        message: SlashCommandMessage,
+    },
+
+    /// Persisted checkpoint converted to User content only at the provider boundary.
+    CompactionSummary {
+        /// Typed checkpoint data flattened to keep the wire payload compact.
+        #[serde(flatten)]
+        compaction: CompactionSummaryMessage,
+    },
 }
 
 impl MessageContent {
@@ -463,11 +512,13 @@ impl MessageContent {
     pub const fn role(&self) -> Option<Role> {
         match self {
             Self::System { .. } => Some(Role::System),
-            Self::User { .. } => Some(Role::User),
+            Self::User { .. } | Self::ExpandedUser { .. } => Some(Role::User),
             Self::Assistant { .. } => Some(Role::Assistant),
             Self::ToolResult { .. }
             | Self::BashExecution { .. }
-            | Self::Extension { .. } => None,
+            | Self::Extension { .. }
+            | Self::SlashCommand { .. }
+            | Self::CompactionSummary { .. } => None,
         }
     }
 
@@ -479,8 +530,13 @@ impl MessageContent {
             | Self::User { blocks }
             | Self::Assistant { blocks, .. }
             | Self::ToolResult { blocks, .. } => blocks,
+            Self::ExpandedUser { expansion } => &expansion.model_blocks,
             Self::BashExecution { bash } => return Some(bash.model_text()),
             Self::Extension { .. } => return None,
+            Self::SlashCommand { message } => return message.text_content(),
+            Self::CompactionSummary { compaction } => {
+                return Some(compaction.summary.clone());
+            }
         };
         let text = blocks
             .iter()

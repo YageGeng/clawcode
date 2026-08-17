@@ -1,12 +1,10 @@
 //! Shared Prompt resource, rendering, and command contracts.
 
-mod command;
 mod policy;
 mod source;
 mod system;
 mod template;
 
-pub use command::{AvailableAgentCommand, AvailableAgentCommandKind};
 pub use policy::{
     PromptContentSource, PromptPolicy, PromptResourceRequest,
     SkillResourceRequest,

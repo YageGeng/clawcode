@@ -584,6 +584,9 @@ impl ProviderMessage {
             MessageContent::User { blocks } => {
                 Some(Self::try_from_role(Role::User, blocks))
             }
+            MessageContent::ExpandedUser { expansion } => {
+                Some(Self::try_from_role(Role::User, expansion.model_blocks))
+            }
             MessageContent::Assistant { blocks, .. } => {
                 Some(Self::try_from_role(Role::Assistant, blocks))
             }
@@ -609,6 +612,18 @@ impl ProviderMessage {
                 Some(Self::try_from_role(Role::User, extension.blocks))
             }
             MessageContent::Extension { .. } => None,
+            MessageContent::SlashCommand { .. } => None,
+            MessageContent::CompactionSummary { compaction } => {
+                Some(Self::try_from_role(
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: format!(
+                            "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{}\n</summary>",
+                            compaction.summary
+                        ),
+                    }],
+                ))
+            }
         }
     }
 

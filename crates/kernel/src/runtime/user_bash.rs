@@ -14,7 +14,11 @@ impl Kernel {
         request: &RunRequest,
         sink: Arc<dyn EventSink>,
     ) -> Result<Option<RunResult>, KernelError> {
-        let Some(input) = UserBashInput::parse_prefixed(&request.input) else {
+        let Some(input) = request
+            .input
+            .slash_command_text()
+            .and_then(UserBashInput::parse_prefixed)
+        else {
             return Ok(None);
         };
         let execution = self

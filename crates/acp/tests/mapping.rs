@@ -2,11 +2,13 @@ use acp::AcpEventMapper;
 use agent_client_protocol::schema::v2::SessionUpdate;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
-    AssistantMetadata, AvailableAgentCommand, AvailableAgentCommandKind,
-    BashExecutionMessage, ContentBlock, EventMetadata, MessageContent,
-    MessageId, MessageIdentity, MessageTiming, ModelUsage, ProductIdentity,
-    RunId, Sequence, SkillDiagnostic, SkillDiagnosticCode,
-    SkillDiagnosticSeverity, StopReason, TimestampMs, ToolCallId, ToolResult,
+    AssistantMetadata, BashExecutionMessage, CompactionOutcome,
+    CompactionReason, CompactionResult, ContentBlock, EntryId, EventMetadata,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelUsage,
+    ProductIdentity, RunId, Sequence, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiagnosticSeverity, SlashCommandAliasKind, SlashCommandDefinition,
+    SlashCommandMessage, SlashCommandOutput, SlashCommandSource,
+    SlashCommandStatus, StopReason, TimestampMs, ToolCallId, ToolResult,
     ToolResultDetails, TurnId, UserBashDisposition, UserBashResult,
 };
 
@@ -192,11 +194,13 @@ fn available_commands_map_to_native_acp_v2_update() {
         },
         payload: AgentEventPayload::AvailableCommandsChanged {
             commands: vec![
-                AvailableAgentCommand::builder()
+                SlashCommandDefinition::builder()
                     .name("review".to_string())
                     .description("Review changes".to_string())
                     .argument_hint(Some("<path>".to_string()))
-                    .kind(AvailableAgentCommandKind::PromptTemplate)
+                    .source(SlashCommandSource::PromptTemplate)
+                    .qualified_name(None)
+                    .alias_kind(SlashCommandAliasKind::Canonical)
                     .build(),
             ],
         },
@@ -217,6 +221,11 @@ fn available_commands_map_to_native_acp_v2_update() {
     assert_eq!(value["availableCommands"][0]["input"]["type"], "text");
     assert_eq!(value["availableCommands"][0]["input"]["hint"], "<path>");
     assert_eq!(
+        value["availableCommands"][0]["_meta"][ProductIdentity::ACP_NAMESPACE]
+            [ProductIdentity::ACP_SLASH_COMMAND_METADATA]["source"],
+        "prompt_template"
+    );
+    assert_eq!(
         value["_meta"][ProductIdentity::ACP_NAMESPACE]["turnId"],
         "turn-commands"
     );
@@ -227,6 +236,64 @@ fn available_commands_map_to_native_acp_v2_update() {
     assert_eq!(
         value["_meta"][ProductIdentity::ACP_NAMESPACE]["sequence"],
         12
+    );
+}
+
+/// Direct command output maps to native AgentMessage with product metadata.
+#[test]
+fn command_output_maps_to_agent_message_with_product_metadata() {
+    let turn_id = TurnId::try_from("turn-command").expect("TurnId");
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: turn_id.clone(),
+            timestamp_ms: TimestampMs::from(8_500),
+            sequence: Sequence::try_from(7).expect("sequence"),
+        },
+        payload: AgentEventPayload::MessageEnd {
+            message: AgentMessage {
+                identity: MessageIdentity {
+                    message_id: MessageId::try_from("message-command")
+                        .expect("MessageId"),
+                    turn_id,
+                },
+                timing: MessageTiming::try_from((
+                    TimestampMs::from(8_400),
+                    TimestampMs::from(8_400),
+                    TimestampMs::from(8_500),
+                ))
+                .expect("message timing"),
+                content: MessageContent::SlashCommand {
+                    message: SlashCommandMessage::Output(
+                        SlashCommandOutput::builder()
+                            .command("session".to_string())
+                            .source(SlashCommandSource::Builtin)
+                            .status(SlashCommandStatus::Succeeded)
+                            .blocks(vec![ContentBlock::Text {
+                                text: "Session ID: session-1".to_string(),
+                            }])
+                            .build(),
+                    ),
+                },
+            },
+        },
+    };
+
+    let updates = AcpEventMapper::map(event).expect("map command output");
+    let value = serde_json::to_value(&updates[0]).expect("serialize update");
+    assert_eq!(value["sessionUpdate"], "agent_message");
+    assert_eq!(
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]
+            [ProductIdentity::ACP_SLASH_COMMAND_METADATA]["messageKind"],
+        "output"
+    );
+    assert_eq!(
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]
+            [ProductIdentity::ACP_SLASH_COMMAND_METADATA]["source"],
+        "builtin"
+    );
+    assert_eq!(
+        value["_meta"][ProductIdentity::ACP_NAMESPACE]["messageTiming"]["ended_at_ms"],
+        "8500"
     );
 }
 
@@ -408,6 +475,53 @@ fn only_agent_settled_maps_to_idle_state() {
             agent_client_protocol::schema::v2::StateUpdate::Idle(_)
         )
     )));
+}
+
+/// Completed compaction updates carry all data required for a durable WebUI card.
+#[test]
+fn completed_compaction_maps_to_product_extension_update() {
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: TurnId::try_from("turn-compaction").expect("turn id"),
+            timestamp_ms: TimestampMs::from(2_050),
+            sequence: Sequence::try_from(8).expect("sequence"),
+        },
+        payload: AgentEventPayload::CompactionEnd {
+            run_id: RunId::try_from("run-compaction").expect("run id"),
+            reason: CompactionReason::Manual,
+            outcome: CompactionOutcome::Completed {
+                result: CompactionResult::builder()
+                    .entry_id(
+                        EntryId::try_from("entry-compaction")
+                            .expect("entry id"),
+                    )
+                    .turn_id(
+                        TurnId::try_from("turn-compaction").expect("turn id"),
+                    )
+                    .summary("## Goal\nContinue implementation".to_string())
+                    .tokens_before(42_000)
+                    .usage(None)
+                    .started_at_ms(TimestampMs::from(2_000))
+                    .ended_at_ms(TimestampMs::from(2_050))
+                    .build(),
+            },
+        },
+    };
+
+    let updates = AcpEventMapper::map(event).expect("map compaction");
+    let value = serde_json::to_value(&updates[0]).expect("serialize update");
+
+    assert_eq!(value["sessionUpdate"], ProductIdentity::ACP_EVENT_UPDATE);
+    assert_eq!(value["payload"]["event"], "compaction_end");
+    assert_eq!(value["payload"]["outcome"]["status"], "completed");
+    assert_eq!(
+        value["payload"]["outcome"]["result"]["entryId"],
+        "entry-compaction"
+    );
+    assert_eq!(
+        value["payload"]["outcome"]["result"]["tokensBefore"],
+        "42000"
+    );
 }
 
 /// A failed agent run uses a product error reason instead of pretending cancellation.

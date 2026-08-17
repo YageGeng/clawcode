@@ -2,9 +2,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use protocol::{
-    AgentMessage, ContentBlock, EntryId, IdKind, MessageContent,
-    MessageIdentity, MessageTiming, PendingMessages, QueueId, QueueKind,
-    QueuedMessage, RecordId, SessionId, TurnId,
+    AgentMessage, EntryId, IdKind, MessageIdentity, MessageTiming,
+    PendingMessages, QueueId, QueueKind, QueuedMessage, RecordId, SessionId,
+    TurnId,
 };
 use serde::{Deserialize, Serialize};
 use store::{NewRecord, RecordKind, SessionRecord};
@@ -29,36 +29,26 @@ impl Kernel {
                 KernelError::SessionNotRunning(session_id.clone())
             })?;
         if let Ok(invocation) =
-            ::extension::ExtensionCommandInvocation::try_from(input.as_str())
+            protocol::SlashCommandInvocation::try_from(input.as_str())
         {
-            match session
-                .commands
-                .snapshot()
-                .map_err(|error| {
-                    KernelError::ExtensionBlocked(error.to_string())
-                })?
-                .resolve(&invocation.name)
-            {
-                Ok(_command) => {
-                    return Err(KernelError::ExtensionCommandCannotQueue(
-                        invocation.name,
-                    ));
+            match session.resolve_direct_slash_command(&invocation)? {
+                super::command::DirectSlashCommandResolution::Command(
+                    command,
+                ) => {
+                    return Err(KernelError::SlashCommandCannotQueue {
+                        name: invocation.name,
+                        command_source: command.source(),
+                    });
                 }
-                Err(::extension::DynamicRegistryError::CommandNotFound(_)) => {}
-                Err(::extension::DynamicRegistryError::AmbiguousCommand(
-                    name,
-                )) => {
-                    return Err(KernelError::ExtensionCommandAmbiguous(name));
-                }
-                Err(error) => {
-                    return Err(KernelError::ExtensionBlocked(
-                        error.to_string(),
-                    ));
-                }
+                super::command::DirectSlashCommandResolution::Rejected {
+                    error,
+                    ..
+                } => return Err(KernelError::SlashCommandRejected(error)),
+                super::command::DirectSlashCommandResolution::NotFound => {}
             }
         }
         let expanded = session.expand_prompt_input(session_id, &input)?;
-        if let Some(diagnostic) = expanded.diagnostic {
+        if let Some(diagnostic) = expanded.diagnostic.clone() {
             let sink = session
                 .event_sink
                 .lock()
@@ -91,7 +81,7 @@ impl Kernel {
             )
             .await?;
         }
-        let input = expanded.text;
+        let content = expanded.message_content();
         let timestamp = self.clock.now();
         let queued = QueuedMessage::builder()
             .queue_id(
@@ -115,9 +105,7 @@ impl Kernel {
                     timestamp, timestamp, timestamp,
                 ))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
-                content: MessageContent::User {
-                    blocks: vec![ContentBlock::Text { text: input }],
-                },
+                content,
             })
             .build();
         let item = PendingQueueItem::new(

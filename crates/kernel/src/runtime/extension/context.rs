@@ -95,6 +95,17 @@ impl Kernel {
         run_id: Option<&RunId>,
         turn_id: Option<&TurnId>,
     ) -> Result<ExtensionContext, KernelError> {
+        self.extension_context_with_event_sink(session, run_id, turn_id, None)
+    }
+
+    /// Captures an extension context with an operation-local event destination.
+    pub(in crate::runtime) fn extension_context_with_event_sink(
+        &self,
+        session: &Arc<SessionRuntime>,
+        run_id: Option<&RunId>,
+        turn_id: Option<&TurnId>,
+        event_sink: Option<Arc<dyn crate::EventSink>>,
+    ) -> Result<ExtensionContext, KernelError> {
         let snapshot = session.extension_snapshot()?;
         let extension_id = ExtensionId::try_from(ProductIdentity::SLUG)
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
@@ -103,6 +114,7 @@ impl Kernel {
             .kernel(self.clone())
             .clock(Arc::clone(&self.clock))
             .id_generator(Arc::clone(&self.id_generator))
+            .event_sink(event_sink)
             .build();
 
         Ok(ExtensionContext::builder()

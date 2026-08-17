@@ -14,6 +14,7 @@ mod queue;
 mod scalar;
 mod session;
 mod skill;
+mod slash_command;
 mod tool;
 mod turn;
 
@@ -25,8 +26,13 @@ pub use acp::{
     AcpWorkingDirectory, AcpWorkingDirectoryError,
 };
 pub use capability::{
-    CompactionData, CompactionDetails, CompactionPolicy, CompactionReason,
-    CompactionResult, ModelProfile, RetryPolicy, SessionTitle,
+    CompactionData, CompactionDetails, CompactionOperationError,
+    CompactionOperationFinished, CompactionOperationIntent,
+    CompactionOperationKind, CompactionOperationOutcome,
+    CompactionOperationStarted, CompactionOutcome, CompactionPolicy,
+    CompactionReason, CompactionResult, CompactionStep, CompactionStepAttempt,
+    CompactionUsageCause, CompactionUsageRecord, ModelProfile, RetryPolicy,
+    SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
@@ -81,17 +87,17 @@ pub use mcp::{
     McpToolRequest, McpToolResult, McpTransportKind,
 };
 pub use message::{
-    AgentMessage, AssistantMetadata, BashExecutionMessage, ContentBlock,
-    EmbeddedResourceContent, ExtensionMessage, MessageContent, MessageIdentity,
-    MessageTiming, MessageTimingError, ModelUsage, Role,
+    AgentMessage, AssistantMetadata, BashExecutionMessage,
+    CompactionSummaryMessage, ContentBlock, EmbeddedResourceContent,
+    ExtensionMessage, MessageContent, MessageIdentity, MessageTiming,
+    MessageTimingError, ModelUsage, Role,
 };
 pub use model::{
     ModelFailure, ModelFinal, ModelRequest, ModelRequestOptions,
     ModelRetryDisposition, ModelStreamEvent,
 };
 pub use prompt::{
-    AvailableAgentCommand, AvailableAgentCommandKind, ProjectInstruction,
-    PromptCollision, PromptContentSource, PromptDiagnostic,
+    ProjectInstruction, PromptCollision, PromptContentSource, PromptDiagnostic,
     PromptDiagnosticSeverity, PromptPolicy, PromptResourceRequest,
     PromptSourceInfo, PromptSourceKind, PromptSourceScope, PromptTemplateInfo,
     SkillResourceRequest, SystemPromptBuildOptions, SystemPromptTool,
@@ -103,13 +109,19 @@ pub use scalar::{
     ScalarError, Sequence, SessionId, TimestampMs, ToolCallId, TraceId, TurnId,
 };
 pub use session::{
-    RunRequest, RunResult, SessionSummary, SessionTreeEntry,
-    SessionTreeSnapshot, UserBashInput, UserBashRequest,
+    RunInput, RunRequest, RunResult, SessionReplayItem, SessionSummary,
+    SessionTreeEntry, SessionTreeSnapshot, UserBashInput, UserBashRequest,
 };
 pub use skill::{
     SkillCollision, SkillDiagnostic, SkillDiagnosticCode,
     SkillDiagnosticSeverity, SkillDiscoveryMode, SkillInfo, SkillListResult,
     SkillSelectionRule, SkillSource, SkillSourceKind, SkillSourceScope,
+};
+pub use slash_command::{
+    SlashCommandAliasKind, SlashCommandDefinition, SlashCommandError,
+    SlashCommandExpansion, SlashCommandInvocation, SlashCommandMessage,
+    SlashCommandOutcome, SlashCommandOutput, SlashCommandParseError,
+    SlashCommandSource, SlashCommandStatus,
 };
 pub use tool::{
     ToolCall, ToolDefinition, ToolResult, ToolResultDetails, TruncationDetails,

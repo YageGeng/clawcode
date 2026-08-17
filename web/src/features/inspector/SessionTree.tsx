@@ -55,7 +55,7 @@ export function SessionTree({ tree, cwd, controller }: SessionTreeProps) {
         <button type="button" disabled={busy !== undefined || target === null || cwd === undefined} title="Fork 为新会话" onClick={() => {
           if (target !== null && cwd !== undefined) void operate("fork", () => controller.fork(target, cwd));
         }}><GitFork size={14} />Fork</button>
-        <button type="button" disabled={busy !== undefined} title="自动压缩上下文" onClick={() => void operate("compact", () => controller.compact())}><Minimize2 size={14} />Compact</button>
+        <button type="button" disabled={busy !== undefined} title="自动压缩上下文" onClick={() => void operate("compact", () => controller.send({ text: "/compact", resources: [] }))}><Minimize2 size={14} />Compact</button>
       </div>
       {busy === undefined ? null : <div className="operation-status">{busy} 进行中…</div>}
       {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}

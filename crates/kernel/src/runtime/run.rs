@@ -17,24 +17,34 @@ impl Kernel {
             return Ok(result);
         }
         let session = self.session(&request.session_id)?;
-        let command_input = match self
-            .dispatch_extension_command_input(&session, &request.input)
-            .await?
+        let command_input = request.input.as_str().to_string();
+        let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
+            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let first_turn_id =
+            TurnId::try_from(self.id_generator.next(IdKind::Turn))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let operation_started_at = self.clock.now();
+        if let Some(invocation) =
+            request.input.slash_command_text().and_then(|input| {
+                protocol::SlashCommandInvocation::try_from(input).ok()
+            })
+            && let Some(result) = self
+                .try_execute_direct_slash_command(
+                    command::SlashCommandExecution::builder()
+                        .session_id(&request.session_id)
+                        .session(&session)
+                        .run_id(&run_id)
+                        .turn_id(&first_turn_id)
+                        .trace_id(&trace_id)
+                        .sink(Arc::clone(&sink))
+                        .started_at(operation_started_at)
+                        .invocation(invocation)
+                        .build(),
+                )
+                .await?
         {
-            input::CommandInputDisposition::Handled => {
-                return Ok(RunResult {
-                    run_id: RunId::try_from(
-                        self.id_generator.next(IdKind::Run),
-                    )
-                    .map_err(|error| {
-                        KernelError::Protocol(error.to_string())
-                    })?,
-                    messages: Vec::new(),
-                    turns: Vec::new(),
-                });
-            }
-            input::CommandInputDisposition::Continue(input) => input,
-        };
+            return Ok(result);
+        }
         let _run_guard = session.acquire_operation().await?;
         let cancellation = CancellationToken::new();
         *session
@@ -42,11 +52,6 @@ impl Kernel {
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)? =
             cancellation.clone();
-        let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let first_turn_id =
-            TurnId::try_from(self.id_generator.next(IdKind::Turn))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?;
         tracing::info!(
             "started Kernel Run {} for session {}",
             run_id,
@@ -106,7 +111,7 @@ impl Kernel {
             .await?;
         let expanded_input =
             session.expand_prompt_input(&request.session_id, &run_input)?;
-        if let Some(diagnostic) = expanded_input.diagnostic {
+        if let Some(diagnostic) = expanded_input.diagnostic.clone() {
             emitter
                 .emit(
                     first_turn_id.clone(),
@@ -114,7 +119,8 @@ impl Kernel {
                 )
                 .await?;
         }
-        let run_input = expanded_input.text;
+        let run_input = expanded_input.text.clone();
+        let initial_message_content = expanded_input.message_content();
         self.record_operation(
             &session,
             &run_id,
@@ -180,7 +186,7 @@ impl Kernel {
 
         let mut produced_messages = Vec::new();
         let mut turns = Vec::new();
-        let mut next_initial_input = Some(run_input.clone());
+        let mut next_initial_input = Some(initial_message_content);
         let mut next_queued_item = None;
         let mut next_turn_id = Some(first_turn_id.clone());
         let mut retry_state = RetryState::default();
@@ -251,7 +257,7 @@ impl Kernel {
             let user_message = match queued_item.as_ref() {
                 Some(item) => Some(item.queued.message.clone()),
                 None => match next_initial_input.take() {
-                    Some(input) => {
+                    Some(content) => {
                         let timestamp = self.clock.now();
                         Some(AgentMessage {
                             identity: MessageIdentity {
@@ -264,11 +270,7 @@ impl Kernel {
                             .map_err(|error| {
                                 KernelError::Protocol(error.to_string())
                             })?,
-                            content: MessageContent::User {
-                                blocks: vec![ContentBlock::Text {
-                                    text: input,
-                                }],
-                            },
+                            content,
                         })
                     }
                     None => None,
@@ -612,9 +614,12 @@ impl Kernel {
                 ),
                 MessageContent::System { .. }
                 | MessageContent::User { .. }
+                | MessageContent::ExpandedUser { .. }
                 | MessageContent::ToolResult { .. }
                 | MessageContent::BashExecution { .. }
-                | MessageContent::Extension { .. } => unreachable!(
+                | MessageContent::Extension { .. }
+                | MessageContent::SlashCommand { .. }
+                | MessageContent::CompactionSummary { .. } => unreachable!(
                     "AssistantAttempt always produces an Assistant message"
                 ),
             };

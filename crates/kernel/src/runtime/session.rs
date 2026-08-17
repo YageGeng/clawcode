@@ -1,5 +1,7 @@
 use super::*;
 
+mod replay;
+
 /// Session-local selections reconstructed from Pi v4 branch entries.
 struct RestoredSessionSettings {
     model: Arc<dyn Model>,
@@ -339,36 +341,6 @@ impl Kernel {
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)
             .map(|history| history.clone())
-    }
-
-    /// Returns every persisted message on the active branch for ACP replay and UI history.
-    pub fn session_transcript(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<AgentMessage>, KernelError> {
-        let session = self.session(session_id)?;
-        let store = session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let Some(leaf) = store.lane(&session.lane) else {
-            return Ok(Vec::new());
-        };
-        store
-            .branch(leaf)?
-            .into_iter()
-            .filter(|entry| entry.kind == EntryKind::Message)
-            .map(|entry| {
-                serde_json::from_value(serde_json::Value::Object(entry.payload))
-                    .map_err(|error| {
-                        store::StoreError::InvalidSession(format!(
-                            "invalid message entry {}: {error}",
-                            entry.id
-                        ))
-                        .into()
-                    })
-            })
-            .collect()
     }
 
     /// Returns all persisted entries and the active main-lane cursor.
@@ -755,82 +727,6 @@ impl Kernel {
         Ok(runtime)
     }
 
-    /// Reconstructs compaction-aware model context from one persisted lane branch.
-    pub(in crate::runtime) fn history_from_store(
-        store: &dyn SessionStore,
-        lane: &LaneId,
-    ) -> Result<Vec<AgentMessage>, KernelError> {
-        let Some(leaf) = store.lane(lane) else {
-            return Ok(Vec::new());
-        };
-        let mut history = Vec::new();
-        for entry in store.branch(leaf)? {
-            match entry.kind {
-                EntryKind::Message => {
-                    // Persisted transcript corruption is a session-schema
-                    // failure, including missing mandatory Assistant metadata.
-                    let message = serde_json::from_value(
-                        serde_json::Value::Object(entry.payload),
-                    )
-                    .map_err(|error| {
-                        store::StoreError::InvalidSession(format!(
-                            "invalid message entry {}: {error}",
-                            entry.id
-                        ))
-                    })?;
-                    history.push(message);
-                }
-                EntryKind::Compaction => {
-                    let compaction_entry_id = entry.id.clone();
-                    let data: CompactionData = serde_json::from_value(
-                        serde_json::Value::Object(entry.payload),
-                    )?;
-                    let details = data.details.ok_or_else(|| {
-                        KernelError::Protocol(
-                            "compaction details are required".to_string(),
-                        )
-                    })?;
-                    let summary_message = AgentMessage {
-                        identity: MessageIdentity {
-                            message_id: MessageId::try_from(format!(
-                                "compaction-summary-{}",
-                                compaction_entry_id
-                            ))
-                            .map_err(|error| {
-                                KernelError::Protocol(error.to_string())
-                            })?,
-                            turn_id: details.turn_id,
-                        },
-                        timing: MessageTiming::try_from((
-                            details.started_at_ms,
-                            details.started_at_ms,
-                            details.ended_at_ms,
-                        ))
-                        .map_err(|error| {
-                            KernelError::Protocol(error.to_string())
-                        })?,
-                        content: MessageContent::System {
-                            blocks: vec![ContentBlock::Text {
-                                text: data.summary,
-                            }],
-                        },
-                    };
-                    history = Vec::with_capacity(
-                        data.retained_tail.len().saturating_add(1),
-                    );
-                    history.push(summary_message);
-                    history.extend(data.retained_tail);
-                }
-                EntryKind::ModelChange
-                | EntryKind::ThinkingLevelChange
-                | EntryKind::ActiveToolsChange
-                | EntryKind::BranchSummary
-                | EntryKind::Custom => {}
-            }
-        }
-        Ok(history)
-    }
-
     /// Registers a fully constructed runtime without retaining a map guard across async hooks.
     fn register_session(
         &self,
@@ -929,19 +825,30 @@ impl Kernel {
         session: &SessionRuntime,
         message: &AgentMessage,
     ) -> Result<Option<String>, KernelError> {
-        let MessageContent::User { blocks } = &message.content else {
-            return Ok(None);
+        let title = match &message.content {
+            MessageContent::User { blocks } => blocks
+                .iter()
+                .filter_map(ContentBlock::text)
+                .flat_map(str::lines)
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(80).collect::<String>()),
+            MessageContent::ExpandedUser { expansion } => expansion
+                .invocation
+                .original
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(80).collect::<String>()),
+            MessageContent::System { .. }
+            | MessageContent::Assistant { .. }
+            | MessageContent::ToolResult { .. }
+            | MessageContent::BashExecution { .. }
+            | MessageContent::Extension { .. }
+            | MessageContent::SlashCommand { .. }
+            | MessageContent::CompactionSummary { .. } => None,
         };
-        let Some(title) = blocks
-            .iter()
-            .filter_map(ContentBlock::text)
-            .flat_map(str::lines)
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(80).collect::<String>())
-        else {
-            return Ok(None);
-        };
+        let Some(title) = title else { return Ok(None) };
         let mut store = session
             .store
             .lock()

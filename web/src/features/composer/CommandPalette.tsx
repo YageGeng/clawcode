@@ -1,6 +1,13 @@
 import type { AvailableCommandEntity } from "../../domain/model";
 import { CommandPaletteModel } from "./commandPaletteModel";
 
+const SOURCE_LABELS = {
+  builtin: "Builtin",
+  extension: "Extension",
+  skill: "Skill",
+  prompt_template: "Template"
+} as const;
+
 export type CommandPaletteProps = Readonly<{
   commands: readonly AvailableCommandEntity[];
   query: string;
@@ -30,8 +37,10 @@ export function CommandPalette({ commands, query, selectedIndex, onSelect }: Com
           <span className="command-palette__signature">
             <strong>/{command.name}</strong>
             {command.argumentHint === undefined ? null : <code>{command.argumentHint}</code>}
+            {command.source === undefined ? null : <span className="command-source-badge" data-source={command.source}>{SOURCE_LABELS[command.source]}</span>}
           </span>
           <span className="command-palette__description">{command.description}</span>
+          {command.aliasKind !== "short" || command.qualifiedName === undefined ? null : <span className="command-palette__qualified">完整名称 /{command.qualifiedName}</span>}
         </button>
       ))}
     </div>

@@ -1,94 +1,51 @@
 use super::*;
 
-/// Result of checking raw input against the current Extension command snapshot.
-pub(super) enum CommandInputDisposition {
-    /// An Extension command completed without starting an Agent Run.
-    Handled,
-    /// Input was not an Extension command and continues through normal processing.
-    Continue(String),
-}
-
-/// Server-expanded prompt text plus an optional recoverable Skill diagnostic.
+/// Server-expanded prompt data plus an optional recoverable Skill diagnostic.
 pub(super) struct PromptInputExpansion {
-    /// Text that continues through Prompt Template expansion.
+    /// Exact text projected into the Model when no resource command matched.
     pub(super) text: String,
+    /// Frozen Skill or Prompt Template projection retained for replay.
+    pub(super) expansion: Option<protocol::SlashCommandExpansion>,
     /// Skill read failure emitted by the active Kernel Run when present.
     pub(super) diagnostic: Option<protocol::SkillDiagnostic>,
 }
 
-impl Kernel {
-    /// Dispatches a recognized slash command before acquiring the Session run gate.
-    pub(super) async fn dispatch_extension_command_input(
-        &self,
-        session: &Arc<SessionRuntime>,
-        input: &str,
-    ) -> Result<CommandInputDisposition, KernelError> {
-        let invocation =
-            match ::extension::ExtensionCommandInvocation::try_from(input) {
-                Ok(invocation) => invocation,
-                Err(
-                    ::extension::DynamicRegistryError::InvalidCommandInvocation(
-                        _,
-                    ),
-                ) => {
-                    return Ok(CommandInputDisposition::Continue(
-                        input.to_string(),
-                    ));
-                }
-                Err(error) => {
-                    return Err(KernelError::ExtensionBlocked(
-                        error.to_string(),
-                    ));
-                }
-            };
-        let command = match session
-            .commands
-            .snapshot()
-            .map_err(|error| KernelError::ExtensionBlocked(error.to_string()))?
-            .resolve(&invocation.name)
-        {
-            Ok(command) => command,
-            Err(::extension::DynamicRegistryError::CommandNotFound(_)) => {
-                return Ok(CommandInputDisposition::Continue(
-                    input.to_string(),
-                ));
-            }
-            Err(::extension::DynamicRegistryError::AmbiguousCommand(name)) => {
-                return Err(KernelError::ExtensionCommandAmbiguous(name));
-            }
-            Err(error) => {
-                return Err(KernelError::ExtensionBlocked(error.to_string()));
-            }
-        };
-        let context = self
-            .extension_context(session, None, None)?
-            .for_extension(&command.extension_id);
-        command
-            .handler
-            .handle(
-                &invocation.arguments,
-                &serde_json::Value::Null,
-                &::extension::ExtensionCommandContext { event: context },
-            )
-            .await?;
-        Ok(CommandInputDisposition::Handled)
+impl PromptInputExpansion {
+    /// Materializes the persisted user message content for this expansion result.
+    pub(super) fn message_content(self) -> MessageContent {
+        match self.expansion {
+            Some(expansion) => MessageContent::ExpandedUser { expansion },
+            None => MessageContent::User {
+                blocks: vec![ContentBlock::Text { text: self.text }],
+            },
+        }
     }
 }
 
 impl SessionRuntime {
-    /// Expands one transformed input through Session Skill and Template snapshots.
+    /// Expands one transformed input through Session Skill and Template snapshots once.
     pub(super) fn expand_prompt_input(
         &self,
         session_id: &SessionId,
         input: &str,
     ) -> Result<PromptInputExpansion, KernelError> {
-        let (skill_expanded, diagnostic) = match self.skill_catalog()? {
-            Some(skills) => match skills.expand_command(input) {
-                skill::SkillCommandExpansion::Expanded(expanded) => {
-                    (expanded, None)
-                }
-                skill::SkillCommandExpansion::NotSkillCommand => {
-                    (input.to_string(), None)
+        let invocation = protocol::SlashCommandInvocation::try_from(input).ok();
+        if let Some(skills) = self.skill_catalog()? {
+            match skills.expand_command(input) {
+                skill::SkillCommandExpansion::Expanded(text) => {
+                    return Ok(PromptInputExpansion {
+                        expansion: invocation.map(|invocation| {
+                            protocol::SlashCommandExpansion::builder()
+                                .invocation(invocation)
+                                .source(protocol::SlashCommandSource::Skill)
+                                .model_blocks(vec![ContentBlock::Text {
+                                    text: text.clone(),
+                                }])
+                                .build()
+                        }),
+                        text,
+                        diagnostic: None,
+                    });
                 }
                 skill::SkillCommandExpansion::Failed {
                     original,
@@ -99,14 +56,44 @@ impl SessionRuntime {
                         session_id,
                         diagnostic.message
                     );
-                    (original, Some(*diagnostic))
+                    return Ok(PromptInputExpansion {
+                        text: original,
+                        expansion: None,
+                        diagnostic: Some(*diagnostic),
+                    });
                 }
-            },
-            None => (input.to_string(), None),
-        };
+                skill::SkillCommandExpansion::NotSkillCommand => {}
+            }
+        }
+
+        let prompt = self.prompt_session()?;
+        let is_template = invocation.as_ref().is_some_and(|invocation| {
+            prompt
+                .templates()
+                .iter()
+                .any(|template| template.name == invocation.name)
+        });
+        if is_template {
+            let text = prompt.expand_template(input);
+            return Ok(PromptInputExpansion {
+                expansion: invocation.map(|invocation| {
+                    protocol::SlashCommandExpansion::builder()
+                        .invocation(invocation)
+                        .source(protocol::SlashCommandSource::PromptTemplate)
+                        .model_blocks(vec![ContentBlock::Text {
+                            text: text.clone(),
+                        }])
+                        .build()
+                }),
+                text,
+                diagnostic: None,
+            });
+        }
+
         Ok(PromptInputExpansion {
-            text: self.prompt_session()?.expand_template(&skill_expanded),
-            diagnostic,
+            text: input.to_string(),
+            expansion: None,
+            diagnostic: None,
         })
     }
 }

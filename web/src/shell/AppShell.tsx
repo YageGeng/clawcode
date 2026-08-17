@@ -100,7 +100,6 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
             {state.retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {state.retry.attempt}/{state.retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}
             {state.retry?.type === "running" ? <span className="runtime-chip" data-tone="warning">Retry {state.retry.attempt}/{state.retry.maxAttempts}</span> : null}
             {state.retry?.type === "finished" && !state.retry.success ? <span className="runtime-chip" data-tone="danger">Retry 失败</span> : null}
-            {state.compaction.type === "running" ? <span className="runtime-chip" data-tone="accent">Compact · {state.compaction.reason}</span> : null}
           </div>
           <button className="icon-button" type="button" title={inspectorOpen ? "收起详情栏" : "展开详情栏"} onClick={() => setInspectorOpen((value) => !value)}>
             {inspectorOpen ? <Boxes size={18} /> : <PanelRightOpen size={18} />}

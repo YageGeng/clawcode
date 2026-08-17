@@ -356,8 +356,8 @@ impl AcpServerFactory {
                             .await
                             .map_err(agent_client_protocol::Error::into_internal_error)?;
                         if replay_from_start {
-                            for (index, message) in kernel
-                                .session_transcript(&session_id)
+                            for (index, item) in kernel
+                                .session_replay(&session_id)
                                 .map_err(agent_client_protocol::Error::into_internal_error)?
                                 .into_iter()
                                 .enumerate()
@@ -368,13 +368,33 @@ impl AcpServerFactory {
                                         .saturating_add(1),
                                 )
                                 .map_err(agent_client_protocol::Error::into_internal_error)?;
-                                let event = AgentEvent {
-                                    metadata: EventMetadata {
-                                        turn_id: message.identity.turn_id.clone(),
-                                        timestamp_ms: message.timing.ended_at_ms,
-                                        sequence,
+                                let event = match item {
+                                    protocol::SessionReplayItem::Message(message) => AgentEvent {
+                                        metadata: EventMetadata {
+                                            turn_id: message.identity.turn_id.clone(),
+                                            timestamp_ms: message.timing.ended_at_ms,
+                                            sequence,
+                                        },
+                                        payload: AgentEventPayload::MessageEnd { message },
                                     },
-                                    payload: AgentEventPayload::MessageEnd { message },
+                                    protocol::SessionReplayItem::Compaction {
+                                        run_id,
+                                        reason,
+                                        result,
+                                    } => AgentEvent {
+                                        metadata: EventMetadata {
+                                            turn_id: result.turn_id.clone(),
+                                            timestamp_ms: result.ended_at_ms,
+                                            sequence,
+                                        },
+                                        payload: AgentEventPayload::CompactionEnd {
+                                            run_id,
+                                            reason,
+                                            outcome: protocol::CompactionOutcome::Completed {
+                                                result,
+                                            },
+                                        },
+                                    },
                                 };
                                 let metadata = AcpEventMapper::metadata(&event)
                                     .map_err(
@@ -567,7 +587,9 @@ impl AcpServerFactory {
                         &responder,
                         request.parameters(),
                     )?;
-                    operation.run(async move {
+                    // The extension dispatcher covers every product method;
+                    // boxing keeps that large state machine out of the ACP handler future.
+                    operation.run(Box::pin(async move {
                         let response = AcpExtensionDispatcher {
                             kernel,
                             connection,
@@ -576,14 +598,14 @@ impl AcpServerFactory {
                         .execute(request)
                         .await?;
                         responder.respond(response)
-                    }).await
+                    })).await
                 },
                 agent_client_protocol::on_receive_request!(),
             )
     }
 }
 
-struct PromptInput(String);
+struct PromptInput(protocol::RunInput);
 
 impl TryFrom<Vec<wire::ContentBlock>> for PromptInput {
     type Error = PromptInputError;
@@ -591,14 +613,17 @@ impl TryFrom<Vec<wire::ContentBlock>> for PromptInput {
     /// Converts ACP baseline text and resource links without client-side file reads.
     fn try_from(blocks: Vec<wire::ContentBlock>) -> Result<Self, Self::Error> {
         let mut parts = Vec::new();
+        let mut text_only = true;
         for block in blocks {
             match block {
                 wire::ContentBlock::Text(text) => parts.push(text.text),
                 wire::ContentBlock::ResourceLink(resource) => {
+                    text_only = false;
                     parts
                         .push(format!("[{}]({})", resource.name, resource.uri));
                 }
                 wire::ContentBlock::Other(other) => {
+                    text_only = false;
                     parts.push(serde_json::to_string(&other)?);
                 }
                 wire::ContentBlock::Image(_)
@@ -612,7 +637,12 @@ impl TryFrom<Vec<wire::ContentBlock>> for PromptInput {
         if parts.is_empty() {
             return Err(PromptInputError::Empty);
         }
-        Ok(Self(parts.join("\n\n")))
+        let input = parts.join("\n\n");
+        Ok(Self(if text_only {
+            protocol::RunInput::Text(input)
+        } else {
+            protocol::RunInput::Composite(input)
+        }))
     }
 }
 

@@ -24,6 +24,18 @@ impl SessionRuntime {
         Ok(guard)
     }
 
+    /// Attempts to acquire the run gate without silently queueing direct commands.
+    pub(super) fn try_acquire_operation(
+        &self,
+    ) -> Result<Option<MutexGuard<'_, ()>>, KernelError> {
+        self.ensure_active()?;
+        let Ok(guard) = self.run_gate.try_lock() else {
+            return Ok(None);
+        };
+        self.ensure_active()?;
+        Ok(Some(guard))
+    }
+
     /// Transitions an active runtime into closing while holding its run gate.
     pub(super) fn begin_closing(&self) -> Result<(), KernelError> {
         let mut lifecycle = self

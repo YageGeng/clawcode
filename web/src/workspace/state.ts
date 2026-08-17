@@ -1,7 +1,8 @@
-import type { EventMeta, MessageId, SessionId } from "../acp/protocol";
+import type { EntryId, EventMeta, MessageId, SessionId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   BashExecutionEntity,
+  CompactionEntity,
   CompactionStatus,
   ContextUsage,
   EventOrder,
@@ -40,6 +41,7 @@ export type WorkspaceState = Readonly<{
   tools: ReadonlyMap<string, ToolCallEntity>;
   bashExecutions: ReadonlyMap<MessageId, BashExecutionEntity>;
   extensions: ReadonlyMap<string, ExtensionEntity>;
+  compactions: ReadonlyMap<EntryId, CompactionEntity>;
   events: readonly SessionEvent[];
   pending: PendingMessages;
   tree: SessionTree | undefined;
@@ -69,6 +71,7 @@ export type WorkspaceAction =
   | { readonly type: "tool/upserted"; readonly tool: ToolCallEntity; readonly order: EventOrder }
   | { readonly type: "bash/upserted"; readonly bash: BashExecutionEntity; readonly order: EventOrder }
   | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
+  | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
   | { readonly type: "tree/replaced"; readonly tree: SessionTree }
@@ -94,6 +97,7 @@ export const initialWorkspaceState: WorkspaceState = {
   tools: new Map(),
   bashExecutions: new Map(),
   extensions: new Map(),
+  compactions: new Map(),
   events: [],
   pending: { steering: [], followUp: [] },
   tree: undefined,
@@ -133,6 +137,7 @@ export function reduceWorkspace(
         tools: new Map(),
         bashExecutions: new Map(),
         extensions: new Map(),
+        compactions: new Map(),
         events: [],
         pending: { steering: [], followUp: [] },
         tree: undefined,
@@ -158,6 +163,7 @@ export function reduceWorkspace(
       tools: new Map(),
       bashExecutions: new Map(),
       extensions: new Map(),
+      compactions: new Map(),
       events: [],
       skills: [],
       skillDiagnostics: [],
@@ -222,6 +228,14 @@ export function reduceWorkspace(
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, extensions, transcript };
     }
+    case "compaction/upserted": {
+      const compactions = new Map(state.compactions);
+      const exists = compactions.has(action.compaction.entryId);
+      compactions.set(action.compaction.entryId, action.compaction);
+      const transcript = exists ? state.transcript : [...state.transcript, { type: "compaction" as const, entryId: action.compaction.entryId, order: action.order }]
+        .sort((left, right) => Ordering.compare(left.order, right.order));
+      return { ...state, compactions, transcript };
+    }
     case "event/received": return { ...state, events: [...state.events, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
     case "queue/replaced": return { ...state, pending: action.pending };
     case "tree/replaced": return { ...state, tree: action.tree };
@@ -260,7 +274,7 @@ export function reduceWorkspace(
           ...state,
           running: false,
           retry: state.retry?.type === "finished" ? state.retry : undefined,
-          compaction: state.compaction.type === "finished" ? state.compaction : { type: "idle" }
+          compaction: state.compaction.type === "running" ? { type: "idle" } : state.compaction
         };
     case "usage/changed": return { ...state, contextUsage: action.usage };
     case "retry/changed": return { ...state, retry: action.retry };

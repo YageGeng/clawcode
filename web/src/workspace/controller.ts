@@ -108,8 +108,8 @@ export class WorkspaceController {
   async send(input: PromptInput): Promise<void> {
     const state = useWorkspaceStore.getState();
     if (state.activeSessionId === undefined) throw new Error("No active session");
-    const text = input.text.trim();
-    if (text.length === 0 && input.resources.length === 0) throw new Error("Prompt is empty");
+    const text = input.text;
+    if (text.trim().length === 0 && input.resources.length === 0) throw new Error("Prompt is empty");
     this.dispatch({ type: "outcome/unknown", value: false });
     try {
       if (state.running) {
@@ -167,28 +167,6 @@ export class WorkspaceController {
     await this.refreshSessions();
     await this.openSession(result.sessionId);
     return result.sessionId;
-  }
-
-  async compact(): Promise<void> {
-    const sessionId = useWorkspaceStore.getState().activeSessionId;
-    if (sessionId === undefined) throw new Error("No active session");
-    await this.requireConnection().request(this.methods.compact, { sessionId });
-    await this.openSession(sessionId);
-  }
-
-  async invokeSkill(name: string, userInput: string): Promise<void> {
-    const state = useWorkspaceStore.getState();
-    const sessionId = state.activeSessionId;
-    if (sessionId === undefined) throw new Error("No active session");
-    // Explicit Skill content is intentionally persisted for replay, but it is
-    // too large and unstable to serve as a newly created Session title.
-    const shouldSetSkillTitle = state.sessions.some((session) => (
-      session.sessionId === sessionId && session.title === sessionId
-    ));
-    const result = await this.requireConnection().request<Readonly<{ name: string; content: string }>>(this.methods.invokeSkill, { sessionId, name });
-    const prompt = [result.content, userInput.trim()].filter((part) => part.length > 0).join("\n\nUser request:\n");
-    await this.send({ text: prompt, resources: [] });
-    if (shouldSetSkillTitle) await this.renameSession(sessionId, `/skill:${result.name}`);
   }
 
   cancel(): void {

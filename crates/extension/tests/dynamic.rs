@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use extension::{
-    DynamicCommandRegistry, DynamicRegistryError, ExtensionCommandContext,
-    ExtensionCommandHandler, ExtensionCommandInvocation, ExtensionError,
-    RegisteredCommand,
+    DynamicCommandRegistry, ExtensionCommandContext, ExtensionCommandHandler,
+    ExtensionError, RegisteredCommand,
 };
 use protocol::{ExtensionCommandDefinition, ExtensionId};
 
@@ -57,12 +56,17 @@ fn dynamic_commands_are_versioned_and_qualified() {
             .as_str(),
         "first"
     );
-    assert!(current.resolve("inspect").is_err());
+    let ambiguous = match current.resolve("inspect") {
+        Ok(_command) => panic!("ambiguous command must be rejected"),
+        Err(error) => error,
+    };
+    assert!(ambiguous.to_string().contains("first:inspect"));
+    assert!(ambiguous.to_string().contains("second:inspect"));
     current
-        .resolve("first/inspect")
+        .resolve("first:inspect")
         .expect("first qualified command");
     current
-        .resolve("second/inspect")
+        .resolve("second:inspect")
         .expect("second qualified command");
 
     commands
@@ -72,7 +76,7 @@ fn dynamic_commands_are_versioned_and_qualified() {
         )
         .expect("remove first command");
     let removed = commands.snapshot().expect("removed snapshot");
-    assert!(removed.resolve("first/inspect").is_err());
+    assert!(removed.resolve("first:inspect").is_err());
     assert_eq!(
         removed
             .resolve("inspect")
@@ -82,7 +86,7 @@ fn dynamic_commands_are_versioned_and_qualified() {
         "second"
     );
     current
-        .resolve("first/inspect")
+        .resolve("first:inspect")
         .expect("pre-remove snapshot remains stable");
 
     assert_eq!(
@@ -94,25 +98,11 @@ fn dynamic_commands_are_versioned_and_qualified() {
     );
 }
 
-/// Slash parsing uses only one ordinary space as pi's command delimiter.
+/// Qualified Extension commands use the protocol-wide colon namespace separator.
 #[test]
-fn extension_command_invocation_preserves_non_space_name_characters() {
-    let invocation =
-        ExtensionCommandInvocation::try_from("/first/inspect   alpha beta  ")
-            .expect("command invocation");
-    assert_eq!(invocation.name, "first/inspect");
-    assert_eq!(invocation.arguments, "alpha beta");
-
-    let tabbed = ExtensionCommandInvocation::try_from("/inspect\talpha")
-        .expect("tabbed invocation");
-    assert_eq!(tabbed.name, "inspect\talpha");
-    assert!(tabbed.arguments.is_empty());
-
-    for invalid in ["inspect", "/"] {
-        assert!(matches!(
-            ExtensionCommandInvocation::try_from(invalid),
-            Err(DynamicRegistryError::InvalidCommandInvocation(value))
-                if value == invalid
-        ));
-    }
+fn extension_command_qualified_name_uses_colon() {
+    assert_eq!(
+        command("first", "inspect").qualified_name(),
+        "first:inspect"
+    );
 }

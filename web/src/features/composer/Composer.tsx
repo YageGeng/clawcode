@@ -42,7 +42,15 @@ const QueuedMessageView = {
   text(item: QueuedMessage): string {
     const content = item.message.content;
     if (typeof content !== "object" || content === null || Array.isArray(content)) return item.queueId;
-    const blocks = (content as Record<string, unknown>).blocks;
+    const contentRecord = content as Record<string, unknown>;
+    const expansion = typeof contentRecord.expansion === "object" && contentRecord.expansion !== null && !Array.isArray(contentRecord.expansion)
+      ? contentRecord.expansion as Record<string, unknown>
+      : undefined;
+    const invocation = typeof expansion?.invocation === "object" && expansion.invocation !== null && !Array.isArray(expansion.invocation)
+      ? expansion.invocation as Record<string, unknown>
+      : undefined;
+    if (typeof invocation?.original === "string") return invocation.original;
+    const blocks = contentRecord.blocks;
     if (!Array.isArray(blocks)) return item.queueId;
     return blocks.map((block) => {
       if (typeof block !== "object" || block === null || Array.isArray(block)) return "";

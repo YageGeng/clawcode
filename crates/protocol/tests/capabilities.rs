@@ -1,7 +1,7 @@
 use protocol::{
     AgentMessage, CompactionData, CompactionDetails, ContentBlock,
     MessageContent, MessageId, MessageIdentity, MessageTiming, QueueId,
-    QueueKind, QueuedMessage, SessionTitle, TimestampMs, TurnId,
+    QueueKind, QueuedMessage, RunId, SessionTitle, TimestampMs, TurnId,
 };
 
 /// Builds one complete user message with hand-controlled precision-sensitive fields.
@@ -59,9 +59,12 @@ fn compaction_data_uses_pi_v4_wire_fields() {
         .details(Some(
             CompactionDetails::builder()
                 .reason(protocol::CompactionReason::Manual)
+                .run_id(RunId::try_from("run-compact").expect("run id"))
                 .turn_id(TurnId::try_from("turn-compact").expect("turn id"))
                 .started_at_ms(TimestampMs::from(10))
                 .ended_at_ms(TimestampMs::from(20))
+                .read_files(Vec::new())
+                .modified_files(Vec::new())
                 .build(),
         ))
         .build();
@@ -69,7 +72,8 @@ fn compaction_data_uses_pi_v4_wire_fields() {
     let value = serde_json::to_value(data).expect("serialize compaction");
     assert_eq!(value["summary"], "summary");
     assert!(value["retainedTail"].is_array());
-    assert_eq!(value["tokensBefore"], 123);
+    assert_eq!(value["tokensBefore"], "123");
+    assert_eq!(value["details"]["runId"], "run-compact");
     assert_eq!(value["details"]["turnId"], "turn-compact");
     assert_eq!(value["details"]["startedAtMs"], "10");
     assert_eq!(value["details"]["endedAtMs"], "20");

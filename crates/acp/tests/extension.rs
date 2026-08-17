@@ -12,9 +12,17 @@ use kernel::{
     NanoidIdGenerator,
 };
 use prompt::FilesystemPromptFactory;
-use protocol::{AcpExtensionMethod, ModelProfile, ModelRequest, SessionId};
+use protocol::{
+    AcpExtensionMethod, AgentMessage, CompactionData, CompactionDetails,
+    CompactionReason, ContentBlock, EntryId, MessageContent, MessageId,
+    MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
+    ProductIdentity, RunId, SessionId, TimestampMs, TurnId,
+};
 use skill::FilesystemSkillFactory;
-use store::{JsonlStoreFactory, SystemClock};
+use store::{
+    EntryKind, JsonlStoreFactory, NewEntry, SessionCreateOptions, StoreFactory,
+    SystemClock,
+};
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
 
@@ -669,16 +677,18 @@ async fn session_activation_publishes_available_commands() {
             else {
                 panic!("Available Commands update expected after New");
             };
-            assert_eq!(commands.available_commands[0].name, "review");
+            let review = commands
+                .available_commands
+                .iter()
+                .find(|command| command.name == "review")
+                .expect("Review Prompt Template command");
             assert_eq!(
-                commands.available_commands[0].input.as_ref().and_then(
-                    |input| match input {
-                        wire::AvailableCommandInput::Text(input) => {
-                            Some(input.hint.as_str())
-                        }
-                        _ => None,
+                review.input.as_ref().and_then(|input| match input {
+                    wire::AvailableCommandInput::Text(input) => {
+                        Some(input.hint.as_str())
                     }
-                ),
+                    _ => None,
+                }),
                 Some("<path>")
             );
 
@@ -758,4 +768,373 @@ async fn session_activation_publishes_available_commands() {
         })
         .await
         .expect("Available Commands lifecycle");
+}
+
+/// ACP executes a Builtin command as correlated messages and replays both in order.
+#[tokio::test]
+async fn slash_command_messages_round_trip_through_acp_replay() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let server =
+        AcpServerFactory::new(Arc::clone(&kernel), Arc::new(NanoidIdGenerator))
+            .component(AcpTransportKind::Stdio);
+    let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |notification: wire::UpdateSessionNotification,
+                    _connection| {
+            updates_tx.send(notification).map_err(|_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("notification receiver closed"),
+                )
+            })?;
+            Ok(())
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+
+    client
+        .connect_with(server, async move |connection| {
+            connection
+                .send_request(wire::InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    wire::Implementation::new("slash-replay-test", "0.1.0"),
+                ))
+                .block_task()
+                .await?;
+            let created = connection
+                .send_request(wire::NewSessionRequest::new(
+                    workspace.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            let session_id =
+                SessionId::try_from(created.session_id.to_string())
+                    .expect("Session id");
+            let initial = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                updates_rx.recv(),
+            )
+            .await
+            .expect("initial command snapshot")
+            .expect("initial notification");
+            assert!(matches!(
+                initial.update,
+                wire::SessionUpdate::AvailableCommandsUpdate(_)
+            ));
+
+            connection
+                .send_request(wire::PromptRequest::new(
+                    created.session_id.clone(),
+                    vec![wire::ContentBlock::Text(wire::TextContent::new(
+                        "/session",
+                    ))],
+                ))
+                .block_task()
+                .await?;
+            let mut live_messages = Vec::new();
+            loop {
+                let notification = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    updates_rx.recv(),
+                )
+                .await
+                .expect("live command update")
+                .expect("live notification");
+                let is_idle = matches!(
+                    notification.update,
+                    wire::SessionUpdate::StateUpdate(
+                        wire::StateUpdate::Idle(_)
+                    )
+                );
+                if matches!(
+                    notification.update,
+                    wire::SessionUpdate::UserMessage(_)
+                        | wire::SessionUpdate::AgentMessage(_)
+                ) {
+                    live_messages.push(
+                        serde_json::to_value(&notification.update)
+                            .expect("serialize live message update"),
+                    );
+                }
+                if is_idle {
+                    break;
+                }
+            }
+            assert_eq!(live_messages.len(), 2);
+            assert_eq!(live_messages[0]["sessionUpdate"], "user_message");
+            assert_eq!(live_messages[1]["sessionUpdate"], "agent_message");
+
+            kernel
+                .close_session(&session_id)
+                .await
+                .map_err(agent_client_protocol::Error::into_internal_error)?;
+            connection
+                .send_request(
+                    wire::ResumeSessionRequest::new(
+                        created.session_id,
+                        workspace.path().to_path_buf(),
+                    )
+                    .replay_from(wire::ReplayFrom::from(
+                        wire::ReplayFromStart::new(),
+                    )),
+                )
+                .block_task()
+                .await?;
+
+            let mut replayed_messages = Vec::new();
+            loop {
+                let notification = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    updates_rx.recv(),
+                )
+                .await
+                .expect("replayed command update")
+                .expect("replayed notification");
+                if matches!(
+                    notification.update,
+                    wire::SessionUpdate::AvailableCommandsUpdate(_)
+                ) {
+                    break;
+                }
+                if matches!(
+                    notification.update,
+                    wire::SessionUpdate::UserMessage(_)
+                        | wire::SessionUpdate::AgentMessage(_)
+                ) {
+                    replayed_messages.push(
+                        serde_json::to_value(&notification.update)
+                            .expect("serialize replayed message update"),
+                    );
+                }
+            }
+            assert_eq!(replayed_messages.len(), 2);
+            for (live, replayed) in
+                live_messages.iter().zip(&replayed_messages)
+            {
+                assert_eq!(live["sessionUpdate"], replayed["sessionUpdate"]);
+                assert_eq!(live["messageId"], replayed["messageId"]);
+                assert_eq!(
+                    live["content"][0]["type"],
+                    replayed["content"][0]["type"]
+                );
+                assert_eq!(
+                    live["content"][0]["text"],
+                    replayed["content"][0]["text"]
+                );
+                assert_eq!(
+                    live["_meta"][protocol::ProductIdentity::ACP_NAMESPACE]
+                        ["turnId"],
+                    replayed["_meta"]
+                        [protocol::ProductIdentity::ACP_NAMESPACE]["turnId"]
+                );
+                assert_eq!(
+                    live["_meta"][protocol::ProductIdentity::ACP_NAMESPACE]
+                        [protocol::ProductIdentity::ACP_SLASH_COMMAND_METADATA],
+                    replayed["_meta"]
+                        [protocol::ProductIdentity::ACP_NAMESPACE]
+                        [protocol::ProductIdentity::ACP_SLASH_COMMAND_METADATA]
+                );
+            }
+            Ok(())
+        })
+        .await
+        .expect("Slash Command ACP replay lifecycle");
+}
+
+/// ACP resume replays a durable compaction card between its neighboring messages.
+#[tokio::test]
+async fn compaction_card_replays_in_persisted_branch_order() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+    let store_factory = JsonlStoreFactory::new(state.path(), clock);
+    let session_id =
+        SessionId::try_from("session-compaction-replay").expect("session id");
+    let mut store = store_factory
+        .create(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: workspace.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .expect("create persisted session");
+    let first_timestamp = TimestampMs::from(1_000);
+    let first = AgentMessage {
+        identity: MessageIdentity {
+            message_id: MessageId::try_from("message-before")
+                .expect("message id"),
+            turn_id: TurnId::try_from("turn-before").expect("turn id"),
+        },
+        timing: MessageTiming::try_from((
+            first_timestamp,
+            first_timestamp,
+            first_timestamp,
+        ))
+        .expect("message timing"),
+        content: MessageContent::User {
+            blocks: vec![ContentBlock::Text {
+                text: "before compaction".to_string(),
+            }],
+        },
+    };
+    store
+        .append_entry(
+            &protocol::LaneId::try_from("main").expect("lane id"),
+            NewEntry {
+                id: EntryId::try_from("entry-before").expect("entry id"),
+                kind: EntryKind::Message,
+                payload: serde_json::to_value(first)
+                    .expect("serialize first message"),
+            },
+        )
+        .expect("append first message");
+    let compaction_entry_id =
+        EntryId::try_from("entry-compaction").expect("entry id");
+    store
+        .append_entry(
+            &protocol::LaneId::try_from("main").expect("lane id"),
+            NewEntry {
+                id: compaction_entry_id.clone(),
+                kind: EntryKind::Compaction,
+                payload: serde_json::to_value(
+                    CompactionData::builder()
+                        .summary("## Goal\nContinue after replay".to_string())
+                        .retained_tail(Vec::new())
+                        .tokens_before(42_000)
+                        .usage(None)
+                        .details(Some(
+                            CompactionDetails::builder()
+                                .reason(CompactionReason::Manual)
+                                .run_id(
+                                    RunId::try_from("run-compaction")
+                                        .expect("run id"),
+                                )
+                                .turn_id(
+                                    TurnId::try_from("turn-compaction")
+                                        .expect("turn id"),
+                                )
+                                .started_at_ms(TimestampMs::from(1_100))
+                                .ended_at_ms(TimestampMs::from(1_200))
+                                .read_files(Vec::new())
+                                .modified_files(Vec::new())
+                                .build(),
+                        ))
+                        .build(),
+                )
+                .expect("serialize compaction"),
+            },
+        )
+        .expect("append compaction");
+    let second_timestamp = TimestampMs::from(1_300);
+    let second = AgentMessage {
+        identity: MessageIdentity {
+            message_id: MessageId::try_from("message-after")
+                .expect("message id"),
+            turn_id: TurnId::try_from("turn-after").expect("turn id"),
+        },
+        timing: MessageTiming::try_from((
+            second_timestamp,
+            second_timestamp,
+            second_timestamp,
+        ))
+        .expect("message timing"),
+        content: MessageContent::User {
+            blocks: vec![ContentBlock::Text {
+                text: "after compaction".to_string(),
+            }],
+        },
+    };
+    store
+        .append_entry(
+            &protocol::LaneId::try_from("main").expect("lane id"),
+            NewEntry {
+                id: EntryId::try_from("entry-after").expect("entry id"),
+                kind: EntryKind::Message,
+                payload: serde_json::to_value(second)
+                    .expect("serialize second message"),
+            },
+        )
+        .expect("append second message");
+    drop(store);
+
+    let kernel = integration_kernel(state.path());
+    let server = AcpServerFactory::new(kernel, Arc::new(NanoidIdGenerator))
+        .component(AcpTransportKind::Stdio);
+    let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |notification: wire::UpdateSessionNotification,
+                    _connection| {
+            updates_tx.send(notification).map_err(|_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("notification receiver closed"),
+                )
+            })?;
+            Ok(())
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+
+    client
+        .connect_with(server, async move |connection| {
+            connection
+                .send_request(wire::InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    wire::Implementation::new(
+                        "compaction-replay-test",
+                        "0.1.0",
+                    ),
+                ))
+                .block_task()
+                .await?;
+            connection
+                .send_request(
+                    wire::ResumeSessionRequest::new(
+                        session_id.to_string(),
+                        workspace.path().to_path_buf(),
+                    )
+                    .replay_from(wire::ReplayFrom::from(
+                        wire::ReplayFromStart::new(),
+                    )),
+                )
+                .block_task()
+                .await?;
+            let mut replay = Vec::new();
+            loop {
+                let notification = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    updates_rx.recv(),
+                )
+                .await
+                .expect("replay update")
+                .expect("replay notification");
+                if matches!(
+                    notification.update,
+                    wire::SessionUpdate::AvailableCommandsUpdate(_)
+                ) {
+                    break;
+                }
+                replay.push(
+                    serde_json::to_value(notification.update)
+                        .expect("serialize update"),
+                );
+            }
+
+            assert_eq!(replay.len(), 3);
+            assert_eq!(replay[0]["sessionUpdate"], "user_message");
+            assert_eq!(replay[0]["messageId"], "message-before");
+            assert_eq!(
+                replay[1]["sessionUpdate"],
+                ProductIdentity::ACP_EVENT_UPDATE
+            );
+            assert_eq!(replay[1]["payload"]["event"], "compaction_end");
+            assert_eq!(
+                replay[1]["payload"]["outcome"]["result"]["entryId"],
+                compaction_entry_id.as_str()
+            );
+            assert_eq!(replay[2]["sessionUpdate"], "user_message");
+            assert_eq!(replay[2]["messageId"], "message-after");
+            Ok(())
+        })
+        .await
+        .expect("Compaction ACP replay lifecycle");
 }

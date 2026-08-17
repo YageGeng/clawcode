@@ -385,7 +385,7 @@ async fn diagnostic_infrastructure_failures_are_logged() {
         .run(
             RunRequest {
                 session_id,
-                input: "prompt-secret-must-not-be-logged".to_string(),
+                input: "prompt-secret-must-not-be-logged".into(),
             },
             Arc::new(SelectiveFailingSink),
         )

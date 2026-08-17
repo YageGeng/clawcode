@@ -36,9 +36,30 @@ pub(super) struct SessionExtensionHost {
     kernel: super::super::Kernel,
     clock: Arc<dyn store::Clock>,
     id_generator: Arc<dyn protocol::IdGenerator>,
+    /// Operation-local sink used when no active Agent Run owns the Session.
+    #[builder(default)]
+    event_sink: Option<Arc<dyn crate::EventSink>>,
 }
 
 impl SessionExtensionHost {
+    /// Resolves the operation-local sink before the active Session fallback.
+    fn event_sink(
+        &self,
+    ) -> Result<Option<Arc<dyn crate::EventSink>>, ExtensionHostError> {
+        if let Some(sink) = &self.event_sink {
+            return Ok(Some(Arc::clone(sink)));
+        }
+        self.session
+            .event_sink
+            .lock()
+            .map_err(|_poison_error| {
+                ExtensionHostError::Operation(
+                    "event sink lock poisoned".to_string(),
+                )
+            })
+            .map(|sink| sink.as_ref().map(Arc::clone))
+    }
+
     /// Converts one generated identifier into a sanitized host-operation error.
     fn entry_id(&self) -> Result<EntryId, ExtensionHostError> {
         EntryId::try_from(self.id_generator.next(IdKind::Entry))
@@ -86,17 +107,7 @@ impl SessionExtensionHost {
         &self,
         session_id: &SessionId,
     ) -> Result<(), ExtensionHostError> {
-        let sink = self
-            .session
-            .event_sink
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "event sink lock poisoned".to_string(),
-                )
-            })?
-            .as_ref()
-            .map(Arc::clone);
+        let sink = self.event_sink()?;
         if let Some(sink) = sink {
             let event =
                 self.kernel.available_commands_event(session_id).map_err(
@@ -260,17 +271,7 @@ impl ExtensionHost for SessionExtensionHost {
                 )
             })?
             .push(message.clone());
-        let sink = self
-            .session
-            .event_sink
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "event sink lock poisoned".to_string(),
-                )
-            })?
-            .as_ref()
-            .map(Arc::clone);
+        let sink = self.event_sink()?;
         if let Some(sink) = sink {
             let sequence = self
                 .session
@@ -316,7 +317,7 @@ impl ExtensionHost for SessionExtensionHost {
                 .run_with_source(
                     protocol::RunRequest {
                         session_id: invocation.session_id.clone(),
-                        input: request.text,
+                        input: request.text.into(),
                     },
                     Arc::new(DiscardEventSink),
                     protocol::InputSource::Extension,

@@ -789,7 +789,7 @@ async fn dynamically_registered_tool_is_active_in_its_session() {
             .run(
                 RunRequest {
                     session_id,
-                    input: "inspect tools".to_string(),
+                    input: "inspect tools".into(),
                 },
                 Arc::new(DiscardSink),
             )
@@ -847,7 +847,7 @@ async fn dynamic_command_changes_publish_available_command_events() {
         .run(
             RunRequest {
                 session_id,
-                input: "publish command changes".to_string(),
+                input: "publish command changes".into(),
             },
             Arc::new(RecordingSink {
                 events: Arc::clone(&events),
@@ -869,7 +869,7 @@ async fn dynamic_command_changes_publish_available_command_events() {
     assert_eq!(snapshots.len(), 2);
     assert!(snapshots[0].0 < snapshots[1].0);
     assert!(snapshots[0].1.iter().any(|command| {
-        command.name == "dynamic-command/temporary"
+        command.name == "dynamic-command:temporary"
             && command.argument_hint.as_deref() == Some("[value]")
     }));
     assert!(
@@ -879,7 +879,7 @@ async fn dynamic_command_changes_publish_available_command_events() {
             .any(|command| command.name == "temporary")
     );
     assert!(snapshots[1].1.iter().all(|command| {
-        command.name != "dynamic-command/temporary"
+        command.name != "dynamic-command:temporary"
             && command.name != "temporary"
     }));
 }
@@ -927,7 +927,7 @@ async fn command_context_uses_complete_kernel_host() {
     kernel
         .invoke_extension_command(
             &session_id,
-            "host/manage".to_string(),
+            "host:manage".to_string(),
             serde_json::Value::Null,
         )
         .await
@@ -997,7 +997,7 @@ async fn navigation_uses_extension_branch_summary() {
             .run(
                 RunRequest {
                     session_id: session_id.clone(),
-                    input: input.to_string(),
+                    input: input.into(),
                 },
                 Arc::new(DiscardSink),
             )
@@ -1074,7 +1074,7 @@ async fn extension_handler_failure_is_persisted_for_replay() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "continue after extension failure".to_string(),
+                input: "continue after extension failure".into(),
             },
             Arc::new(DiscardSink),
         )
@@ -1170,7 +1170,7 @@ async fn user_bash_uses_hooks_and_preserves_context_exclusion() {
             .run(
                 RunRequest {
                     session_id: session_id.clone(),
-                    input: input.to_string(),
+                    input: input.into(),
                 },
                 Arc::new(DiscardSink),
             )

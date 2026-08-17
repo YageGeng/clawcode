@@ -3,8 +3,51 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, EntryId, LaneId, RunId, SessionId, TimestampMs, TurnRecord,
+    AgentMessage, CompactionReason, CompactionResult, EntryId, LaneId, RunId,
+    SessionId, TimestampMs, TurnRecord,
 };
+
+/// Text projection of one prompt plus whether Slash Command dispatch is safe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunInput {
+    /// Prompt containing only text blocks and eligible for command dispatch.
+    Text(String),
+    /// Prompt flattened from more than text and ineligible for command dispatch.
+    Composite(String),
+}
+
+impl RunInput {
+    /// Returns command-eligible text only for a text-only ACP Prompt.
+    #[must_use]
+    pub fn slash_command_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Composite(_) => None,
+        }
+    }
+
+    /// Returns the complete model-facing text projection.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(text) | Self::Composite(text) => text,
+        }
+    }
+}
+
+impl From<String> for RunInput {
+    /// Treats an in-process plain string as command-eligible text.
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for RunInput {
+    /// Copies an in-process string slice into command-eligible text.
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
 
 /// Input required to start one serialized agent run in an existing session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,7 +55,7 @@ pub struct RunRequest {
     /// Existing session that owns the run.
     pub session_id: SessionId,
     /// Initial user text assigned to the run's first Turn.
-    pub input: String,
+    pub input: RunInput,
 }
 
 /// Prefix-free user-bash input shared by Kernel and ACP request handling.
@@ -63,6 +106,22 @@ pub struct RunResult {
     pub messages: Vec<AgentMessage>,
     /// Completed Turns in execution order.
     pub turns: Vec<TurnRecord>,
+}
+
+/// One durable active-branch item projected to ACP in original entry order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionReplayItem {
+    /// A persisted transcript message.
+    Message(AgentMessage),
+    /// A persisted compaction boundary rendered as a replayable card.
+    Compaction {
+        /// Run-shaped identifier originally emitted by the compaction.
+        run_id: RunId,
+        /// Cause stored with the compaction entry.
+        reason: CompactionReason,
+        /// Complete result shared with the live completion event.
+        result: CompactionResult,
+    },
 }
 
 /// Persisted session metadata exposed without leaking a storage implementation.

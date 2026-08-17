@@ -60,6 +60,9 @@ impl ProductIdentity {
     /// ACP v2 extension stop reason used when foreground work fails.
     pub const ACP_ERROR_STOP_REASON: &str = "_clawcode/error";
 
+    /// Product metadata key carrying Slash Command source and terminal state.
+    pub const ACP_SLASH_COMMAND_METADATA: &str = "slashCommand";
+
     /// ACP v2 custom content discriminator for structured MCP Tool output.
     pub const ACP_STRUCTURED_CONTENT_BLOCK: &str =
         "_clawcode/structured_content";

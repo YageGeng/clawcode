@@ -391,7 +391,7 @@ async fn run_dispatches_pi_lifecycle_order() {
         .run(
             RunRequest {
                 session_id,
-                input: "hello".to_string(),
+                input: "hello".into(),
             },
             Arc::new(DiscardSink),
         )
@@ -462,7 +462,7 @@ async fn idle_extension_user_message_uses_the_normal_input_pipeline() {
     kernel
         .invoke_extension_command(
             &session_id,
-            "lifecycle/send".to_string(),
+            "lifecycle:send".to_string(),
             serde_json::Value::Null,
         )
         .await
@@ -545,13 +545,21 @@ async fn prompt_order_matches_pi_before_agent_lifecycle() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "/handled alpha beta".to_string(),
+                input: "/handled alpha beta".into(),
             },
             Arc::new(DiscardSink),
         )
         .await
         .expect("dispatch Extension command");
-    assert!(handled.messages.is_empty());
+    assert!(matches!(
+        &handled.messages[0].content,
+        protocol::MessageContent::SlashCommand {
+            message: protocol::SlashCommandMessage::Invocation {
+                invocation,
+                ..
+            }
+        } if invocation.original == "/handled alpha beta"
+    ));
     assert!(handled.turns.is_empty());
     assert_eq!(
         *events.lock().expect("prompt order lock"),
@@ -563,7 +571,7 @@ async fn prompt_order_matches_pi_before_agent_lifecycle() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "/raw-skill".to_string(),
+                input: "/raw-skill".into(),
             },
             Arc::new(DiscardSink),
         )
@@ -582,7 +590,7 @@ async fn prompt_order_matches_pi_before_agent_lifecycle() {
         .run(
             RunRequest {
                 session_id: session_id.clone(),
-                input: "/raw-template".to_string(),
+                input: "/raw-template".into(),
             },
             Arc::new(DiscardSink),
         )
@@ -598,7 +606,7 @@ async fn prompt_order_matches_pi_before_agent_lifecycle() {
         .run(
             RunRequest {
                 session_id,
-                input: "/unknown".to_string(),
+                input: "/unknown".into(),
             },
             Arc::new(DiscardSink),
         )
