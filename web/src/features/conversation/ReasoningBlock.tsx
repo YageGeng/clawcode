@@ -12,8 +12,13 @@ export function ReasoningBlock({ message }: ReasoningBlockProps) {
   if (message.reasoning.length === 0) return null;
   const elapsed = BigInt(message.endedAtMs) - BigInt(message.startedAtMs);
   return (
-    <details className="reasoning-block" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary>
+    <details className="reasoning-block" open={open}>
+      <summary onClick={(event) => {
+        // Prevent the native toggle and update controlled state exactly once;
+        // mirroring `onToggle` can bounce when React changes the open attribute.
+        event.preventDefault();
+        setOpen((current) => !current);
+      }}>
         <BrainCircuit size={15} aria-hidden="true" />
         <span>推理</span>
         <span className="reasoning-block__status">{message.streaming ? "进行中" : `${elapsed} ms`}</span>

@@ -477,7 +477,8 @@
   flex: 1;
   overflow: auto;
   padding: 28px max(24px, calc((100% - 820px) / 2));
-  scroll-behavior: smooth;
+  /* Reserve the scrollbar width so streaming content cannot shift the transcript. */
+  scrollbar-gutter: stable;
 }
 
 .transcript__empty {

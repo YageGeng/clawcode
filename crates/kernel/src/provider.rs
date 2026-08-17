@@ -617,10 +617,9 @@ impl ProviderMessage {
                 Some(Self::try_from_role(
                     Role::User,
                     vec![ContentBlock::Text {
-                        text: format!(
-                            "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{}\n</summary>",
-                            compaction.summary
-                        ),
+                        // Preserve the checkpoint's exact context size so a resumed
+                        // model receives the same compaction metadata as storage and UI.
+                        text: compaction.model_text(),
                     }],
                 ))
             }
