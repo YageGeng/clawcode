@@ -50,6 +50,7 @@ api_key = { env = "DEEPSEEK_API_KEY" }
 [[providers.models]]
 id = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
+input = ["text"]
 context_tokens = 1000000
 max_output_tokens = 384000
 
@@ -86,6 +87,11 @@ name = "example"
 command = "example-mcp-server"
 args = []
 ```
+
+Model `id` is the stable local identifier used by `active_model`, Session
+metadata, and model selection. When an upstream API expects a different
+`model` value, set the optional `upstream_id`; when omitted, requests use
+`id`.
 
 ## Prompt resources
 
@@ -165,8 +171,9 @@ service also exposes `GET /health`.
 The unauthenticated WebUI is deliberately loopback-only. The server rejects
 wildcard, LAN, and public bind addresses. The active model, Skills, and MCP
 configuration are read-only in the browser and are loaded from TOML at startup.
-The UI supports text, Markdown, and resource links; it does not upload files or
-implement ACP client filesystem or terminal callbacks. If `web/dist` is
+The UI supports text, Markdown, resource links, and raster image attachments.
+Selected images are encoded into ACP prompt blocks in the browser; the UI does
+not implement ACP client filesystem or terminal callbacks. If `web/dist` is
 missing, UI routes return HTTP 503 while ACP and health routes stay available.
 
 For frontend development, start the Rust server on port 3000, then run

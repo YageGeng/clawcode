@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigValidationError;
-use protocol::ModelProfile;
+use protocol::{ModelInputModalities, ModelInputModality, ModelProfile};
 
 /// Stable provider identifier used by configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -154,19 +154,39 @@ pub enum ProviderAuthConfig {
 }
 
 /// User-visible model metadata attached to an [`LlmProvider`].
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    typed_builder::TypedBuilder,
+)]
 pub struct LlmModel {
-    /// Provider model identifier sent in request payloads (e.g. "deepseek-v4-flash").
+    /// Stable local model identifier used for selection and persisted metadata.
     pub id: String,
+    /// Optional provider-facing model identifier sent in API request payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub upstream_id: Option<String>,
     /// Optional display name for user interfaces.
+    #[builder(default)]
     pub display_name: Option<String>,
     /// Optional context window size in tokens.
+    #[builder(default)]
     pub context_tokens: Option<u64>,
     /// Optional maximum output size in tokens.
+    #[builder(default)]
     pub max_output_tokens: Option<u64>,
+    /// Ordered input modalities accepted by this model.
+    #[serde(default = "LlmModel::default_input")]
+    #[builder(default = Self::default_input())]
+    pub input: Vec<ModelInputModality>,
     /// Provider-specific parameters merged into every request for this model.
     /// For DeepSeek thinking mode: `{ "thinking": {"type": "enabled"}, "reasoning_effort": "high" }`.
     #[serde(default)]
+    #[builder(default)]
     pub extra_param: serde_json::Value,
 }
 
@@ -194,12 +214,27 @@ pub struct LlmProvider {
 }
 
 impl LlmModel {
+    /// Returns the backward-compatible text-only model input default.
+    fn default_input() -> Vec<ModelInputModality> {
+        vec![ModelInputModality::Text]
+    }
+
     /// Converts validated model metadata into the stable runtime profile.
     pub fn to_profile(
         &self,
         provider: &LlmProvider,
     ) -> Result<ModelProfile, ConfigValidationError> {
         let provider_id = provider.id.as_str();
+        if self
+            .upstream_id
+            .as_ref()
+            .is_some_and(|upstream_id| upstream_id.trim().is_empty())
+        {
+            return Err(ConfigValidationError::InvalidUpstreamModelId {
+                provider_id: provider_id.to_string(),
+                model_id: self.id.clone(),
+            });
+        }
         let context_tokens = self.context_tokens.ok_or_else(|| {
             ConfigValidationError::MissingModelLimit {
                 provider_id: provider_id.to_string(),
@@ -228,6 +263,12 @@ impl LlmModel {
                 field: "max_output_tokens",
             });
         }
+        let input = ModelInputModalities::try_from(self.input.clone())
+            .map_err(|reason| ConfigValidationError::InvalidModelInput {
+                provider_id: provider_id.to_string(),
+                model_id: self.id.clone(),
+                reason,
+            })?;
 
         Ok(ModelProfile::builder()
             .provider_id(provider_id.to_string())
@@ -237,7 +278,15 @@ impl LlmModel {
             )
             .context_tokens(context_tokens)
             .max_output_tokens(max_output_tokens)
+            .input(input)
             .build())
+    }
+}
+
+impl Default for LlmModel {
+    /// Creates an empty text-only model configuration.
+    fn default() -> Self {
+        Self::builder().id(String::new()).build()
     }
 }
 

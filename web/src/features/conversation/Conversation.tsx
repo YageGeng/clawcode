@@ -40,7 +40,7 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
         ref={transcriptRef}
         onScroll={onScroll}
       >
-        {state.transcript.length === 0 ? <div className="empty-state transcript__empty"><h2>准备好了</h2><p>发送文本、Markdown 或资源链接开始这一会话。</p></div> : null}
+        {state.transcript.length === 0 ? <div className="empty-state transcript__empty"><h2>准备好了</h2><p>发送文本、图片、Markdown 或资源链接开始这一会话。</p></div> : null}
         {state.transcript.map((entry) => {
           if (entry.type === "message") {
             const message = state.messages.get(entry.messageId);

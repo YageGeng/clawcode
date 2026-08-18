@@ -25,12 +25,13 @@ use mcp::{
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
-    AgentEvent, AgentEventPayload, ExtensionDescriptor, ExtensionId,
-    IdGenerator, IdKind, McpProtocolVersion, McpServerId, McpServerState,
-    MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
-    SessionId, SessionTitle, SkillDiagnosticCode, SlashCommandSource,
-    StopReason, TimestampMs,
+    AgentEvent, AgentEventPayload, ContentBlock, ExtensionDescriptor,
+    ExtensionId, IdGenerator, IdKind, McpProtocolVersion, McpServerId,
+    McpServerState, MessageContent, ModelFailure, ModelFinal,
+    ModelInputModalities, ModelInputModality, ModelProfile, ModelRequest,
+    ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunInput,
+    RunRequest, SessionId, SessionTitle, SkillDiagnosticCode,
+    SlashCommandSource, StopReason, TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -49,6 +50,24 @@ static TEST_MODEL_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| {
         .display_name("Session fixture".to_string())
         .context_tokens(128_000)
         .max_output_tokens(8_000)
+        .build()
+});
+
+/// Shared deterministic capabilities for fixtures that must retain images.
+static IMAGE_TEST_MODEL_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| {
+    ModelProfile::builder()
+        .provider_id("fixture".to_string())
+        .model_id("session-image".to_string())
+        .display_name("Session image fixture".to_string())
+        .context_tokens(128_000)
+        .max_output_tokens(8_000)
+        .input(
+            ModelInputModalities::try_from(vec![
+                ModelInputModality::Text,
+                ModelInputModality::Image,
+            ])
+            .expect("image input modalities"),
+        )
         .build()
 });
 
@@ -108,6 +127,47 @@ impl Model for PendingModel {
     ) -> Result<TestModelStream, ModelError> {
         self.entered.notify_one();
         Ok(Box::pin(stream::pending()))
+    }
+}
+
+/// Holds the first request open and captures each request that follows it.
+#[derive(Default)]
+struct GatedCaptureModel {
+    requests: Mutex<Vec<ModelRequest>>,
+    first_entered: Notify,
+    first_release: Notify,
+}
+
+#[async_trait]
+impl Model for GatedCaptureModel {
+    /// Returns the stable profile used by queued follow-up assertions.
+    fn profile(&self) -> &ModelProfile {
+        &IMAGE_TEST_MODEL_PROFILE
+    }
+
+    /// Confirms that the gated local model has no provider dependency.
+    async fn preflight(&self) -> Result<(), ModelError> {
+        Ok(())
+    }
+
+    /// Captures every request while pausing only the first model turn.
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<TestModelStream, ModelError> {
+        let is_first = {
+            let mut requests = self.requests.lock().expect("request lock");
+            requests.push(request);
+            requests.len() == 1
+        };
+        if is_first {
+            self.first_entered.notify_one();
+            self.first_release.notified().await;
+        }
+        Ok(Box::pin(stream::iter([Ok(ScriptedModel::finished(
+            StopReason::EndTurn,
+        ))])))
     }
 }
 
@@ -1025,11 +1085,30 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
     });
     entered.notified().await;
 
+    let image_blocks = vec![
+        ContentBlock::Text {
+            text: "next".to_string(),
+        },
+        ContentBlock::Image {
+            data: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+        },
+    ];
     let queued = kernel
-        .queue_message(&session_id, QueueKind::FollowUp, "next".to_string())
+        .queue_message(
+            &session_id,
+            QueueKind::FollowUp,
+            RunInput::Blocks(image_blocks.clone()),
+        )
         .await
         .expect("queue");
     assert!(!queued.message.identity.turn_id.as_str().is_empty());
+    assert_eq!(
+        queued.message.content,
+        MessageContent::User {
+            blocks: image_blocks
+        }
+    );
     kernel.cancel_session(&session_id).expect("cancel");
     run.await.expect("join").expect("settle");
     kernel
@@ -1057,6 +1136,93 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
             .expect("pending")
             .follow_up
             .is_empty()
+    );
+}
+
+/// A queued image follow-up becomes the next model turn and leaves no pending entry.
+#[tokio::test]
+async fn queued_image_follow_up_is_consumed_by_the_next_model_turn() {
+    let root = tempfile::tempdir().expect("store root");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(12_000)));
+    let ids: Arc<dyn IdGenerator> = Arc::new(SequentialIds(AtomicU64::new(0)));
+    let model = Arc::new(GatedCaptureModel::default());
+    let kernel = build_kernel(
+        root.path().to_path_buf(),
+        Arc::clone(&model) as Arc<dyn Model>,
+        clock,
+        ids,
+        None,
+    );
+    let session_id =
+        SessionId::try_from("session-image-follow-up").expect("session id");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let running_kernel = Arc::clone(&kernel);
+    let running_session = session_id.clone();
+    let run = tokio::spawn(async move {
+        running_kernel
+            .run(
+                RunRequest {
+                    session_id: running_session,
+                    input: "first".into(),
+                },
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+    });
+    model.first_entered.notified().await;
+
+    let image_blocks = vec![
+        ContentBlock::Text {
+            text: "describe this image".to_string(),
+        },
+        ContentBlock::Image {
+            data: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+        },
+    ];
+    kernel
+        .queue_message(
+            &session_id,
+            QueueKind::FollowUp,
+            RunInput::Blocks(image_blocks.clone()),
+        )
+        .await
+        .expect("queue image follow-up");
+    model.first_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("queued follow-up run timeout")
+        .expect("join queued follow-up run")
+        .expect("complete queued follow-up run");
+
+    assert!(
+        kernel
+            .pending_messages(&session_id)
+            .expect("pending messages")
+            .follow_up
+            .is_empty()
+    );
+    let requests = model.requests.lock().expect("request lock");
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            matches!(
+                &message.content,
+                MessageContent::User { blocks } if blocks == &image_blocks
+            )
+        }),
+        "second request did not contain queued image blocks: {:#?}",
+        requests[1].messages
     );
 }
 
@@ -1305,6 +1471,7 @@ async fn skills_return_metadata_without_file_bodies() {
         "---\nname: review\ndescription: Review code\n---\nSECRET BODY\n",
     )
     .expect("write skill");
+    let skill_path = fs::canonicalize(skill_path).expect("canonical Skill");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(30_000)));
     let ids: Arc<dyn IdGenerator> = Arc::new(SequentialIds(AtomicU64::new(0)));
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {

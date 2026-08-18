@@ -2,7 +2,7 @@ import { AcpConnection } from "../acp/connection";
 import { AcpMethods, AcpNotifications } from "../acp/extensions";
 import type { AcpExtensionMethods, AcpExtensionNotifications } from "../acp/extensions";
 import { AcpProtocol } from "../acp/protocol";
-import type { InitializeResult, NewSessionResult, SessionId, SessionInfo, SessionListResult, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
+import type { InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
 import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { useWorkspaceStore } from "./store";
@@ -109,21 +109,21 @@ export class WorkspaceController {
     const state = useWorkspaceStore.getState();
     if (state.activeSessionId === undefined) throw new Error("No active session");
     const text = input.text;
-    if (text.trim().length === 0 && input.resources.length === 0) throw new Error("Prompt is empty");
+    if (text.trim().length === 0 && input.resources.length === 0 && input.images.length === 0) throw new Error("Prompt is empty");
+    const prompt: PromptContentBlock[] = [
+      ...(text.length === 0 ? [] : [{ type: "text" as const, text }]),
+      ...input.resources.map((resource) => ({ type: "resource_link" as const, name: resource.name, uri: resource.uri })),
+      ...input.images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))
+    ];
     this.dispatch({ type: "outcome/unknown", value: false });
     try {
       if (state.running) {
-        const resourceText = input.resources.map((resource) => `[${resource.name}](${resource.uri})`).join("\n");
-        const followUp = [text, resourceText].filter((part) => part.length > 0).join("\n\n");
-        await this.requireConnection().request(this.methods.followUp, { sessionId: state.activeSessionId, input: followUp });
+        await this.requireConnection().request(this.methods.followUp, { sessionId: state.activeSessionId, prompt });
         await this.refreshPending(state.activeSessionId);
       } else {
         await this.requireConnection().request(AcpProtocol.methods.sessionPrompt, {
           sessionId: state.activeSessionId,
-          prompt: [
-            ...(text.length === 0 ? [] : [{ type: "text", text }]),
-            ...input.resources.map((resource) => ({ type: "resource_link", name: resource.name, uri: resource.uri }))
-          ]
+          prompt
         });
       }
     } catch (reason: unknown) {

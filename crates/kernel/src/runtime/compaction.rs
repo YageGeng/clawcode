@@ -700,7 +700,7 @@ impl Kernel {
         model.preflight().await?;
         let max_tokens = max_tokens
             .map(|tokens| tokens.min(model.profile().max_output_tokens));
-        let request = ModelRequest {
+        let mut request = ModelRequest {
             messages: request_messages,
             tools: Vec::new(),
             options: ModelRequestOptions {
@@ -708,6 +708,13 @@ impl Kernel {
                 temperature: None,
             },
         };
+        if request.adapt_input(model.profile()) {
+            tracing::debug!(
+                "replaced unsupported images before calling compaction model {}/{}",
+                model.profile().provider_id,
+                model.profile().model_id
+            );
+        }
         let mut retry_state = RetryState::default();
         loop {
             let result: Result<GeneratedSummary, ModelError> = async {

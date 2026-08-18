@@ -18,8 +18,9 @@ use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, ContentBlock, ExtensionDescriptor,
     ExtensionId, ExtensionMessageDraft, ExtensionUserMessage, IdGenerator,
-    IdKind, MessageContent, ModelFinal, ModelProfile, ModelRequest,
-    ModelStreamEvent, ModelUsage, QueueKind, RunInput, RunRequest, SessionId,
+    IdKind, MessageContent, ModelFinal, ModelInputModalities,
+    ModelInputModality, ModelProfile, ModelRequest, ModelStreamEvent,
+    ModelUsage, QueueKind, RunInput, RunRequest, SessionId,
     SlashCommandMessage, SlashCommandStatus, StopReason, TimestampMs,
 };
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -37,6 +38,13 @@ static TEST_MODEL_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| {
         .display_name("Slash Command fixture".to_string())
         .context_tokens(128_000)
         .max_output_tokens(8_000)
+        .input(
+            ModelInputModalities::try_from(vec![
+                ModelInputModality::Text,
+                ModelInputModality::Image,
+            ])
+            .expect("image modalities"),
+        )
         .build()
 });
 
@@ -537,24 +545,31 @@ async fn template_replay_keeps_original_and_model_expansion() {
     }));
 }
 
-/// Composite input beginning with a slash bypasses command dispatch and reaches the Model.
+/// Image input beginning with a slash bypasses command dispatch and retains every block.
 #[tokio::test]
-async fn composite_slash_input_is_an_ordinary_user_prompt() {
+async fn image_slash_input_is_an_ordinary_user_prompt() {
     let (_root, fixture) = fixture().await;
+    let blocks = vec![
+        ContentBlock::Text {
+            text: "/session".to_string(),
+        },
+        ContentBlock::Image {
+            data: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+        },
+    ];
 
     fixture
         .kernel
         .run(
             RunRequest {
                 session_id: fixture.session_id,
-                input: RunInput::Composite(
-                    "/session\n\n[spec](file:///workspace/spec.md)".to_string(),
-                ),
+                input: RunInput::Blocks(blocks.clone()),
             },
             Arc::new(RecordingSink::default()),
         )
         .await
-        .expect("ordinary composite prompt");
+        .expect("ordinary image prompt");
 
     let requests = fixture
         .state
@@ -565,9 +580,15 @@ async fn composite_slash_input_is_an_ordinary_user_prompt() {
         matches!(
             &message.content,
             MessageContent::User { blocks }
-                if blocks == &vec![ContentBlock::Text {
-                    text: "/session\n\n[spec](file:///workspace/spec.md)".to_string(),
-                }]
+                if blocks == &vec![
+                    ContentBlock::Text {
+                        text: "/session".to_string(),
+                    },
+                    ContentBlock::Image {
+                        data: "iVBORw0KGgo=".to_string(),
+                        mime_type: "image/png".to_string(),
+                    },
+                ]
         )
     }));
 }

@@ -54,7 +54,8 @@ export function SkillCard({ skill, hasSession, controller }: SkillCardProps) {
           const arguments_ = input.trim();
           void controller.send({
             text: `/skill:${skill.name}${arguments_.length === 0 ? "" : ` ${arguments_}`}`,
-            resources: []
+            resources: [],
+            images: []
           })
             .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
             .finally(() => setBusy(false));

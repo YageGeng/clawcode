@@ -2,6 +2,7 @@
 
 mod content;
 mod extension;
+mod input;
 mod mapping;
 mod server;
 mod trace;

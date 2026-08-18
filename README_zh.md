@@ -50,6 +50,7 @@ api_key = { env = "DEEPSEEK_API_KEY" }
 [[providers.models]]
 id = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
+input = ["text"]
 context_tokens = 1000000
 max_output_tokens = 384000
 
@@ -87,6 +88,10 @@ name = "example"
 command = "example-mcp-server"
 args = []
 ```
+
+模型的 `id` 是 `active_model`、Session 元数据和模型选择使用的稳定本地标识。
+如果上游 API 要求不同的 `model` 参数，可配置可选的 `upstream_id`；省略时请求继续
+使用 `id`。
 
 ## Prompt 资源
 
@@ -145,8 +150,9 @@ SSE；`POST /acp` 承载 ACP JSON-RPC；健康检查位于 `GET /health`。
 
 WebUI 没有登录能力，因此服务强制只监听 loopback，通配、局域网和公网地址会被
 拒绝。模型、Skills 与 MCP 配置在界面中只读，修改 TOML 后需要重启。界面支持
-文本、Markdown 和资源链接，不上传文件，也不实现 ACP 客户端文件系统或 terminal
-callback。缺少 `web/dist` 时，UI 路由返回 HTTP 503，但 ACP 与 health 仍可用。
+文本、Markdown、资源链接和栅格图片附件；图片由浏览器编码为 ACP Prompt 内容块，
+不实现 ACP 客户端文件系统或 terminal callback。缺少 `web/dist` 时，UI 路由返回
+HTTP 503，但 ACP 与 health 仍可用。
 
 前端开发时先在 3000 端口启动 Rust 服务，再从 `web/` 运行 `npm run dev`；Vite
 会代理 bootstrap 和 ACP WebSocket。

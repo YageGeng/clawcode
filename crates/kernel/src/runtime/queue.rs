@@ -9,6 +9,7 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 use store::{NewRecord, RecordKind, SessionRecord};
 
+use super::input::PromptInputExpansion;
 use super::{EventEmitter, Kernel, KernelError, SessionRuntime};
 
 impl Kernel {
@@ -17,8 +18,9 @@ impl Kernel {
         &self,
         session_id: &SessionId,
         kind: QueueKind,
-        input: String,
+        input: impl Into<protocol::RunInput>,
     ) -> Result<QueuedMessage, KernelError> {
+        let input = input.into();
         let session = self.session(session_id)?;
         let run_id = session
             .active_run_id
@@ -28,8 +30,9 @@ impl Kernel {
             .ok_or_else(|| {
                 KernelError::SessionNotRunning(session_id.clone())
             })?;
-        if let Ok(invocation) =
-            protocol::SlashCommandInvocation::try_from(input.as_str())
+        if let Some(command_input) = input.slash_command_text()
+            && let Ok(invocation) =
+                protocol::SlashCommandInvocation::try_from(command_input)
         {
             match session.resolve_direct_slash_command(&invocation)? {
                 super::command::DirectSlashCommandResolution::Command(
@@ -47,8 +50,15 @@ impl Kernel {
                 super::command::DirectSlashCommandResolution::NotFound => {}
             }
         }
-        let expanded = session.expand_prompt_input(session_id, &input)?;
-        if let Some(diagnostic) = expanded.diagnostic.clone() {
+        let expanded = match input {
+            protocol::RunInput::Text(text) => {
+                session.expand_prompt_input(session_id, &text)?
+            }
+            protocol::RunInput::Blocks(blocks) => {
+                PromptInputExpansion::from_blocks(blocks)
+            }
+        };
+        if let Some(diagnostic) = expanded.diagnostic().cloned() {
             let sink = session
                 .event_sink
                 .lock()

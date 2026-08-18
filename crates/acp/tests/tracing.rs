@@ -218,9 +218,15 @@ async fn prompt_trace_reaches_the_provider_background_task() {
             connection
                 .send_request(wire::PromptRequest::new(
                     session_id.clone(),
-                    vec![wire::ContentBlock::Text(wire::TextContent::new(
-                        "sensitive prompt body",
-                    ))],
+                    vec![
+                        wire::ContentBlock::Text(wire::TextContent::new(
+                            "sensitive prompt body",
+                        )),
+                        wire::ContentBlock::Image(wire::ImageContent::new(
+                            "c2VjcmV0LWltYWdlLWJ5dGVz",
+                            "image/png",
+                        )),
+                    ],
                 ))
                 .block_task()
                 .await?;
@@ -280,6 +286,8 @@ async fn prompt_trace_reaches_the_provider_background_task() {
         assert!(line.contains("trace_id=trace-"));
     }
     assert!(output.contains("sensitive prompt body"));
+    assert!(output.contains("image data omitted: 18 bytes"));
+    assert!(!output.contains("c2VjcmV0LWltYWdlLWJ5dGVz"));
     assert!(output.contains("visible-diagnostic"));
     assert!(output.contains("\"input_tokens\":42"));
     assert!(output.matches("[REDACTED]").count() >= 6);

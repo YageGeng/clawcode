@@ -12,7 +12,7 @@ use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
 use crate::tools::ToolsConfig;
 pub use protocol::CompactionPolicy as CompactionConfig;
-use protocol::ModelProfile;
+use protocol::{ModelInputModalitiesError, ModelProfile};
 
 /// File-backed session persistence settings.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -88,6 +88,26 @@ pub enum ConfigValidationError {
         model_id: String,
         /// Name of the invalid limit field.
         field: &'static str,
+    },
+    /// A model declared an invalid combination of input modalities.
+    #[error(
+        "model '{provider_id}/{model_id}' has invalid input modalities: {reason}"
+    )]
+    InvalidModelInput {
+        /// Provider identifier containing the model.
+        provider_id: String,
+        /// Model containing the invalid input list.
+        model_id: String,
+        /// Typed modality validation failure.
+        reason: ModelInputModalitiesError,
+    },
+    /// A configured upstream model identifier contained no visible content.
+    #[error("model '{provider_id}/{model_id}' upstream_id must not be empty")]
+    InvalidUpstreamModelId {
+        /// Provider identifier containing the model.
+        provider_id: String,
+        /// Local model identifier containing the invalid override.
+        model_id: String,
     },
     /// Exponential retry delay arithmetic would overflow milliseconds.
     #[error(

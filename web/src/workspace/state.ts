@@ -194,6 +194,7 @@ export function reduceWorkspace(
         turnId: action.meta.turnId,
         role: action.type === "message/text-delta" ? action.role : "assistant",
         text: "",
+        images: [],
         reasoning: "",
         timestampMs: action.meta.timestampMs,
         startedAtMs: action.meta.timestampMs,

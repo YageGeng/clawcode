@@ -51,6 +51,8 @@ fn discovers_and_invokes_nested_skills() {
         &skill_file,
         "---\nname: \"code-review\"\ndescription: >-\n  Review Rust code with\n  ownership awareness\n---\n\n# Steps\nInspect carefully.\n",
     );
+    let skill_file =
+        fs::canonicalize(skill_file).expect("canonical nested Skill");
 
     let catalog = factory(global, Vec::new())
         .create(request(&workspace.path().join("project")))
@@ -349,6 +351,8 @@ fn skill_commands_expand_with_pi_literal_space_semantics() {
         &skill_file,
         "---\nname: rust-patterns\ndescription: Rust patterns\n---\n\nUse ownership carefully.\n",
     );
+    let skill_file =
+        fs::canonicalize(skill_file).expect("canonical command Skill");
     let catalog = factory(global, Vec::new())
         .create(request(&cwd))
         .expect("Skills should load");

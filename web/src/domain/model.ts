@@ -8,6 +8,7 @@ import type {
   ToolCallId,
   TurnId
 } from "../acp/protocol";
+import type { ImageContentBlock, ImageMimeType } from "../acp/protocol";
 
 export type SessionSummary = Readonly<{
   sessionId: SessionId;
@@ -85,6 +86,7 @@ export type MessageEntity = Readonly<{
   turnId: TurnId;
   role: "user" | "assistant" | "system";
   text: string;
+  images: readonly ImageContentBlock[];
   reasoning: string;
   timestampMs: TimestampMs;
   startedAtMs: TimestampMs;
@@ -150,9 +152,18 @@ export type PromptResourceLink = Readonly<{
   uri: string;
 }>;
 
+export type PromptImage = Readonly<{
+  id: string;
+  name: string;
+  size: number;
+  data: string;
+  mimeType: ImageMimeType;
+}>;
+
 export type PromptInput = Readonly<{
   text: string;
   resources: readonly PromptResourceLink[];
+  images: readonly PromptImage[];
 }>;
 
 export type QueuedMessage = Readonly<{

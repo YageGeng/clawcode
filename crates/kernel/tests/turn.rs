@@ -16,9 +16,9 @@ use protocol::{
     AgentEvent, AgentEventPayload, AgentOutcome, ContentBlock, EntryId,
     ExtensionDescriptor, ExtensionId, IdGenerator, IdKind, LaneId,
     MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, RunRequest, SessionId,
-    StopReason, TimestampMs, ToolBlock, ToolCall, ToolCallId, ToolCallResult,
-    ToolDefinition, ToolResult, TraceId,
+    ModelRetryDisposition, ModelStreamEvent, ModelUsage, RunInput, RunRequest,
+    SessionId, StopReason, TimestampMs, ToolBlock, ToolCall, ToolCallId,
+    ToolCallResult, ToolDefinition, ToolResult, TraceId,
 };
 use store::{
     Clock, EntryKind, JsonlStoreFactory, NewEntry, SessionCreateOptions,
@@ -743,6 +743,84 @@ async fn streamed_response_produces_one_timed_turn() {
             ..
         })
     ));
+}
+
+/// Text-only adaptation changes the provider copy while preserving stored images.
+#[tokio::test]
+async fn text_only_model_receives_placeholder_without_rewriting_history() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_100)));
+    let model = Arc::new(SystemPromptCaptureModel {
+        scripts: Mutex::new(VecDeque::from([ScriptedResponse::events(vec![
+            ScriptedModel::finished(StopReason::EndTurn),
+        ])])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-text-only-image").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    let image = ContentBlock::Image {
+        data: "iVBORw0KGgo=".to_string(),
+        mime_type: "image/png".to_string(),
+    };
+
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: RunInput::Blocks(vec![image.clone()]),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("run image prompt");
+
+    let requests = model.requests.lock().expect("request lock");
+    assert!(requests[0].messages.iter().any(|message| {
+        matches!(
+            &message.content,
+            MessageContent::User { blocks }
+                if blocks == &vec![ContentBlock::Text {
+                    text: "(image omitted: model does not support images)"
+                        .to_string(),
+                }]
+        )
+    }));
+    drop(requests);
+    assert!(kernel
+        .session_messages(&session_id)
+        .expect("stored messages")
+        .iter()
+        .any(|message| matches!(
+            &message.content,
+            MessageContent::User { blocks } if blocks == &vec![image.clone()]
+        )));
 }
 
 /// An ingress Trace remains unchanged through Kernel Tool execution.

@@ -17,6 +17,7 @@ use protocol::{
 use crate::extension::{
     AcpExtensionDispatcher, AcpExtensionRequest, AcpMcpUpdateNotification,
 };
+use crate::input::PromptInput;
 use crate::trace::AcpTraceFactory;
 use crate::{AcpEventMapper, AcpMappingError};
 
@@ -228,9 +229,15 @@ impl AcpServerFactory {
                         )
                         .capabilities(
                             wire::AgentCapabilities::new().session(
-                                wire::SessionCapabilities::new().delete(
-                                    wire::SessionDeleteCapabilities::new(),
-                                ),
+                                wire::SessionCapabilities::new()
+                                    .delete(
+                                        wire::SessionDeleteCapabilities::new(),
+                                    )
+                                    .prompt(
+                                        wire::PromptCapabilities::new().image(
+                                            wire::PromptImageCapabilities::new(),
+                                        ),
+                                    ),
                             ),
                         )
                             .meta(capabilities_meta),
@@ -496,7 +503,7 @@ impl AcpServerFactory {
                                 agent_client_protocol::Error::invalid_params()
                                     .data(error.to_string())
                             })?
-                            .0;
+                            .into_inner();
                         responder.respond(wire::PromptResponse::new())?;
 
                         let task_connection = connection.clone();
@@ -605,59 +612,6 @@ impl AcpServerFactory {
     }
 }
 
-struct PromptInput(protocol::RunInput);
-
-impl TryFrom<Vec<wire::ContentBlock>> for PromptInput {
-    type Error = PromptInputError;
-
-    /// Converts ACP baseline text and resource links without client-side file reads.
-    fn try_from(blocks: Vec<wire::ContentBlock>) -> Result<Self, Self::Error> {
-        let mut parts = Vec::new();
-        let mut text_only = true;
-        for block in blocks {
-            match block {
-                wire::ContentBlock::Text(text) => parts.push(text.text),
-                wire::ContentBlock::ResourceLink(resource) => {
-                    text_only = false;
-                    parts
-                        .push(format!("[{}]({})", resource.name, resource.uri));
-                }
-                wire::ContentBlock::Other(other) => {
-                    text_only = false;
-                    parts.push(serde_json::to_string(&other)?);
-                }
-                wire::ContentBlock::Image(_)
-                | wire::ContentBlock::Audio(_)
-                | wire::ContentBlock::Resource(_) => {
-                    return Err(PromptInputError::UnsupportedContent);
-                }
-                _ => return Err(PromptInputError::UnsupportedContent),
-            }
-        }
-        if parts.is_empty() {
-            return Err(PromptInputError::Empty);
-        }
-        let input = parts.join("\n\n");
-        Ok(Self(if text_only {
-            protocol::RunInput::Text(input)
-        } else {
-            protocol::RunInput::Composite(input)
-        }))
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum PromptInputError {
-    #[error("prompt must contain at least one supported content block")]
-    Empty,
-    #[error(
-        "prompt content requires a capability this agent did not advertise"
-    )]
-    UnsupportedContent,
-    #[error("custom prompt content could not be preserved: {0}")]
-    Json(#[from] serde_json::Error),
-}
-
 pub(crate) struct AcpEventSink {
     session_id: SessionId,
     connection: ConnectionTo<Client>,
@@ -703,5 +657,120 @@ impl From<AcpMappingError> for SinkError {
     /// Preserves mapping diagnostics at the kernel event-sink boundary.
     fn from(error: AcpMappingError) -> Self {
         Self::Consumer(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::input::PromptInput;
+    use agent_client_protocol::schema::v2 as wire;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use protocol::{ContentBlock, RunInput};
+
+    /// Ordered ACP text and image blocks remain lossless at Kernel ingress.
+    #[test]
+    fn prompt_input_preserves_ordered_text_and_image_blocks() {
+        let input = PromptInput::try_from(vec![
+            wire::ContentBlock::Text(wire::TextContent::new("Read the marker")),
+            wire::ContentBlock::Image(wire::ImageContent::new(
+                "Q0xBVy03MzE5",
+                "image/png",
+            )),
+        ])
+        .expect("valid image prompt");
+
+        assert_eq!(
+            input.into_inner(),
+            RunInput::Blocks(vec![
+                ContentBlock::Text {
+                    text: "Read the marker".to_string(),
+                },
+                ContentBlock::Image {
+                    data: "Q0xBVy03MzE5".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+            ])
+        );
+    }
+
+    /// Invalid, unsupported, and undeclared ACP content is rejected.
+    #[test]
+    fn prompt_input_rejects_invalid_images() {
+        for block in [
+            wire::ImageContent::new("not-base64", "image/png"),
+            wire::ImageContent::new("Q0xBVw==", "image/svg+xml"),
+        ] {
+            assert!(
+                PromptInput::try_from(vec![wire::ContentBlock::Image(block)])
+                    .is_err()
+            );
+        }
+
+        assert!(
+            PromptInput::try_from(
+                (0..6)
+                    .map(|_| {
+                        wire::ContentBlock::Image(wire::ImageContent::new(
+                            "Q0xBVw==",
+                            "image/png",
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+
+        assert!(
+            PromptInput::try_from(vec![wire::ContentBlock::Other(
+                wire::OtherContentBlock::new(
+                    "future_media",
+                    Default::default(),
+                ),
+            )])
+            .is_err()
+        );
+    }
+
+    /// Encoded payloads that cannot fit the decoded limit are rejected before decoding.
+    #[test]
+    fn prompt_input_enforces_decoded_image_size_limits() {
+        let invalid_but_oversized = "!".repeat(13_981_020);
+        let error =
+            match PromptInput::try_from(vec![wire::ContentBlock::Image(
+                wire::ImageContent::new(invalid_but_oversized, "image/png"),
+            )]) {
+                Err(error) => error,
+                Ok(_) => panic!("oversized invalid image was accepted"),
+            };
+        assert!(error.to_string().contains("each decoded image"));
+
+        let oversized =
+            BASE64_STANDARD.encode(vec![0_u8; 10 * 1024 * 1024 + 1]);
+        let error =
+            match PromptInput::try_from(vec![wire::ContentBlock::Image(
+                wire::ImageContent::new(oversized, "image/png"),
+            )]) {
+                Err(error) => error,
+                Ok(_) => panic!("oversized image was accepted"),
+            };
+        assert!(error.to_string().contains("each decoded image"));
+
+        let seven_mebibytes =
+            BASE64_STANDARD.encode(vec![0_u8; 7 * 1024 * 1024]);
+        let error = match PromptInput::try_from(
+            (0..3)
+                .map(|_| {
+                    wire::ContentBlock::Image(wire::ImageContent::new(
+                        seven_mebibytes.clone(),
+                        "image/png",
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized image aggregate was accepted"),
+        };
+        assert!(error.to_string().contains("in total"));
     }
 }

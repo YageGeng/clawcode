@@ -1,3 +1,4 @@
+use super::input::PromptInputExpansion;
 use super::*;
 
 impl Kernel {
@@ -17,7 +18,6 @@ impl Kernel {
             return Ok(result);
         }
         let session = self.session(&request.session_id)?;
-        let command_input = request.input.as_str().to_string();
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let first_turn_id =
@@ -73,37 +73,44 @@ impl Kernel {
             Some(&run_id),
             Some(&first_turn_id),
         )?;
-        let input = session
-            .extensions
-            .emit_input(
-                protocol::InputEvent {
-                    text: command_input.clone(),
-                    source: input_source,
-                    streaming_behavior: None,
-                },
-                &extension_context,
-            )
-            .await;
-        let run_input = match input {
-            protocol::InputResult::Continue => command_input,
-            protocol::InputResult::Transform { text } => text,
-            protocol::InputResult::Handled => {
-                // Input handlers may persist through the Extension Host even
-                // when they consume the request before an Agent Turn starts.
-                session.sync_store()?;
-                tracing::info!(
-                    "completed Kernel Run {} for session {} because an extension handled the input",
-                    run_id,
-                    request.session_id
-                );
-                return Ok(RunResult {
-                    run_id,
-                    messages: Vec::new(),
-                    turns: Vec::new(),
-                });
+        let run_input = match request.input {
+            protocol::RunInput::Text(command_input) => {
+                let input = session
+                    .extensions
+                    .emit_input(
+                        protocol::InputEvent {
+                            text: command_input.clone(),
+                            source: input_source,
+                            streaming_behavior: None,
+                        },
+                        &extension_context,
+                    )
+                    .await;
+                let run_input = match input {
+                    protocol::InputResult::Continue => command_input,
+                    protocol::InputResult::Transform { text } => text,
+                    protocol::InputResult::Handled => {
+                        // Input handlers may persist through the Extension Host even
+                        // when they consume the request before an Agent Turn starts.
+                        session.sync_store()?;
+                        tracing::info!(
+                            "completed Kernel Run {} for session {} because an extension handled the input",
+                            run_id,
+                            request.session_id
+                        );
+                        return Ok(RunResult {
+                            run_id,
+                            messages: Vec::new(),
+                            turns: Vec::new(),
+                        });
+                    }
+                };
+                protocol::RunInput::Text(run_input)
+            }
+            protocol::RunInput::Blocks(blocks) => {
+                protocol::RunInput::Blocks(blocks)
             }
         };
-        // Pi expands Skills before Templates after extensions transform input.
         emitter
             .emit(
                 first_turn_id.clone(),
@@ -112,9 +119,16 @@ impl Kernel {
                 },
             )
             .await?;
-        let expanded_input =
-            session.expand_prompt_input(&request.session_id, &run_input)?;
-        if let Some(diagnostic) = expanded_input.diagnostic.clone() {
+        let expanded_input = match run_input {
+            protocol::RunInput::Text(text) => {
+                // Pi expands Skills before Templates after extensions transform input.
+                session.expand_prompt_input(&request.session_id, &text)?
+            }
+            protocol::RunInput::Blocks(blocks) => {
+                PromptInputExpansion::from_blocks(blocks)
+            }
+        };
+        if let Some(diagnostic) = expanded_input.diagnostic().cloned() {
             emitter
                 .emit(
                     first_turn_id.clone(),
@@ -122,7 +136,7 @@ impl Kernel {
                 )
                 .await?;
         }
-        let run_input = expanded_input.text.clone();
+        let run_input = expanded_input.text().to_string();
         let initial_message_content = expanded_input.message_content();
         self.record_operation(
             &session,
@@ -443,6 +457,13 @@ impl Kernel {
                 .messages
             {
                 request_for_model.messages = messages;
+            }
+            if request_for_model.adapt_input(turn_model.profile()) {
+                tracing::debug!(
+                    "replaced unsupported images before calling model {}/{}",
+                    turn_model.profile().provider_id,
+                    turn_model.profile().model_id
+                );
             }
             let assistant_id = self.message_id()?;
             let assistant_timestamp = self.clock.now();

@@ -10,7 +10,7 @@
 use config::{
     ApiKeyConfig, AppConfig, ConfigValidationError, LoggingConfig, load_from,
 };
-use protocol::PromptContentSource;
+use protocol::{ModelInputModality, PromptContentSource};
 use std::path::{Path, PathBuf};
 
 /// Supplies complete configuration documents for cross-field validation tests.
@@ -274,6 +274,95 @@ fn active_model_resolves_to_a_stable_model_profile() {
     assert_eq!(profile.display_name, "DeepSeek V4 Flash");
     assert_eq!(profile.context_tokens, 1_000_000);
     assert_eq!(profile.max_output_tokens, 384_000);
+}
+
+/// An upstream provider identifier does not replace the local model identity.
+#[test]
+fn upstream_model_id_is_transport_only() {
+    let document = ConfigFixture::valid().replace(
+        "display_name = \"DeepSeek V4 Flash\"",
+        "display_name = \"DeepSeek V4 Flash\"\nupstream_id = \"vendor/deepseek-v4-flash\"",
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse upstream model id");
+
+    config.validate().expect("validate upstream model id");
+    let profile = config.model_profile().expect("model profile");
+    let model = serde_json::to_value(&config.providers[0].models[0])
+        .expect("serialize model config");
+
+    assert_eq!(profile.model_id, "deepseek-v4-flash");
+    assert_eq!(model["upstream_id"], "vendor/deepseek-v4-flash");
+}
+
+/// An explicitly configured upstream model identifier must contain content.
+#[test]
+fn upstream_model_id_rejects_blank_values() {
+    let document = ConfigFixture::valid().replace(
+        "display_name = \"DeepSeek V4 Flash\"",
+        "display_name = \"DeepSeek V4 Flash\"\nupstream_id = \"   \"",
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse blank upstream model id");
+
+    let error = config
+        .validate()
+        .expect_err("reject blank upstream model id");
+
+    assert!(error.to_string().contains("upstream_id must not be empty"));
+}
+
+/// Models without an explicit input list remain text-only.
+#[test]
+fn model_input_defaults_to_text() {
+    let config: AppConfig = toml::from_str(ConfigFixture::valid())
+        .expect("parse valid model config");
+
+    let profile = config.model_profile().expect("model profile");
+    assert!(profile.input.supports(ModelInputModality::Text));
+    assert!(!profile.input.supports(ModelInputModality::Image));
+}
+
+/// Explicit image input is retained in the stable runtime profile.
+#[test]
+fn model_input_accepts_text_and_image() {
+    let document = ConfigFixture::valid().replace(
+        "display_name = \"DeepSeek V4 Flash\"",
+        "display_name = \"DeepSeek V4 Flash\"\ninput = [\"text\", \"image\"]",
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse image model config");
+
+    let profile = config.model_profile().expect("model profile");
+    assert!(profile.input.supports(ModelInputModality::Text));
+    assert!(profile.input.supports(ModelInputModality::Image));
+}
+
+/// Empty, image-only, and duplicate input lists fail model validation.
+#[test]
+fn model_input_rejects_invalid_combinations() {
+    for input in [
+        "[]",
+        "[\"image\"]",
+        "[\"text\", \"text\"]",
+        "[\"image\", \"text\"]",
+    ] {
+        let document = ConfigFixture::valid().replace(
+            "display_name = \"DeepSeek V4 Flash\"",
+            &format!("display_name = \"DeepSeek V4 Flash\"\ninput = {input}"),
+        );
+        let config: AppConfig =
+            toml::from_str(&document).expect("parse invalid model input");
+
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigValidationError::InvalidModelInput {
+                provider_id,
+                model_id,
+                ..
+            }) if provider_id == "deepseek" && model_id == "deepseek-v4-flash"
+        ));
+    }
 }
 
 /// Missing environment credentials identify only their source, never a secret value.

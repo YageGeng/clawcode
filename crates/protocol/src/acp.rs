@@ -18,16 +18,6 @@ pub type AcpCompactParameters = AcpSessionParameters;
 /// Server-side bash uses the shared Kernel request without a duplicate ACP shape.
 pub type AcpUserBashParameters = UserBashRequest;
 
-/// Parameters for adding one follow-up to the active run.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AcpQueueMessageParameters {
-    /// Session that owns the queue.
-    pub session_id: SessionId,
-    /// User-authored follow-up input.
-    pub input: String,
-}
-
 /// Parameters for moving or branching the active session cursor.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
