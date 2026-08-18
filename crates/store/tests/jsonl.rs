@@ -5,7 +5,7 @@ use std::sync::Arc;
 use protocol::{EntryId, LaneId, RecordId, RunId, SessionId, TimestampMs};
 use store::{
     Clock, EntryKind, JsonlStoreFactory, NewEntry, NewRecord, RecordKind,
-    SessionCreateOptions, SessionForkOptions, StoreFactory,
+    SessionCreateOptions, SessionForkOptions, StoreError, StoreFactory,
 };
 
 /// Deterministic clock used to assert exact persisted timestamp strings.
@@ -103,9 +103,13 @@ fn append_entry_moves_lane_and_links_parent() {
     );
 }
 
-/// A failed durable append must not consume the shared session sequence.
+/// A rejected append must not consume the shared session sequence.
+///
+/// The filesystem store holds its append handle open for the session lifetime,
+/// so write failures surface at construction; a mutation rejected by candidate
+/// validation (duplicate id) must still leave the sequence available for retry.
 #[test]
-fn failed_append_keeps_sequence_available_for_retry_and_reopen() {
+fn rejected_append_keeps_sequence_available_for_retry_and_reopen() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
@@ -118,12 +122,10 @@ fn failed_append_keeps_sequence_available_for_retry_and_reopen() {
         .expect("session should be created");
     let lane = LaneId::try_from("main").expect("valid lane id");
     let path = store.path().to_path_buf();
-    let backup = path.with_extension("jsonl.backup");
 
-    // Replacing the backing file with a directory deterministically rejects append opens.
-    fs::rename(&path, &backup).expect("move session file aside");
-    fs::create_dir(&path).expect("replace session path with directory");
-    let failed = store.append_entry(
+    // A duplicate entry id is rejected by candidate validation before any
+    // durable write, so the allocated sequence must remain available.
+    let duplicate = store.append_entry(
         &lane,
         NewEntry {
             id: EntryId::try_from("entry-failed").expect("valid entry id"),
@@ -131,9 +133,16 @@ fn failed_append_keeps_sequence_available_for_retry_and_reopen() {
             payload: serde_json::json!({ "customType": "failed" }),
         },
     );
-    failed.unwrap_err();
-    fs::remove_dir(&path).expect("remove blocking directory");
-    fs::rename(&backup, &path).expect("restore session file");
+    duplicate.expect("first append should succeed");
+    let rejected = store.append_entry(
+        &lane,
+        NewEntry {
+            id: EntryId::try_from("entry-failed").expect("valid entry id"),
+            kind: EntryKind::Custom,
+            payload: serde_json::json!({ "customType": "rejected" }),
+        },
+    );
+    assert!(matches!(rejected, Err(StoreError::DuplicateEntry(_))));
 
     let stored = store
         .append_entry(
@@ -145,11 +154,11 @@ fn failed_append_keeps_sequence_available_for_retry_and_reopen() {
             },
         )
         .expect("retry append should succeed");
-    assert_eq!(stored.sequence.get(), 1);
+    assert_eq!(stored.sequence.get(), 2);
     drop(store);
 
     let reopened = factory.open(&path).expect("retry log should reopen");
-    assert_eq!(reopened.entries().len(), 1);
+    assert_eq!(reopened.entries().len(), 2);
 }
 
 /// Lane records and global facts share the same sequence and JSONL file.

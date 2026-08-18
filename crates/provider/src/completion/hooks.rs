@@ -1,49 +1,29 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response};
+use protocol::hooks::model::{
+    ModelHeaders, ModelHookError, ModelRequestHooks, ModelResponseMetadata,
+};
 use serde::Serialize;
 
 use super::CompletionError;
 
-/// Normalized non-secret headers exposed at the provider request boundary.
-pub type ProviderHeaders = BTreeMap<String, String>;
+/// Provider-visible alias for the shared request-hook contract.
+///
+/// The contract itself lives in `protocol` so the kernel's `Model` trait can
+/// accept hooks without depending on this crate; this alias preserves the
+/// rig-flavored name used throughout provider-internal plumbing.
+pub use protocol::hooks::model::ModelRequestHooks as CompletionRequestHooks;
 
-/// Sanitized provider response metadata observed before stream consumption.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderResponseMetadata {
-    /// HTTP or WebSocket handshake status.
-    pub status: u16,
-    /// Normalized response headers with credentials and cookies removed.
-    pub headers: ProviderHeaders,
-}
+/// Provider-visible alias for normalized non-secret request headers.
+pub type ProviderHeaders = ModelHeaders;
 
-/// Request-local provider hook contract independent of the extension crate.
-#[async_trait]
-pub trait CompletionRequestHooks: Send + Sync {
-    /// Replaces one provider-native JSON payload after serialization.
-    async fn before_payload(
-        &self,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, CompletionError>;
-
-    /// Replaces visible non-secret headers immediately before transport.
-    async fn before_headers(
-        &self,
-        headers: ProviderHeaders,
-    ) -> Result<ProviderHeaders, CompletionError>;
-
-    /// Observes sanitized response metadata before body or stream consumption.
-    async fn after_response(
-        &self,
-        response: ProviderResponseMetadata,
-    ) -> Result<(), CompletionError>;
-}
+/// Provider-visible alias for sanitized provider response metadata.
+pub type ProviderResponseMetadata = ModelResponseMetadata;
 
 /// Prepared immutable hook handle attached to one concrete HTTP request.
 #[derive(Clone)]
-pub struct PreparedCompletionHooks(Arc<dyn CompletionRequestHooks>);
+pub struct PreparedCompletionHooks(Arc<dyn ModelRequestHooks>);
 
 impl PreparedCompletionHooks {
     /// Attaches this request-local handle to the concrete transport request.
@@ -84,14 +64,14 @@ impl PreparedCompletionHooks {
         &self,
         metadata: ProviderResponseMetadata,
     ) -> Result<(), CompletionError> {
-        self.0.after_response(metadata).await
+        self.0.after_response(metadata).await.map_err(Into::into)
     }
 }
 
 /// Serializes one provider-native request before transport hooks are attached.
 pub async fn prepare_json_request<T: Serialize>(
     request: &T,
-    hooks: Option<Arc<dyn CompletionRequestHooks>>,
+    hooks: Option<Arc<dyn ModelRequestHooks>>,
 ) -> Result<(Vec<u8>, Option<PreparedCompletionHooks>), CompletionError> {
     let payload = serde_json::to_vec(request)?;
     let prepared = hooks.map(PreparedCompletionHooks);
@@ -141,7 +121,7 @@ impl ProviderHeaderVisibility {
     }
 
     /// Projects one HeaderMap into normalized UTF-8 values allowed by this policy.
-    fn project(self, headers: &HeaderMap) -> ProviderHeaders {
+    fn project(self, headers: &HeaderMap) -> ModelHeaders {
         headers
             .iter()
             .filter(|(name, _value)| self.allows(name))
@@ -156,7 +136,7 @@ impl ProviderHeaderVisibility {
 
 /// Separates extension-visible request headers from immutable provider data.
 struct ProviderHeaderPartition {
-    visible: ProviderHeaders,
+    visible: ModelHeaders,
     protected: HeaderMap,
 }
 
@@ -180,7 +160,7 @@ impl ProviderHeaderPartition {
     /// Applies extension headers before restoring every immutable provider value.
     fn apply(
         self,
-        replacement: ProviderHeaders,
+        replacement: ModelHeaders,
         headers: &mut HeaderMap,
     ) -> Result<(), CompletionError> {
         headers.clear();
@@ -202,5 +182,13 @@ impl ProviderHeaderPartition {
         }
         headers.extend(self.protected);
         Ok(())
+    }
+}
+
+/// Maps a shared hook failure into the provider completion error boundary.
+impl From<ModelHookError> for CompletionError {
+    /// Classifies hook failures as request-local provider errors.
+    fn from(error: ModelHookError) -> Self {
+        Self::ResponseError(error.to_string())
     }
 }

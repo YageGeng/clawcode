@@ -65,6 +65,8 @@ impl RunSettlement<'_> {
             RecordKind::OperationFinished,
             self.record_payload(),
         )?;
+        // RunEnd acknowledges the terminal recovery record to external clients.
+        self.session.sync_store()?;
         self.emitter
             .emit(
                 self.turn_id.clone(),
@@ -102,6 +104,9 @@ impl RunSettlement<'_> {
                 )
                 .await?;
         }
+        // AgentSettled maps to ACP Idle, so every AgentEnd and compaction write
+        // must be durable before that externally visible transition.
+        self.session.sync_store()?;
         self.emitter
             .emit(
                 self.turn_id.clone(),
@@ -118,6 +123,10 @@ impl RunSettlement<'_> {
                 &extension_context,
             )
             .await;
+
+        // Close the run with a final durability checkpoint so the terminal
+        // hook's own writes survive a crash before the next operation.
+        self.session.sync_store()?;
         Ok(())
     }
 }

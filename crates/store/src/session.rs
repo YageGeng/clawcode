@@ -1,6 +1,5 @@
 use std::collections::HashSet;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +20,7 @@ pub(super) struct JsonlSessionStore {
     session_id: SessionId,
     path: PathBuf,
     clock: Arc<dyn Clock>,
+    file: BufWriter<std::fs::File>,
     state: SessionState,
 }
 
@@ -37,11 +37,14 @@ impl JsonlSessionStore {
     }
 
     /// Appends one serialized mutation as a complete JSONL line.
-    fn append<T: Serialize>(&self, mutation: &T) -> Result<(), StoreError> {
-        let mut file = OpenOptions::new().append(true).open(&self.path)?;
-        serde_json::to_writer(&mut file, mutation)?;
-        file.write_all(b"\n")?;
-        file.sync_data()?;
+    ///
+    /// The line is written through the held buffered writer and flushed so
+    /// concurrent readers observe it; durability is deferred to the explicit
+    /// [`SessionStore::sync`] checkpoints instead of one fsync per mutation.
+    fn append<T: Serialize>(&mut self, mutation: &T) -> Result<(), StoreError> {
+        serde_json::to_writer(&mut self.file, mutation)?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()?;
         Ok(())
     }
 
@@ -54,7 +57,8 @@ impl JsonlSessionStore {
         let mut candidate = self.state.clone();
         Self::apply_loaded_mutation(&mut candidate, value.clone())?;
         self.append(&value)?;
-        // State advances only after the complete JSONL line reaches durable storage.
+        // State advances only after the complete JSONL line reaches the OS;
+        // crash durability is guaranteed by the explicit `sync` checkpoints.
         self.state = candidate;
         Ok(())
     }
@@ -446,5 +450,12 @@ impl SessionStore for JsonlSessionStore {
     /// Returns the latest persisted label for one entry.
     fn label(&self, target_id: &EntryId) -> Option<&str> {
         self.state.labels.get(target_id).map(String::as_str)
+    }
+
+    /// Forces the held buffered writer to durable storage.
+    fn sync(&mut self) -> Result<(), StoreError> {
+        self.file.flush()?;
+        self.file.get_ref().sync_data()?;
+        Ok(())
     }
 }

@@ -95,6 +95,15 @@ export class SessionUpdateDecoder {
       const timing = this.decodeMessageTiming(productMeta?.messageTiming);
       const message: MessageEntity = { messageId, turnId: meta.turnId, role: kind === "user_message" ? "user" : "assistant", text, reasoning: existing?.reasoning ?? "", timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false, ...(assistant === undefined ? (existing?.assistant === undefined ? {} : { assistant: existing.assistant }) : { assistant }), ...(slashCommand === undefined ? (existing?.slashCommand === undefined ? {} : { slashCommand: existing.slashCommand }) : { slashCommand }) };
       actions.push({ type: "message/upserted", message, order });
+      if (kind === "user_message") {
+        // A queued message is removed durably before its native ACP user
+        // update is emitted, so the matching local snapshot is now stale.
+        const consumed = [...state.pending.steering, ...state.pending.followUp]
+          .find((item) => item.message.message_id === update.messageId);
+        if (consumed !== undefined) {
+          actions.push({ type: "queue/removed", queueId: consumed.queueId });
+        }
+      }
     } else if (kind === "agent_thought" && typeof update.messageId === "string" && meta !== undefined) {
       const messageId = update.messageId as MessageId;
       const previous = state.messages.get(messageId);

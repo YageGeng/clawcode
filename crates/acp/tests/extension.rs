@@ -106,6 +106,7 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::SkillList.as_str()
             || method == AcpExtensionMethod::McpStatus.as_str()
             || method == AcpExtensionMethod::McpElicitationList.as_str()
+            || method == AcpExtensionMethod::PendingMessageRemove.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
     }
 
@@ -153,6 +154,12 @@ impl JsonRpcMessage for IntegrationRequest {
                     == AcpExtensionMethod::McpElicitationList.as_str() =>
             {
                 AcpExtensionMethod::McpElicitationList.as_str()
+            }
+            method
+                if method
+                    == AcpExtensionMethod::PendingMessageRemove.as_str() =>
+            {
+                AcpExtensionMethod::PendingMessageRemove.as_str()
             }
             _ => {
                 return Err(agent_client_protocol::Error::method_not_found());
@@ -416,6 +423,39 @@ async fn compact_rejects_client_supplied_summary() {
     .await
     .expect_err("client summary must be rejected");
     assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+}
+
+/// Removing a queue item that was already consumed remains an idempotent ACP operation.
+#[tokio::test]
+async fn pending_message_remove_accepts_an_already_absent_item() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let result = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::PendingMessageRemove.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "queueId": "queue-already-consumed"
+            }),
+        ),
+    )
+    .await
+    .expect("idempotent queue removal");
+
+    assert_eq!(result, serde_json::json!({ "removed": false }));
 }
 
 /// ACP v2 advertises native deletion and removes sessions from subsequent lists.

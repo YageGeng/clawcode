@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -52,19 +52,23 @@ impl StoreFactory for JsonlStoreFactory {
             .cwd(options.cwd)
             .parent_session_id(options.parent_session_id)
             .build();
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)?;
-        serde_json::to_writer(&mut file, &header)?;
-        file.write_all(b"\n")?;
-        file.sync_data()?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer(&mut writer, &header)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        // The header is the session's identity, so it is synced once at creation.
+        writer.get_ref().sync_data()?;
 
         Ok(Box::new(
             JsonlSessionStore::builder()
                 .session_id(header.id)
                 .path(path)
                 .clock(Arc::clone(&self.clock))
+                .file(writer)
                 .state(SessionState::new()?)
                 .build(),
         ))
@@ -112,15 +116,33 @@ impl StoreFactory for JsonlStoreFactory {
             JsonlSessionStore::apply_loaded_mutation(&mut state, value)?;
         }
         if !content.ends_with('\n') {
-            let mut file = OpenOptions::new().append(true).open(path)?;
-            file.write_all(b"\n")?;
+            // The torn-tail repair above rewrote the file, so the append handle
+            // is opened after repair and reused for the trailing-newline fix.
+            let mut writer =
+                BufWriter::new(OpenOptions::new().append(true).open(path)?);
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+
+            return Ok(Box::new(
+                JsonlSessionStore::builder()
+                    .session_id(header.id)
+                    .path(path.to_path_buf())
+                    .clock(Arc::clone(&self.clock))
+                    .file(writer)
+                    .state(state)
+                    .build(),
+            ));
         }
 
+        // Reuse the same append handle for later mutations without re-opening.
+        let writer =
+            BufWriter::new(OpenOptions::new().append(true).open(path)?);
         Ok(Box::new(
             JsonlSessionStore::builder()
                 .session_id(header.id)
                 .path(path.to_path_buf())
                 .clock(Arc::clone(&self.clock))
+                .file(writer)
                 .state(state)
                 .build(),
         ))

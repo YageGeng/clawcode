@@ -1,4 +1,4 @@
-import type { EntryId, EventMeta, MessageId, SessionId } from "../acp/protocol";
+import type { EntryId, EventMeta, MessageId, QueueId, SessionId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   BashExecutionEntity,
@@ -74,6 +74,7 @@ export type WorkspaceAction =
   | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
+  | { readonly type: "queue/removed"; readonly queueId: QueueId }
   | { readonly type: "tree/replaced"; readonly tree: SessionTree }
   | { readonly type: "skills/replaced"; readonly result: SkillListResult }
   | { readonly type: "commands/replaced"; readonly commands: readonly AvailableCommandEntity[] }
@@ -237,7 +238,30 @@ export function reduceWorkspace(
       return { ...state, compactions, transcript };
     }
     case "event/received": return { ...state, events: [...state.events, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
-    case "queue/replaced": return { ...state, pending: action.pending };
+    case "queue/replaced": return {
+      ...state,
+      // A delayed snapshot must not reintroduce a queue item whose user
+      // message has already entered the transcript.
+      pending: {
+        steering: action.pending.steering.filter((item) => {
+          const messageId = item.message.message_id;
+          return typeof messageId !== "string"
+            || state.messages.get(messageId as MessageId)?.role !== "user";
+        }),
+        followUp: action.pending.followUp.filter((item) => {
+          const messageId = item.message.message_id;
+          return typeof messageId !== "string"
+            || state.messages.get(messageId as MessageId)?.role !== "user";
+        })
+      }
+    };
+    case "queue/removed": return {
+      ...state,
+      pending: {
+        steering: state.pending.steering.filter((item) => item.queueId !== action.queueId),
+        followUp: state.pending.followUp.filter((item) => item.queueId !== action.queueId)
+      }
+    };
     case "tree/replaced": return { ...state, tree: action.tree };
     case "skills/replaced": return { ...state, skills: action.result.skills, skillDiagnostics: action.result.diagnostics };
     case "commands/replaced": return { ...state, availableCommands: action.commands };
