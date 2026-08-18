@@ -12,6 +12,7 @@ import type {
   McpSessionSnapshot,
   MessageEntity,
   PendingMessages,
+  PromptInput,
   SessionEvent,
   SessionSummary,
   SessionTree,
@@ -44,6 +45,8 @@ export type WorkspaceState = Readonly<{
   compactions: ReadonlyMap<EntryId, CompactionEntity>;
   events: readonly SessionEvent[];
   pending: PendingMessages;
+  drafts: ReadonlyMap<SessionId, PromptInput>;
+  composerRevision: number;
   tree: SessionTree | undefined;
   skills: readonly SkillInfo[];
   skillDiagnostics: readonly SkillDiagnostic[];
@@ -75,6 +78,9 @@ export type WorkspaceAction =
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
   | { readonly type: "queue/removed"; readonly queueId: QueueId }
+  | { readonly type: "draft/activated"; readonly sessionId: SessionId; readonly draft: PromptInput }
+  | { readonly type: "draft/changed"; readonly sessionId: SessionId; readonly draft: PromptInput }
+  | { readonly type: "draft/cleared"; readonly sessionId: SessionId }
   | { readonly type: "tree/replaced"; readonly tree: SessionTree }
   | { readonly type: "skills/replaced"; readonly result: SkillListResult }
   | { readonly type: "commands/replaced"; readonly commands: readonly AvailableCommandEntity[] }
@@ -101,6 +107,8 @@ export const initialWorkspaceState: WorkspaceState = {
   compactions: new Map(),
   events: [],
   pending: { steering: [], followUp: [] },
+  drafts: new Map(),
+  composerRevision: 0,
   tree: undefined,
   skills: [],
   skillDiagnostics: [],
@@ -126,7 +134,10 @@ export function reduceWorkspace(
       const mcpElicitations = new Map(
         [...state.mcpElicitations].filter(([sessionId]) => sessionIds.has(sessionId))
       );
-      return { ...state, sessions: action.sessions, mcpElicitations };
+      const drafts = new Map(
+        [...state.drafts].filter(([sessionId]) => sessionIds.has(sessionId))
+      );
+      return { ...state, sessions: action.sessions, drafts, mcpElicitations };
     }
     case "session/activated": return { ...state, activeSessionId: action.sessionId };
     case "session/deactivated": {
@@ -263,6 +274,21 @@ export function reduceWorkspace(
         followUp: state.pending.followUp.filter((item) => item.queueId !== action.queueId)
       }
     };
+    case "draft/activated": {
+      const drafts = new Map(state.drafts);
+      drafts.set(action.sessionId, action.draft);
+      return { ...state, drafts, composerRevision: state.composerRevision + 1 };
+    }
+    case "draft/changed": {
+      const drafts = new Map(state.drafts);
+      drafts.set(action.sessionId, action.draft);
+      return { ...state, drafts };
+    }
+    case "draft/cleared": {
+      const drafts = new Map(state.drafts);
+      drafts.delete(action.sessionId);
+      return { ...state, drafts };
+    }
     case "tree/replaced": return { ...state, tree: action.tree };
     case "skills/replaced": return { ...state, skills: action.result.skills, skillDiagnostics: action.result.diagnostics };
     case "commands/replaced": return { ...state, availableCommands: action.commands };

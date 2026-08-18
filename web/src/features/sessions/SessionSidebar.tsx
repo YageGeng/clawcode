@@ -1,5 +1,6 @@
 import { Check, Edit3, PanelLeftClose, Plus, Search, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type { SessionId } from "../../acp/protocol";
 import type { SessionSummary } from "../../domain/model";
@@ -15,6 +16,13 @@ export type SessionSidebarProps = Readonly<{
 }>;
 
 type SessionGroup = Readonly<{ label: string; sessions: readonly SessionSummary[] }>;
+type SessionPreview = Readonly<{
+  sessionId: SessionId;
+  title: string;
+  cwd: string;
+  left: number;
+  top: number;
+}>;
 
 export function SessionSidebar(props: SessionSidebarProps) {
   const [query, setQuery] = useState("");
@@ -22,6 +30,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
   const [editingSessionId, setEditingSessionId] = useState<SessionId>();
   const [editingTitle, setEditingTitle] = useState("");
   const [deletingSessionId, setDeletingSessionId] = useState<SessionId>();
+  const [preview, setPreview] = useState<SessionPreview>();
   const groups = useMemo<readonly SessionGroup[]>(() => {
     const normalized = query.trim().toLocaleLowerCase();
     const visible = props.sessions.filter((session) => normalized.length === 0 ||
@@ -58,6 +67,17 @@ export function SessionSidebar(props: SessionSidebarProps) {
     }
   };
 
+  const showPreview = (session: SessionSummary, target: HTMLElement) => {
+    const bounds = target.getBoundingClientRect();
+    setPreview({
+      sessionId: session.sessionId,
+      title: session.title,
+      cwd: session.cwd,
+      left: Math.max(8, Math.min(bounds.right + 8, window.innerWidth - 348)),
+      top: Math.max(8, Math.min(bounds.top, window.innerHeight - 248))
+    });
+  };
+
   return (
     <aside className="session-sidebar" aria-label="会话">
       <div className="panel-heading">
@@ -77,12 +97,20 @@ export function SessionSidebar(props: SessionSidebarProps) {
         <input className="search-input" placeholder="搜索标题或目录" value={query} onChange={(event) => setQuery(event.target.value)} />
       </label>
       {operationError === undefined ? null : <div className="form-error" role="alert">{operationError}</div>}
-      <div className="session-list">
+      <div className="session-list" onScroll={() => setPreview(undefined)}>
         {groups.length === 0 ? <div className="empty-list">没有匹配的会话</div> : groups.map((group) => (
           <section className="session-group" key={group.label}>
             <h3>{group.label}</h3>
             {group.sessions.map((session) => (
-              <div className="session-item" data-active={session.sessionId === props.activeSessionId} key={session.sessionId}>
+              <div
+                className="session-item"
+                data-active={session.sessionId === props.activeSessionId}
+                key={session.sessionId}
+                onBlurCapture={() => setPreview(undefined)}
+                onFocusCapture={(event) => showPreview(session, event.currentTarget)}
+                onMouseEnter={(event) => showPreview(session, event.currentTarget)}
+                onMouseLeave={() => setPreview(undefined)}
+              >
                 {editingSessionId === session.sessionId ? (
                   <div className="session-item__inline-form">
                     <input autoFocus aria-label="新会话标题" value={editingTitle} onChange={(event) => setEditingTitle(event.target.value)} onKeyDown={(event) => {
@@ -100,7 +128,12 @@ export function SessionSidebar(props: SessionSidebarProps) {
                   </div>
                 ) : (
                   <div className="session-item__heading">
-                    <button className="session-item__open" type="button" onClick={() => void run(() => props.onOpen(session.sessionId))}>
+                    <button
+                      className="session-item__open"
+                      type="button"
+                      aria-describedby={preview?.sessionId === session.sessionId ? "session-preview" : undefined}
+                      onClick={() => void run(() => props.onOpen(session.sessionId))}
+                    >
                       <span className="session-item__title">{session.title}</span>
                       <span className="session-item__cwd">{session.cwd}</span>
                     </button>
@@ -116,6 +149,20 @@ export function SessionSidebar(props: SessionSidebarProps) {
           </section>
         ))}
       </div>
+      {preview === undefined ? null : createPortal(
+        <div
+          className="session-preview"
+          id="session-preview"
+          role="tooltip"
+          style={{ left: preview.left, top: preview.top }}
+        >
+          <span className="session-preview__label">标题</span>
+          <strong>{preview.title}</strong>
+          <span className="session-preview__label">目录</span>
+          <span>{preview.cwd}</span>
+        </div>,
+        document.body
+      )}
     </aside>
   );
 }

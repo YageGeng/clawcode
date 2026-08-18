@@ -5,12 +5,18 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { MessageEntity } from "../../domain/model";
+import type { MessageEntity, SessionTreeEntry } from "../../domain/model";
+import type { WorkspaceController } from "../../workspace/controller";
 import { CommandMessageCard } from "./CommandMessageCard";
+import { MessageActions } from "./MessageActions";
 import { ReasoningBlock } from "./ReasoningBlock";
 
 export type MessageViewProps = Readonly<{
   message: MessageEntity;
+  entry?: SessionTreeEntry;
+  cwd?: string;
+  running: boolean;
+  controller: WorkspaceController;
 }>;
 
 function CodeBlock({ text }: Readonly<{ text: string }>) {
@@ -51,9 +57,18 @@ const MarkdownUrlPolicy = {
   }
 } as const;
 
-export function MessageView({ message }: MessageViewProps) {
+export function MessageView({ message, entry, cwd, running, controller }: MessageViewProps) {
+  const actions = (
+    <MessageActions
+      message={message}
+      {...(entry === undefined ? {} : { entry })}
+      {...(cwd === undefined ? {} : { cwd })}
+      running={running}
+      controller={controller}
+    />
+  );
   if (message.slashCommand !== undefined) {
-    return <CommandMessageCard message={message} />;
+    return <CommandMessageCard message={message} actions={actions} />;
   }
   const assistant = message.assistant;
   return (
@@ -72,6 +87,7 @@ export function MessageView({ message }: MessageViewProps) {
           {message.images.map((image, index) => <img key={`${image.mimeType}:${index}`} src={`data:${image.mimeType};base64,${image.data}`} alt={`消息图片 ${index + 1}`} />)}
         </div>
       )}
+      {actions}
       <details className="message__diagnostics">
         <summary>消息详情</summary>
         <dl className="diagnostics-list">
