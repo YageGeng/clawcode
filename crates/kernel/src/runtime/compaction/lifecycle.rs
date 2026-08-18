@@ -4,7 +4,7 @@ use super::super::*;
 #[derive(typed_builder::TypedBuilder)]
 pub(super) struct CompactionLifecycle<'a> {
     kernel: &'a Kernel,
-    session: &'a SessionRuntime,
+    session: &'a Session,
     emitter: &'a EventEmitter,
     run_id: &'a RunId,
     turn_id: &'a TurnId,

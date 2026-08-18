@@ -58,27 +58,21 @@ impl Kernel {
     /// Serializes one bash operation, runs its extension hook, and materializes its message.
     pub(super) async fn execute_user_bash_operation(
         &self,
-        session: Arc<SessionRuntime>,
+        session: Arc<Session>,
         input: UserBashInput,
         sink: Arc<dyn EventSink>,
     ) -> Result<UserBashExecution, KernelError> {
         let _run_guard = session.acquire_operation().await?;
-        let cancellation = CancellationToken::new();
-        *session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            cancellation.clone();
+        let cancellation = session.execution.install_cancellation()?;
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let turn_id = TurnId::try_from(self.id_generator.next(IdKind::Turn))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let _active_run = ActiveRunLease::acquire(
-            Arc::clone(&session),
-            run_id.clone(),
-            turn_id.clone(),
-            Arc::clone(&sink),
-        )?;
+        let _active_run = session.execution.install_run(ActiveRunContext {
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
+            sink: Arc::clone(&sink),
+        })?;
         let extension_context =
             self.extension_context(&session, Some(&run_id), Some(&turn_id))?;
         let event = protocol::UserBashEvent {
@@ -90,6 +84,7 @@ impl Kernel {
         let mut started_at_ms = None;
         let result = match session
             .extensions
+            .runtime_ref()
             .emit_user_bash(&event, &extension_context)
             .await
         {

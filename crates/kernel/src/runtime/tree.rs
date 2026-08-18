@@ -17,20 +17,15 @@ struct TreeNavigationPlan {
 impl TreeNavigationPlan {
     /// Resolves Pi navigation topology from one consistent Store snapshot.
     fn capture(
-        store: &dyn SessionStore,
-        lane: &LaneId,
-        target_id: EntryId,
+        snapshot: TranscriptNavigationSnapshot,
     ) -> Result<Self, KernelError> {
-        let target = store.get_entry(&target_id).cloned().ok_or_else(|| {
-            store::StoreError::EntryNotFound(target_id.clone())
-        })?;
-        let old_leaf_id = store.lane(lane).cloned();
-        let old_branch = old_leaf_id
-            .as_ref()
-            .map(|leaf| store.branch(leaf))
-            .transpose()?
-            .unwrap_or_default();
-        let target_branch = store.branch(&target_id)?;
+        let TranscriptNavigationSnapshot {
+            old_leaf_id,
+            target,
+            old_branch,
+            target_branch,
+        } = snapshot;
+        let target_id = target.id.clone();
         let common_length = old_branch
             .iter()
             .zip(&target_branch)
@@ -115,25 +110,14 @@ impl Kernel {
             None => {
                 let session = self.session(session_id)?;
                 let _run_guard = session.acquire_operation().await?;
-                {
-                    let mut store = session
-                        .store
-                        .lock()
-                        .map_err(|_poison_error| KernelError::Poisoned)?;
-                    store.move_lane(&session.lane, None)?;
-                }
-                session.sync_store()?;
-                *session
-                    .history
-                    .lock()
-                    .map_err(|_poison_error| KernelError::Poisoned)? =
-                    Vec::new();
+                let old_leaf_id = session.transcript.clear_navigation()?;
                 let context = self.extension_context(&session, None, None)?;
                 session
                     .extensions
+                    .runtime_ref()
                     .emit_session_tree(
                         &protocol::SessionTreeEvent::builder()
-                            .old_leaf_id(context.snapshot.tree.leaf_id.clone())
+                            .old_leaf_id(old_leaf_id)
                             .new_leaf_id(None)
                             .from_extension(false)
                             .build(),
@@ -154,19 +138,16 @@ impl Kernel {
     ) -> Result<SessionTreeSnapshot, KernelError> {
         let session = self.session(session_id)?;
         let _run_guard = session.acquire_operation().await?;
-        let plan = {
-            let store = session
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            TreeNavigationPlan::capture(store.as_ref(), &session.lane, target)?
-        };
+        let plan = TreeNavigationPlan::capture(
+            session.transcript.navigation_snapshot(&target)?,
+        )?;
         if plan.old_leaf_id.as_ref() == Some(&plan.target_id) {
             return self.session_tree(session_id);
         }
         let context = self.extension_context(&session, None, None)?;
         let decision = session
             .extensions
+            .runtime_ref()
             .emit_session_before_tree(
                 &protocol::SessionBeforeTreeEvent::builder()
                     .target_id(plan.target_id.clone())
@@ -245,64 +226,52 @@ impl Kernel {
             .as_ref()
             .map(|summary| summary.summary.clone())
             .or(generated_summary);
-        let mut summary_entry = None;
-        let history = {
-            let mut store = session
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            store.move_lane(&session.lane, plan.new_leaf_id.clone())?;
-            if let Some(summary) = summary {
-                let entry = store.append_entry(
-                    &session.lane,
-                    NewEntry {
-                        id: EntryId::try_from(self.id_generator.next(IdKind::Entry))
-                            .map_err(|error| KernelError::Protocol(error.to_string()))?,
-                        kind: EntryKind::BranchSummary,
-                        payload: serde_json::json!({
-                            "fromId": plan.new_leaf_id.as_ref().map(EntryId::as_str).unwrap_or("root"),
-                            "summary": summary,
-                            "details": extension_summary.as_ref().and_then(|summary| summary.details.clone()),
-                            "usage": extension_summary.as_ref().and_then(|summary| summary.usage.clone()),
-                            "fromHook": from_extension,
-                        }),
-                    },
-                )?;
-                if let Some(label) = decision.label.clone() {
-                    store.set_label(entry.id.clone(), Some(label))?;
-                }
-                summary_entry = Some(
-                    SessionTreeEntry::builder()
-                        .entry_id(entry.id)
-                        .parent_id(entry.parent_id)
-                        .kind(entry.kind.as_str().to_string())
-                        .timestamp_ms(entry.timestamp_ms)
-                        .payload(serde_json::Value::Object(entry.payload))
-                        .build(),
-                );
-            } else if let Some(label) = decision.label {
-                store.set_label(plan.target_id.clone(), Some(label))?;
-            }
-            Self::history_from_store(store.as_ref(), &session.lane)?
-        };
-        session.sync_store()?;
-        *session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? = history;
-        let new_leaf_id = {
-            let store = session
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            store.lane(&session.lane).cloned()
-        };
+        let summary = summary
+            .map(|summary| -> Result<NewEntry, KernelError> {
+                Ok(NewEntry {
+                    id: EntryId::try_from(
+                        self.id_generator.next(IdKind::Entry),
+                    )
+                    .map_err(|error| {
+                        KernelError::Protocol(error.to_string())
+                    })?,
+                    kind: EntryKind::BranchSummary,
+                    payload: serde_json::json!({
+                        "fromId": plan.new_leaf_id.as_ref().map(EntryId::as_str).unwrap_or("root"),
+                        "summary": summary,
+                        "details": extension_summary.as_ref().and_then(|summary| summary.details.clone()),
+                        "usage": extension_summary.as_ref().and_then(|summary| summary.usage.clone()),
+                        "fromHook": from_extension,
+                    }),
+                })
+            })
+            .transpose()?;
+        // Apply the lane move, optional summary, label, history rebuild, and
+        // durability checkpoint under one transcript lock after all awaits.
+        let committed = session.transcript.commit_navigation(
+            TranscriptNavigationCommit::builder()
+                .new_leaf_id(plan.new_leaf_id.clone())
+                .target_id(plan.target_id.clone())
+                .summary(summary)
+                .label(decision.label)
+                .build(),
+        )?;
+        let summary_entry = committed.summary_entry.map(|entry| {
+            SessionTreeEntry::builder()
+                .entry_id(entry.id)
+                .parent_id(entry.parent_id)
+                .kind(entry.kind.as_str().to_string())
+                .timestamp_ms(entry.timestamp_ms)
+                .payload(serde_json::Value::Object(entry.payload))
+                .build()
+        });
         let context = self.extension_context(&session, None, None)?;
         session
             .extensions
+            .runtime_ref()
             .emit_session_tree(
                 &protocol::SessionTreeEvent::builder()
-                    .new_leaf_id(new_leaf_id)
+                    .new_leaf_id(committed.new_leaf_id)
                     .old_leaf_id(plan.old_leaf_id)
                     .summary_entry(summary_entry)
                     .from_extension(from_extension)

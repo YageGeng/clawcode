@@ -4,7 +4,7 @@ use protocol::{AgentEventPayload, AgentOutcome, RunId, SessionId, TurnId};
 
 use super::{
     CompactionExecution, CompactionReason, EventEmitter, Kernel, KernelError,
-    RecordKind, RunResult, SessionRuntime,
+    RecordKind, RunResult, Session,
 };
 
 impl RunSettlement<'_> {
@@ -44,7 +44,7 @@ pub(super) struct RunCompletion {
 pub(super) struct RunSettlement<'a> {
     kernel: &'a Kernel,
     session_id: &'a SessionId,
-    session: &'a Arc<SessionRuntime>,
+    session: &'a Arc<Session>,
     emitter: &'a EventEmitter,
     run_id: &'a RunId,
     turn_id: TurnId,
@@ -83,6 +83,7 @@ impl RunSettlement<'_> {
         )?;
         self.session
             .extensions
+            .runtime_ref()
             .emit_agent_end(
                 &protocol::AgentEndEvent {
                     messages: self.messages,
@@ -118,6 +119,7 @@ impl RunSettlement<'_> {
             .await?;
         self.session
             .extensions
+            .runtime_ref()
             .emit_agent_settled(
                 &protocol::AgentSettledEvent,
                 &extension_context,

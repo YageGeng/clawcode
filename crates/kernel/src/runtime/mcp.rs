@@ -1,9 +1,9 @@
 //! Kernel-owned MCP Host composition without client filesystem callbacks.
 
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -13,12 +13,90 @@ use protocol::{
     McpElicitationResult, McpElicitationSnapshot, McpHostRequest,
     McpHostResponse, McpRoot, McpRootsResult, McpSamplingRequest,
     McpSamplingResult, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelRequest, ModelRequestOptions, Role, Sequence,
-    SessionId, TimestampMs, TurnId,
+    MessageTiming, ModelRequest, ModelRequestOptions, Role, SessionId,
+    TimestampMs, TurnId,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
-use super::{Kernel, KernelError, PendingMcpElicitation, SessionRuntime};
+use super::{Kernel, KernelError, PendingMcpElicitation, Session};
+
+/// Represents an absent or fully initialized Session-scoped MCP capability.
+pub(super) enum SessionMcpRuntime {
+    Disabled,
+    Enabled(SessionMcpState),
+}
+
+/// Groups the MCP session, projection task, and pending elicitations.
+#[derive(typed_builder::TypedBuilder)]
+pub(super) struct SessionMcpState {
+    session: Arc<::mcp::McpSession>,
+    #[builder(default)]
+    projection: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    elicitations: Mutex<HashMap<String, PendingMcpElicitation>>,
+}
+
+impl SessionMcpRuntime {
+    /// Converts an optional MCP Session into the explicit capability state.
+    pub(super) fn new(session: Option<Arc<::mcp::McpSession>>) -> Self {
+        session.map_or(Self::Disabled, |session| {
+            Self::Enabled(
+                SessionMcpState::builder()
+                    .session(session)
+                    .projection(AsyncMutex::new(None))
+                    .elicitations(Mutex::new(HashMap::new()))
+                    .build(),
+            )
+        })
+    }
+
+    /// Returns the enabled MCP Session handle when configured.
+    pub(super) fn as_ref(&self) -> Option<&Arc<::mcp::McpSession>> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled(state) => Some(&state.session),
+        }
+    }
+
+    /// Returns enabled MCP state for projection and elicitation operations.
+    fn state(&self) -> Option<&SessionMcpState> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled(state) => Some(state),
+        }
+    }
+
+    /// Shuts down the MCP Session and always joins its projection task.
+    pub(super) async fn shutdown(&self) -> Result<(), KernelError> {
+        let Some(state) = self.state() else {
+            return Ok(());
+        };
+        let shutdown_result = state.session.shutdown().await;
+        let projection_result =
+            if let Some(task) = state.projection.lock().await.take() {
+                task.await.map_err(|error| {
+                    KernelError::Protocol(format!(
+                        "MCP Tool projection task failed: {error}"
+                    ))
+                })
+            } else {
+                Ok(())
+            };
+        match (shutdown_result, projection_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error.into()),
+            (Err(error), Err(projection_error)) => {
+                // Keep the MCP shutdown failure primary while preserving the
+                // independently attempted projection cleanup in diagnostics.
+                tracing::warn!(
+                    "MCP projection cleanup also failed after shutdown error: {}",
+                    projection_error
+                );
+                Err(error.into())
+            }
+        }
+    }
+}
 
 impl Kernel {
     /// Returns one Session's complete transient MCP elicitation state.
@@ -27,8 +105,14 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<McpElicitationSnapshot, KernelError> {
         let session = self.session(session_id)?;
-        let mut requests = session
-            .pending_mcp_elicitations
+        let Some(state) = session.mcp.state() else {
+            return Ok(McpElicitationSnapshot {
+                session_id: session_id.clone(),
+                requests: Vec::new(),
+            });
+        };
+        let mut requests = state
+            .elicitations
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .values()
@@ -42,16 +126,17 @@ impl Kernel {
     }
 }
 
-impl SessionRuntime {
+impl Session {
     /// Starts the Session-owned projection from MCP snapshots into the MCP Tool partition.
     pub(super) async fn start_mcp_projection(
         self: &std::sync::Arc<Self>,
     ) -> Result<(), KernelError> {
-        let Some(mcp) = self.mcp.as_ref().map(std::sync::Arc::clone) else {
+        let Some(state) = self.mcp.state() else {
             return Ok(());
         };
+        let mcp = Arc::clone(&state.session);
         let mut events = mcp.subscribe();
-        let tool_state = std::sync::Arc::clone(&self.tool_state);
+        let tools = std::sync::Arc::clone(&self.tools);
         let task = tokio::spawn(async move {
             loop {
                 let change = match events.recv().await {
@@ -66,11 +151,9 @@ impl SessionRuntime {
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
                 match mcp.tool_registry().and_then(|registry| {
-                    tool_state.replace_mcp_partition(registry).map_err(
-                        |error| {
-                            ::mcp::McpError::ToolRegistration(error.to_string())
-                        },
-                    )
+                    tools.replace_mcp_partition(registry).map_err(|error| {
+                        ::mcp::McpError::ToolRegistration(error.to_string())
+                    })
                 }) {
                     Ok(()) => {}
                     Err(error) => tracing::error!(
@@ -84,19 +167,7 @@ impl SessionRuntime {
                 }
             }
         });
-        *self.mcp_projection.lock().await = Some(task);
-        Ok(())
-    }
-
-    /// Waits for the MCP projection task after the MCP Session publishes shutdown.
-    pub(super) async fn stop_mcp_projection(&self) -> Result<(), KernelError> {
-        if let Some(task) = self.mcp_projection.lock().await.take() {
-            task.await.map_err(|error| {
-                KernelError::Protocol(format!(
-                    "MCP Tool projection task failed: {error}"
-                ))
-            })?;
-        }
+        *state.projection.lock().await = Some(task);
         Ok(())
     }
 
@@ -107,41 +178,31 @@ impl SessionRuntime {
         timestamp_ms: TimestampMs,
         payload: AgentEventPayload,
     ) -> Result<(), ::mcp::McpError> {
-        let sink = self
-            .event_sink
-            .lock()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host(
-                    "Session event sink lock poisoned".to_string(),
-                )
-            })?
-            .clone()
+        let active_run = self
+            .execution
+            .active_run()
+            .map_err(|error| ::mcp::McpError::Host(error.to_string()))?
             .ok_or_else(|| {
                 ::mcp::McpError::Host(
                     "active Turn has no ACP event sink".to_string(),
                 )
             })?;
-        let raw_sequence = self
-            .event_sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .checked_add(1)
-            .ok_or_else(|| {
-                ::mcp::McpError::Host(
-                    "Session event sequence overflow".to_string(),
-                )
-            })?;
-        let sequence = Sequence::try_from(raw_sequence)
+        let sequence = self
+            .execution
+            .next_sequence()
             .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
-        sink.emit(AgentEvent {
-            metadata: EventMetadata {
-                turn_id,
-                timestamp_ms,
-                sequence,
-            },
-            payload,
-        })
-        .await
-        .map_err(|error| ::mcp::McpError::Host(error.to_string()))
+        active_run
+            .sink
+            .emit(AgentEvent {
+                metadata: EventMetadata {
+                    turn_id,
+                    timestamp_ms,
+                    sequence,
+                },
+                payload,
+            })
+            .await
+            .map_err(|error| ::mcp::McpError::Host(error.to_string()))
     }
 
     /// Publishes and waits for one Turn-scoped ACP elicitation response.
@@ -153,8 +214,13 @@ impl SessionRuntime {
         let turn_id = request.context.turn_id.clone();
         let requested_at_ms = request.context.requested_at_ms;
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        match self
-            .pending_mcp_elicitations
+        let state = self.mcp.state().ok_or_else(|| {
+            ::mcp::McpError::Host(
+                "MCP is disabled for this Session".to_string(),
+            )
+        })?;
+        match state
+            .elicitations
             .lock()
             .map_err(|_poison_error| {
                 ::mcp::McpError::Host(
@@ -185,7 +251,8 @@ impl SessionRuntime {
             )
             .await
         {
-            self.pending_mcp_elicitations
+            state
+                .elicitations
                 .lock()
                 .map_err(|_poison_error| {
                     ::mcp::McpError::Host(
@@ -196,14 +263,9 @@ impl SessionRuntime {
             return Err(error);
         }
         let cancellation = self
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host(
-                    "Session cancellation lock poisoned".to_string(),
-                )
-            })?
-            .clone();
+            .execution
+            .cancellation()
+            .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
         let result = tokio::select! {
             _ = cancellation.cancelled() => McpElicitationResult {
                 action: McpElicitationAction::Cancel,
@@ -215,7 +277,8 @@ impl SessionRuntime {
                 ))
             })?,
         };
-        self.pending_mcp_elicitations
+        state
+            .elicitations
             .lock()
             .map_err(|_poison_error| {
                 ::mcp::McpError::Host(
@@ -240,8 +303,13 @@ impl SessionRuntime {
         &self,
         request: McpElicitationResponseRequest,
     ) -> Result<(), KernelError> {
-        let pending = self
-            .pending_mcp_elicitations
+        let state = self.mcp.state().ok_or_else(|| {
+            KernelError::Protocol(
+                "MCP is disabled for this Session".to_string(),
+            )
+        })?;
+        let pending = state
+            .elicitations
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .remove(&request.request_id)
@@ -263,7 +331,7 @@ impl SessionRuntime {
 /// Session-local Host boundary exposing only roots the Kernel already owns.
 pub(super) struct SessionMcpHost {
     cwd: PathBuf,
-    runtime: OnceLock<Weak<SessionRuntime>>,
+    runtime: OnceLock<Weak<Session>>,
 }
 
 impl SessionMcpHost {
@@ -278,7 +346,7 @@ impl SessionMcpHost {
     /// Attaches the completed Session runtime without creating an ownership cycle.
     pub(super) fn attach(
         &self,
-        runtime: &Arc<SessionRuntime>,
+        runtime: &Arc<Session>,
     ) -> Result<(), KernelError> {
         self.runtime
             .set(Arc::downgrade(runtime))
@@ -290,7 +358,7 @@ impl SessionMcpHost {
     }
 
     /// Resolves the live Session runtime for one Turn-scoped Host callback.
-    fn runtime(&self) -> Result<Arc<SessionRuntime>, ::mcp::McpError> {
+    fn runtime(&self) -> Result<Arc<Session>, ::mcp::McpError> {
         self.runtime.get().and_then(Weak::upgrade).ok_or_else(|| {
             ::mcp::McpError::Host(
                 "owning Kernel Session is no longer available".to_string(),
@@ -299,20 +367,16 @@ impl SessionMcpHost {
     }
 }
 
-impl SessionRuntime {
+impl Session {
     /// Runs one Server-requested sample through the current Session model and cancellation path.
     async fn sample_mcp(
         &self,
         request: McpSamplingRequest,
     ) -> Result<McpSamplingResult, ::mcp::McpError> {
         let session_id = self
-            .store
-            .lock()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host("Session Store lock poisoned".to_string())
-            })?
+            .transcript
             .session_id()
-            .clone();
+            .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
         if session_id != request.context.session_id {
             return Err(::mcp::McpError::Host(format!(
                 "Sampling Session mismatch: expected {}, received {}",
@@ -349,26 +413,19 @@ impl SessionRuntime {
                 },
             );
         }
-        let model = self
-            .model
-            .read()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host("Session model lock poisoned".to_string())
-            })?
-            .clone();
+        let model = self.model.active().map_err(|error| {
+            ::mcp::McpError::Host(format!(
+                "failed to read Session model state: {error}"
+            ))
+        })?;
         model
             .preflight()
             .await
             .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
         let cancellation = self
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host(
-                    "Session cancellation lock poisoned".to_string(),
-                )
-            })?
-            .clone();
+            .execution
+            .cancellation()
+            .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
         let mut model_request = ModelRequest {
             messages,
             tools: Vec::new(),
@@ -474,5 +531,81 @@ impl ::mcp::McpHost for SessionMcpHost {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use protocol::{McpHostRequest, McpHostResponse, SessionId};
+    use tokio::sync::Mutex as AsyncMutex;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{SessionMcpRuntime, SessionMcpState};
+
+    struct RejectingHost;
+
+    #[async_trait]
+    impl ::mcp::McpHost for RejectingHost {
+        /// Rejects callbacks because the empty MCP Session has no Servers.
+        async fn handle(
+            &self,
+            _request: McpHostRequest,
+        ) -> Result<McpHostResponse, ::mcp::McpError> {
+            Err(::mcp::McpError::Host(
+                "unexpected test Host callback".to_string(),
+            ))
+        }
+    }
+
+    /// Creates one empty MCP Session with an observable shutdown token.
+    async fn mcp_session(shutdown: CancellationToken) -> ::mcp::McpSession {
+        use ::mcp::McpFactory as _;
+
+        ::mcp::SessionMcpFactory::new(
+            Vec::new(),
+            Arc::new(::mcp::RmcpConnector::default()),
+        )
+        .create(
+            ::mcp::McpSessionRequest::builder()
+                .session_id(
+                    SessionId::try_from("session-mcp-cleanup")
+                        .expect("session id"),
+                )
+                .cwd(PathBuf::from("/workspace"))
+                .host(Arc::new(RejectingHost) as Arc<dyn ::mcp::McpHost>)
+                .shutdown(shutdown)
+                .build(),
+        )
+        .await
+        .expect("create empty MCP Session")
+    }
+
+    /// Preserves MCP shutdown even when the projection task exits abnormally.
+    #[tokio::test]
+    async fn shutdown_cancels_mcp_when_projection_join_fails() {
+        let shutdown = CancellationToken::new();
+        let session = Arc::new(mcp_session(shutdown.clone()).await);
+        let failed_projection = tokio::spawn(async {
+            panic!("forced projection failure");
+        });
+        let runtime = SessionMcpRuntime::Enabled(
+            SessionMcpState::builder()
+                .session(session)
+                .projection(AsyncMutex::new(Some(failed_projection)))
+                .elicitations(Mutex::new(std::collections::HashMap::new()))
+                .build(),
+        );
+
+        let error = runtime
+            .shutdown()
+            .await
+            .expect_err("projection failure must remain observable");
+
+        assert!(shutdown.is_cancelled());
+        assert!(matches!(error, crate::KernelError::Protocol(_)));
     }
 }

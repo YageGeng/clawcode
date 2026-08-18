@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -20,8 +20,9 @@ use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
 };
 use mcp::{
-    McpMrtrPolicy, McpStdioTransport, McpTransport, RmcpConnector,
-    RuntimeMcpServer, SessionMcpFactory,
+    McpError, McpFactory, McpMrtrPolicy, McpSession, McpSessionRequest,
+    McpStdioTransport, McpTransport, RmcpConnector, RuntimeMcpServer,
+    SessionMcpFactory,
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
@@ -136,6 +137,45 @@ struct GatedCaptureModel {
     requests: Mutex<Vec<ModelRequest>>,
     first_entered: Notify,
     first_release: Notify,
+}
+
+/// Holds the first two model Turns independently for queue-correlation races.
+#[derive(Default)]
+struct TwoTurnGatedModel {
+    calls: AtomicU64,
+    entered: [Notify; 2],
+    releases: [Notify; 2],
+}
+
+#[async_trait]
+impl Model for TwoTurnGatedModel {
+    /// Returns the stable profile used by queue diagnostic assertions.
+    fn profile(&self) -> &ModelProfile {
+        &TEST_MODEL_PROFILE
+    }
+
+    /// Confirms that the local gated model has no provider dependency.
+    async fn preflight(&self) -> Result<(), ModelError> {
+        Ok(())
+    }
+
+    /// Pauses the first two requests until the test advances each active Turn.
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<TestModelStream, ModelError> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+        if let (Some(entered), Some(release)) =
+            (self.entered.get(index), self.releases.get(index))
+        {
+            entered.notify_one();
+            release.notified().await;
+        }
+        Ok(Box::pin(stream::iter([Ok(ScriptedModel::finished(
+            StopReason::EndTurn,
+        ))])))
+    }
 }
 
 #[async_trait]
@@ -423,6 +463,147 @@ impl ExtensionHandler<SessionBeforeSwitchPoint> for RecordingExtension {
     }
 }
 
+/// Cancels every Resume switch before the runtime can be registered.
+#[derive(Clone)]
+struct CancelResumeExtension;
+
+impl ExtensionModule for CancelResumeExtension {
+    /// Declares the Resume cancellation fixture.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("cancel-resume").expect("extension id"),
+            name: "Cancel Resume".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers only the pre-switch cancellation point.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<SessionBeforeSwitchPoint, _>(self.clone())
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionBeforeSwitchPoint> for CancelResumeExtension {
+    /// Cancels the attempted switch so cleanup runs before registration.
+    async fn handle(
+        &self,
+        _event: &protocol::SessionBeforeSwitchEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::SessionCancelResult, ExtensionError> {
+        Ok(protocol::SessionCancelResult { cancel: true })
+    }
+}
+
+/// Pauses Resume before registration so concurrent construction can be tested.
+#[derive(Clone)]
+struct GateResumeExtension {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl ExtensionModule for GateResumeExtension {
+    /// Declares the concurrent Resume fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("gate-resume").expect("extension id"),
+            name: "Gate Resume".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers only the pre-switch gate used by Resume.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<SessionBeforeSwitchPoint, _>(self.clone())
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionBeforeSwitchPoint> for GateResumeExtension {
+    /// Blocks only persisted-session Resume attempts before registration.
+    async fn handle(
+        &self,
+        event: &protocol::SessionBeforeSwitchEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::SessionCancelResult, ExtensionError> {
+        if event.reason == protocol::SessionSwitchReason::Resume {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(protocol::SessionCancelResult::default())
+    }
+}
+
+/// Pauses new Session startup after registration but before resources are ready.
+#[derive(Clone)]
+struct GateSessionStartExtension {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl ExtensionModule for GateSessionStartExtension {
+    /// Declares the startup publication fixture identity.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("gate-session-start")
+                .expect("extension id"),
+            name: "Gate Session Start".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers only the Session startup gate used by creation tests.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<SessionStartPoint, _>(self.clone())
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionStartPoint> for GateSessionStartExtension {
+    /// Blocks new Session startup at the first hook after map registration.
+    async fn handle(
+        &self,
+        event: &protocol::SessionStartEvent,
+        _context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        if event.reason == protocol::SessionStartReason::New {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
+/// Records every Session shutdown token created by the wrapped MCP factory.
+struct ObservedMcpFactory {
+    inner: SessionMcpFactory,
+    shutdowns: Arc<Mutex<Vec<CancellationToken>>>,
+}
+
+#[async_trait]
+impl McpFactory for ObservedMcpFactory {
+    /// Captures the shutdown token before creating an empty MCP Session.
+    async fn create(
+        &self,
+        request: McpSessionRequest,
+    ) -> Result<McpSession, McpError> {
+        self.shutdowns
+            .lock()
+            .expect("shutdown token lock")
+            .push(request.shutdown.clone());
+        self.inner.create(request).await
+    }
+}
+
 /// Rejects project trust and records whether resource discovery was attempted.
 #[derive(Clone)]
 struct DenyProjectResources {
@@ -594,6 +775,102 @@ fn build_kernel(
     Arc::new(factory.build().expect("build kernel"))
 }
 
+/// Builds a kernel whose Resume hook can be paused at a deterministic boundary.
+fn build_gated_resume_kernel(
+    root: &Path,
+    clock: Arc<dyn Clock>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    shutdowns: Arc<Mutex<Vec<CancellationToken>>>,
+) -> Arc<Kernel> {
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    Arc::new(
+        KernelFactory::builder()
+            .model_factory(Arc::new(StaticModelFactory(model)))
+            .tool_factory(Arc::new(BuiltinToolFactory::new()))
+            .store_factory(Arc::new(JsonlStoreFactory::new(
+                root,
+                Arc::clone(&clock),
+            )))
+            .extension_factory(Arc::new(StaticExtensionFactory::new(
+                protocol::StaticExtensionRegistration::default(),
+                vec![Arc::new({
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    move || {
+                        Ok(Arc::new(GateResumeExtension {
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        })
+                            as Arc<dyn ExtensionModule>)
+                    }
+                })],
+            )))
+            .mcp_factory(Some(Arc::new(ObservedMcpFactory {
+                inner: SessionMcpFactory::new(
+                    Vec::new(),
+                    Arc::new(RmcpConnector::default()),
+                ),
+                shutdowns,
+            })))
+            .clock(clock)
+            .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.join("config"),
+                protocol::PromptPolicy::default(),
+            )))
+            .build()
+            .build()
+            .expect("build kernel"),
+    )
+}
+
+/// Builds a kernel whose new-Session startup hook pauses after registration.
+fn build_gated_start_kernel(
+    root: &Path,
+    clock: Arc<dyn Clock>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+) -> Arc<Kernel> {
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    Arc::new(
+        KernelFactory::builder()
+            .model_factory(Arc::new(StaticModelFactory(model)))
+            .tool_factory(Arc::new(BuiltinToolFactory::new()))
+            .store_factory(Arc::new(JsonlStoreFactory::new(
+                root,
+                Arc::clone(&clock),
+            )))
+            .extension_factory(Arc::new(StaticExtensionFactory::new(
+                protocol::StaticExtensionRegistration::default(),
+                vec![Arc::new({
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    move || {
+                        Ok(Arc::new(GateSessionStartExtension {
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        })
+                            as Arc<dyn ExtensionModule>)
+                    }
+                })],
+            )))
+            .clock(clock)
+            .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.join("config"),
+                protocol::PromptPolicy::default(),
+            )))
+            .build()
+            .build()
+            .expect("build kernel"),
+    )
+}
+
 /// Builds a filesystem Skill Factory with an isolated unused home root.
 fn filesystem_skill_factory(global_root: PathBuf) -> FilesystemSkillFactory {
     let user_home = global_root.join("test-home");
@@ -601,6 +878,292 @@ fn filesystem_skill_factory(global_root: PathBuf) -> FilesystemSkillFactory {
         .global_root(global_root)
         .user_home(user_home)
         .build()
+}
+
+/// Resume cancellation shuts down its unregistered MCP runtime without deleting Store.
+#[tokio::test]
+async fn resume_cancellation_shuts_down_unregistered_mcp() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_000)));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    let shutdowns = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new(|| {
+                Ok(Arc::new(CancelResumeExtension) as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .mcp_factory(Some(Arc::new(ObservedMcpFactory {
+            inner: SessionMcpFactory::new(
+                Vec::new(),
+                Arc::new(RmcpConnector::default()),
+            ),
+            shutdowns: Arc::clone(&shutdowns),
+        })))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-cancel-resume").expect("session id");
+    let session_path = kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close initial session");
+
+    let error = kernel
+        .resume_session(session_id, cwd)
+        .await
+        .expect_err("Resume must be cancelled");
+    assert!(matches!(error, kernel::KernelError::ExtensionBlocked(_)));
+    let shutdowns = shutdowns.lock().expect("shutdown token lock");
+    assert_eq!(shutdowns.len(), 2);
+    assert!(shutdowns[1].is_cancelled());
+    assert!(session_path.exists());
+}
+
+/// Rejects a second Resume before it can construct another runtime for the same id.
+#[tokio::test]
+async fn concurrent_resume_reserves_session_before_construction() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_500)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let shutdowns = Arc::new(Mutex::new(Vec::new()));
+    let kernel = build_gated_resume_kernel(
+        root.path(),
+        clock,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+        Arc::clone(&shutdowns),
+    );
+    let session_id =
+        SessionId::try_from("session-concurrent-resume").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close initial session");
+
+    let first_kernel = Arc::clone(&kernel);
+    let first_session_id = session_id.clone();
+    let first_cwd = cwd.clone();
+    let first = tokio::spawn(async move {
+        first_kernel
+            .resume_session(first_session_id, first_cwd)
+            .await
+    });
+    entered.notified().await;
+
+    let second_kernel = Arc::clone(&kernel);
+    let second_session_id = session_id.clone();
+    let second = tokio::spawn(async move {
+        second_kernel.resume_session(second_session_id, cwd).await
+    });
+    let second_result =
+        tokio::time::timeout(Duration::from_secs(1), second).await;
+    if second_result.is_err() {
+        release.notify_waiters();
+        first
+            .await
+            .expect("join first Resume")
+            .expect("first Resume");
+        panic!(
+            "second Resume reached construction instead of observing the reservation"
+        );
+    }
+    let second_error = second_result
+        .expect("second Resume timeout")
+        .expect("join second Resume")
+        .expect_err("second Resume must be rejected");
+    assert!(matches!(
+        second_error,
+        kernel::KernelError::DuplicateSession(id) if id == session_id
+    ));
+    assert_eq!(shutdowns.lock().expect("shutdown token lock").len(), 2);
+
+    release.notify_waiters();
+    first
+        .await
+        .expect("join first Resume")
+        .expect("first Resume");
+}
+
+/// Rejects Delete while an unregistered Resume owns the same Session identifier.
+#[tokio::test]
+async fn delete_rejects_session_reserved_by_resume_construction() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_600)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let kernel = build_gated_resume_kernel(
+        root.path(),
+        clock,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let session_id =
+        SessionId::try_from("session-delete-reserved").expect("session id");
+    let session_path = kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close initial session");
+
+    let resume_kernel = Arc::clone(&kernel);
+    let resume_session_id = session_id.clone();
+    let resume = tokio::spawn(async move {
+        resume_kernel.resume_session(resume_session_id, cwd).await
+    });
+    entered.notified().await;
+
+    let delete_result = kernel.delete_session(&session_id).await;
+    release.notify_waiters();
+    resume
+        .await
+        .expect("join Resume")
+        .expect("complete reserved Resume");
+
+    assert!(matches!(
+        delete_result,
+        Err(kernel::KernelError::DuplicateSession(id)) if id == session_id
+    ));
+    assert!(session_path.exists());
+}
+
+/// Rejects public operations while a registered Session is still starting.
+#[tokio::test]
+async fn starting_session_rejects_close_until_resources_are_ready() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_650)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let kernel = build_gated_start_kernel(
+        root.path(),
+        clock,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+    );
+    let session_id =
+        SessionId::try_from("session-starting-close").expect("session id");
+    let create_kernel = Arc::clone(&kernel);
+    let create_session_id = session_id.clone();
+    let create = tokio::spawn(async move {
+        create_kernel
+            .create_session(SessionCreateOptions {
+                session_id: create_session_id,
+                cwd,
+                parent_session_id: None,
+            })
+            .await
+    });
+    entered.notified().await;
+
+    let close_result = kernel.close_session(&session_id).await;
+    release.notify_waiters();
+    let create_result = create.await.expect("join Session creation");
+
+    assert_eq!(
+        close_result
+            .expect_err("starting Session must reject Close")
+            .to_string(),
+        "session is starting"
+    );
+    create_result.expect("complete Session creation after startup release");
+}
+
+/// Rejects a live Resume that loses the lifecycle race while its hook is paused.
+#[tokio::test]
+async fn live_resume_rechecks_lifecycle_after_before_switch_hook() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_700)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let kernel = build_gated_resume_kernel(
+        root.path(),
+        clock,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let session_id =
+        SessionId::try_from("session-live-resume-close").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let resume_kernel = Arc::clone(&kernel);
+    let resume_session_id = session_id.clone();
+    let resume_cwd = cwd.clone();
+    let resume = tokio::spawn(async move {
+        resume_kernel
+            .resume_session(resume_session_id, resume_cwd)
+            .await
+    });
+    entered.notified().await;
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close live session while Resume hook is paused");
+    release.notify_waiters();
+
+    let resume_error = resume
+        .await
+        .expect("join live Resume")
+        .expect_err("Resume must observe the completed close");
+    assert!(matches!(resume_error, kernel::KernelError::SessionClosing));
 }
 
 /// Session creation, metadata changes, and resume dispatch their declared hooks.
@@ -1139,9 +1702,9 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
     );
 }
 
-/// A queued image follow-up becomes the next model turn and leaves no pending entry.
+/// A follow-up racing final settlement is consumed once and never revives on Resume.
 #[tokio::test]
-async fn queued_image_follow_up_is_consumed_by_the_next_model_turn() {
+async fn queue_racing_final_checkpoint_recovers_exactly_once() {
     let root = tempfile::tempdir().expect("store root");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(12_000)));
     let ids: Arc<dyn IdGenerator> = Arc::new(SequentialIds(AtomicU64::new(0)));
@@ -1160,7 +1723,7 @@ async fn queued_image_follow_up_is_consumed_by_the_next_model_turn() {
     kernel
         .create_session(SessionCreateOptions {
             session_id: session_id.clone(),
-            cwd,
+            cwd: cwd.clone(),
             parent_session_id: None,
         })
         .await
@@ -1190,7 +1753,7 @@ async fn queued_image_follow_up_is_consumed_by_the_next_model_turn() {
             mime_type: "image/png".to_string(),
         },
     ];
-    kernel
+    let queued = kernel
         .queue_message(
             &session_id,
             QueueKind::FollowUp,
@@ -1212,6 +1775,30 @@ async fn queued_image_follow_up_is_consumed_by_the_next_model_turn() {
             .follow_up
             .is_empty()
     );
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close after queue consumption");
+    kernel
+        .resume_session(session_id.clone(), cwd)
+        .await
+        .expect("resume after queue consumption");
+    assert!(
+        kernel
+            .pending_messages(&session_id)
+            .expect("resumed pending messages")
+            .follow_up
+            .is_empty()
+    );
+    let queued_message_count = kernel
+        .session_transcript(&session_id)
+        .expect("resumed transcript")
+        .into_iter()
+        .filter(|message| {
+            message.identity.message_id == queued.message.identity.message_id
+        })
+        .count();
+    assert_eq!(queued_message_count, 1);
     let requests = model.requests.lock().expect("request lock");
     assert_eq!(requests.len(), 2);
     assert!(
@@ -1512,6 +2099,139 @@ async fn skills_return_metadata_without_file_bodies() {
             .expect("invoke Session Skill")
             .contains("SECRET BODY")
     );
+}
+
+/// Queued Skill diagnostics use the Turn active after synchronous expansion completes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_skill_diagnostic_uses_latest_active_turn() {
+    let root = tempfile::tempdir().expect("store root");
+    let skill_root = tempfile::tempdir().expect("skill root");
+    let skill_path = skill_root.path().join("skills/review/SKILL.md");
+    fs::create_dir_all(skill_path.parent().expect("Skill parent"))
+        .expect("create Skill parent");
+    fs::write(
+        &skill_path,
+        "---\nname: review\ndescription: Review code\n---\nreview body\n",
+    )
+    .expect("write Skill");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(34_000)));
+    let model = Arc::new(TwoTurnGatedModel::default());
+    let kernel = build_kernel(
+        root.path().to_path_buf(),
+        Arc::clone(&model) as Arc<dyn Model>,
+        clock,
+        Arc::new(SequentialIds(AtomicU64::new(0))),
+        Some(skill_root.path().to_path_buf()),
+    );
+    let session_id =
+        SessionId::try_from("session-queued-skill-race").expect("session id");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    fs::remove_file(&skill_path).expect("remove discovered Skill file");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&skill_path)
+        .status()
+        .expect("execute mkfifo");
+    assert!(
+        status.success(),
+        "mkfifo must create the blocking Skill path"
+    );
+    let sink = Arc::new(RecordingSink::default());
+
+    let running_kernel = Arc::clone(&kernel);
+    let running_session = session_id.clone();
+    let running_sink = Arc::clone(&sink);
+    let run = tokio::spawn(async move {
+        running_kernel
+            .run(
+                RunRequest {
+                    session_id: running_session,
+                    input: "first".into(),
+                },
+                running_sink as Arc<dyn EventSink>,
+            )
+            .await
+    });
+    model.entered[0].notified().await;
+    kernel
+        .queue_message(&session_id, QueueKind::FollowUp, "advance")
+        .await
+        .expect("queue second Turn");
+
+    let (writer_opened_tx, writer_opened_rx) = tokio::sync::oneshot::channel();
+    let (write_tx, write_rx) = std::sync::mpsc::sync_channel(1);
+    let writer_path = skill_path.clone();
+    let writer = std::thread::spawn(move || {
+        let mut fifo = std::fs::OpenOptions::new()
+            .write(true)
+            .open(writer_path)
+            .expect("open Skill FIFO writer");
+        writer_opened_tx.send(()).expect("signal FIFO connection");
+        write_rx.recv().expect("wait to complete Skill read");
+        std::io::Write::write_all(&mut fifo, &[0xff])
+            .expect("write invalid UTF-8");
+    });
+    let queued_kernel = Arc::clone(&kernel);
+    let queued_session = session_id.clone();
+    let queued = tokio::spawn(async move {
+        queued_kernel
+            .queue_message(
+                &queued_session,
+                QueueKind::FollowUp,
+                "/skill:review inspect this",
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), writer_opened_rx)
+        .await
+        .expect("Skill expansion must reach the FIFO")
+        .expect("FIFO writer signal");
+
+    model.releases[0].notify_one();
+    tokio::time::timeout(Duration::from_secs(2), model.entered[1].notified())
+        .await
+        .expect("run must advance to the queued Turn");
+    write_tx.send(()).expect("complete Skill read");
+    tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("diagnostic queue timeout")
+        .expect("join diagnostic queue")
+        .expect("queue diagnostic message");
+    writer.join().expect("join FIFO writer");
+
+    {
+        let events = sink.0.lock().expect("event lock");
+        let turn_ids = events
+            .iter()
+            .filter(|event| {
+                matches!(event.payload, AgentEventPayload::TurnStart { .. })
+            })
+            .map(|event| event.metadata.turn_id.clone())
+            .collect::<Vec<_>>();
+        let diagnostic_turn = events.iter().find_map(|event| {
+            matches!(event.payload, AgentEventPayload::SkillDiagnostic { .. })
+                .then(|| event.metadata.turn_id.clone())
+        });
+        assert_eq!(turn_ids.len(), 2);
+        assert_eq!(diagnostic_turn.as_ref(), turn_ids.get(1));
+        assert_ne!(diagnostic_turn.as_ref(), turn_ids.first());
+    }
+
+    model.releases[1].notify_one();
+    tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .expect("run completion timeout")
+        .expect("join run")
+        .expect("complete run");
 }
 
 /// Automatic Skill read failures preserve input and emit a Turn-correlated diagnostic.

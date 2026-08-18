@@ -7,7 +7,7 @@ use super::super::*;
 /// Immutable inputs for one tool-free model summary request.
 #[derive(typed_builder::TypedBuilder)]
 pub(in crate::runtime) struct SummaryGeneration<'a> {
-    pub(in crate::runtime) session: &'a Arc<SessionRuntime>,
+    pub(in crate::runtime) session: &'a Arc<Session>,
     pub(in crate::runtime) run_id: &'a RunId,
     pub(in crate::runtime) turn_id: &'a TurnId,
     pub(in crate::runtime) timestamp: TimestampMs,

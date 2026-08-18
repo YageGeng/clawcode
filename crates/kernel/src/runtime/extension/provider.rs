@@ -7,19 +7,19 @@ use protocol::{
     RunId, TurnId,
 };
 
-use super::super::{Kernel, KernelError, SessionRuntime};
+use super::super::{Kernel, KernelError, Session};
 
 impl Kernel {
     /// Creates one request-local bridge from provider hooks to the session runtime.
     pub(in crate::runtime) fn completion_hooks(
         &self,
-        session: &Arc<SessionRuntime>,
+        session: &Arc<Session>,
         run_id: &RunId,
         turn_id: &TurnId,
     ) -> Result<Arc<dyn ModelRequestHooks>, KernelError> {
         Ok(Arc::new(
             ExtensionCompletionHooks::builder()
-                .runtime(Arc::clone(&session.extensions))
+                .runtime(session.extensions.runtime())
                 .context(self.extension_context(
                     session,
                     Some(run_id),

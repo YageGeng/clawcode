@@ -5,7 +5,7 @@ use super::{DirectSlashCommand, DirectSlashCommandResolution};
 #[derive(typed_builder::TypedBuilder)]
 pub(in crate::runtime) struct SlashCommandExecution<'a> {
     pub(super) session_id: &'a SessionId,
-    pub(super) session: &'a Arc<SessionRuntime>,
+    pub(super) session: &'a Arc<Session>,
     pub(super) run_id: &'a RunId,
     pub(super) turn_id: &'a TurnId,
     pub(super) trace_id: &'a TraceId,
@@ -126,13 +126,8 @@ impl Kernel {
                 }));
             }
         };
-        let cancellation = CancellationToken::new();
-        *execution
-            .session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            cancellation.clone();
+        let cancellation =
+            execution.session.execution.install_cancellation()?;
         tracing::info!(
             "started Slash Command /{} for session {}, Run {}, Turn {}, trace {}",
             execution.invocation.name,
@@ -320,7 +315,7 @@ impl Kernel {
     /// Persists one command message and emits its complete message lifecycle.
     async fn persist_and_emit_slash_message(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         emitter: &EventEmitter,
         message: &AgentMessage,
     ) -> Result<(), KernelError> {

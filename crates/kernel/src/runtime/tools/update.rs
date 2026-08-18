@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ::tools::ToolUpdateSink;
 use protocol::{ToolCall, ToolCallId, ToolResult};
 use tokio::sync::watch;
-use tools::ToolUpdateSink;
 
 /// Correlates one replaceable tool snapshot with its transformed source call.
 #[derive(Clone)]

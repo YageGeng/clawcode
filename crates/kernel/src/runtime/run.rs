@@ -46,23 +46,17 @@ impl Kernel {
             return Ok(result);
         }
         let _run_guard = session.acquire_operation().await?;
-        let cancellation = CancellationToken::new();
-        *session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            cancellation.clone();
+        let cancellation = session.execution.install_cancellation()?;
         tracing::info!(
             "started Kernel Run {} for session {}",
             run_id,
             request.session_id
         );
-        let _active_run = ActiveRunLease::acquire(
-            Arc::clone(&session),
-            run_id.clone(),
-            first_turn_id.clone(),
-            Arc::clone(&sink),
-        )?;
+        let _active_run = session.execution.install_run(ActiveRunContext {
+            run_id: run_id.clone(),
+            turn_id: first_turn_id.clone(),
+            sink: Arc::clone(&sink),
+        })?;
         let emitter = EventEmitter {
             clock: Arc::clone(&self.clock),
             sink,
@@ -77,6 +71,7 @@ impl Kernel {
             protocol::RunInput::Text(command_input) => {
                 let input = session
                     .extensions
+                    .runtime_ref()
                     .emit_input(
                         protocol::InputEvent {
                             text: command_input.clone(),
@@ -145,7 +140,7 @@ impl Kernel {
             serde_json::json!({ "operation": "agent" }),
         )?;
         let execution: Result<RunCompletion, KernelError> = async {
-            let initial_tools = session.tool_state.snapshot()?.active_registry()?;
+            let initial_tools = session.tools.snapshot()?.active_registry()?;
             let initial_skills = session
                 .skill_catalog()?
                 .map_or_else(Vec::new, |catalog| catalog.descriptors());
@@ -155,7 +150,7 @@ impl Kernel {
             )?;
             let before_agent = session
                 .extensions
-                .emit_before_agent_start(
+                .runtime_ref().emit_before_agent_start(
                     protocol::BeforeAgentStartEvent {
                         prompt: run_input.clone(),
                         system_prompt: initial_system_prompt.text,
@@ -172,16 +167,12 @@ impl Kernel {
             let mut before_agent_messages = Some(before_agent.messages);
             session
                 .extensions
-                .emit_agent_start(
+                .runtime_ref().emit_agent_start(
                     &protocol::AgentStartEvent,
                     &extension_context,
                 )
                 .await;
-            let initial_model = session
-                .model
-                .read()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .clone();
+            let initial_model = session.model.active()?;
 
         let pre_prompt_compaction = self
             .pre_prompt_compaction(&session, initial_model.profile())?;
@@ -234,17 +225,11 @@ impl Kernel {
             );
             // Model selection is snapshotted once so host changes made during
             // this Turn apply only to the next Turn.
-            let turn_model = session
-                .model
-                .read()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .clone();
+            let turn_model = session.model.active()?;
             turn_model.preflight().await?;
-            *session
-                .diagnostic_turn_id
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)? =
-                Some(turn_id.clone());
+            session
+                .execution
+                .set_active_turn(&run_id, turn_id.clone())?;
             emitter
                 .emit(
                     turn_id.clone(),
@@ -260,7 +245,7 @@ impl Kernel {
             )?;
             session
                 .extensions
-                .emit_turn_start(
+                .runtime_ref().emit_turn_start(
                     &protocol::TurnStartEvent {
                         turn_index: turns.len(),
                         timestamp_ms: turn_started_at,
@@ -269,8 +254,6 @@ impl Kernel {
                 )
                 .await;
 
-            let queued_entry_id =
-                queued_item.as_ref().map(|item| item.entry_id.clone());
             let user_message = match queued_item.as_ref() {
                 Some(item) => Some(item.queued.message.clone()),
                 None => match next_initial_input.take() {
@@ -306,7 +289,7 @@ impl Kernel {
                     .await?;
                 session
                     .extensions
-                    .emit_message_start(
+                    .runtime_ref().emit_message_start(
                         &protocol::MessageStartEvent {
                             message: message.clone(),
                         },
@@ -315,16 +298,27 @@ impl Kernel {
                     .await;
                 let message = session
                     .extensions
-                    .emit_message_end(
+                    .runtime_ref().emit_message_end(
                         protocol::MessageEndEvent {
                             message: message.clone(),
                         },
                         &extension_context,
                     )
                     .await;
-                match queued_entry_id {
-                    Some(entry_id) => {
-                        self.persist_message_at(&session, &message, entry_id)?
+                match queued_item.as_ref() {
+                    Some(item) => {
+                        let record = self.queue_cancellation_record(
+                            &session,
+                            Some(&run_id),
+                            item.queued.queue_id.clone(),
+                            QueueCancellationReason::Consumed,
+                        )?;
+                        session.consume_pending(
+                            &message,
+                            item.entry_id.clone(),
+                            record,
+                            &item.queued.queue_id,
+                        )?;
                     }
                     None => self.persist_message(&session, &message)?,
                 }
@@ -339,19 +333,6 @@ impl Kernel {
                         )
                         .await?;
                 }
-                if let Some(item) = queued_item {
-                    self.record_queue_cancellation(
-                        &session,
-                        Some(&run_id),
-                        item.queued.queue_id.clone(),
-                        QueueCancellationReason::Consumed,
-                    )?;
-                    session
-                        .queue
-                        .lock()
-                        .map_err(|_poison_error| KernelError::Poisoned)?
-                        .remove(&item.queued.queue_id);
-                }
                 emitter
                     .emit_at(
                         turn_id.clone(),
@@ -364,11 +345,7 @@ impl Kernel {
                 produced_messages.push(message);
             }
 
-            let mut history = session
-                .history
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .clone();
+            let mut history = session.transcript.history()?;
             // Failed Assistant attempts remain replayable in Store but are
             // excluded from the next active provider context, matching pi.
             history.retain(|message| {
@@ -380,7 +357,7 @@ impl Kernel {
             });
             // One immutable registry snapshot defines the complete Turn.
             let turn_tools =
-                Arc::new(session.tool_state.snapshot()?.active_registry()?);
+                Arc::new(session.tools.snapshot()?.active_registry()?);
             let mut system_prompt = self.system_prompt_message(
                 &session,
                 turn_id.clone(),
@@ -400,7 +377,7 @@ impl Kernel {
                         .materialize_extension_message(&turn_id, draft)?;
                     session
                         .extensions
-                        .emit_message_start(
+                        .runtime_ref().emit_message_start(
                             &protocol::MessageStartEvent {
                                 message: message.clone(),
                             },
@@ -410,7 +387,7 @@ impl Kernel {
                     let identity = message.identity.clone();
                     let message = session
                         .extensions
-                        .emit_message_end(
+                        .runtime_ref().emit_message_end(
                             protocol::MessageEndEvent { message },
                             &extension_context,
                         )
@@ -447,7 +424,7 @@ impl Kernel {
             };
             if let Some(messages) = session
                 .extensions
-                .emit_context(
+                .runtime_ref().emit_context(
                     protocol::ContextEvent {
                         request: request_for_model.clone(),
                     },
@@ -484,7 +461,7 @@ impl Kernel {
                 .await?;
             session
                 .extensions
-                .emit_message_start(
+                .runtime_ref().emit_message_start(
                     &protocol::MessageStartEvent {
                         message: attempt.snapshot(assistant_timestamp)?,
                     },
@@ -543,7 +520,7 @@ impl Kernel {
                                         },
                                     )
                                     .await?;
-                                session.extensions.emit_message_update(
+                                session.extensions.runtime_ref().emit_message_update(
                                     &protocol::MessageUpdateEvent {
                                         message: attempt.snapshot(timestamp)?,
                                         update: protocol::MessageUpdate::Text {
@@ -564,7 +541,7 @@ impl Kernel {
                                         },
                                     )
                                     .await?;
-                                session.extensions.emit_message_update(
+                                session.extensions.runtime_ref().emit_message_update(
                                     &protocol::MessageUpdateEvent {
                                         message: attempt.snapshot(timestamp)?,
                                         update: protocol::MessageUpdate::Reasoning {
@@ -575,7 +552,7 @@ impl Kernel {
                                 ).await;
                             }
                             ModelStreamEvent::ToolCall(call) => {
-                                session.extensions.emit_message_update(
+                                session.extensions.runtime_ref().emit_message_update(
                                     &protocol::MessageUpdateEvent {
                                         message: attempt.snapshot(timestamp)?,
                                         update: protocol::MessageUpdate::ToolCall {
@@ -619,7 +596,7 @@ impl Kernel {
                     }
                 };
             let original_identity = assistant.identity.clone();
-            let assistant = session.extensions.emit_message_end(
+            let assistant = session.extensions.runtime_ref().emit_message_end(
                 protocol::MessageEndEvent { message: assistant },
                 &extension_context,
             ).await;
@@ -695,12 +672,12 @@ impl Kernel {
                         },
                     )
                     .await?;
-                session.extensions.emit_message_start(
+                session.extensions.runtime_ref().emit_message_start(
                     &protocol::MessageStartEvent { message: message.clone() },
                     &extension_context,
                 ).await;
                 let original_identity = message.identity.clone();
-                let message = session.extensions.emit_message_end(
+                let message = session.extensions.runtime_ref().emit_message_end(
                     protocol::MessageEndEvent { message },
                     &extension_context,
                 ).await;
@@ -756,7 +733,7 @@ impl Kernel {
                     AgentEventPayload::TurnEnd { turn: turn.clone() },
                 )
                 .await?;
-            session.extensions.emit_turn_end(
+            session.extensions.runtime_ref().emit_turn_end(
                 &protocol::TurnEndEvent {
                     turn: turn.clone(),
                     tool_results: turn_tool_results,
@@ -927,27 +904,21 @@ impl Kernel {
 
             let should_continue_for_tools =
                 !tool_terminated && !tool_calls.is_empty();
-            next_queued_item = {
-                let queue = session
-                    .queue
-                    .lock()
-                    .map_err(|_poison_error| KernelError::Poisoned)?;
-                queue.next(!should_continue_for_tools)
-            };
+            next_queued_item = session
+                .execution
+                .next_pending(!should_continue_for_tools)?;
             let should_continue =
                 should_continue_for_tools || next_queued_item.is_some();
             if !should_continue {
-                let should_threshold_compact =
-                    ContextUsageEstimate::from_history(
-                        &session
-                            .history
-                            .lock()
-                            .map_err(|_poison_error| KernelError::Poisoned)?,
-                    )
-                    .should_compact(
-                        turn_model.profile().context_tokens,
-                        self.compaction_policy,
-                    );
+                let should_threshold_compact = session
+                    .transcript
+                    .inspect_history(|history| {
+                        ContextUsageEstimate::from_history(history)
+                            .should_compact(
+                                turn_model.profile().context_tokens,
+                                self.compaction_policy,
+                            )
+                    })?;
                 let auto_compaction_reason = match overflow_recovery {
                     Some(OverflowRecovery::CompactOnly) => {
                         Some(CompactionReason::Overflow)

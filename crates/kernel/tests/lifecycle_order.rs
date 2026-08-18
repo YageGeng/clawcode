@@ -9,8 +9,8 @@ use extension::{
     ExtensionCommandContext, ExtensionCommandHandler, ExtensionContext,
     ExtensionError, ExtensionHandler, ExtensionModule, ExtensionRegistrar,
     InputPoint, MessageEndPoint, MessageStartPoint, MessageUpdatePoint,
-    ResourcesDiscoverPoint, StaticExtensionFactory, TurnEndPoint,
-    TurnStartPoint,
+    ResourcesDiscoverPoint, SessionTreePoint, StaticExtensionFactory,
+    TurnEndPoint, TurnStartPoint,
 };
 use futures::{Stream, stream};
 use kernel::{
@@ -26,7 +26,7 @@ use protocol::{
     MessageContent, MessageEndEvent, ModelFinal, ModelProfile, ModelRequest,
     ModelStreamEvent, ModelUsage, QueueKind, ResourcesDiscoverEvent,
     ResourcesDiscoverResult, RunRequest, SessionId, SessionTitle,
-    StaticExtensionRegistration, StopReason, UserBashRequest,
+    SessionTreeEvent, StaticExtensionRegistration, StopReason, UserBashRequest,
 };
 use skill::FilesystemSkillFactory;
 use store::{
@@ -167,6 +167,50 @@ impl StoreFactory for DurabilityStoreFactory {
     /// Delegates session deletion.
     fn delete(&self, session_id: &SessionId) -> Result<(), StoreError> {
         self.inner.delete(session_id)
+    }
+}
+
+/// Store factory wrapper that records and rejects persisted Session deletion.
+struct DeleteFailingStoreFactory {
+    inner: Arc<dyn StoreFactory>,
+    delete_attempted: Arc<AtomicBool>,
+}
+
+impl StoreFactory for DeleteFailingStoreFactory {
+    /// Delegates Session creation.
+    fn create(
+        &self,
+        options: SessionCreateOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        self.inner.create(options)
+    }
+
+    /// Delegates persisted Session opening.
+    fn open(&self, path: &Path) -> Result<Box<dyn SessionStore>, StoreError> {
+        self.inner.open(path)
+    }
+
+    /// Delegates Session forking.
+    fn fork(
+        &self,
+        source_path: &Path,
+        options: SessionForkOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        self.inner.fork(source_path, options)
+    }
+
+    /// Delegates Session discovery.
+    fn list(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<SessionMetadata>, StoreError> {
+        self.inner.list(cwd)
+    }
+
+    /// Records the cleanup attempt before returning an injected failure.
+    fn delete(&self, _session_id: &SessionId) -> Result<(), StoreError> {
+        self.delete_attempted.store(true, Ordering::SeqCst);
+        Err(std::io::Error::other("injected delete failure").into())
     }
 }
 
@@ -400,6 +444,43 @@ impl ModelFactory for BlockingModelFactory {
 /// Shared ordered hook recorder.
 #[derive(Clone)]
 struct LifecycleRecorder(Arc<Mutex<Vec<&'static str>>>);
+
+/// Records completed tree navigation events for leaf-correlation assertions.
+#[derive(Clone)]
+struct TreeEventRecorder(Arc<Mutex<Vec<SessionTreeEvent>>>);
+
+#[async_trait]
+impl ExtensionHandler<SessionTreePoint> for TreeEventRecorder {
+    /// Retains one completed tree event without changing navigation behavior.
+    async fn handle(
+        &self,
+        event: &SessionTreeEvent,
+        _context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        self.0.lock().expect("tree event lock").push(event.clone());
+        Ok(())
+    }
+}
+
+impl ExtensionModule for TreeEventRecorder {
+    /// Declares the extension used to observe completed navigation.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("tree-event-recorder")
+                .expect("extension id"),
+            name: "Tree event recorder".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers only the completed tree observer point.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<SessionTreePoint, _>(self.clone())
+    }
+}
 
 macro_rules! observe_lifecycle {
     ($point:ty, $event:ty, $name:literal) => {
@@ -834,6 +915,115 @@ async fn create_session_sync_failure_rolls_back_registration() {
     );
 }
 
+/// Preserves the startup failure while still attempting fallible rollback deletion.
+#[tokio::test]
+async fn startup_rollback_preserves_primary_error_when_delete_fails() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let delete_attempted = Arc::new(AtomicBool::new(false));
+    let inner: Arc<dyn StoreFactory> = Arc::new(DurabilityStoreFactory {
+        inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+        order: Arc::new(Mutex::new(Vec::new())),
+        fail_sync: Arc::new(AtomicBool::new(true)),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DeleteFailingStoreFactory {
+            inner,
+            delete_attempted: Arc::clone(&delete_attempted),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id = SessionId::try_from("session-primary-startup-error")
+        .expect("session id");
+
+    let error = kernel
+        .create_session(SessionCreateOptions {
+            session_id,
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect_err("startup sync must remain primary");
+
+    assert!(error.to_string().contains("injected sync failure"));
+    assert!(delete_attempted.load(Ordering::SeqCst));
+}
+
+/// Removes a closing runtime even when its final Store checkpoint fails.
+#[tokio::test]
+async fn close_sync_failure_does_not_leave_session_stuck_closing() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let fail_sync = Arc::new(AtomicBool::new(false));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order: Arc::new(Mutex::new(Vec::new())),
+            fail_sync: Arc::clone(&fail_sync),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-close-sync-failure").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    fail_sync.store(true, Ordering::SeqCst);
+
+    assert!(matches!(
+        kernel
+            .close_session(&session_id)
+            .await
+            .expect_err("close sync must fail"),
+        kernel::KernelError::Store(_)
+    ));
+    assert!(matches!(
+        kernel
+            .session_messages(&session_id)
+            .expect_err("failed close must still unregister the runtime"),
+        kernel::KernelError::SessionNotFound(id) if id == session_id
+    ));
+
+    fail_sync.store(false, Ordering::SeqCst);
+    kernel
+        .resume_session(session_id, cwd)
+        .await
+        .expect("resume after failed close checkpoint");
+}
+
 /// Queue acceptance and cancellation are synced before either API reports success.
 #[tokio::test]
 async fn queue_mutations_sync_before_returning() {
@@ -986,6 +1176,80 @@ async fn rename_session_syncs_before_returning() {
     assert_eq!(
         *order.lock().expect("durability lock"),
         vec!["set_name", "sync"]
+    );
+}
+
+/// Root navigation reports the leaf that was selected before the lane was cleared.
+#[tokio::test]
+async fn root_navigation_event_preserves_previous_leaf() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let module_events = Arc::clone(&events);
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::new(SystemClock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(TreeEventRecorder(Arc::clone(&module_events)))
+                    as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-root-event").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "create branch".into(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("prepare branch");
+    let old_leaf = kernel
+        .session_tree(&session_id)
+        .expect("session tree")
+        .leaf_id
+        .expect("branch leaf");
+
+    kernel
+        .navigate_session(&session_id, None)
+        .await
+        .expect("navigate to root");
+
+    assert_eq!(
+        *events.lock().expect("tree event lock"),
+        vec![
+            SessionTreeEvent::builder()
+                .old_leaf_id(Some(old_leaf))
+                .new_leaf_id(None)
+                .from_extension(false)
+                .build()
+        ]
     );
 }
 

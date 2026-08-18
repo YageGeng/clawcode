@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -556,6 +557,56 @@ impl ExtensionModule for SessionDynamicToolModule {
     }
 }
 
+/// Registers the dynamic Tool only while its simulated provider is available.
+#[derive(Clone)]
+struct RestoredDynamicToolModule {
+    available: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionStartPoint> for RestoredDynamicToolModule {
+    /// Persists the initial selection and restores the Tool only when available.
+    async fn handle(
+        &self,
+        event: &SessionStartEvent,
+        context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        if self.available.load(Ordering::SeqCst) {
+            context
+                .register_tool(Arc::new(SessionDynamicTool))
+                .await
+                .map_err(|error| ExtensionError::Handler(error.to_string()))?;
+        }
+        if event.reason == protocol::SessionStartReason::New {
+            context
+                .set_active_tools(vec!["session_dynamic".to_string()])
+                .await
+                .map_err(|error| ExtensionError::Handler(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+impl ExtensionModule for RestoredDynamicToolModule {
+    /// Declares the extension used to simulate temporary Tool unavailability.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("restored-dynamic-tool")
+                .expect("extension id"),
+            name: "Restored dynamic tool".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the Session start handler that owns the dynamic Tool lifecycle.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<SessionStartPoint, _>(self.clone())
+    }
+}
+
 struct ShutdownReentry {
     errors: Arc<Mutex<Vec<ExtensionHostError>>>,
 }
@@ -800,6 +851,94 @@ async fn dynamically_registered_tool_is_active_in_its_session() {
     let requests = requests.lock().expect("tool request lock");
     assert!(requests[0].iter().any(|name| name == "session_dynamic"));
     assert!(!requests[1].iter().any(|name| name == "session_dynamic"));
+}
+
+/// Persisted active Tool preferences survive one Resume while the Tool is unavailable.
+#[tokio::test]
+async fn dynamic_tool_selection_survives_temporary_unavailability() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let available = Arc::new(AtomicBool::new(true));
+    let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+    let module_available = Arc::clone(&available);
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(ToolCaptureModelFactory {
+            requests: Arc::clone(&requests),
+        }))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(RestoredDynamicToolModule {
+                    available: Arc::clone(&module_available),
+                }) as Arc<dyn ExtensionModule>)
+            })],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(kernel::NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("dynamic-tool-restore").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close initial session");
+
+    available.store(false, Ordering::SeqCst);
+    kernel
+        .resume_session(session_id.clone(), cwd.clone())
+        .await
+        .expect("resume while dynamic Tool is unavailable");
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close unavailable session");
+
+    available.store(true, Ordering::SeqCst);
+    kernel
+        .resume_session(session_id.clone(), cwd)
+        .await
+        .expect("resume after dynamic Tool reconnects");
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "inspect restored tools".into(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("run with restored Tool selection");
+
+    assert!(
+        requests
+            .lock()
+            .expect("tool request lock")
+            .last()
+            .expect("captured model request")
+            .iter()
+            .any(|name| name == "session_dynamic")
+    );
 }
 
 /// Dynamic command changes emit complete ordered snapshots through the active Run sink.

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use store::{NewRecord, RecordKind, SessionRecord};
 
 use super::input::PromptInputExpansion;
-use super::{EventEmitter, Kernel, KernelError, SessionRuntime};
+use super::{EventEmitter, Kernel, KernelError, Session};
 
 impl Kernel {
     /// Persists and queues a complete user message for the active run.
@@ -23,10 +23,9 @@ impl Kernel {
         let input = input.into();
         let session = self.session(session_id)?;
         let run_id = session
-            .active_run_id
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .clone()
+            .execution
+            .active_run()?
+            .map(|active_run| active_run.run_id)
             .ok_or_else(|| {
                 KernelError::SessionNotRunning(session_id.clone())
             })?;
@@ -59,27 +58,17 @@ impl Kernel {
             }
         };
         if let Some(diagnostic) = expanded.diagnostic().cloned() {
-            let sink = session
-                .event_sink
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .clone()
+            // Expansion performs synchronous resource I/O, so refresh the
+            // active Turn before correlating a diagnostic emitted afterward.
+            let active_run = session
+                .execution
+                .active_run()?
+                .filter(|active_run| active_run.run_id == run_id)
                 .ok_or_else(|| {
-                    KernelError::Protocol(
-                        "active run is missing its event sink".to_string(),
-                    )
+                    KernelError::SessionNotRunning(session_id.clone())
                 })?;
-            let turn_id = session
-                .diagnostic_turn_id
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .clone()
-                .ok_or_else(|| {
-                    KernelError::Protocol(
-                        "active run is missing its diagnostic TurnId"
-                            .to_string(),
-                    )
-                })?;
+            let sink = Arc::clone(&active_run.sink);
+            let turn_id = active_run.turn_id.clone();
             EventEmitter {
                 clock: Arc::clone(&self.clock),
                 sink,
@@ -123,20 +112,19 @@ impl Kernel {
             EntryId::try_from(self.id_generator.next(IdKind::Entry))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
         );
-        self.record_operation(
-            &session,
-            &run_id,
-            RecordKind::QueueEnqueued,
-            item.enqueued_payload()?,
+        let record_id =
+            RecordId::try_from(self.id_generator.next(IdKind::Record))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        session.enqueue_pending(
+            NewRecord::builder()
+                .id(record_id)
+                .lane(session.transcript.lane())
+                .run_id(Some(run_id))
+                .kind(RecordKind::QueueEnqueued)
+                .payload(item.enqueued_payload()?)
+                .build(),
+            item,
         )?;
-        // Queue acceptance is externally acknowledged by this return value and
-        // may race the active Run's final checkpoint.
-        session.sync_store()?;
-        let mut queue = session
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        queue.push(item);
         Ok(queued)
     }
 
@@ -146,11 +134,7 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<PendingMessages, KernelError> {
         let session = self.session(session_id)?;
-        let queue = session
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        Ok(queue.snapshot())
+        session.execution.pending_snapshot()
     }
 
     /// Cancels one queued message durably before removing its in-memory view.
@@ -161,27 +145,20 @@ impl Kernel {
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
         let exists = session
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .ids()
+            .execution
+            .pending_ids()?
             .iter()
             .any(|candidate| candidate == queue_id);
         if !exists {
             return Err(KernelError::PendingMessageNotFound(queue_id.clone()));
         }
-        self.record_queue_cancellation(
+        let record = self.queue_cancellation_record(
             &session,
             None,
             queue_id.clone(),
             QueueCancellationReason::Removed,
         )?;
-        session.sync_store()?;
-        session
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .remove(queue_id);
+        session.remove_pending(record, queue_id)?;
         Ok(())
     }
 
@@ -191,55 +168,90 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
-        let queue_ids = session
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .ids();
-        for queue_id in &queue_ids {
-            self.record_queue_cancellation(
-                &session,
-                None,
-                queue_id.clone(),
-                QueueCancellationReason::Cleared,
-            )?;
-        }
-        session.sync_store()?;
-        let mut queue = session
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        for queue_id in queue_ids {
-            queue.remove(&queue_id);
-        }
+        let queue_ids = session.execution.pending_ids()?;
+        let records = queue_ids
+            .iter()
+            .map(|queue_id| {
+                self.queue_cancellation_record(
+                    &session,
+                    None,
+                    queue_id.clone(),
+                    QueueCancellationReason::Cleared,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        session.clear_pending(records, &queue_ids)?;
         Ok(())
     }
 
     /// Appends a queue cancellation with an optional active-run correlation.
-    pub(super) fn record_queue_cancellation(
+    pub(super) fn queue_cancellation_record(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         run_id: Option<&protocol::RunId>,
         queue_id: QueueId,
         reason: QueueCancellationReason,
-    ) -> Result<(), KernelError> {
+    ) -> Result<NewRecord, KernelError> {
         let record_id =
             RecordId::try_from(self.id_generator.next(IdKind::Record))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .append_record(
-                NewRecord::builder()
-                    .id(record_id)
-                    .lane(session.lane.clone())
-                    .run_id(run_id.cloned())
-                    .kind(RecordKind::QueueCancelled)
-                    .payload(cancelled_payload(queue_id, reason)?)
-                    .build(),
-            )?;
-        Ok(())
+        Ok(NewRecord::builder()
+            .id(record_id)
+            .lane(session.transcript.lane())
+            .run_id(run_id.cloned())
+            .kind(RecordKind::QueueCancelled)
+            .payload(cancelled_payload(queue_id, reason)?)
+            .build())
+    }
+}
+
+impl Session {
+    /// Persists and syncs an accepted item before exposing it in memory.
+    fn enqueue_pending(
+        &self,
+        record: NewRecord,
+        item: PendingQueueItem,
+    ) -> Result<(), KernelError> {
+        self.transcript.append_record(record)?;
+        self.sync_store()?;
+        self.execution.push_pending(item)
+    }
+
+    /// Persists and syncs one removal before deleting its in-memory item.
+    fn remove_pending(
+        &self,
+        record: NewRecord,
+        queue_id: &QueueId,
+    ) -> Result<(), KernelError> {
+        self.transcript.append_record(record)?;
+        self.sync_store()?;
+        self.execution.remove_pending(queue_id)
+    }
+
+    /// Persists and syncs all clear records before deleting in-memory items.
+    fn clear_pending(
+        &self,
+        records: Vec<NewRecord>,
+        queue_ids: &[QueueId],
+    ) -> Result<(), KernelError> {
+        for record in records {
+            self.transcript.append_record(record)?;
+        }
+        self.sync_store()?;
+        self.execution.remove_pending_batch(queue_ids)
+    }
+
+    /// Commits one consumed message and cancellation before removing its item.
+    pub(super) fn consume_pending(
+        &self,
+        message: &AgentMessage,
+        entry_id: EntryId,
+        record: NewRecord,
+        queue_id: &QueueId,
+    ) -> Result<(), KernelError> {
+        self.transcript.append_context_message(entry_id, message)?;
+        self.transcript.append_record(record)?;
+        self.execution.remove_pending(queue_id)
     }
 }
 
@@ -349,6 +361,11 @@ impl PendingQueue {
                 .then(|| self.follow_up.front().cloned())
                 .flatten()
         })
+    }
+
+    /// Reports whether both scheduling lanes contain no pending item.
+    pub(super) fn is_empty(&self) -> bool {
+        self.steering.is_empty() && self.follow_up.is_empty()
     }
 
     /// Removes one item by stable identifier after its cancellation is durable.
