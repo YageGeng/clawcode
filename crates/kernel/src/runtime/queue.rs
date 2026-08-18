@@ -119,6 +119,9 @@ impl Kernel {
             RecordKind::QueueEnqueued,
             item.enqueued_payload()?,
         )?;
+        // Queue acceptance is externally acknowledged by this return value and
+        // may race the active Run's final checkpoint.
+        session.sync_store()?;
         let mut queue = session
             .queue
             .lock()
@@ -163,6 +166,7 @@ impl Kernel {
             queue_id.clone(),
             QueueCancellationReason::Removed,
         )?;
+        session.sync_store()?;
         session
             .queue
             .lock()
@@ -182,18 +186,21 @@ impl Kernel {
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .ids();
-        for queue_id in queue_ids {
+        for queue_id in &queue_ids {
             self.record_queue_cancellation(
                 &session,
                 None,
                 queue_id.clone(),
                 QueueCancellationReason::Cleared,
             )?;
-            session
-                .queue
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .remove(&queue_id);
+        }
+        session.sync_store()?;
+        let mut queue = session
+            .queue
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        for queue_id in queue_ids {
+            queue.remove(&queue_id);
         }
         Ok(())
     }

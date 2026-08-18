@@ -290,6 +290,9 @@ impl Kernel {
             .await?;
             messages.push(output_message);
         }
+        // SlashCommandEnd is the externally visible operation boundary for
+        // command-owned writes such as manual compaction.
+        execution.session.sync_store()?;
         emitter
             .emit(
                 execution.turn_id.clone(),
@@ -331,6 +334,7 @@ impl Kernel {
             )
             .await?;
         self.persist_message(session, message)?;
+        session.sync_store()?;
         emitter
             .emit_at(
                 message.identity.turn_id.clone(),

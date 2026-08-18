@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -18,15 +19,22 @@ use kernel::{
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
-    AgentEvent, AgentMessage, BeforeAgentStartEvent, BeforeAgentStartResult,
+    AgentEvent, AgentEventPayload, AgentMessage, BeforeAgentStartEvent,
+    BeforeAgentStartResult, CompactionPolicy, EntryId,
     ExtensionCommandDefinition, ExtensionDescriptor, ExtensionId,
-    ExtensionUserMessage, InputEvent, InputResult, InputSource,
-    MessageEndEvent, ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent,
-    ModelUsage, QueueKind, ResourcesDiscoverEvent, ResourcesDiscoverResult,
-    RunRequest, SessionId, StaticExtensionRegistration, StopReason,
+    ExtensionUserMessage, InputEvent, InputResult, InputSource, LaneId,
+    MessageContent, MessageEndEvent, ModelFinal, ModelProfile, ModelRequest,
+    ModelStreamEvent, ModelUsage, QueueKind, ResourcesDiscoverEvent,
+    ResourcesDiscoverResult, RunRequest, SessionId, SessionTitle,
+    StaticExtensionRegistration, StopReason, UserBashRequest,
 };
 use skill::FilesystemSkillFactory;
-use store::{JsonlStoreFactory, SessionCreateOptions, SystemClock};
+use store::{
+    EntryKind, JsonlStoreFactory, NewEntry, NewRecord, RecordKind,
+    SessionCreateOptions, SessionEntry, SessionForkOptions, SessionMetadata,
+    SessionRecord, SessionStore, StoreError, StoreFactory, SystemClock,
+};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
 
@@ -101,6 +109,291 @@ impl EventSink for DiscardSink {
     /// Discards one live event.
     async fn emit(&self, _event: AgentEvent) -> Result<(), kernel::SinkError> {
         Ok(())
+    }
+}
+
+/// Store factory that records mutation and durability boundaries around real JSONL stores.
+struct DurabilityStoreFactory {
+    inner: JsonlStoreFactory,
+    order: Arc<Mutex<Vec<&'static str>>>,
+    fail_sync: Arc<AtomicBool>,
+}
+
+impl StoreFactory for DurabilityStoreFactory {
+    /// Creates one instrumented real store.
+    fn create(
+        &self,
+        options: SessionCreateOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        Ok(Box::new(DurabilityStore {
+            inner: self.inner.create(options)?,
+            order: Arc::clone(&self.order),
+            fail_sync: Arc::clone(&self.fail_sync),
+        }))
+    }
+
+    /// Opens one instrumented real store.
+    fn open(&self, path: &Path) -> Result<Box<dyn SessionStore>, StoreError> {
+        Ok(Box::new(DurabilityStore {
+            inner: self.inner.open(path)?,
+            order: Arc::clone(&self.order),
+            fail_sync: Arc::clone(&self.fail_sync),
+        }))
+    }
+
+    /// Forks one instrumented real store.
+    fn fork(
+        &self,
+        source_path: &Path,
+        options: SessionForkOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        let inner = self.inner.fork(source_path, options)?;
+        self.order.lock().expect("durability lock").push("forked");
+        Ok(Box::new(DurabilityStore {
+            inner,
+            order: Arc::clone(&self.order),
+            fail_sync: Arc::clone(&self.fail_sync),
+        }))
+    }
+
+    /// Delegates session discovery.
+    fn list(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<SessionMetadata>, StoreError> {
+        self.inner.list(cwd)
+    }
+
+    /// Delegates session deletion.
+    fn delete(&self, session_id: &SessionId) -> Result<(), StoreError> {
+        self.inner.delete(session_id)
+    }
+}
+
+/// Real session store that exposes selected mutation and sync order to tests.
+struct DurabilityStore {
+    inner: Box<dyn SessionStore>,
+    order: Arc<Mutex<Vec<&'static str>>>,
+    fail_sync: Arc<AtomicBool>,
+}
+
+impl SessionStore for DurabilityStore {
+    /// Returns the delegated session identifier.
+    fn session_id(&self) -> &SessionId {
+        self.inner.session_id()
+    }
+
+    /// Returns the delegated session path.
+    fn path(&self) -> &Path {
+        self.inner.path()
+    }
+
+    /// Delegates lane creation.
+    fn create_lane(
+        &mut self,
+        lane: LaneId,
+        at: Option<EntryId>,
+    ) -> Result<(), StoreError> {
+        self.inner.create_lane(lane, at)
+    }
+
+    /// Delegates lane movement.
+    fn move_lane(
+        &mut self,
+        lane: &LaneId,
+        to: Option<EntryId>,
+    ) -> Result<(), StoreError> {
+        self.order
+            .lock()
+            .expect("durability lock")
+            .push("move_lane");
+        self.inner.move_lane(lane, to)
+    }
+
+    /// Delegates entry persistence.
+    fn append_entry(
+        &mut self,
+        lane: &LaneId,
+        entry: NewEntry,
+    ) -> Result<SessionEntry, StoreError> {
+        if entry.kind == EntryKind::Message
+            && entry.payload.pointer("/content/type")
+                == Some(&serde_json::json!("bash_execution"))
+        {
+            self.order
+                .lock()
+                .expect("durability lock")
+                .push("bash_message");
+        }
+        self.inner.append_entry(lane, entry)
+    }
+
+    /// Returns the delegated lane leaf.
+    fn lane(&self, lane: &LaneId) -> Option<&EntryId> {
+        self.inner.lane(lane)
+    }
+
+    /// Returns one delegated entry.
+    fn get_entry(&self, id: &EntryId) -> Option<&SessionEntry> {
+        self.inner.get_entry(id)
+    }
+
+    /// Returns all delegated entries.
+    fn entries(&self) -> Vec<SessionEntry> {
+        self.inner.entries()
+    }
+
+    /// Returns one delegated branch.
+    fn branch(&self, leaf: &EntryId) -> Result<Vec<SessionEntry>, StoreError> {
+        self.inner.branch(leaf)
+    }
+
+    /// Records selected operation mutations before delegating persistence.
+    fn append_record(
+        &mut self,
+        record: NewRecord,
+    ) -> Result<SessionRecord, StoreError> {
+        let marker = match record.kind {
+            RecordKind::StepAttempt => Some("step_attempt"),
+            RecordKind::OperationFinished => Some("operation_finished"),
+            RecordKind::QueueEnqueued => Some("queue_enqueued"),
+            RecordKind::QueueCancelled => Some("queue_cancelled"),
+            RecordKind::OperationStarted
+            | RecordKind::AbortRequested
+            | RecordKind::ToolStarted
+            | RecordKind::WriteDeferred
+            | RecordKind::Usage => None,
+        };
+        if let Some(marker) = marker {
+            self.order.lock().expect("durability lock").push(marker);
+        }
+        self.inner.append_record(record)
+    }
+
+    /// Records and delegates one durability checkpoint.
+    fn sync(&mut self) -> Result<(), StoreError> {
+        self.order.lock().expect("durability lock").push("sync");
+        if self.fail_sync.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected sync failure").into());
+        }
+        self.inner.sync()
+    }
+
+    /// Returns all delegated records.
+    fn records(&self) -> Vec<SessionRecord> {
+        self.inner.records()
+    }
+
+    /// Records and delegates session-name persistence.
+    fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
+        self.order.lock().expect("durability lock").push("set_name");
+        self.inner.set_name(name)
+    }
+
+    /// Returns the delegated session name.
+    fn name(&self) -> Option<&str> {
+        self.inner.name()
+    }
+
+    /// Delegates entry-label persistence.
+    fn set_label(
+        &mut self,
+        target_id: EntryId,
+        label: Option<String>,
+    ) -> Result<(), StoreError> {
+        self.inner.set_label(target_id, label)
+    }
+
+    /// Returns the delegated entry label.
+    fn label(&self, target_id: &EntryId) -> Option<&str> {
+        self.inner.label(target_id)
+    }
+}
+
+/// Event sink that records externally visible terminal boundaries.
+struct DurabilitySink(Arc<Mutex<Vec<&'static str>>>);
+
+#[async_trait]
+impl EventSink for DurabilitySink {
+    /// Records only events whose publication must follow a durability checkpoint.
+    async fn emit(&self, event: AgentEvent) -> Result<(), kernel::SinkError> {
+        let marker = match event.payload {
+            AgentEventPayload::TurnEnd { .. } => Some("turn_end"),
+            AgentEventPayload::RunEnd { .. } => Some("run_end"),
+            AgentEventPayload::AgentSettled { .. } => Some("agent_settled"),
+            AgentEventPayload::CompactionEnd { .. } => Some("compaction_end"),
+            AgentEventPayload::MessageEnd { message }
+                if matches!(
+                    message.content,
+                    MessageContent::BashExecution { .. }
+                ) =>
+            {
+                Some("bash_message_end")
+            }
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            self.0.lock().expect("durability lock").push(marker);
+        }
+        Ok(())
+    }
+}
+
+/// Model that pauses one active run so queue operations can be observed in isolation.
+struct BlockingModel {
+    profile: ModelProfile,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Model for BlockingModel {
+    /// Returns the deterministic blocking-model profile.
+    fn profile(&self) -> &ModelProfile {
+        &self.profile
+    }
+
+    /// Confirms that the fixture has no external readiness dependency.
+    async fn preflight(&self) -> Result<(), ModelError> {
+        Ok(())
+    }
+
+    /// Waits for test release before returning one successful terminal event.
+    async fn stream(
+        &self,
+        _request: ModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<
+        Pin<
+            Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>,
+        >,
+        ModelError,
+    > {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
+            ModelFinal {
+                stop_reason: StopReason::EndTurn,
+                raw_stop_reason: None,
+                usage: ModelUsage::builder()
+                    .input_tokens(1)
+                    .output_tokens(0)
+                    .cache_read_tokens(0)
+                    .cache_write_tokens(0)
+                    .total_tokens(1)
+                    .build(),
+            },
+        ))])))
+    }
+}
+
+/// Supplies one shared blocking model to a durability test.
+struct BlockingModelFactory(Arc<BlockingModel>);
+
+impl ModelFactory for BlockingModelFactory {
+    /// Returns the shared blocking model.
+    fn create(&self) -> Result<Arc<dyn Model>, ModelError> {
+        Ok(Arc::clone(&self.0) as Arc<dyn Model>)
     }
 }
 
@@ -415,6 +708,502 @@ async fn run_dispatches_pi_lifecycle_order() {
             "agent_settled",
         ]
     );
+}
+
+/// Turn and Run terminal events are published only after their persisted state is synced.
+#[tokio::test]
+async fn terminal_events_follow_durability_checkpoints() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order: Arc::clone(&order),
+            fail_sync: Arc::new(AtomicBool::new(false)),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-durability-order").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    order.lock().expect("durability lock").clear();
+
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "hello".into(),
+            },
+            Arc::new(DurabilitySink(Arc::clone(&order))),
+        )
+        .await
+        .expect("run agent");
+
+    let order = order.lock().expect("durability lock");
+    assert!(
+        order
+            .windows(3)
+            .any(|window| { window == ["step_attempt", "sync", "turn_end"] })
+    );
+    assert!(
+        order.windows(3).any(|window| {
+            window == ["operation_finished", "sync", "run_end"]
+        })
+    );
+    assert!(
+        order
+            .windows(3)
+            .any(|window| window == ["run_end", "sync", "agent_settled"])
+    );
+}
+
+/// A failed startup checkpoint unregisters and deletes the partial new session.
+#[tokio::test]
+async fn create_session_sync_failure_rolls_back_registration() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order,
+            fail_sync: Arc::new(AtomicBool::new(true)),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-sync-rollback").expect("session id");
+
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect_err("startup sync should fail");
+
+    assert!(matches!(
+        kernel
+            .close_session(&session_id)
+            .await
+            .expect_err("partial session should be unregistered"),
+        kernel::KernelError::SessionNotFound(id) if id == session_id
+    ));
+    assert!(
+        kernel
+            .list_sessions(None)
+            .expect("list persisted sessions")
+            .is_empty()
+    );
+}
+
+/// Queue acceptance and cancellation are synced before either API reports success.
+#[tokio::test]
+async fn queue_mutations_sync_before_returning() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let model = Arc::new(BlockingModel {
+        profile: ModelProfile::builder()
+            .provider_id("fixture".to_string())
+            .model_id("blocking".to_string())
+            .display_name("Blocking".to_string())
+            .context_tokens(128_000)
+            .max_output_tokens(8_000)
+            .build(),
+        started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    });
+    let kernel = Arc::new(
+        KernelFactory::builder()
+            .model_factory(Arc::new(BlockingModelFactory(Arc::clone(&model))))
+            .tool_factory(Arc::new(BuiltinToolFactory::new()))
+            .store_factory(Arc::new(DurabilityStoreFactory {
+                inner: JsonlStoreFactory::new(
+                    root.path(),
+                    Arc::new(SystemClock),
+                ),
+                order: Arc::clone(&order),
+                fail_sync: Arc::new(AtomicBool::new(false)),
+            }))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.path().join("config"),
+                protocol::PromptPolicy::default(),
+            )))
+            .extension_factory(Arc::new(StaticExtensionFactory::new(
+                StaticExtensionRegistration::default(),
+                Vec::new(),
+            )))
+            .clock(Arc::new(SystemClock))
+            .id_generator(Arc::new(NanoidIdGenerator))
+            .build()
+            .build()
+            .expect("build kernel"),
+    );
+    let session_id =
+        SessionId::try_from("session-queue-durability").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    order.lock().expect("durability lock").clear();
+
+    let run_kernel = Arc::clone(&kernel);
+    let run_session_id = session_id.clone();
+    let run = tokio::spawn(async move {
+        run_kernel
+            .run(
+                RunRequest {
+                    session_id: run_session_id,
+                    input: "hold".into(),
+                },
+                Arc::new(DiscardSink),
+            )
+            .await
+    });
+    model.started.notified().await;
+
+    let queued = kernel
+        .queue_message(&session_id, QueueKind::FollowUp, "queued".to_string())
+        .await
+        .expect("queue message");
+    {
+        let order = order.lock().expect("durability lock");
+        assert!(
+            order
+                .windows(2)
+                .any(|window| window == ["queue_enqueued", "sync"])
+        );
+    }
+
+    order.lock().expect("durability lock").clear();
+    kernel
+        .remove_pending_message(&session_id, &queued.queue_id)
+        .expect("remove queued message");
+    {
+        let order = order.lock().expect("durability lock");
+        assert!(
+            order
+                .windows(2)
+                .any(|window| window == ["queue_cancelled", "sync"])
+        );
+    }
+
+    model.release.notify_one();
+    run.await.expect("join run").expect("complete blocked run");
+}
+
+/// Session metadata changes are synced before their public operation completes.
+#[tokio::test]
+async fn rename_session_syncs_before_returning() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order: Arc::clone(&order),
+            fail_sync: Arc::new(AtomicBool::new(false)),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-rename-durability").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    order.lock().expect("durability lock").clear();
+
+    kernel
+        .rename_session(
+            &session_id,
+            SessionTitle::try_from("durable title").expect("session title"),
+        )
+        .await
+        .expect("rename session");
+
+    assert_eq!(
+        *order.lock().expect("durability lock"),
+        vec!["set_name", "sync"]
+    );
+}
+
+/// Session navigation, forking, and shutdown each end with a durability checkpoint.
+#[tokio::test]
+async fn session_maintenance_operations_sync_before_returning() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order: Arc::clone(&order),
+            fail_sync: Arc::new(AtomicBool::new(false)),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id = SessionId::try_from("session-maintenance-durability")
+        .expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "hello".into(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("prepare session branch");
+    let leaf = kernel
+        .session_tree(&session_id)
+        .expect("session tree")
+        .leaf_id
+        .expect("session leaf");
+
+    order.lock().expect("durability lock").clear();
+    kernel
+        .navigate_session(&session_id, None)
+        .await
+        .expect("navigate to root");
+    assert_eq!(
+        *order.lock().expect("durability lock"),
+        vec!["move_lane", "sync"]
+    );
+
+    order.lock().expect("durability lock").clear();
+    kernel
+        .fork_session(
+            &session_id,
+            leaf,
+            SessionId::try_from("session-maintenance-fork")
+                .expect("fork session id"),
+            cwd,
+        )
+        .await
+        .expect("fork session");
+    assert_eq!(
+        *order.lock().expect("durability lock"),
+        vec!["forked", "sync"]
+    );
+
+    order.lock().expect("durability lock").clear();
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close session");
+    assert_eq!(*order.lock().expect("durability lock"), vec!["sync"]);
+}
+
+/// User Bash output is durable before its complete message event is published.
+#[tokio::test]
+async fn user_bash_message_syncs_before_publication() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order: Arc::clone(&order),
+            fail_sync: Arc::new(AtomicBool::new(false)),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-bash-durability").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    order.lock().expect("durability lock").clear();
+
+    kernel
+        .execute_user_bash(
+            UserBashRequest {
+                session_id,
+                command: "printf durability".to_string(),
+                exclude_from_context: false,
+            },
+            Arc::new(DurabilitySink(Arc::clone(&order))),
+        )
+        .await
+        .expect("execute user bash");
+
+    let order = order.lock().expect("durability lock");
+    assert!(order.windows(3).any(|window| {
+        window == ["bash_message", "sync", "bash_message_end"]
+    }));
+}
+
+/// Manual compaction publishes its terminal event only after the recovery record is synced.
+#[tokio::test]
+async fn compaction_end_follows_its_durability_checkpoint() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(LifecycleModelFactory))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(DurabilityStoreFactory {
+            inner: JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            order: Arc::clone(&order),
+            fail_sync: Arc::new(AtomicBool::new(false)),
+        }))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            StaticExtensionRegistration::default(),
+            Vec::new(),
+        )))
+        .clock(Arc::new(SystemClock))
+        .id_generator(Arc::new(NanoidIdGenerator))
+        .compaction_policy(
+            CompactionPolicy::builder()
+                .enabled(true)
+                .reserve_tokens(16_384)
+                .keep_recent_tokens(0)
+                .build(),
+        )
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id = SessionId::try_from("session-compaction-durability")
+        .expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "history".into(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("prepare compaction history");
+    order.lock().expect("durability lock").clear();
+
+    kernel
+        .compact_session(
+            &session_id,
+            Arc::new(DurabilitySink(Arc::clone(&order))),
+        )
+        .await
+        .expect("compact session");
+
+    let order = order.lock().expect("durability lock");
+    assert!(order.windows(3).any(|window| {
+        window == ["operation_finished", "sync", "compaction_end"]
+    }));
 }
 
 /// Idle extension user messages start a normal run with `InputSource::Extension`.

@@ -122,6 +122,7 @@ impl Kernel {
                         .map_err(|_poison_error| KernelError::Poisoned)?;
                     store.move_lane(&session.lane, None)?;
                 }
+                session.sync_store()?;
                 *session
                     .history
                     .lock()
@@ -284,6 +285,7 @@ impl Kernel {
             }
             Self::history_from_store(store.as_ref(), &session.lane)?
         };
+        session.sync_store()?;
         *session
             .history
             .lock()

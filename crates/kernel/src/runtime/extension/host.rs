@@ -99,6 +99,9 @@ impl SessionExtensionHost {
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
+        self.session.sync_store().map_err(|error| {
+            ExtensionHostError::Operation(error.to_string())
+        })?;
         Ok(())
     }
 
@@ -262,6 +265,9 @@ impl ExtensionHost for SessionExtensionHost {
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
+        self.session.sync_store().map_err(|error| {
+            ExtensionHostError::Operation(error.to_string())
+        })?;
         self.session
             .history
             .lock()
@@ -402,6 +408,9 @@ impl ExtensionHost for SessionExtensionHost {
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
+        self.session.sync_store().map_err(|error| {
+            ExtensionHostError::Operation(error.to_string())
+        })?;
         Ok(entry_id)
     }
 
@@ -421,6 +430,9 @@ impl ExtensionHost for SessionExtensionHost {
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
+        self.session.sync_store().map_err(|error| {
+            ExtensionHostError::Operation(error.to_string())
+        })?;
         let context = self
             .kernel
             .extension_context(
@@ -455,6 +467,11 @@ impl ExtensionHost for SessionExtensionHost {
                 ExtensionHostError::Operation("store lock poisoned".to_string())
             })?
             .set_label(entry_id, label)
+            .map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
+        self.session
+            .sync_store()
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 

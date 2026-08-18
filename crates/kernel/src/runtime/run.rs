@@ -88,6 +88,9 @@ impl Kernel {
             protocol::InputResult::Continue => command_input,
             protocol::InputResult::Transform { text } => text,
             protocol::InputResult::Handled => {
+                // Input handlers may persist through the Extension Host even
+                // when they consume the request before an Agent Turn starts.
+                session.sync_store()?;
                 tracing::info!(
                     "completed Kernel Run {} for session {} because an extension handled the input",
                     run_id,
@@ -723,6 +726,9 @@ impl Kernel {
                 RecordKind::StepAttempt,
                 serde_json::to_value(&turn)?,
             )?;
+            // Publish Turn completion only after its transcript and recovery
+            // record have reached durable storage.
+            session.sync_store()?;
             emitter
                 .emit(
                     turn_id.clone(),
@@ -736,6 +742,9 @@ impl Kernel {
                 },
                 &extension_context,
             ).await;
+            // A settled Turn is the durable checkpoint: force the session log
+            // again after TurnEnd hooks in case they persisted extension state.
+            session.sync_store()?;
             tracing::info!(
                 "settled Turn {} for Kernel Run {} in {} ms with outcome {:?}",
                 turn_id,

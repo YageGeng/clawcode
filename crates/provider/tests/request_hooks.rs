@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use protocol::hooks::model::ModelHookError;
 use provider::completion::{
-    CompletionError, CompletionRequestHooks, ProviderHeaders,
-    ProviderResponseMetadata, prepare_json_request,
+    CompletionRequestHooks, ProviderHeaders, ProviderResponseMetadata,
+    prepare_json_request,
 };
 
 #[derive(Default)]
@@ -27,7 +28,7 @@ impl CompletionRequestHooks for CredentialProbeHooks {
     async fn before_payload(
         &self,
         payload: serde_json::Value,
-    ) -> Result<serde_json::Value, CompletionError> {
+    ) -> Result<serde_json::Value, ModelHookError> {
         Ok(payload)
     }
 
@@ -35,7 +36,7 @@ impl CompletionRequestHooks for CredentialProbeHooks {
     async fn before_headers(
         &self,
         mut headers: ProviderHeaders,
-    ) -> Result<ProviderHeaders, CompletionError> {
+    ) -> Result<ProviderHeaders, ModelHookError> {
         *self.visible.lock().expect("visible header lock") =
             Some(headers.clone());
         for name in [
@@ -54,7 +55,7 @@ impl CompletionRequestHooks for CredentialProbeHooks {
     async fn after_response(
         &self,
         _response: ProviderResponseMetadata,
-    ) -> Result<(), CompletionError> {
+    ) -> Result<(), ModelHookError> {
         Ok(())
     }
 }
@@ -65,7 +66,7 @@ impl CompletionRequestHooks for RecordingHooks {
     async fn before_payload(
         &self,
         mut payload: serde_json::Value,
-    ) -> Result<serde_json::Value, CompletionError> {
+    ) -> Result<serde_json::Value, ModelHookError> {
         self.order.lock().expect("order lock").push("payload");
         self.payload_calls.fetch_add(1, Ordering::Relaxed);
         payload
@@ -79,7 +80,7 @@ impl CompletionRequestHooks for RecordingHooks {
     async fn before_headers(
         &self,
         mut headers: ProviderHeaders,
-    ) -> Result<ProviderHeaders, CompletionError> {
+    ) -> Result<ProviderHeaders, ModelHookError> {
         self.order.lock().expect("order lock").push("headers");
         self.header_calls.fetch_add(1, Ordering::Relaxed);
         assert!(!headers.contains_key("authorization"));
@@ -92,7 +93,7 @@ impl CompletionRequestHooks for RecordingHooks {
     async fn after_response(
         &self,
         response: ProviderResponseMetadata,
-    ) -> Result<(), CompletionError> {
+    ) -> Result<(), ModelHookError> {
         self.order.lock().expect("order lock").push("response");
         self.response_calls.fetch_add(1, Ordering::Relaxed);
         assert_eq!(response.status, 202);

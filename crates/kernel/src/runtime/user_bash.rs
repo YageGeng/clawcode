@@ -141,6 +141,8 @@ impl Kernel {
             },
         };
         self.persist_message(&session, &message)?;
+        // MessageEnd acknowledges the completed Bash transcript entry.
+        session.sync_store()?;
         EventEmitter {
             clock: Arc::clone(&self.clock),
             sink,

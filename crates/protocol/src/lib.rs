@@ -4,6 +4,7 @@ mod acp;
 mod capability;
 mod event;
 mod extension;
+pub mod hooks;
 mod id;
 mod identity;
 mod mcp;
@@ -60,6 +61,9 @@ pub use extension::{
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
     ToolResultPatch, TreeSummary, TurnEndEvent, TurnStartEvent,
     UserBashDisposition, UserBashEvent, UserBashResult,
+};
+pub use hooks::model::{
+    ModelHeaders, ModelHookError, ModelRequestHooks, ModelResponseMetadata,
 };
 pub use id::{IdGenerator, IdKind};
 pub use identity::{

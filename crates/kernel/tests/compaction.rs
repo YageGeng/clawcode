@@ -377,6 +377,11 @@ impl SessionStore for FailingCompactionStore {
         self.inner.append_record(record)
     }
 
+    /// Delegates durability checkpoints to the real store.
+    fn sync(&mut self) -> Result<(), StoreError> {
+        self.inner.sync()
+    }
+
     /// Returns all delegated operation records.
     fn records(&self) -> Vec<SessionRecord> {
         self.inner.records()

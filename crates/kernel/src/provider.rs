@@ -187,7 +187,7 @@ impl ProviderModel {
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
-        hooks: Option<Arc<dyn provider::completion::CompletionRequestHooks>>,
+        hooks: Option<Arc<dyn protocol::ModelRequestHooks>>,
     ) -> Result<ModelStream, ModelError> {
         let provider_name =
             format!("{}/{}", self.profile.provider_id, self.profile.model_id);
@@ -333,7 +333,7 @@ impl Model for ProviderModel {
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
-        hooks: Option<Arc<dyn provider::completion::CompletionRequestHooks>>,
+        hooks: Option<Arc<dyn protocol::ModelRequestHooks>>,
     ) -> Result<ModelStream, ModelError> {
         self.stream_request(request, cancellation, hooks).await
     }

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use extension::{ExtensionContext, ExtensionRuntime};
-use protocol::{RunId, TurnId};
+use protocol::{
+    ModelHeaders, ModelHookError, ModelRequestHooks, ModelResponseMetadata,
+    RunId, TurnId,
+};
 
 use super::super::{Kernel, KernelError, SessionRuntime};
 
@@ -13,10 +16,7 @@ impl Kernel {
         session: &Arc<SessionRuntime>,
         run_id: &RunId,
         turn_id: &TurnId,
-    ) -> Result<
-        Arc<dyn provider::completion::CompletionRequestHooks>,
-        KernelError,
-    > {
+    ) -> Result<Arc<dyn ModelRequestHooks>, KernelError> {
         Ok(Arc::new(
             ExtensionCompletionHooks::builder()
                 .runtime(Arc::clone(&session.extensions))
@@ -39,17 +39,17 @@ struct ExtensionCompletionHooks {
     runtime: Arc<ExtensionRuntime>,
     context: ExtensionContext,
     payload: tokio::sync::Mutex<Option<serde_json::Value>>,
-    headers: tokio::sync::Mutex<Option<provider::completion::ProviderHeaders>>,
+    headers: tokio::sync::Mutex<Option<ModelHeaders>>,
     response_seen: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
-impl provider::completion::CompletionRequestHooks for ExtensionCompletionHooks {
+impl ModelRequestHooks for ExtensionCompletionHooks {
     /// Applies ordered provider-payload replacements once per logical request.
     async fn before_payload(
         &self,
         payload: serde_json::Value,
-    ) -> Result<serde_json::Value, provider::completion::CompletionError> {
+    ) -> Result<serde_json::Value, ModelHookError> {
         let mut prepared = self.payload.lock().await;
         if let Some(payload) = prepared.as_ref() {
             return Ok(payload.clone());
@@ -68,11 +68,8 @@ impl provider::completion::CompletionRequestHooks for ExtensionCompletionHooks {
     /// Applies ordered mutations to normalized non-secret headers once per request.
     async fn before_headers(
         &self,
-        mut headers: provider::completion::ProviderHeaders,
-    ) -> Result<
-        provider::completion::ProviderHeaders,
-        provider::completion::CompletionError,
-    > {
+        mut headers: ModelHeaders,
+    ) -> Result<ModelHeaders, ModelHookError> {
         let mut prepared = self.headers.lock().await;
         if let Some(headers) = prepared.as_ref() {
             return Ok(headers.clone());
@@ -103,8 +100,8 @@ impl provider::completion::CompletionRequestHooks for ExtensionCompletionHooks {
     /// Forwards sanitized response status and headers to observers once.
     async fn after_response(
         &self,
-        response: provider::completion::ProviderResponseMetadata,
-    ) -> Result<(), provider::completion::CompletionError> {
+        response: ModelResponseMetadata,
+    ) -> Result<(), ModelHookError> {
         if self
             .response_seen
             .swap(true, std::sync::atomic::Ordering::AcqRel)

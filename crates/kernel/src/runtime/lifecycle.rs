@@ -14,6 +14,23 @@ pub(super) enum SessionLifecycle {
 }
 
 impl SessionRuntime {
+    /// Forces all buffered session mutations to durable storage.
+    pub(super) fn sync_store(&self) -> Result<(), KernelError> {
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        if let Err(error) = store.sync() {
+            tracing::error!(
+                "failed to sync persistent state for session {}: {}",
+                store.session_id(),
+                error
+            );
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     /// Acquires the run gate only while this runtime remains active.
     pub(super) async fn acquire_operation(
         &self,

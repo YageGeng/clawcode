@@ -466,7 +466,7 @@ where
                     headers: crate::completion::ProviderHeaders::default(),
                 };
                 if let Err(error) = hooks.after_response(metadata).await {
-                    return Err(self.fail_session(error));
+                    return Err(self.fail_session(error.into()));
                 }
             }
             self.update_state_for_event(&event);
@@ -911,13 +911,14 @@ mod tests {
     };
     use crate::client::CompletionClient;
     use crate::completion::{
-        CompletionError, CompletionModel, CompletionRequestHooks,
-        ProviderHeaders, ProviderResponseMetadata,
+        CompletionModel, CompletionRequestHooks, ProviderHeaders,
+        ProviderResponseMetadata,
     };
     use crate::providers::openai::responses_api::{
         CompletionResponse, ResponseObject, ResponseStatus, ResponsesUsage,
     };
     use futures::{SinkExt, StreamExt};
+    use protocol::hooks::model::ModelHookError;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -962,7 +963,7 @@ mod tests {
         async fn before_payload(
             &self,
             mut payload: serde_json::Value,
-        ) -> Result<serde_json::Value, CompletionError> {
+        ) -> Result<serde_json::Value, ModelHookError> {
             self.0.lock().expect("hook order lock").push("payload");
             payload
                 .as_object_mut()
@@ -975,7 +976,7 @@ mod tests {
         async fn before_headers(
             &self,
             headers: ProviderHeaders,
-        ) -> Result<ProviderHeaders, CompletionError> {
+        ) -> Result<ProviderHeaders, ModelHookError> {
             self.0.lock().expect("hook order lock").push("headers");
             assert!(headers.is_empty());
             Ok(headers)
@@ -985,7 +986,7 @@ mod tests {
         async fn after_response(
             &self,
             response: ProviderResponseMetadata,
-        ) -> Result<(), CompletionError> {
+        ) -> Result<(), ModelHookError> {
             self.0.lock().expect("hook order lock").push("response");
             assert_eq!(response.status, 200);
             assert!(response.headers.is_empty());

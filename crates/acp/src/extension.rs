@@ -5,7 +5,7 @@ use agent_client_protocol::{
     Client, ConnectionTo, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, UntypedMessage,
 };
-use kernel::Kernel;
+use kernel::{Kernel, KernelError};
 use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExtensionMethod,
     AcpForkParameters, AcpNavigateParameters,
@@ -289,12 +289,36 @@ impl AcpExtensionDispatcher {
                 let input: AcpPendingMessageRemoveParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                self.kernel
+                let removed = match self
+                    .kernel
                     .remove_pending_message(&input.session_id, &input.queue_id)
-                    .map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?;
-                serde_json::json!({ "removed": true })
+                {
+                    Ok(()) => true,
+                    Err(KernelError::PendingMessageNotFound(_)) => {
+                        // The queue consumer may win the race after the WebUI
+                        // rendered its last snapshot. DELETE remains idempotent.
+                        tracing::debug!(
+                            "pending message {} for session {} was already absent during removal",
+                            input.queue_id,
+                            input.session_id
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "failed to remove pending message {} from session {}: {}",
+                            input.queue_id,
+                            input.session_id,
+                            error
+                        );
+                        return Err(
+                            agent_client_protocol::Error::into_internal_error(
+                                error,
+                            ),
+                        );
+                    }
+                };
+                serde_json::json!({ "removed": removed })
             }
             AcpExtensionMethod::ClearQueue => {
                 let input: AcpSessionParameters =

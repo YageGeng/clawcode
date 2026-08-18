@@ -11,6 +11,9 @@ workspace = true
 # error
 thiserror = { workspace = true }
 
+# async
+async-trait = { workspace = true }
+
 # serde
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

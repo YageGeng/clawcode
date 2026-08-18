@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
-use protocol::{ModelFailure, ModelProfile, ModelRequest, ModelStreamEvent};
+use protocol::{
+    ModelFailure, ModelProfile, ModelRequest, ModelRequestHooks,
+    ModelStreamEvent,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Boxed model stream shared by production adapters and deterministic tests.
@@ -55,7 +58,7 @@ pub trait Model: Send + Sync {
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
-        _hooks: Option<Arc<dyn provider::completion::CompletionRequestHooks>>,
+        _hooks: Option<Arc<dyn ModelRequestHooks>>,
     ) -> Result<ModelStream, ModelError> {
         self.stream(request, cancellation).await
     }

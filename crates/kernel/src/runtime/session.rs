@@ -149,6 +149,7 @@ impl Kernel {
                 .await?;
             return Err(error);
         }
+        self.checkpoint_started_session(&session_id, true).await?;
         Ok(path)
     }
 
@@ -216,6 +217,7 @@ impl Kernel {
                     "session resume cancelled".to_string(),
                 ));
             }
+            existing.sync_store()?;
             return Ok(path);
         }
         {
@@ -262,6 +264,7 @@ impl Kernel {
                 .await?;
             return Err(error);
         }
+        self.checkpoint_started_session(&session_id, false).await?;
         Ok(path)
     }
 
@@ -295,6 +298,7 @@ impl Kernel {
             mcp.shutdown().await?;
         }
         session.stop_mcp_projection().await?;
+        session.sync_store()?;
         session.finish_closing()?;
         session.extensions.invalidate();
         self.sessions
@@ -381,12 +385,13 @@ impl Kernel {
         session_id: &SessionId,
         title: SessionTitle,
     ) -> Result<(), KernelError> {
-        self.session(session_id)?
+        let session = self.session(session_id)?;
+        session
             .store
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .set_name(Some(title.as_str().to_string()))?;
-        let session = self.session(session_id)?;
+        session.sync_store()?;
         let context = self.extension_context(&session, None, None)?;
         session
             .extensions
@@ -457,6 +462,8 @@ impl Kernel {
                 .await?;
             return Err(error);
         }
+        self.checkpoint_started_session(&new_session_id, true)
+            .await?;
         Ok(path)
     }
 
@@ -764,6 +771,25 @@ impl Kernel {
         }
         if delete_persisted {
             self.store_factory.delete(session_id)?;
+        }
+        Ok(())
+    }
+
+    /// Syncs startup writes or removes the partially started runtime on failure.
+    async fn checkpoint_started_session(
+        &self,
+        session_id: &SessionId,
+        delete_persisted: bool,
+    ) -> Result<(), KernelError> {
+        if let Err(error) = self.session(session_id)?.sync_store() {
+            tracing::error!(
+                "failed to checkpoint started session {}; rolling back registration: {}",
+                session_id,
+                error
+            );
+            self.rollback_session_registration(session_id, delete_persisted)
+                .await?;
+            return Err(error);
         }
         Ok(())
     }

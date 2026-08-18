@@ -368,6 +368,14 @@ pub trait SessionStore: Send {
         record: NewRecord,
     ) -> Result<SessionRecord, StoreError>;
 
+    /// Forces all appended mutations to durable storage.
+    ///
+    /// Implementations may flush on every append; filesystem stores use this
+    /// as an explicit durability checkpoint so appends avoid one fsync each.
+    fn sync(&mut self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     /// Returns all durable lane records in shared sequence order.
     fn records(&self) -> Vec<SessionRecord>;
 
