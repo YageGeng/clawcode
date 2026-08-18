@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
+use agent_client_protocol::schema::v2 as wire;
 use agent_client_protocol::{
     Client, ConnectionTo, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, UntypedMessage,
@@ -9,14 +10,25 @@ use kernel::{Kernel, KernelError};
 use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExtensionMethod,
     AcpForkParameters, AcpNavigateParameters,
-    AcpPendingMessageRemoveParameters, AcpQueueMessageParameters,
-    AcpSessionParameters, AcpSessionRenameParameters, AcpSkillParameters,
-    AcpUserBashParameters, McpSessionRevisionNotification, ProductIdentity,
-    QueueKind, SessionTitle,
+    AcpPendingMessageRemoveParameters, AcpSessionParameters,
+    AcpSessionRenameParameters, AcpSkillParameters, AcpUserBashParameters,
+    McpSessionRevisionNotification, ProductIdentity, QueueKind, SessionTitle,
 };
+use serde::Deserialize;
 
+use crate::input::PromptInput;
 use crate::server::AcpEventSink;
 use crate::server::AcpServer;
+
+/// Parameters for adding one multimodal follow-up to the active run.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcpQueueMessageParameters {
+    /// Session that owns the queue.
+    session_id: protocol::SessionId,
+    /// Ordered ACP prompt blocks supplied by the client.
+    prompt: Vec<wire::ContentBlock>,
+}
 
 /// Converts any parameter decoding failure into the ACP invalid-parameters category.
 fn invalid_parameters(
@@ -157,13 +169,12 @@ impl AcpExtensionDispatcher {
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
                 let session_id = input.session_id;
+                let prompt = PromptInput::try_from(input.prompt)
+                    .map_err(invalid_parameters)?
+                    .into_inner();
                 let queued = self
                     .kernel
-                    .queue_message(
-                        &session_id,
-                        QueueKind::FollowUp,
-                        input.input,
-                    )
+                    .queue_message(&session_id, QueueKind::FollowUp, prompt)
                     .await
                     .map_err(
                         agent_client_protocol::Error::into_internal_error,
@@ -495,5 +506,30 @@ impl AcpExtensionDispatcher {
             }
         };
         Ok(AcpExtensionResponse(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AcpQueueMessageParameters;
+
+    /// Follow-up parameters preserve ordered ACP text and image blocks.
+    #[test]
+    fn follow_up_parameters_accept_acp_prompt_blocks() {
+        let parameters: AcpQueueMessageParameters =
+            serde_json::from_value(serde_json::json!({
+                "sessionId": "session-follow-up",
+                "prompt": [
+                    { "type": "text", "text": "inspect" },
+                    {
+                        "type": "image",
+                        "data": "Q0xBVy03MzE5",
+                        "mimeType": "image/png"
+                    }
+                ]
+            }))
+            .expect("multimodal follow-up parameters");
+
+        assert_eq!(parameters.prompt.len(), 2);
     }
 }

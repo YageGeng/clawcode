@@ -7,6 +7,83 @@ use crate::{
 /// Maximum number of Unicode scalar values accepted in a session title.
 const MAX_SESSION_TITLE_CHARS: usize = 120;
 
+/// One model input modality supported by the runtime configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInputModality {
+    /// UTF-8 text input.
+    Text,
+    /// Base64-encoded image input.
+    Image,
+}
+
+/// Invalid combinations of configured model input modalities.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ModelInputModalitiesError {
+    /// At least text input is required for an agent model.
+    #[error("input must contain text")]
+    MissingText,
+    /// Text must remain the primary modality in the configured order.
+    #[error("input must start with text")]
+    TextNotFirst,
+    /// Repeating a modality is ambiguous and rejected during validation.
+    #[error("input contains duplicate modality '{modality:?}'")]
+    Duplicate {
+        /// Repeated input modality.
+        modality: ModelInputModality,
+    },
+}
+
+/// Validated ordered model input modalities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<ModelInputModality>", into = "Vec<ModelInputModality>")]
+pub struct ModelInputModalities(Vec<ModelInputModality>);
+
+impl ModelInputModalities {
+    /// Returns whether the model accepts one input modality.
+    #[must_use]
+    pub fn supports(&self, modality: ModelInputModality) -> bool {
+        self.0.contains(&modality)
+    }
+}
+
+impl Default for ModelInputModalities {
+    /// Defaults existing model configurations to text-only input.
+    fn default() -> Self {
+        Self(vec![ModelInputModality::Text])
+    }
+}
+
+impl TryFrom<Vec<ModelInputModality>> for ModelInputModalities {
+    type Error = ModelInputModalitiesError;
+
+    /// Validates that text is present and every modality appears once.
+    fn try_from(value: Vec<ModelInputModality>) -> Result<Self, Self::Error> {
+        let mut seen = std::collections::HashSet::new();
+        for modality in &value {
+            if !seen.insert(*modality) {
+                return Err(ModelInputModalitiesError::Duplicate {
+                    modality: *modality,
+                });
+            }
+        }
+        if !seen.contains(&ModelInputModality::Text) {
+            return Err(ModelInputModalitiesError::MissingText);
+        }
+        if value.first() != Some(&ModelInputModality::Text) {
+            return Err(ModelInputModalitiesError::TextNotFirst);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl From<ModelInputModalities> for Vec<ModelInputModality> {
+    /// Restores the configured order when serializing a validated modality list.
+    fn from(value: ModelInputModalities) -> Self {
+        value.0
+    }
+}
+
 /// Immutable token-driven compaction settings aligned with pi v4.
 #[derive(
     Debug,
@@ -130,6 +207,10 @@ pub struct ModelProfile {
     pub context_tokens: u64,
     /// Maximum tokens the model may emit for one request.
     pub max_output_tokens: u64,
+    /// Validated input modalities accepted by this model.
+    #[serde(default)]
+    #[builder(default)]
+    pub input: ModelInputModalities,
 }
 
 /// Cause that initiated a context compaction operation.

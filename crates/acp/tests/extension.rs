@@ -485,7 +485,16 @@ async fn native_session_delete_is_advertised_and_idempotent() {
                     initialized
                         .capabilities
                         .session
-                        .and_then(|session| session.delete)
+                        .as_ref()
+                        .and_then(|session| session.delete.as_ref())
+                        .is_some()
+                );
+                assert!(
+                    initialized
+                        .capabilities
+                        .session
+                        .and_then(|session| session.prompt)
+                        .and_then(|prompt| prompt.image)
                         .is_some()
                 );
                 let created = connection
@@ -590,6 +599,9 @@ async fn skill_extensions_are_session_scoped() {
         "---\nname: review\ndescription: Project review\n---\nPROJECT REVIEW BODY\n",
     )
     .expect("write project Skill");
+    let project_skill =
+        std::fs::canonicalize(project_skill).expect("canonical project Skill");
+    let skill = std::fs::canonicalize(skill).expect("canonical global Skill");
     let kernel = integration_kernel(state.path());
     let session = send_request(
         Arc::clone(&kernel),

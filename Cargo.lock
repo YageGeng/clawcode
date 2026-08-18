@@ -10,6 +10,7 @@ dependencies = [
  "agent-client-protocol-http",
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "extension",
  "futures",
  "kernel",

@@ -32,7 +32,10 @@ export type InitializeResult = Readonly<{
   protocolVersion: number;
   info: Readonly<{ name: string; title?: string; version: string }>;
   capabilities: Readonly<Record<string, unknown> & {
-    session?: Readonly<Record<string, unknown> & { delete?: Readonly<Record<string, unknown>> | null }> | null;
+    session?: Readonly<Record<string, unknown> & {
+      delete?: Readonly<Record<string, unknown>> | null;
+      prompt?: Readonly<Record<string, unknown> & { image?: Readonly<Record<string, unknown>> | null }> | null;
+    }> | null;
   }>;
   _meta?: AcpMeta;
 }>;
@@ -53,12 +56,18 @@ export type SessionListResult = Readonly<{
 export type NewSessionResult = Readonly<{ sessionId: SessionId }>;
 
 export type TextContentBlock = Readonly<{ type: "text"; text: string }>;
+export type ImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+export type ImageContentBlock = Readonly<{
+  type: "image";
+  data: string;
+  mimeType: ImageMimeType;
+}>;
 export type ResourceLinkContentBlock = Readonly<{
   type: "resource_link";
   name: string;
   uri: string;
 }>;
-export type PromptContentBlock = TextContentBlock | ResourceLinkContentBlock;
+export type PromptContentBlock = TextContentBlock | ImageContentBlock | ResourceLinkContentBlock;
 
 export type SessionUpdateNotification = Readonly<{
   sessionId: SessionId;

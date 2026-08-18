@@ -3,17 +3,17 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, CompactionReason, CompactionResult, EntryId, LaneId, RunId,
-    SessionId, TimestampMs, TurnRecord,
+    AgentMessage, CompactionReason, CompactionResult, ContentBlock, EntryId,
+    LaneId, RunId, SessionId, TimestampMs, TurnRecord,
 };
 
-/// Text projection of one prompt plus whether Slash Command dispatch is safe.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Ordered prompt input plus whether text-only command dispatch is safe.
+#[derive(Debug, Clone, PartialEq)]
 pub enum RunInput {
     /// Prompt containing only text blocks and eligible for command dispatch.
     Text(String),
-    /// Prompt flattened from more than text and ineligible for command dispatch.
-    Composite(String),
+    /// Ordered content blocks that bypass text-only command dispatch.
+    Blocks(Vec<ContentBlock>),
 }
 
 impl RunInput {
@@ -22,15 +22,7 @@ impl RunInput {
     pub fn slash_command_text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(text),
-            Self::Composite(_) => None,
-        }
-    }
-
-    /// Returns the complete model-facing text projection.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Text(text) | Self::Composite(text) => text,
+            Self::Blocks(_) => None,
         }
     }
 }
@@ -50,11 +42,11 @@ impl From<&str> for RunInput {
 }
 
 /// Input required to start one serialized agent run in an existing session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RunRequest {
     /// Existing session that owns the run.
     pub session_id: SessionId,
-    /// Initial user text assigned to the run's first Turn.
+    /// Initial user content assigned to the run's first Turn.
     pub input: RunInput,
 }
 

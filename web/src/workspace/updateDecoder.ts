@@ -1,5 +1,5 @@
 import { AcpProtocol } from "../acp/protocol";
-import type { EntryId, MessageId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
+import type { EntryId, ImageContentBlock, MessageId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   AssistantDiagnostics,
@@ -85,15 +85,29 @@ export class SessionUpdateDecoder {
     } else if ((kind === "agent_message" || kind === "user_message") && typeof update.messageId === "string" && meta !== undefined) {
       const messageId = update.messageId as MessageId;
       const existing = state.messages.get(messageId);
+      const contentBlocks = Array.isArray(update.content)
+        ? update.content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null && !Array.isArray(block))
+        : [];
       // ACP v2 whole-message updates preserve omitted content and replace
       // concrete content, including explicit clears.
       const text = !("content" in update) ? existing?.text ?? "" : Array.isArray(update.content)
-        ? update.content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null && !Array.isArray(block)).map((block) => typeof block.text === "string" ? block.text : "").join("")
+        ? contentBlocks.map((block) => typeof block.text === "string" ? block.text : "").join("")
         : "";
+      const images: readonly ImageContentBlock[] = !("content" in update)
+        ? existing?.images ?? []
+        : contentBlocks.flatMap((block) => {
+            const mimeType = block.mimeType;
+            if (
+              block.type !== "image"
+              || typeof block.data !== "string"
+              || (mimeType !== "image/png" && mimeType !== "image/jpeg" && mimeType !== "image/gif" && mimeType !== "image/webp")
+            ) return [];
+            return [{ type: "image", data: block.data, mimeType }];
+          });
       const assistant = kind === "agent_message" ? this.decodeAssistantDiagnostics(productMeta?.assistant) : undefined;
       const slashCommand = this.decodeSlashCommandMetadata(productMeta?.slashCommand);
       const timing = this.decodeMessageTiming(productMeta?.messageTiming);
-      const message: MessageEntity = { messageId, turnId: meta.turnId, role: kind === "user_message" ? "user" : "assistant", text, reasoning: existing?.reasoning ?? "", timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false, ...(assistant === undefined ? (existing?.assistant === undefined ? {} : { assistant: existing.assistant }) : { assistant }), ...(slashCommand === undefined ? (existing?.slashCommand === undefined ? {} : { slashCommand: existing.slashCommand }) : { slashCommand }) };
+      const message: MessageEntity = { messageId, turnId: meta.turnId, role: kind === "user_message" ? "user" : "assistant", text, images, reasoning: existing?.reasoning ?? "", timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false, ...(assistant === undefined ? (existing?.assistant === undefined ? {} : { assistant: existing.assistant }) : { assistant }), ...(slashCommand === undefined ? (existing?.slashCommand === undefined ? {} : { slashCommand: existing.slashCommand }) : { slashCommand }) };
       actions.push({ type: "message/upserted", message, order });
       if (kind === "user_message") {
         // A queued message is removed durably before its native ACP user
@@ -112,7 +126,7 @@ export class SessionUpdateDecoder {
       const reasoning = !("content" in update) ? previous?.reasoning ?? "" : Array.isArray(update.content)
         ? update.content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null && !Array.isArray(block)).map((block) => typeof block.text === "string" ? block.text : "").join("")
         : "";
-      const message: MessageEntity = previous === undefined ? { messageId, turnId: meta.turnId, role: "assistant", text: "", reasoning, timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false } : { ...previous, reasoning, ...(timing === undefined ? {} : timing) };
+      const message: MessageEntity = previous === undefined ? { messageId, turnId: meta.turnId, role: "assistant", text: "", images: [], reasoning, timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false } : { ...previous, reasoning, ...(timing === undefined ? {} : timing) };
       actions.push({ type: "message/upserted", message, order });
     } else if (kind === "tool_call_update" && typeof update.toolCallId === "string") {
       const toolCallId = update.toolCallId as ToolCallEntity["toolCallId"];

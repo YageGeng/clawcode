@@ -501,9 +501,8 @@ impl TryFrom<message::UserContent> for UserContent {
                         data
                     );
 
-                    let detail = detail.ok_or(message::MessageError::ConversionError(
-                        "OpenAI image URI must have image detail".into(),
-                    ))?;
+                    // OpenAI defaults omitted image detail to automatic selection.
+                    let detail = detail.unwrap_or_default();
 
                     Ok(UserContent::Image {
                         image_url: ImageUrl { url, detail },
@@ -1582,6 +1581,23 @@ mod tests {
             .expect("serialization should succeed");
 
         assert_eq!(serialized["model"], "gpt-4o-mini");
+    }
+
+    #[test]
+    fn base64_image_without_detail_uses_openai_default() {
+        let content = message::UserContent::image_base64(
+            "Q0xBVy03MzE5",
+            Some(message::ImageMediaType::PNG),
+            None,
+        );
+
+        let converted = UserContent::try_from(content)
+            .expect("base64 image conversion should succeed");
+        let UserContent::Image { image_url } = converted else {
+            panic!("expected image content");
+        };
+        assert_eq!(image_url.url, "data:image/png;base64,Q0xBVy03MzE5");
+        assert_eq!(image_url.detail, ImageDetail::Auto);
     }
 
     #[test]

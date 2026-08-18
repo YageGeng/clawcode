@@ -1,4 +1,4 @@
-active_model = "deepseek/deepseek-v4-flash"
+active_model = "moonshotai/kimi-k3"
 
 [logging]
 filter = "info,acp::trace=debug"
@@ -58,6 +58,24 @@ max_output_tokens = 384000
 [providers.models.extra_param]
 thinking = { type = "enabled" }
 reasoning_effort = "high"
+
+[[providers]]
+id = "moonshotai"
+display_name = "Moonshot AI"
+provider_type = "openai-completions"
+base_url = "https://wismodel-proxy-dev.atominnolab.com/api/v1"
+api_key = { env = "PROXY_PROVIDER_KEY" }
+
+[[providers.models]]
+id = "kimi-k3"
+upstream_id = "moonshotai/kimi-k3"
+display_name = "Kimi K3"
+input = ["text", "image"]
+context_tokens = 1048576
+max_output_tokens = 131072
+
+[providers.models.extra_param]
+reasoning_effort = "max"
 
 [[mcp_servers]]
 enabled = true

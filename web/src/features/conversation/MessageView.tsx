@@ -67,6 +67,11 @@ export function MessageView({ message }: MessageViewProps) {
           {message.streaming ? <span className="streaming-cursor" aria-label="正在生成" /> : null}
         </div>
       )}
+      {message.images.length === 0 ? null : (
+        <div className="message__images">
+          {message.images.map((image, index) => <img key={`${image.mimeType}:${index}`} src={`data:${image.mimeType};base64,${image.data}`} alt={`消息图片 ${index + 1}`} />)}
+        </div>
+      )}
       <details className="message__diagnostics">
         <summary>消息详情</summary>
         <dl className="diagnostics-list">

@@ -413,13 +413,13 @@ fn provider_model_factory_builds_static_extension_providers() {
         base_url: "https://example.com/v1".to_string(),
         api_key: Some(config::ApiKeyConfig::Plaintext("sk-test".to_string())),
         auth: None,
-        models: vec![config::LlmModel {
-            id: "base-model".to_string(),
-            display_name: None,
-            context_tokens: Some(128_000),
-            max_output_tokens: Some(8_000),
-            extra_param: serde_json::Value::Null,
-        }],
+        models: vec![
+            config::LlmModel::builder()
+                .id("base-model".to_string())
+                .context_tokens(Some(128_000))
+                .max_output_tokens(Some(8_000))
+                .build(),
+        ],
     };
     let config = config::ConfigHandle::from_config(config::AppConfig {
         providers: vec![base_provider],

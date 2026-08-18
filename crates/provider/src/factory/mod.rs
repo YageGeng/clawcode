@@ -278,6 +278,7 @@ impl LlmFactory {
         model: &config::LlmModel,
     ) -> Result<ArcLlm, BuildError> {
         let model_id = model.id.as_str();
+        let upstream_id = model.upstream_id.as_deref().unwrap_or(model_id);
         let pid = provider.id.as_str();
         let api_key = provider
             .api_key
@@ -320,7 +321,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Chatgpt => {
@@ -349,7 +350,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Other(_) => {
@@ -366,7 +367,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 _ => Err(BuildError::UnsupportedProtocol {
@@ -390,7 +391,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Deepseek => {
@@ -407,7 +408,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Moonshot => {
@@ -424,7 +425,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Minimax => {
@@ -441,7 +442,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Xiaomimimo => {
@@ -458,7 +459,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Other(_) => {
@@ -475,7 +476,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 _ => Err(BuildError::UnsupportedProtocol {
@@ -496,7 +497,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Moonshot => {
@@ -510,7 +511,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Minimax => {
@@ -524,7 +525,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Xiaomimimo => {
@@ -538,7 +539,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 ProviderId::Other(_) => {
@@ -552,7 +553,7 @@ impl LlmFactory {
                         pid,
                         model_id,
                         model.extra_param.clone(),
-                        client.completion_model(model_id),
+                        client.completion_model(upstream_id),
                     ))
                 }
                 _ => Err(BuildError::UnsupportedProtocol {
@@ -664,6 +665,8 @@ mod tests {
     use super::*;
     use config::AppConfig;
     use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     /// get returns None for unknown provider ids.
     #[test]
@@ -776,6 +779,109 @@ id = "custom-model"
         let llm = factory.get("custom-openai", "custom-model").unwrap();
         assert_eq!(llm.provider_id(), "custom-openai");
         assert_eq!(llm.model_id(), "custom-model");
+    }
+
+    /// Factory lookup retains the local id while the HTTP payload uses upstream_id.
+    #[tokio::test]
+    async fn configured_upstream_id_reaches_provider_request()
+    -> anyhow::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = socket.read(&mut chunk).await?;
+                anyhow::ensure!(
+                    read > 0,
+                    "provider request ended before its body"
+                );
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = std::str::from_utf8(&request[..header_end])?;
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>())
+                    })
+                    .transpose()?
+                    .ok_or_else(|| anyhow::anyhow!("missing content-length"))?;
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .ok_or_else(|| anyhow::anyhow!("missing header terminator"))?;
+            let payload: Value =
+                serde_json::from_slice(&request[header_end + 4..])?;
+            let upstream_model = payload["model"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing model"))?
+                .to_string();
+            let body = serde_json::json!({
+                "id": "completion-upstream-id",
+                "object": "chat.completion",
+                "created": 0,
+                "model": upstream_model,
+                "system_fingerprint": null,
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "ok" },
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 1, "total_tokens": 2 }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await?;
+            anyhow::Ok(upstream_model)
+        });
+        let document = format!(
+            r#"
+[[providers]]
+id = "custom-openai"
+display_name = "Custom OpenAI"
+provider_type = "openai-completions"
+base_url = "http://{address}"
+api_key = "sk-test"
+
+[[providers.models]]
+id = "kimi-k3"
+upstream_id = "moonshotai/kimi-k3"
+"#
+        );
+        let config: AppConfig = toml::from_str(&document)?;
+        let factory =
+            LlmFactory::new(config::ConfigHandle::from_config(config));
+        let llm = factory
+            .get("custom-openai", "kimi-k3")
+            .ok_or_else(|| anyhow::anyhow!("local model lookup failed"))?;
+
+        llm.completion(
+            CompletionRequest::builder()
+                .chat_history(crate::OneOrMany::one("describe".into()))
+                .build(),
+        )
+        .await?;
+        let upstream_model = server.await??;
+
+        anyhow::ensure!(llm.model_id() == "kimi-k3");
+        anyhow::ensure!(upstream_model == "moonshotai/kimi-k3");
+        Ok(())
     }
 
     /// chatgpt with `auth.type = \"codex\"` builds without a local API key.

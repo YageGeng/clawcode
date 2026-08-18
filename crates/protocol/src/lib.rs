@@ -22,9 +22,8 @@ mod turn;
 pub use acp::{
     AcpCommandParameters, AcpCompactParameters, AcpForkParameters,
     AcpNavigateParameters, AcpPendingMessageRemoveParameters,
-    AcpQueueMessageParameters, AcpSessionParameters,
-    AcpSessionRenameParameters, AcpSkillParameters, AcpUserBashParameters,
-    AcpWorkingDirectory, AcpWorkingDirectoryError,
+    AcpSessionParameters, AcpSessionRenameParameters, AcpSkillParameters,
+    AcpUserBashParameters, AcpWorkingDirectory, AcpWorkingDirectoryError,
 };
 pub use capability::{
     CompactionData, CompactionDetails, CompactionOperationError,
@@ -32,7 +31,8 @@ pub use capability::{
     CompactionOperationKind, CompactionOperationOutcome,
     CompactionOperationStarted, CompactionOutcome, CompactionPolicy,
     CompactionReason, CompactionResult, CompactionStep, CompactionStepAttempt,
-    CompactionUsageCause, CompactionUsageRecord, ModelProfile, RetryPolicy,
+    CompactionUsageCause, CompactionUsageRecord, ModelInputModalities,
+    ModelInputModalitiesError, ModelInputModality, ModelProfile, RetryPolicy,
     SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};

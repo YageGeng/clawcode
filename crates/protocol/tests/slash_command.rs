@@ -47,18 +47,20 @@ fn slash_invocation_keeps_tabs_and_newlines_in_the_name() {
     assert!(multiline.arguments.is_empty());
 }
 
-/// Composite ACP input keeps its text projection but is never dispatched as a Slash Command.
+/// Multiblock ACP input is never dispatched as a Slash Command.
 #[test]
-fn composite_input_is_not_a_slash_candidate() {
-    let input = RunInput::Composite(
-        "/compact\n\n[spec](file:///workspace/spec.md)".to_string(),
-    );
+fn multiblock_input_is_not_a_slash_candidate() {
+    let input = RunInput::Blocks(vec![
+        ContentBlock::Text {
+            text: "/compact".to_string(),
+        },
+        ContentBlock::Image {
+            data: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+        },
+    ]);
 
     assert!(input.slash_command_text().is_none());
-    assert_eq!(
-        input.as_str(),
-        "/compact\n\n[spec](file:///workspace/spec.md)"
-    );
 }
 
 /// Expanded user messages display their invocation while retaining model-only expanded blocks.

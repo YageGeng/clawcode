@@ -1,9 +1,19 @@
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AssistantMetadata,
     ContentBlock, EventMetadata, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelUsage, RunId, Sequence, StopReason, TimestampMs,
-    TurnId,
+    MessageTiming, ModelInputModalities, ModelInputModality, ModelProfile,
+    ModelRequest, ModelRequestOptions, ModelUsage, RunId, Sequence, StopReason,
+    TimestampMs, ToolCallId, TurnId,
 };
+
+#[test]
+fn model_input_modalities_reject_invalid_deserialization() {
+    let error =
+        serde_json::from_str::<ModelInputModalities>(r#"["image","text"]"#)
+            .expect_err("reversed modalities must fail");
+
+    assert!(error.to_string().contains("input must start with text"));
+}
 
 /// Builds deterministic message identity data for protocol wire assertions.
 fn sample_identity(message_id: &str, turn_id: &str) -> MessageIdentity {
@@ -136,4 +146,133 @@ fn retry_and_usage_events_keep_turn_metadata() {
     assert_eq!(usage_value["event"], "usage_updated");
     assert_eq!(usage_value["usage"]["input_tokens"], "10");
     assert_eq!(usage_value["context_window"], 128_000);
+}
+
+/// Text-only models receive one placeholder for each consecutive image run.
+#[test]
+fn text_only_model_request_replaces_unsupported_images() {
+    let original_blocks = vec![
+        ContentBlock::Text {
+            text: "before".to_string(),
+        },
+        ContentBlock::Image {
+            data: "first".to_string(),
+            mime_type: "image/png".to_string(),
+        },
+        ContentBlock::Image {
+            data: "second".to_string(),
+            mime_type: "image/jpeg".to_string(),
+        },
+        ContentBlock::Text {
+            text: "after".to_string(),
+        },
+    ];
+    let mut request = ModelRequest {
+        messages: vec![
+            AgentMessage {
+                identity: sample_identity("user-image", "turn-image"),
+                timing: sample_timing("200", "200", "200"),
+                content: MessageContent::User {
+                    blocks: original_blocks.clone(),
+                },
+            },
+            AgentMessage {
+                identity: sample_identity("tool-image", "turn-image"),
+                timing: sample_timing("201", "201", "201"),
+                content: MessageContent::ToolResult {
+                    tool_call_id: ToolCallId::try_from("tool-call")
+                        .expect("tool call id"),
+                    blocks: vec![ContentBlock::Image {
+                        data: "tool".to_string(),
+                        mime_type: "image/webp".to_string(),
+                    }],
+                    is_error: false,
+                    details: None,
+                },
+            },
+        ],
+        tools: Vec::new(),
+        options: ModelRequestOptions::default(),
+    };
+    let profile = ModelProfile::builder()
+        .provider_id("fixture".to_string())
+        .model_id("text-only".to_string())
+        .display_name("Text only".to_string())
+        .context_tokens(8_192)
+        .max_output_tokens(1_024)
+        .build();
+
+    assert!(request.adapt_input(&profile));
+
+    let MessageContent::User { blocks } = &request.messages[0].content else {
+        panic!("user message expected");
+    };
+    assert_eq!(
+        blocks,
+        &vec![
+            ContentBlock::Text {
+                text: "before".to_string(),
+            },
+            ContentBlock::Text {
+                text: "(image omitted: model does not support images)"
+                    .to_string(),
+            },
+            ContentBlock::Text {
+                text: "after".to_string(),
+            },
+        ]
+    );
+    let MessageContent::ToolResult { blocks, .. } =
+        &request.messages[1].content
+    else {
+        panic!("tool result expected");
+    };
+    assert_eq!(
+        blocks,
+        &vec![ContentBlock::Text {
+            text: "(tool image omitted: model does not support images)"
+                .to_string(),
+        }]
+    );
+    assert!(matches!(original_blocks[1], ContentBlock::Image { .. }));
+}
+
+/// Image-capable models retain the exact user image block.
+#[test]
+fn image_model_request_preserves_images() {
+    let image = ContentBlock::Image {
+        data: "image-data".to_string(),
+        mime_type: "image/png".to_string(),
+    };
+    let mut request = ModelRequest {
+        messages: vec![AgentMessage {
+            identity: sample_identity("user-vision", "turn-vision"),
+            timing: sample_timing("300", "300", "300"),
+            content: MessageContent::User {
+                blocks: vec![image.clone()],
+            },
+        }],
+        tools: Vec::new(),
+        options: ModelRequestOptions::default(),
+    };
+    let profile = ModelProfile::builder()
+        .provider_id("fixture".to_string())
+        .model_id("vision".to_string())
+        .display_name("Vision".to_string())
+        .context_tokens(8_192)
+        .max_output_tokens(1_024)
+        .input(
+            ModelInputModalities::try_from(vec![
+                ModelInputModality::Text,
+                ModelInputModality::Image,
+            ])
+            .expect("image modalities"),
+        )
+        .build();
+
+    assert!(!request.adapt_input(&profile));
+    assert!(matches!(
+        &request.messages[0].content,
+        MessageContent::User { blocks } if blocks == &vec![image]
+    ));
 }

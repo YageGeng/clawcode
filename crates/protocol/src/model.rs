@@ -1,4 +1,15 @@
-use crate::{AgentMessage, ModelUsage, StopReason, ToolCall, ToolDefinition};
+use crate::{
+    AgentMessage, ContentBlock, MessageContent, ModelInputModality,
+    ModelProfile, ModelUsage, StopReason, ToolCall, ToolDefinition,
+};
+
+/// User-image placeholder sent to models without image input support.
+const USER_IMAGE_PLACEHOLDER: &str =
+    "(image omitted: model does not support images)";
+
+/// Tool-image placeholder sent to models without image input support.
+const TOOL_IMAGE_PLACEHOLDER: &str =
+    "(tool image omitted: model does not support images)";
 
 /// Optional generation controls applied only to one model request.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -18,6 +29,62 @@ pub struct ModelRequest {
     pub tools: Vec<ToolDefinition>,
     /// Request-local generation controls, empty for ordinary agent Turns.
     pub options: ModelRequestOptions,
+}
+
+impl ModelRequest {
+    /// Replaces unsupported images in this request without touching stored messages.
+    pub fn adapt_input(&mut self, profile: &ModelProfile) -> bool {
+        if profile.input.supports(ModelInputModality::Image) {
+            return false;
+        }
+
+        let mut changed = false;
+        for message in &mut self.messages {
+            let (blocks, placeholder) = match &mut message.content {
+                MessageContent::User { blocks } => {
+                    (blocks, USER_IMAGE_PLACEHOLDER)
+                }
+                MessageContent::ExpandedUser { expansion } => {
+                    (&mut expansion.model_blocks, USER_IMAGE_PLACEHOLDER)
+                }
+                MessageContent::ToolResult { blocks, .. } => {
+                    (blocks, TOOL_IMAGE_PLACEHOLDER)
+                }
+                MessageContent::Extension { extension }
+                    if extension.include_in_context =>
+                {
+                    (&mut extension.blocks, USER_IMAGE_PLACEHOLDER)
+                }
+                MessageContent::System { .. }
+                | MessageContent::Assistant { .. }
+                | MessageContent::BashExecution { .. }
+                | MessageContent::Extension { .. }
+                | MessageContent::SlashCommand { .. }
+                | MessageContent::CompactionSummary { .. } => continue,
+            };
+            let mut previous_was_placeholder = false;
+            let mut adapted = Vec::with_capacity(blocks.len());
+            for block in std::mem::take(blocks) {
+                if matches!(block, ContentBlock::Image { .. }) {
+                    changed = true;
+                    if !previous_was_placeholder {
+                        adapted.push(ContentBlock::Text {
+                            text: placeholder.to_string(),
+                        });
+                    }
+                    previous_was_placeholder = true;
+                } else {
+                    previous_was_placeholder = matches!(
+                        &block,
+                        ContentBlock::Text { text } if text == placeholder
+                    );
+                    adapted.push(block);
+                }
+            }
+            *blocks = adapted;
+        }
+        changed
+    }
 }
 
 /// Incremental provider-neutral output consumed by the Turn state machine.

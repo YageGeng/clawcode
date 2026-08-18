@@ -369,18 +369,23 @@ impl SessionRuntime {
                 )
             })?
             .clone();
+        let mut model_request = ModelRequest {
+            messages,
+            tools: Vec::new(),
+            options: ModelRequestOptions {
+                max_tokens: Some(request.max_tokens),
+                temperature: request.temperature,
+            },
+        };
+        if model_request.adapt_input(model.profile()) {
+            tracing::debug!(
+                "replaced unsupported images before MCP sampling model {}/{}",
+                model.profile().provider_id,
+                model.profile().model_id
+            );
+        }
         let mut stream = model
-            .stream(
-                ModelRequest {
-                    messages,
-                    tools: Vec::new(),
-                    options: ModelRequestOptions {
-                        max_tokens: Some(request.max_tokens),
-                        temperature: request.temperature,
-                    },
-                },
-                cancellation,
-            )
+            .stream(model_request, cancellation)
             .await
             .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
         let mut blocks = Vec::new();
