@@ -4,6 +4,7 @@ import type { AcpExtensionMethods, AcpExtensionNotifications } from "../acp/exte
 import { AcpProtocol } from "../acp/protocol";
 import type { InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
+import type { BranchEditPlan } from "../domain/messageActions";
 import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { useWorkspaceStore } from "./store";
 import type { WorkspaceAction } from "./state";
@@ -167,6 +168,28 @@ export class WorkspaceController {
     await this.refreshSessions();
     await this.openSession(result.sessionId);
     return result.sessionId;
+  }
+
+  /** Branches before one user message and seeds its original prompt in the same Session. */
+  async branchForEditing(plan: BranchEditPlan): Promise<void> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    await this.requireConnection().request(this.methods.branch, {
+      sessionId,
+      entryId: plan.branchEntryId
+    });
+    this.dispatch({ type: "draft/activated", sessionId, draft: plan.draft });
+    await this.openSession(sessionId);
+  }
+
+  /** Keeps one complete in-memory Composer draft across Session switches. */
+  updateDraft(sessionId: SessionId, draft: PromptInput): void {
+    this.dispatch({ type: "draft/changed", sessionId, draft });
+  }
+
+  /** Removes a submitted Composer draft from Session-scoped memory. */
+  clearDraft(sessionId: SessionId): void {
+    this.dispatch({ type: "draft/cleared", sessionId });
   }
 
   cancel(): void {

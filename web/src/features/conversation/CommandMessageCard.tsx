@@ -1,4 +1,5 @@
 import ReactMarkdown from "react-markdown";
+import type { ReactNode } from "react";
 import remarkGfm from "remark-gfm";
 
 import type { MessageEntity, SlashCommandSource } from "../../domain/model";
@@ -12,10 +13,11 @@ const SOURCE_LABELS: Readonly<Record<SlashCommandSource, string>> = {
 
 export type CommandMessageCardProps = Readonly<{
   message: MessageEntity;
+  actions?: ReactNode;
 }>;
 
 /** Renders one decoded Slash Command message without inspecting raw ACP data. */
-export function CommandMessageCard({ message }: CommandMessageCardProps) {
+export function CommandMessageCard({ message, actions }: CommandMessageCardProps) {
   const command = message.slashCommand;
   if (command === undefined) return null;
   return (
@@ -27,6 +29,7 @@ export function CommandMessageCard({ message }: CommandMessageCardProps) {
         {command.status === undefined ? null : <span className="command-message__status">{command.status === "succeeded" ? "成功" : "失败"}</span>}
       </header>
       {message.text.length === 0 ? null : <div className="command-message__body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div>}
+      {actions}
       <details className="message__diagnostics">
         <summary>消息详情</summary>
         <dl className="diagnostics-list">

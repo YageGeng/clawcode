@@ -15,6 +15,7 @@ export type ComposerProps = Readonly<{
   outcomeUnknown: boolean;
   pending: PendingMessages;
   availableCommands: readonly AvailableCommandEntity[];
+  initialDraft?: PromptInput;
   controller: WorkspaceController;
 }>;
 
@@ -68,12 +69,13 @@ const QueuedMessageView = {
   }
 } as const;
 
-export function Composer({ productSlug, sessionId, running, outcomeUnknown, pending, availableCommands, controller }: ComposerProps) {
+export function Composer({ productSlug, sessionId, running, outcomeUnknown, pending, availableCommands, initialDraft, controller }: ComposerProps) {
   const storageKey = `${productSlug}:agent-draft:${sessionId}`;
-  const initial = DraftCodec.parse(sessionStorage.getItem(storageKey));
+  const stored = DraftCodec.parse(sessionStorage.getItem(storageKey));
+  const initial = initialDraft ?? { ...stored, images: [] };
   const [text, setText] = useState(initial.text);
   const [resources, setResources] = useState(initial.resources);
-  const [images, setImages] = useState<readonly PromptImage[]>([]);
+  const [images, setImages] = useState<readonly PromptImage[]>(initial.images);
   const [resourceName, setResourceName] = useState("");
   const [resourceUri, setResourceUri] = useState("");
   const [showResourceForm, setShowResourceForm] = useState(false);
@@ -84,16 +86,20 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const imageInput = useRef<HTMLInputElement>(null);
   const imageReadInProgress = useRef(false);
+  const imagesRef = useRef(initial.images);
   const queued = [...pending.steering, ...pending.followUp];
   const commandQuery = text.startsWith("/") && !/\s/.test(text) ? text.slice(1) : undefined;
   const matchingCommands = commandQuery === undefined ? [] : CommandPaletteModel.matches(availableCommands, commandQuery);
   const paletteOpen = commandQuery !== undefined && !paletteDismissed;
   const activeCommandIndex = matchingCommands.length === 0 ? 0 : selectedCommandIndex % matchingCommands.length;
 
-  const persist = (draft: StoredDraft) => {
-    sessionStorage.setItem(storageKey, JSON.stringify(draft));
+  const persist = (draft: PromptInput) => {
+    sessionStorage.setItem(storageKey, JSON.stringify({ text: draft.text, resources: draft.resources } satisfies StoredDraft));
+    controller.updateDraft(sessionId, draft);
+    imagesRef.current = draft.images;
     setText(draft.text);
     setResources(draft.resources);
+    setImages(draft.images);
   };
 
   const submit = async (input: PromptInput) => {
@@ -105,7 +111,11 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
     setError(undefined);
     try {
       await controller.send(input);
-      persist({ text: "", resources: [] });
+      sessionStorage.removeItem(storageKey);
+      controller.clearDraft(sessionId);
+      imagesRef.current = [];
+      setText("");
+      setResources([]);
       setImages([]);
     } catch (reason: unknown) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -118,7 +128,8 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const selectCommand = (command: AvailableCommandEntity) => {
     persist({
       text: `/${command.name}${command.argumentHint === undefined ? "" : " "}`,
-      resources
+      resources,
+      images
     });
     setSelectedCommandIndex(0);
     setPaletteDismissed(true);
@@ -133,15 +144,15 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
         </section>
       )}
       <div className="composer-card">
-        {resources.length === 0 ? null : <div className="resource-chips">{resources.map((resource) => <span className="resource-chip" key={`${resource.name}:${resource.uri}`}><Link2 size={12} />{resource.name}<button type="button" title="移除资源链接" onClick={() => persist({ text, resources: resources.filter((item) => item !== resource) })}><X size={12} /></button></span>)}</div>}
-        {images.length === 0 ? null : <div className="image-previews">{images.map((image) => <figure className="image-preview" key={image.id}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name} /><figcaption title={image.name}>{image.name}</figcaption><button type="button" title={`移除 ${image.name}`} onClick={() => setImages((current) => current.filter((item) => item.id !== image.id))}><X size={12} /></button></figure>)}</div>}
+        {resources.length === 0 ? null : <div className="resource-chips">{resources.map((resource) => <span className="resource-chip" key={`${resource.name}:${resource.uri}`}><Link2 size={12} />{resource.name}<button type="button" title="移除资源链接" onClick={() => persist({ text, resources: resources.filter((item) => item !== resource), images })}><X size={12} /></button></span>)}</div>}
+        {images.length === 0 ? null : <div className="image-previews">{images.map((image) => <figure className="image-preview" key={image.id}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name} /><figcaption title={image.name}>{image.name}</figcaption><button type="button" title={`移除 ${image.name}`} onClick={() => persist({ text, resources, images: images.filter((item) => item.id !== image.id) })}><X size={12} /></button></figure>)}</div>}
         {showResourceForm ? <div className="resource-form"><input aria-label="资源名称" placeholder="显示名称" value={resourceName} onChange={(event) => setResourceName(event.target.value)} /><input aria-label="资源 URI" placeholder="file:///path 或 https://…" value={resourceUri} onChange={(event) => setResourceUri(event.target.value)} /><button className="secondary-button" type="button" onClick={() => {
           const name = resourceName.trim();
           const uri = resourceUri.trim();
           try {
             if (name.length === 0) throw new Error("资源名称不能为空");
             void new URL(uri);
-            persist({ text, resources: [...resources, { name, uri }] });
+            persist({ text, resources: [...resources, { name, uri }], images });
             setResourceName(""); setResourceUri(""); setShowResourceForm(false); setError(undefined);
           } catch (reason: unknown) {
             setError(reason instanceof Error ? reason.message : String(reason));
@@ -157,6 +168,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
         ) : null}
         <textarea
           aria-label="消息"
+          autoFocus={initialDraft !== undefined}
           aria-controls={paletteOpen ? "command-palette" : undefined}
           aria-expanded={paletteOpen}
           aria-activedescendant={paletteOpen && matchingCommands.length > 0 ? `command-option-${activeCommandIndex}` : undefined}
@@ -164,7 +176,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           rows={3}
           value={text}
           onChange={(event) => {
-            persist({ text: event.target.value, resources });
+            persist({ text: event.target.value, resources, images });
             setSelectedCommandIndex(0);
             setPaletteDismissed(false);
           }}
@@ -238,7 +250,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
               }, { once: true });
               reader.readAsDataURL(file);
             }))).then((selected) => {
-              setImages((current) => [...current, ...selected]);
+              persist({ text, resources, images: [...imagesRef.current, ...selected] });
               setError(undefined);
             }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason))).finally(() => {
               imageReadInProgress.current = false;

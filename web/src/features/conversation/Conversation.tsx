@@ -1,4 +1,5 @@
 import type { UiBootstrap } from "../../bootstrap/model";
+import { MessageActionModel } from "../../domain/messageActions";
 import type { WorkspaceController } from "../../workspace/controller";
 import { useWorkspaceStore } from "../../workspace/store";
 import { Composer } from "../composer/Composer";
@@ -16,6 +17,7 @@ export type ConversationProps = Readonly<{
 
 export function Conversation({ bootstrap, controller }: ConversationProps) {
   const state = useWorkspaceStore();
+  const cwd = state.sessions.find((session) => session.sessionId === state.activeSessionId)?.cwd;
   // Streaming entities replace their collection identity on every update, so
   // the scroll controller can follow new content without owning workspace state.
   const { transcriptRef, onScroll } = useTranscriptScroll({
@@ -32,6 +34,7 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
   if (state.activeSessionId === undefined) {
     return <section className="conversation-placeholder"><div className="empty-state"><h2>开始一个 Agent 会话</h2><p>从左侧恢复会话，或创建一个使用本机工作目录的新会话。</p></div></section>;
   }
+  const activeDraft = state.drafts.get(state.activeSessionId);
   return (
     <section className="conversation-workspace">
       <div
@@ -44,7 +47,17 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
         {state.transcript.map((entry) => {
           if (entry.type === "message") {
             const message = state.messages.get(entry.messageId);
-            return message === undefined ? null : <MessageView key={`message:${entry.messageId}`} message={message} />;
+            const treeEntry = MessageActionModel.entry(state.tree, entry.messageId);
+            return message === undefined ? null : (
+              <MessageView
+                key={`message:${entry.messageId}`}
+                message={message}
+                {...(treeEntry === undefined ? {} : { entry: treeEntry })}
+                {...(cwd === undefined ? {} : { cwd })}
+                running={state.running}
+                controller={controller}
+              />
+            );
           }
           if (entry.type === "extension") {
             const extension = state.extensions.get(entry.extensionEventId);
@@ -66,13 +79,14 @@ export function Conversation({ bootstrap, controller }: ConversationProps) {
         {state.compaction.type === "cancelled" ? <div className="compaction-activity" role="status">已取消上下文压缩</div> : null}
       </div>
       <Composer
-        key={state.activeSessionId}
+        key={`${state.activeSessionId}:${state.composerRevision}`}
         productSlug={bootstrap.product.slug}
         sessionId={state.activeSessionId}
         running={state.running}
         outcomeUnknown={state.outcomeUnknown}
         pending={state.pending}
         availableCommands={state.availableCommands}
+        {...(activeDraft === undefined ? {} : { initialDraft: activeDraft })}
         controller={controller}
       />
     </section>
