@@ -55,7 +55,7 @@ impl DirectSlashCommandResolution {
     }
 }
 
-impl SessionRuntime {
+impl Session {
     /// Resolves direct commands in Builtin then Extension precedence order.
     pub(super) fn resolve_direct_slash_command(
         &self,
@@ -67,8 +67,8 @@ impl SessionRuntime {
             ));
         }
         match self
-            .commands
-            .snapshot()
+            .extensions
+            .command_snapshot()
             .map_err(|error| KernelError::ExtensionBlocked(error.to_string()))?
             .resolve(&invocation.name)
         {
@@ -101,8 +101,8 @@ impl Kernel {
     ) -> Result<Vec<protocol::SlashCommandDefinition>, KernelError> {
         let session = self.session(session_id)?;
         let registered = session
-            .commands
-            .snapshot()
+            .extensions
+            .command_snapshot()
             .map_err(|error| KernelError::ExtensionBlocked(error.to_string()))?
             .commands();
         let mut short_counts = BTreeMap::<String, usize>::new();
@@ -222,13 +222,6 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<AgentEvent, KernelError> {
         let session = self.session(session_id)?;
-        let raw_sequence = session
-            .event_sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .checked_add(1)
-            .ok_or_else(|| {
-                KernelError::Protocol("event sequence overflow".to_string())
-            })?;
         Ok(AgentEvent {
             metadata: EventMetadata {
                 turn_id: TurnId::try_from(self.id_generator.next(IdKind::Turn))
@@ -236,9 +229,7 @@ impl Kernel {
                         KernelError::Protocol(error.to_string())
                     })?,
                 timestamp_ms: self.clock.now(),
-                sequence: Sequence::try_from(raw_sequence).map_err(
-                    |error| KernelError::Protocol(error.to_string()),
-                )?,
+                sequence: session.execution.next_sequence()?,
             },
             payload: AgentEventPayload::AvailableCommandsChanged {
                 commands: self.available_commands(session_id)?,

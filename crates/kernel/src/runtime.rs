@@ -5,24 +5,28 @@ mod extension;
 mod input;
 mod lifecycle;
 mod mcp;
+mod model_state;
 mod prompt;
 mod queue;
+mod resources;
 mod retry;
 mod run;
 mod session;
 mod settlement;
-mod tool_batch;
-mod tool_state;
-mod tool_updates;
+mod tools;
+mod transcript;
 mod tree;
 mod user_bash;
 
-use extension::KernelExtensionDiagnostics;
-use lifecycle::SessionLifecycle;
+use extension::{KernelExtensionDiagnostics, SessionExtensions};
+use lifecycle::{ActiveRunContext, SessionExecution, SessionLifecycle};
+use mcp::SessionMcpRuntime;
+use model_state::SessionModelState;
+use resources::SessionResources;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -30,19 +34,23 @@ use ::extension::{
     DynamicCommandRegistry, ExtensionFactory, ExtensionRegistrar,
     ExtensionRuntime,
 };
+use ::tools::{
+    BashExecutionRequest, BashExecutor, ToolExecutionContext, ToolFactory,
+    ToolRegistry,
+};
 use futures::StreamExt;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
     BashExecutionMessage, CompactionData, CompactionDetails, CompactionPolicy,
     CompactionReason, CompactionResult, ContentBlock, EntryId, EventMetadata,
-    ExtensionEventData, ExtensionFlagDefinition, IdGenerator, IdKind, LaneId,
-    McpSessionSnapshot, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelRequest, ModelRetryDisposition, ModelStreamEvent,
-    QueueId, RecordId, RetryPolicy, RunId, RunRequest, RunResult, Sequence,
-    SessionId, SessionSummary, SessionTitle, SessionTreeEntry,
-    SessionTreeSnapshot, StopReason, ThinkingLevel, TimestampMs, ToolCall,
-    ToolResult, TraceId, TurnId, TurnIdentity, TurnOutcome, TurnRecord,
-    TurnTiming, UserBashInput, UserBashRequest, UserBashResult,
+    ExtensionFlagDefinition, IdGenerator, IdKind, LaneId, McpSessionSnapshot,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelRequest,
+    ModelRetryDisposition, ModelStreamEvent, QueueId, RecordId, RetryPolicy,
+    RunId, RunRequest, RunResult, SessionId, SessionSummary, SessionTitle,
+    SessionTreeEntry, SessionTreeSnapshot, StopReason, ThinkingLevel,
+    TimestampMs, ToolCall, ToolResult, TraceId, TurnId, TurnIdentity,
+    TurnOutcome, TurnRecord, TurnTiming, UserBashInput, UserBashRequest,
+    UserBashResult,
 };
 use store::{
     Clock, EntryKind, NewEntry, NewRecord, RecordKind, SessionCreateOptions,
@@ -50,10 +58,6 @@ use store::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
-use tools::{
-    BashExecutionRequest, BashExecutor, ToolExecutionContext, ToolFactory,
-    ToolRegistry,
-};
 
 use crate::{
     EventSink, Model, ModelCatalog, ModelError, ModelFactory, SinkError,
@@ -70,8 +74,10 @@ use queue::{PendingQueue, PendingQueueItem, QueueCancellationReason};
 pub use retry::RetryClassifier;
 use retry::RetryState;
 use settlement::{RunCompletion, RunSettlement};
-use tool_state::SessionToolState;
-use tool_updates::{ToolExecutionUpdate, ToolUpdateChannel};
+use tools::{SessionToolState, ToolBatch, ToolBatchResult};
+use transcript::{
+    SessionTranscript, TranscriptNavigationCommit, TranscriptNavigationSnapshot,
+};
 
 /// Errors surfaced by kernel construction, persistence, extensions, and Turns.
 #[derive(Debug, thiserror::Error)]
@@ -81,7 +87,7 @@ pub enum KernelError {
     Model(#[from] ModelError),
     /// Tool registry construction failed.
     #[error("tool subsystem failed: {0}")]
-    Tool(#[from] tools::ToolError),
+    Tool(#[from] ::tools::ToolError),
     /// Session persistence failed.
     #[error("store subsystem failed: {0}")]
     Store(#[from] store::StoreError),
@@ -106,6 +112,9 @@ pub enum KernelError {
     /// A session identifier was registered more than once.
     #[error("session already exists: {0}")]
     DuplicateSession(SessionId),
+    /// A registered session has not completed startup and resource publication.
+    #[error("session is starting")]
+    SessionStarting,
     /// A closing session cannot accept another serialized operation.
     #[error("session is closing")]
     SessionClosing,
@@ -210,6 +219,7 @@ impl KernelFactory {
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
+            .pending_sessions(Arc::new(Mutex::new(HashSet::new())))
             .shutdown(CancellationToken::new())
             .build())
     }
@@ -234,7 +244,8 @@ pub struct Kernel {
     max_turns: usize,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
-    sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionRuntime>>>>,
+    sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
+    pending_sessions: Arc<Mutex<HashSet<SessionId>>>,
     shutdown: CancellationToken,
 }
 
@@ -427,8 +438,8 @@ impl Kernel {
     ) -> Result<serde_json::Value, KernelError> {
         let session = self.session(session_id)?;
         let command = session
-            .commands
-            .snapshot()
+            .extensions
+            .command_snapshot()
             .map_err(|error| KernelError::ExtensionBlocked(error.to_string()))?
             .resolve(&name)
             .map_err(|_error| KernelError::ExtensionCommandNotFound(name))?;
@@ -461,33 +472,15 @@ impl From<serde_json::Error> for KernelError {
 }
 
 #[derive(typed_builder::TypedBuilder)]
-struct SessionRuntime {
-    store: Arc<Mutex<Box<dyn SessionStore>>>,
-    lane: LaneId,
+struct Session {
     cwd: PathBuf,
-    mcp: Option<Arc<::mcp::McpSession>>,
-    prompt: OnceLock<Arc<::prompt::PromptSession>>,
-    skills: OnceLock<Option<Arc<skill::SkillCatalog>>>,
-    extensions: Arc<ExtensionRuntime>,
-    tool_state: Arc<SessionToolState>,
-    mcp_projection: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
-    pending_mcp_elicitations: Mutex<HashMap<String, PendingMcpElicitation>>,
-    commands: DynamicCommandRegistry,
-    flags: Arc<[ExtensionFlagDefinition]>,
-    models: Arc<ModelCatalog>,
-    model: RwLock<Arc<dyn Model>>,
-    thinking_level: RwLock<ThinkingLevel>,
-    event_bus: broadcast::Sender<ExtensionEventData>,
-    event_sink: Arc<Mutex<Option<Arc<dyn EventSink>>>>,
-    diagnostic_turn_id: Arc<Mutex<Option<TurnId>>>,
-    history: Arc<Mutex<Vec<AgentMessage>>>,
-    queue: Mutex<PendingQueue>,
-    lifecycle: RwLock<SessionLifecycle>,
-    run_gate: AsyncMutex<()>,
-    active_run_id: Mutex<Option<RunId>>,
-    idle_notify: Notify,
-    cancellation: Mutex<CancellationToken>,
-    event_sequence: Arc<AtomicU64>,
+    transcript: Arc<SessionTranscript>,
+    mcp: SessionMcpRuntime,
+    resources: OnceLock<SessionResources>,
+    extensions: SessionExtensions,
+    tools: Arc<SessionToolState>,
+    model: SessionModelState,
+    execution: Arc<SessionExecution>,
 }
 
 /// Retains the request payload and its one-shot response route as one state entry.
@@ -496,82 +489,10 @@ struct PendingMcpElicitation {
     sender: tokio::sync::oneshot::Sender<protocol::McpElicitationResult>,
 }
 
-/// Clears active-run correlation on every success and error exit from `Kernel::run`.
-struct ActiveRunLease {
-    session: Arc<SessionRuntime>,
-    run_id: RunId,
-}
-
-impl ActiveRunLease {
-    /// Marks one run active after the session gate has been acquired.
-    fn acquire(
-        session: Arc<SessionRuntime>,
-        run_id: RunId,
-        turn_id: TurnId,
-        sink: Arc<dyn EventSink>,
-    ) -> Result<Self, KernelError> {
-        *session
-            .active_run_id
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            Some(run_id.clone());
-        *session
-            .event_sink
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? = Some(sink);
-        *session
-            .diagnostic_turn_id
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? = Some(turn_id);
-        Ok(Self { session, run_id })
-    }
-}
-
-impl Drop for ActiveRunLease {
-    /// Clears only the run identity installed by this lease.
-    fn drop(&mut self) {
-        if let Ok(mut active_run_id) = self.session.active_run_id.lock()
-            && active_run_id.as_ref() == Some(&self.run_id)
-        {
-            *active_run_id = None;
-        }
-        self.session.idle_notify.notify_waiters();
-        if let Ok(mut sink) = self.session.event_sink.lock() {
-            *sink = None;
-        }
-        if let Ok(mut turn_id) = self.session.diagnostic_turn_id.lock() {
-            *turn_id = None;
-        }
-    }
-}
-
 struct EventEmitter {
     clock: Arc<dyn Clock>,
     sink: Arc<dyn EventSink>,
-    session: Arc<SessionRuntime>,
-}
-
-/// Immutable inputs required to execute and correlate one complete tool batch.
-#[derive(typed_builder::TypedBuilder)]
-struct ToolBatch<'a> {
-    session_id: &'a SessionId,
-    run_id: &'a RunId,
-    turn_id: &'a TurnId,
-    trace_id: &'a TraceId,
-    session: &'a Arc<SessionRuntime>,
-    emitter: &'a EventEmitter,
-    cancellation: &'a CancellationToken,
-    tools: Arc<ToolRegistry>,
-    calls: Vec<ToolCall>,
-}
-
-/// Completed source-ordered tool messages plus cancellation state for the Turn.
-#[derive(Default, typed_builder::TypedBuilder)]
-struct ToolBatchResult {
-    messages: Vec<AgentMessage>,
-    results: Vec<ToolResult>,
-    cancelled: bool,
-    terminate: bool,
+    session: Arc<Session>,
 }
 
 impl EventEmitter {
@@ -591,16 +512,7 @@ impl EventEmitter {
         timestamp_ms: TimestampMs,
         payload: AgentEventPayload,
     ) -> Result<(), KernelError> {
-        let raw_sequence = self
-            .session
-            .event_sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .checked_add(1)
-            .ok_or_else(|| {
-                KernelError::Protocol("event sequence overflow".to_string())
-            })?;
-        let sequence = Sequence::try_from(raw_sequence)
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let sequence = self.session.execution.next_sequence()?;
         self.sink
             .emit(AgentEvent {
                 metadata: EventMetadata {

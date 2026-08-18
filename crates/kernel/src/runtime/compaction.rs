@@ -26,7 +26,7 @@ pub(super) struct CompactionExecution<'a> {
     /// Session identifier supplied to extension lifecycle events.
     session_id: &'a SessionId,
     /// Live session whose caller already owns the serialized run lock.
-    session: &'a Arc<SessionRuntime>,
+    session: &'a Arc<Session>,
     /// Event destination shared with the surrounding agent operation.
     sink: Arc<dyn EventSink>,
     /// Persisted and emitted reason for this compaction.
@@ -71,55 +71,54 @@ impl Kernel {
     /// Selects pre-prompt compaction from the persisted active history and model limits.
     pub(super) fn pre_prompt_compaction(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         profile: &ModelProfile,
     ) -> Result<Option<(CompactionReason, Option<MessageId>)>, KernelError>
     {
-        let history = session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let latest_compaction_started_at =
-            history.iter().rev().find_map(|message| {
-                matches!(
-                    message.content,
-                    MessageContent::CompactionSummary { .. }
-                )
-                .then_some(message.timing.started_at_ms)
-            });
-        // Retained-tail messages are ordered after the synthetic summary but
-        // retain their original timing, so stale provider metadata must not
-        // initiate another overflow recovery after the same compaction.
-        let latest_assistant = history.iter().rev().find_map(|message| {
-            if let MessageContent::Assistant { metadata, .. } = &message.content
-                && latest_compaction_started_at.is_none_or(|boundary| {
-                    message.timing.ended_at_ms > boundary
-                })
-            {
-                Some((message, metadata))
-            } else {
-                None
-            }
-        });
-        Ok(latest_assistant
-            .and_then(|(message, metadata)| {
-                self.compaction_policy
-                    .overflow_recovery(metadata, profile)
-                    .map(|recovery| {
-                        let excluded = (recovery
-                            == OverflowRecovery::CompactAndRetry)
-                            .then(|| message.identity.message_id.clone());
-                        (CompactionReason::Overflow, excluded)
-                    })
-            })
-            .or_else(|| {
-                ContextUsageEstimate::from_history(&history)
-                    .should_compact(
-                        profile.context_tokens,
-                        self.compaction_policy,
+        session.transcript.inspect_history(|history| {
+            let latest_compaction_started_at =
+                history.iter().rev().find_map(|message| {
+                    matches!(
+                        message.content,
+                        MessageContent::CompactionSummary { .. }
                     )
-                    .then_some((CompactionReason::Threshold, None))
-            }))
+                    .then_some(message.timing.started_at_ms)
+                });
+            // Retained-tail messages are ordered after the synthetic summary
+            // but retain their original timing, so stale provider metadata
+            // must not trigger another recovery after the same compaction.
+            let latest_assistant = history.iter().rev().find_map(|message| {
+                if let MessageContent::Assistant { metadata, .. } =
+                    &message.content
+                    && latest_compaction_started_at.is_none_or(|boundary| {
+                        message.timing.ended_at_ms > boundary
+                    })
+                {
+                    Some((message, metadata))
+                } else {
+                    None
+                }
+            });
+            latest_assistant
+                .and_then(|(message, metadata)| {
+                    self.compaction_policy
+                        .overflow_recovery(metadata, profile)
+                        .map(|recovery| {
+                            let excluded = (recovery
+                                == OverflowRecovery::CompactAndRetry)
+                                .then(|| message.identity.message_id.clone());
+                            (CompactionReason::Overflow, excluded)
+                        })
+                })
+                .or_else(|| {
+                    ContextUsageEstimate::from_history(history)
+                        .should_compact(
+                            profile.context_tokens,
+                            self.compaction_policy,
+                        )
+                        .then_some((CompactionReason::Threshold, None))
+                })
+        })
     }
 
     /// Generates and persists one model-backed pi v4 compaction atomically on failure.
@@ -145,12 +144,7 @@ impl Kernel {
     ) -> Result<CompactionResult, KernelError> {
         let session = self.session(session_id)?;
         let _run_guard = session.acquire_operation().await?;
-        let cancellation = CancellationToken::new();
-        *session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            cancellation.clone();
+        let cancellation = session.execution.install_cancellation()?;
         self.perform_compaction(
             CompactionExecution::builder()
                 .session_id(session_id)
@@ -178,11 +172,7 @@ impl Kernel {
             identity,
             instruction,
         } = execution;
-        let mut compacted_history = session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .clone();
+        let mut compacted_history = session.transcript.history()?;
         // Failed and explicitly excluded Assistant attempts stay replayable in
         // Store but never become part of a recovered active model context.
         compacted_history.retain(|message| {
@@ -234,6 +224,7 @@ impl Kernel {
             self.extension_context(session, Some(&run_id), Some(&turn_id))?;
         let extension_result = session
             .extensions
+            .runtime_ref()
             .emit_session_before_compact(
                 &protocol::SessionBeforeCompactEvent::builder()
                     .reason(reason)
@@ -256,12 +247,7 @@ impl Kernel {
             sink,
             session: Arc::clone(session),
         };
-        let source_leaf_id = session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .lane(&session.lane)
-            .cloned();
+        let source_leaf_id = session.transcript.leaf_id()?;
         self.record_operation(
             session,
             &run_id,
@@ -511,18 +497,6 @@ impl Kernel {
                 .usage(summary_usage.clone())
                 .details(Some(details.clone()))
                 .build();
-            session
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .append_entry(
-                    &session.lane,
-                    NewEntry {
-                        id: entry_id.clone(),
-                        kind: EntryKind::Compaction,
-                        payload: serde_json::to_value(&data)?,
-                    },
-                )?;
             let summary_message = AgentMessage {
                 identity: MessageIdentity {
                     message_id: MessageId::try_from(format!(
@@ -551,10 +525,16 @@ impl Kernel {
                 Vec::with_capacity(retained_tail.len().saturating_add(1));
             context.push(summary_message);
             context.extend(retained_tail);
-            *session
-                .history
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)? = context;
+            // Commit the durable boundary and its in-memory context together so
+            // readers cannot observe a compaction split across two locks.
+            session.transcript.commit_compaction(
+                NewEntry {
+                    id: entry_id.clone(),
+                    kind: EntryKind::Compaction,
+                    payload: serde_json::to_value(&data)?,
+                },
+                context,
+            )?;
             let result = CompactionResult::builder()
                 .entry_id(entry_id.clone())
                 .turn_id(turn_id.clone())
@@ -584,6 +564,7 @@ impl Kernel {
         let terminal_result = lifecycle.complete(&result).await;
         session
             .extensions
+            .runtime_ref()
             .emit_session_compact(
                 &protocol::SessionCompactEvent::builder()
                     .compaction(result.clone())
@@ -692,11 +673,7 @@ impl Kernel {
         let completion_hooks =
             self.completion_hooks(session, run_id, turn_id)?;
         // Compaction uses one immutable model snapshot just like a normal Turn.
-        let model = session
-            .model
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .clone();
+        let model = session.model.active()?;
         model.preflight().await?;
         let max_tokens = max_tokens
             .map(|tokens| tokens.min(model.profile().max_output_tokens));

@@ -348,18 +348,18 @@ impl AcpServerFactory {
                             None => false,
                             _ => false,
                         };
-                        kernel
-                            .resume_session(
-                                session_id.clone(),
-                                AcpWorkingDirectory::try_from(
-                                    request.cwd.into_inner(),
-                                )
-                                .map_err(|error| {
-                                    agent_client_protocol::Error::invalid_params()
-                                        .data(error.to_string())
-                                })?
-                                .into_inner(),
-                            )
+                        // Resume carries Extension dispatch and lifecycle
+                        // arbitration state; box it so the enclosing ACP
+                        // request future does not retain that large state inline.
+                        let cwd = AcpWorkingDirectory::try_from(
+                            request.cwd.into_inner(),
+                        )
+                        .map_err(|error| {
+                            agent_client_protocol::Error::invalid_params()
+                                .data(error.to_string())
+                        })?
+                        .into_inner();
+                        Box::pin(kernel.resume_session(session_id.clone(), cwd))
                             .await
                             .map_err(agent_client_protocol::Error::into_internal_error)?;
                         if replay_from_start {

@@ -35,6 +35,73 @@ use tools::BuiltinToolFactory;
 type TestModelStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
 
+/// Disabled MCP keeps public snapshot defaults and request errors stable.
+#[tokio::test]
+async fn disabled_mcp_preserves_public_semantics() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(0)));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build Kernel");
+    let session_id =
+        SessionId::try_from("session-disabled-mcp").expect("Session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+
+    assert_eq!(
+        kernel.mcp_status(&session_id).expect("MCP status"),
+        protocol::McpSessionSnapshot::default()
+    );
+    assert!(
+        kernel
+            .subscribe_mcp(&session_id)
+            .expect("subscribe")
+            .is_none()
+    );
+    assert!(
+        kernel
+            .mcp_elicitations(&session_id)
+            .expect("elicitations")
+            .requests
+            .is_empty()
+    );
+    let error = kernel
+        .mcp_reconnect(protocol::McpReconnectRequest {
+            session_id,
+            server_id: McpServerId::try_from("missing").expect("Server id"),
+        })
+        .await
+        .expect_err("disabled reconnect");
+    assert!(matches!(
+        error,
+        kernel::KernelError::Mcp(McpError::ServerNotFound(_))
+    ));
+}
+
 /// Stable profile used by the nested Sampling model fixture.
 static PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| {
     ModelProfile::builder()

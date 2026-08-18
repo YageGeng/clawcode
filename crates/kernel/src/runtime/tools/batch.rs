@@ -1,4 +1,28 @@
-use super::*;
+use super::super::*;
+use super::update::{ToolExecutionUpdate, ToolUpdateChannel};
+
+/// Immutable inputs required to execute and correlate one complete tool batch.
+#[derive(typed_builder::TypedBuilder)]
+pub(in crate::runtime) struct ToolBatch<'a> {
+    pub(in crate::runtime) session_id: &'a SessionId,
+    pub(in crate::runtime) run_id: &'a RunId,
+    pub(in crate::runtime) turn_id: &'a TurnId,
+    pub(in crate::runtime) trace_id: &'a TraceId,
+    pub(in crate::runtime) session: &'a Arc<Session>,
+    pub(in crate::runtime) emitter: &'a EventEmitter,
+    pub(in crate::runtime) cancellation: &'a CancellationToken,
+    pub(in crate::runtime) tools: Arc<ToolRegistry>,
+    pub(in crate::runtime) calls: Vec<ToolCall>,
+}
+
+/// Completed source-ordered tool messages plus cancellation state for the Turn.
+#[derive(Default, typed_builder::TypedBuilder)]
+pub(in crate::runtime) struct ToolBatchResult {
+    pub(in crate::runtime) messages: Vec<AgentMessage>,
+    pub(in crate::runtime) results: Vec<ToolResult>,
+    pub(in crate::runtime) cancelled: bool,
+    pub(in crate::runtime) terminate: bool,
+}
 
 impl Kernel {
     /// Emits one replaceable tool snapshot through protocol and extension observers.
@@ -25,6 +49,7 @@ impl Kernel {
         batch
             .session
             .extensions
+            .runtime_ref()
             .emit_tool_execution_update(
                 &protocol::ToolExecutionUpdateEvent {
                     call: update.call,
@@ -37,7 +62,7 @@ impl Kernel {
     }
 
     /// Executes transformed sibling tool calls concurrently and returns source-ordered results.
-    pub(super) async fn execute_tool_batch(
+    pub(in crate::runtime) async fn execute_tool_batch(
         &self,
         mut batch: ToolBatch<'_>,
     ) -> Result<ToolBatchResult, KernelError> {
@@ -56,6 +81,7 @@ impl Kernel {
             batch
                 .session
                 .extensions
+                .runtime_ref()
                 .emit_tool_execution_start(
                     &protocol::ToolExecutionStartEvent { call: call.clone() },
                     &extension_context,
@@ -77,6 +103,7 @@ impl Kernel {
             match batch
                 .session
                 .extensions
+                .runtime_ref()
                 .emit_tool_call(
                     protocol::ToolCallEvent { call: call.clone() },
                     &extension_context,
@@ -176,6 +203,7 @@ impl Kernel {
             let patch = batch
                 .session
                 .extensions
+                .runtime_ref()
                 .emit_tool_result(
                     protocol::ToolResultEvent {
                         call: call.clone(),
@@ -197,6 +225,7 @@ impl Kernel {
             batch
                 .session
                 .extensions
+                .runtime_ref()
                 .emit_tool_execution_end(
                     &protocol::ToolExecutionEndEvent {
                         call,

@@ -3,18 +3,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use extension::ExtensionDiagnosticSink;
 use protocol::{
-    ContentBlock, ExtensionId, IdGenerator, IdKind, LaneId, MessageIdentity,
-    TurnId,
+    ContentBlock, ExtensionId, IdGenerator, IdKind, MessageIdentity, TurnId,
 };
-use store::{EntryKind, NewEntry, SessionStore};
+
+use super::super::{SessionExecution, SessionTranscript};
 
 /// Failure stage for infrastructure that records extension handler diagnostics.
 #[derive(Debug)]
 enum DiagnosticStage {
     Identity,
-    Serialize,
     Persist,
-    History,
     Sequence,
     Sink,
 }
@@ -24,9 +22,7 @@ impl std::fmt::Display for DiagnosticStage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Identity => "identity",
-            Self::Serialize => "serialize",
             Self::Persist => "persist",
-            Self::History => "history",
             Self::Sequence => "sequence",
             Self::Sink => "sink",
         })
@@ -37,12 +33,8 @@ impl std::fmt::Display for DiagnosticStage {
 #[derive(typed_builder::TypedBuilder)]
 pub(in crate::runtime) struct KernelExtensionDiagnostics {
     clock: Arc<dyn store::Clock>,
-    sink: Arc<std::sync::Mutex<Option<Arc<dyn crate::EventSink>>>>,
-    turn_id: Arc<std::sync::Mutex<Option<TurnId>>>,
-    sequence: Arc<std::sync::atomic::AtomicU64>,
-    store: Arc<std::sync::Mutex<Box<dyn SessionStore>>>,
-    history: Arc<std::sync::Mutex<Vec<protocol::AgentMessage>>>,
-    lane: LaneId,
+    execution: Arc<SessionExecution>,
+    transcript: Arc<SessionTranscript>,
     id_generator: Arc<dyn IdGenerator>,
 }
 
@@ -57,11 +49,11 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
     ) {
         // Handler failures remain non-fatal, but failures in their diagnostic
         // path must remain observable even when durable replay is unavailable.
-        let turn_id = match self.turn_id.lock() {
-            Ok(turn_id) => turn_id.clone(),
+        let active_run = match self.execution.active_run() {
+            Ok(active_run) => active_run,
             Err(error) => {
                 tracing::warn!(
-                    "extension diagnostic turn lock failed for extension {} at {} during {}: {}",
+                    "extension diagnostic active Run snapshot failed for extension {} at {} during {}: {}",
                     extension_id,
                     point,
                     DiagnosticStage::Identity,
@@ -70,8 +62,8 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
                 None
             }
         };
-        let turn_id = match turn_id {
-            Some(turn_id) => turn_id,
+        let turn_id = match active_run.as_ref() {
+            Some(active_run) => active_run.turn_id.clone(),
             None => {
                 match TurnId::try_from(self.id_generator.next(IdKind::Turn)) {
                     Ok(turn_id) => turn_id,
@@ -145,43 +137,14 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
                 return;
             }
         };
-        let payload = match serde_json::to_value(&message) {
-            Ok(payload) => payload,
+        let _persisted = match self
+            .transcript
+            .append_context_message(entry_id, &message)
+        {
+            Ok(()) => true,
             Err(error) => {
                 tracing::error!(
-                    "extension diagnostic serialization failed for extension {} at {} during {}: {}",
-                    extension_id,
-                    point,
-                    DiagnosticStage::Serialize,
-                    error
-                );
-                return;
-            }
-        };
-        let persisted = match self.store.lock() {
-            Ok(mut store) => match store.append_entry(
-                &self.lane,
-                NewEntry {
-                    id: entry_id,
-                    kind: EntryKind::Message,
-                    payload,
-                },
-            ) {
-                Ok(_entry) => true,
-                Err(error) => {
-                    tracing::error!(
-                        "extension diagnostic persistence failed for extension {} at {} during {}: {}",
-                        extension_id,
-                        point,
-                        DiagnosticStage::Persist,
-                        error
-                    );
-                    false
-                }
-            },
-            Err(error) => {
-                tracing::error!(
-                    "extension diagnostic store lock failed for extension {} at {} during {}: {}",
+                    "extension diagnostic persistence failed for extension {} at {} during {}: {}",
                     extension_id,
                     point,
                     DiagnosticStage::Persist,
@@ -190,45 +153,13 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
                 false
             }
         };
-        if persisted {
-            match self.history.lock() {
-                Ok(mut history) => history.push(message),
-                Err(error) => tracing::error!(
-                    "extension diagnostic history lock failed for extension {} at {} during {}: {}",
-                    extension_id,
-                    point,
-                    DiagnosticStage::History,
-                    error
-                ),
-            }
-        }
-
-        let sink = match self.sink.lock() {
-            Ok(sink) => sink.as_ref().map(Arc::clone),
-            Err(error) => {
-                tracing::error!(
-                    "extension diagnostic sink lock failed for extension {} at {} during {}: {}",
-                    extension_id,
-                    point,
-                    DiagnosticStage::Sink,
-                    error
-                );
-                return;
-            }
-        };
+        // Live delivery remains independent from persistence so one failing
+        // diagnostic path does not hide failures in the other infrastructure.
+        let sink = active_run.map(|active_run| Arc::clone(&active_run.sink));
         let Some(sink) = sink else {
             return;
         };
-        let sequence = self
-            .sequence
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .checked_add(1)
-            .ok_or("event sequence overflow")
-            .and_then(|value| {
-                protocol::Sequence::try_from(value)
-                    .map_err(|_error| "event sequence is invalid")
-            });
-        let sequence = match sequence {
+        let sequence = match self.execution.next_sequence() {
             Ok(sequence) => sequence,
             Err(error) => {
                 tracing::error!(

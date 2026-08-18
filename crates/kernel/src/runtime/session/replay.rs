@@ -7,15 +7,9 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<Vec<AgentMessage>, KernelError> {
         let session = self.session(session_id)?;
-        let store = session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let Some(leaf) = store.lane(&session.lane) else {
-            return Ok(Vec::new());
-        };
-        store
-            .branch(leaf)?
+        session
+            .transcript
+            .active_branch()?
             .into_iter()
             .filter(|entry| entry.kind == EntryKind::Message)
             .map(|entry| {
@@ -37,15 +31,8 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<Vec<protocol::SessionReplayItem>, KernelError> {
         let session = self.session(session_id)?;
-        let store = session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let Some(leaf) = store.lane(&session.lane) else {
-            return Ok(Vec::new());
-        };
         let mut replay = Vec::new();
-        for entry in store.branch(leaf)? {
+        for entry in session.transcript.active_branch()? {
             match entry.kind {
                 EntryKind::Message => {
                     let message = serde_json::from_value(

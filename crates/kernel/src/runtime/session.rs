@@ -2,6 +2,21 @@ use super::*;
 
 mod replay;
 
+/// Releases one exclusively reserved Session identifier when its operation exits.
+struct SessionIdReservation {
+    session_id: SessionId,
+    pending_sessions: Arc<Mutex<HashSet<SessionId>>>,
+}
+
+impl Drop for SessionIdReservation {
+    /// Removes only the Session identifier owned by this exclusive operation.
+    fn drop(&mut self) {
+        if let Ok(mut pending_sessions) = self.pending_sessions.lock() {
+            pending_sessions.remove(&self.session_id);
+        }
+    }
+}
+
 /// Session-local selections reconstructed from Pi v4 branch entries.
 struct RestoredSessionSettings {
     model: Arc<dyn Model>,
@@ -10,7 +25,7 @@ struct RestoredSessionSettings {
 }
 
 impl RestoredSessionSettings {
-    /// Replays setting entries on the active branch and validates current capabilities.
+    /// Replays settings while retaining preferences for dynamic capabilities that may reconnect.
     fn load(
         store: &dyn SessionStore,
         lane: &LaneId,
@@ -85,13 +100,6 @@ impl RestoredSessionSettings {
                             },
                         )?,
                     )?;
-                    for name in &settings.active_tools {
-                        if tools.tool(name).is_none() {
-                            return Err(KernelError::Tool(
-                                tools::ToolError::NotFound(name.clone()),
-                            ));
-                        }
-                    }
                 }
                 EntryKind::Message
                 | EntryKind::Compaction
@@ -128,28 +136,28 @@ impl Kernel {
     ) -> Result<PathBuf, KernelError> {
         let session_id = options.session_id.clone();
         let cwd = options.cwd.clone();
-        {
-            let sessions = self
-                .sessions
-                .read()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            if sessions.contains_key(&session_id) {
-                return Err(KernelError::DuplicateSession(session_id));
-            }
-        }
+        let _reservation = self.reserve_session_build(&session_id)?;
         let store = self.store_factory.create(options)?;
         let path = store.path().to_path_buf();
-        let runtime = self.build_session_runtime(store, cwd).await?;
-        self.register_session(session_id.clone(), runtime)?;
+        let runtime = self.build_session(store, cwd).await?;
+        self.register_session(session_id.clone(), &runtime).await?;
         if let Err(error) = self
-            .start_extensions(&session_id, protocol::SessionStartReason::New)
+            .start_extensions(&runtime, protocol::SessionStartReason::New)
             .await
         {
-            self.rollback_session_registration(&session_id, true)
-                .await?;
+            if let Err(rollback_error) =
+                self.rollback_session_registration(&session_id, true).await
+            {
+                tracing::warn!(
+                    "failed to clean up Session {} after startup error: {}",
+                    session_id,
+                    rollback_error
+                );
+            }
             return Err(error);
         }
-        self.checkpoint_started_session(&session_id, true).await?;
+        self.checkpoint_started_session(&session_id, &runtime, true)
+            .await?;
         Ok(path)
     }
 
@@ -188,6 +196,9 @@ impl Kernel {
             .get(&session_id)
             .map(Arc::clone);
         if let Some(existing) = existing {
+            // A live map entry is published during startup for hook context, but
+            // external Resume must not observe it as an initialized Session.
+            existing.ensure_active()?;
             if existing.cwd != cwd {
                 return Err(KernelError::SessionCwdMismatch {
                     session_id,
@@ -195,15 +206,11 @@ impl Kernel {
                     received: cwd,
                 });
             }
-            let path = existing
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?
-                .path()
-                .to_path_buf();
+            let path = existing.transcript.path()?;
             let context = self.extension_context(&existing, None, None)?;
             let before = existing
                 .extensions
+                .runtime_ref()
                 .emit_session_before_switch(
                     &protocol::SessionBeforeSwitchEvent {
                         reason: protocol::SessionSwitchReason::Resume,
@@ -212,23 +219,23 @@ impl Kernel {
                     &context,
                 )
                 .await;
+            // The context contains an owned Session snapshot and is no longer
+            // needed after the hook; release it before adding another await so
+            // the Resume future does not retain that snapshot in its state.
+            drop(context);
             if before.cancel {
                 return Err(KernelError::ExtensionBlocked(
                     "session resume cancelled".to_string(),
                 ));
             }
+            // The hook stays outside the operation gate so Extension Host calls
+            // can reenter safely. Acquiring afterward rejects a Resume when
+            // Close won the lifecycle race while the hook was suspended.
+            let _operation_guard = existing.acquire_operation().await?;
             existing.sync_store()?;
             return Ok(path);
         }
-        {
-            let sessions = self
-                .sessions
-                .read()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            if sessions.contains_key(&session_id) {
-                return Err(KernelError::DuplicateSession(session_id));
-            }
-        }
+        let _reservation = self.reserve_session_build(&session_id)?;
         let metadata = self
             .store_factory
             .list(Some(&cwd))?
@@ -237,10 +244,11 @@ impl Kernel {
             .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
         let store = self.store_factory.open(&metadata.path)?;
         let path = store.path().to_path_buf();
-        let runtime = self.build_session_runtime(store, cwd).await?;
+        let runtime = self.build_session(store, cwd).await?;
         let context = self.extension_context(&runtime, None, None)?;
         let before = runtime
             .extensions
+            .runtime_ref()
             .emit_session_before_switch(
                 &protocol::SessionBeforeSwitchEvent {
                     reason: protocol::SessionSwitchReason::Resume,
@@ -250,21 +258,38 @@ impl Kernel {
             )
             .await;
         if before.cancel {
-            runtime.extensions.invalidate();
+            if let Err(error) =
+                Self::release_unregistered_session(&runtime).await
+            {
+                // Preserve the extension cancellation as the operation result
+                // while keeping cleanup failures visible to operators.
+                tracing::warn!(
+                    "failed to clean up MCP after Session Resume cancellation: {}",
+                    error
+                );
+            }
             return Err(KernelError::ExtensionBlocked(
                 "session resume cancelled".to_string(),
             ));
         }
-        self.register_session(session_id.clone(), runtime)?;
+        self.register_session(session_id.clone(), &runtime).await?;
         if let Err(error) = self
-            .start_extensions(&session_id, protocol::SessionStartReason::Resume)
+            .start_extensions(&runtime, protocol::SessionStartReason::Resume)
             .await
         {
-            self.rollback_session_registration(&session_id, false)
-                .await?;
+            if let Err(rollback_error) =
+                self.rollback_session_registration(&session_id, false).await
+            {
+                tracing::warn!(
+                    "failed to clean up Session {} after Resume startup error: {}",
+                    session_id,
+                    rollback_error
+                );
+            }
             return Err(error);
         }
-        self.checkpoint_started_session(&session_id, false).await?;
+        self.checkpoint_started_session(&session_id, &runtime, false)
+            .await?;
         Ok(path)
     }
 
@@ -274,18 +299,27 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
-        session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .cancel();
-        let _run_guard = session.run_gate.lock().await;
+        session.execution.cancel()?;
+        let _run_guard = session.acquire_operation().await?;
         // Transition before invoking hooks so reentrant host operations fail
         // immediately instead of waiting on the gate held by this shutdown.
         session.begin_closing()?;
-        let context = self.extension_context(&session, None, None)?;
+        let context = match self.extension_context(&session, None, None) {
+            Ok(context) => context,
+            Err(error) => {
+                if let Err(abort_error) = session.abort_closing() {
+                    tracing::warn!(
+                        "failed to restore Session {} after shutdown setup error: {}",
+                        session_id,
+                        abort_error
+                    );
+                }
+                return Err(error);
+            }
+        };
         session
             .extensions
+            .runtime_ref()
             .emit_session_shutdown(
                 &protocol::SessionShutdownEvent {
                     reason: protocol::SessionShutdownReason::Quit,
@@ -294,18 +328,32 @@ impl Kernel {
                 &context,
             )
             .await;
-        if let Some(mcp) = &session.mcp {
-            mcp.shutdown().await?;
-        }
-        session.stop_mcp_projection().await?;
-        session.sync_store()?;
-        session.finish_closing()?;
-        session.extensions.invalidate();
-        self.sessions
+        // Once MCP teardown starts the runtime cannot safely become active
+        // again, so every finalization step runs even when an earlier one fails.
+        let mcp_result = session.mcp.shutdown().await;
+        let sync_result = session.sync_store();
+        let lifecycle_result = session.finish_closing();
+        session.extensions.runtime_ref().invalidate();
+        let removal_result = self
+            .sessions
             .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .remove(session_id);
-        Ok(())
+            .map_err(|_poison_error| KernelError::Poisoned)
+            .map(|mut sessions| {
+                sessions.remove(session_id);
+            });
+        Self::preserve_primary_error(
+            Self::preserve_primary_error(
+                Self::preserve_primary_error(
+                    mcp_result,
+                    sync_result,
+                    "sync Store during Session close",
+                ),
+                lifecycle_result,
+                "finish Session lifecycle during close",
+            ),
+            removal_result,
+            "remove Session runtime after close",
+        )
     }
 
     /// Releases an active runtime before removing its persisted session history idempotently.
@@ -313,6 +361,9 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
+        // Reserve before closing so construction cannot claim the identifier
+        // between runtime removal and persisted Store deletion.
+        let _reservation = self.reserve_session_deletion(session_id)?;
         match self.close_session(session_id).await {
             Ok(()) | Err(KernelError::SessionNotFound(_)) => {}
             Err(error) => return Err(error),
@@ -327,12 +378,7 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
-        session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .cancel();
-        Ok(())
+        session.execution.cancel()
     }
 
     /// Returns the compaction-aware active model context for runtime inspection.
@@ -340,11 +386,7 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<AgentMessage>, KernelError> {
-        self.session(session_id)?
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)
-            .map(|history| history.clone())
+        self.session(session_id)?.transcript.history()
     }
 
     /// Returns all persisted entries and the active main-lane cursor.
@@ -352,31 +394,7 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionTreeSnapshot, KernelError> {
-        let session = self.session(session_id)?;
-        let store = session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let entries = store
-            .entries()
-            .into_iter()
-            .map(|entry| {
-                SessionTreeEntry::builder()
-                    .entry_id(entry.id)
-                    .parent_id(entry.parent_id)
-                    .kind(entry.kind.as_str().to_string())
-                    .timestamp_ms(entry.timestamp_ms)
-                    .payload(serde_json::Value::Object(entry.payload))
-                    .build()
-            })
-            .collect();
-        Ok(SessionTreeSnapshot::builder()
-            .session_id(session_id.clone())
-            .lane(session.lane.clone())
-            .leaf_id(store.lane(&session.lane).cloned())
-            .entries(entries)
-            .name(store.name().map(ToOwned::to_owned))
-            .build())
+        self.session(session_id)?.transcript.tree_snapshot()
     }
 
     /// Persists a normalized manual session title without modifying transcript entries.
@@ -387,14 +405,13 @@ impl Kernel {
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
         session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
+            .transcript
             .set_name(Some(title.as_str().to_string()))?;
         session.sync_store()?;
         let context = self.extension_context(&session, None, None)?;
         session
             .extensions
+            .runtime_ref()
             .emit_session_info_changed(
                 &protocol::SessionInfoChangedEvent {
                     name: Some(title.as_str().to_string()),
@@ -417,6 +434,7 @@ impl Kernel {
         let context = self.extension_context(&source, None, None)?;
         let decision = source
             .extensions
+            .runtime_ref()
             .emit_session_before_fork(
                 &protocol::SessionBeforeForkEvent {
                     entry_id: source_leaf.clone(),
@@ -430,12 +448,8 @@ impl Kernel {
                 "session fork cancelled".to_string(),
             ));
         }
-        let source_path = source
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .path()
-            .to_path_buf();
+        let _reservation = self.reserve_session_build(&new_session_id)?;
+        let source_path = source.transcript.path()?;
         let store = self.store_factory.fork(
             &source_path,
             SessionForkOptions {
@@ -445,24 +459,30 @@ impl Kernel {
                     parent_session_id: Some(source_session_id.clone()),
                 },
                 source_leaf,
-                lane: source.lane.clone(),
+                lane: source.transcript.lane(),
             },
         )?;
         let path = store.path().to_path_buf();
-        let runtime = self.build_session_runtime(store, cwd).await?;
-        self.register_session(new_session_id.clone(), runtime)?;
+        let runtime = self.build_session(store, cwd).await?;
+        self.register_session(new_session_id.clone(), &runtime)
+            .await?;
         if let Err(error) = self
-            .start_extensions(
-                &new_session_id,
-                protocol::SessionStartReason::Fork,
-            )
+            .start_extensions(&runtime, protocol::SessionStartReason::Fork)
             .await
         {
-            self.rollback_session_registration(&new_session_id, true)
-                .await?;
+            if let Err(rollback_error) = self
+                .rollback_session_registration(&new_session_id, true)
+                .await
+            {
+                tracing::warn!(
+                    "failed to clean up forked Session {} after startup error: {}",
+                    new_session_id,
+                    rollback_error
+                );
+            }
             return Err(error);
         }
-        self.checkpoint_started_session(&new_session_id, true)
+        self.checkpoint_started_session(&new_session_id, &runtime, true)
             .await?;
         Ok(path)
     }
@@ -490,13 +510,13 @@ impl Kernel {
     /// Runs typed startup, resource, session, model, and thinking points for one runtime.
     async fn start_extensions(
         &self,
-        session_id: &SessionId,
+        session: &Arc<Session>,
         reason: protocol::SessionStartReason,
     ) -> Result<(), KernelError> {
-        let session = self.session(session_id)?;
-        let context = self.extension_context(&session, None, None)?;
+        let context = self.extension_context(session, None, None)?;
         let trust = session
             .extensions
+            .runtime_ref()
             .emit_project_trust(
                 &protocol::ProjectTrustEvent {
                     cwd: session.cwd.clone(),
@@ -508,6 +528,7 @@ impl Kernel {
         // that will be attached to that session runtime.
         session
             .extensions
+            .runtime_ref()
             .emit_session_start(
                 &protocol::SessionStartEvent {
                     reason,
@@ -522,6 +543,7 @@ impl Kernel {
         // remain discoverable because they are not implicitly project content.
         let resources = session
             .extensions
+            .runtime_ref()
             .emit_resources_discover(
                 &protocol::ResourcesDiscoverEvent {
                     cwd: session.cwd.clone(),
@@ -542,11 +564,6 @@ impl Kernel {
             })
             .transpose()?
             .map(Arc::new);
-        session.skills.set(skills).map_err(|_skills| {
-            KernelError::Protocol(
-                "session Skill resources already initialized".to_string(),
-            )
-        })?;
         let prompt =
             self.prompt_factory
                 .create(protocol::PromptResourceRequest {
@@ -554,23 +571,22 @@ impl Kernel {
                     project_resources_allowed,
                     extension_prompt_paths: resources.prompt_paths,
                 })?;
-        session.prompt.set(Arc::new(prompt)).map_err(|_prompt| {
-            KernelError::Protocol(
-                "session Prompt resources already initialized".to_string(),
-            )
-        })?;
-        let restored_model = session
-            .model
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .profile()
-            .clone();
-        let restored_thinking_level = *session
-            .thinking_level
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        // Publish Prompt and Skill resources together so readers cannot observe
+        // a partially initialized startup snapshot.
+        session
+            .resources
+            .set(SessionResources::new(Arc::new(prompt), skills))
+            .map_err(|_resources| {
+                KernelError::Protocol(
+                    "session resources already initialized".to_string(),
+                )
+            })?;
+        let (restored_model, restored_thinking_level) =
+            session.model.snapshot()?;
+        let restored_model = restored_model.profile().clone();
         session
             .extensions
+            .runtime_ref()
             .emit_model_select(
                 &protocol::ModelSelectEvent {
                     model: restored_model,
@@ -582,6 +598,7 @@ impl Kernel {
             .await;
         session
             .extensions
+            .runtime_ref()
             .emit_thinking_level_select(
                 &protocol::ThinkingLevelSelectEvent {
                     level: restored_thinking_level,
@@ -594,11 +611,11 @@ impl Kernel {
     }
 
     /// Builds session-scoped tools and reconstructs model history from the active main branch.
-    async fn build_session_runtime(
+    async fn build_session(
         &self,
         store: Box<dyn SessionStore>,
         cwd: PathBuf,
-    ) -> Result<Arc<SessionRuntime>, KernelError> {
+    ) -> Result<Arc<Session>, KernelError> {
         let modules = self.extension_factory.create_modules()?;
         let mut registrar = ExtensionRegistrar::new();
         for module in modules {
@@ -632,123 +649,249 @@ impl Kernel {
                     )
                     .await?,
             );
-            let mcp_tools = mcp_session.tool_registry()?;
+            let mcp_tools = match mcp_session.tool_registry() {
+                Ok(tools) => tools,
+                Err(error) => {
+                    // MCP was already created, so a catalog failure must not
+                    // leave its background transports alive.
+                    if let Err(shutdown_error) = mcp_session.shutdown().await {
+                        tracing::warn!(
+                            "failed to shut down MCP after catalog construction failed: {}",
+                            shutdown_error
+                        );
+                    }
+                    return Err(error.into());
+                }
+            };
             (Some(mcp_session), mcp_tools, Some(host))
         } else {
             (None, ToolRegistry::default(), None)
         };
-        let mut tools = builtins.clone();
-        tools.overlay(&extension_tools);
-        tools.overlay(&mcp_tools);
-        let lane = LaneId::try_from("main")
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let settings = RestoredSessionSettings::load(
-            store.as_ref(),
-            &lane,
-            &self.models,
-            &tools,
-        )?;
-        let history = Self::history_from_store(store.as_ref(), &lane)?;
-        // Resume starts after persisted entry order so replayed transcript events
-        // always sort before newly emitted live events in ACP clients.
-        let initial_event_sequence =
-            u64::try_from(store.entries().len()).unwrap_or(u64::MAX);
-        let queue = PendingQueue::from_records(&store.records())?;
-        let commands =
-            DynamicCommandRegistry::new(extension_registry.commands())
-                .map_err(|error| {
-                    KernelError::ExtensionBlocked(error.to_string())
-                })?;
-        let mut flags = self.static_extensions.flags.clone();
-        let mut flag_names = flags
-            .iter()
-            .map(|flag| flag.name.clone())
-            .collect::<BTreeSet<_>>();
-        for flag in extension_registry.flags() {
-            if flag_names.insert(flag.name.clone()) {
-                flags.push(flag);
+        let cleanup_mcp = mcp.as_ref().map(Arc::clone);
+        let result: Result<Arc<Session>, KernelError> = async {
+            let mut tools = builtins.clone();
+            tools.overlay(&extension_tools);
+            tools.overlay(&mcp_tools);
+            let lane = LaneId::try_from("main")
+                .map_err(|error| KernelError::Protocol(error.to_string()))?;
+            let settings = RestoredSessionSettings::load(
+                store.as_ref(),
+                &lane,
+                &self.models,
+                &tools,
+            )?;
+            let history = Self::history_from_store(store.as_ref(), &lane)?;
+            // Resume starts after persisted entry order so replayed transcript events
+            // always sort before newly emitted live events in ACP clients.
+            let initial_event_sequence =
+                u64::try_from(store.entries().len()).unwrap_or(u64::MAX);
+            let queue = PendingQueue::from_records(&store.records())?;
+            let commands =
+                DynamicCommandRegistry::new(extension_registry.commands())
+                    .map_err(|error| {
+                        KernelError::ExtensionBlocked(error.to_string())
+                    })?;
+            let mut flags = self.static_extensions.flags.clone();
+            let mut flag_names = flags
+                .iter()
+                .map(|flag| flag.name.clone())
+                .collect::<BTreeSet<_>>();
+            for flag in extension_registry.flags() {
+                if flag_names.insert(flag.name.clone()) {
+                    flags.push(flag);
+                }
             }
-        }
-        let tool_state = Arc::new(SessionToolState::new(
-            builtins,
-            extension_tools,
-            mcp_tools,
-            settings.active_tools,
-        )?);
-        let event_sink = Arc::new(Mutex::new(None));
-        let diagnostic_turn_id = Arc::new(Mutex::new(None));
-        let event_sequence = Arc::new(AtomicU64::new(initial_event_sequence));
-        // Diagnostics share transcript persistence without retaining the session
-        // runtime and creating a reference cycle through ExtensionRuntime.
-        let store = Arc::new(Mutex::new(store));
-        let history = Arc::new(Mutex::new(history));
-        let extensions = Arc::new(ExtensionRuntime::new(
-            Arc::clone(&extension_registry),
-            Arc::new(
-                KernelExtensionDiagnostics::builder()
-                    .clock(Arc::clone(&self.clock))
-                    .sink(Arc::clone(&event_sink))
-                    .turn_id(Arc::clone(&diagnostic_turn_id))
-                    .sequence(Arc::clone(&event_sequence))
-                    .store(Arc::clone(&store))
-                    .history(Arc::clone(&history))
-                    .lane(lane.clone())
-                    .id_generator(Arc::clone(&self.id_generator))
+            let tools = Arc::new(SessionToolState::new(
+                builtins,
+                extension_tools,
+                mcp_tools,
+                settings.active_tools,
+            )?);
+            let execution = Arc::new(
+                SessionExecution::builder()
+                    .lifecycle(RwLock::new(SessionLifecycle::Starting))
+                    .gate(AsyncMutex::new(()))
+                    .active_run(Mutex::new(None))
+                    .idle_notify(Notify::new())
+                    .cancellation(Mutex::new(CancellationToken::new()))
+                    .queue(Mutex::new(queue))
+                    .sequence(AtomicU64::new(initial_event_sequence))
                     .build(),
-            ),
-        ));
-        let runtime = Arc::new(
-            SessionRuntime::builder()
-                .store(store)
-                .lane(lane)
-                .cwd(cwd)
-                .mcp(mcp)
-                .prompt(OnceLock::new())
-                .skills(OnceLock::new())
-                .extensions(extensions)
-                .tool_state(tool_state)
-                .mcp_projection(AsyncMutex::new(None))
-                .pending_mcp_elicitations(Mutex::new(HashMap::new()))
+            );
+            // Diagnostics share the transcript component without retaining the
+            // Session and creating a reference cycle through ExtensionRuntime.
+            let transcript =
+                Arc::new(SessionTranscript::new(store, lane.clone(), history));
+            let extension_runtime = Arc::new(ExtensionRuntime::new(
+                Arc::clone(&extension_registry),
+                Arc::new(
+                    KernelExtensionDiagnostics::builder()
+                        .clock(Arc::clone(&self.clock))
+                        .execution(Arc::clone(&execution))
+                        .transcript(Arc::clone(&transcript))
+                        .id_generator(Arc::clone(&self.id_generator))
+                        .build(),
+                ),
+            ));
+            let extensions = SessionExtensions::builder()
+                .runtime(extension_runtime)
                 .commands(commands)
                 .flags(Arc::from(flags))
-                .models(Arc::clone(&self.models))
-                .model(RwLock::new(settings.model))
-                .thinking_level(RwLock::new(settings.thinking_level))
-                .event_bus(broadcast::channel(64).0)
-                .event_sink(event_sink)
-                .diagnostic_turn_id(diagnostic_turn_id)
-                .history(history)
-                .queue(Mutex::new(queue))
-                .lifecycle(RwLock::new(SessionLifecycle::Active))
-                .run_gate(AsyncMutex::new(()))
-                .active_run_id(Mutex::new(None))
-                .idle_notify(Notify::new())
-                .cancellation(Mutex::new(CancellationToken::new()))
-                .event_sequence(event_sequence)
-                .build(),
-        );
-        if let Some(host) = mcp_host {
-            host.attach(&runtime)?;
+                .events(broadcast::channel(64).0)
+                .build();
+            let runtime = Arc::new(
+                Session::builder()
+                    .cwd(cwd)
+                    .transcript(transcript)
+                    .mcp(SessionMcpRuntime::new(mcp))
+                    .resources(OnceLock::new())
+                    .extensions(extensions)
+                    .tools(tools)
+                    .model(SessionModelState::new(
+                        Arc::clone(&self.models),
+                        settings.model,
+                        settings.thinking_level,
+                    ))
+                    .execution(execution)
+                    .build(),
+            );
+            if let Some(host) = mcp_host
+                && let Err(error) = host.attach(&runtime)
+            {
+                runtime.extensions.runtime_ref().invalidate();
+                return Err(error);
+            }
+            if let Err(error) = runtime.start_mcp_projection().await {
+                runtime.extensions.runtime_ref().invalidate();
+                let _ = runtime.mcp.shutdown().await;
+                return Err(error);
+            }
+            Ok(runtime)
         }
-        runtime.start_mcp_projection().await?;
-        Ok(runtime)
+        .await;
+        if result.is_err()
+            && let Some(mcp) = cleanup_mcp
+            && let Err(error) = mcp.shutdown().await
+        {
+            // Preserve the original construction error while making cleanup
+            // failure observable for operators.
+            tracing::warn!(
+                "failed to shut down MCP after Session construction failed: {}",
+                error
+            );
+        }
+        result
     }
 
-    /// Registers a fully constructed runtime without retaining a map guard across async hooks.
-    fn register_session(
+    /// Registers a constructed runtime or releases its unregistered resources on failure.
+    async fn register_session(
         &self,
         session_id: SessionId,
-        runtime: Arc<SessionRuntime>,
+        runtime: &Arc<Session>,
     ) -> Result<(), KernelError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        if sessions.contains_key(&session_id) {
-            return Err(KernelError::DuplicateSession(session_id));
+        let registration = (|| {
+            let mut sessions = self
+                .sessions
+                .write()
+                .map_err(|_poison_error| KernelError::Poisoned)?;
+            if sessions.contains_key(&session_id) {
+                return Err(KernelError::DuplicateSession(session_id.clone()));
+            }
+            sessions.insert(session_id.clone(), Arc::clone(runtime));
+            Ok(())
+        })();
+        if let Err(error) = registration {
+            if let Err(cleanup_error) =
+                Self::release_unregistered_session(runtime).await
+            {
+                tracing::warn!(
+                    "failed to release unregistered Session {} after registration error: {}",
+                    session_id,
+                    cleanup_error
+                );
+            }
+            return Err(error);
         }
-        sessions.insert(session_id, runtime);
         Ok(())
+    }
+
+    /// Reserves one identifier across Store opening, runtime construction, and startup hooks.
+    fn reserve_session_build(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionIdReservation, KernelError> {
+        // Hold the map read lock until the pending id is inserted so registration
+        // and reservation cannot both observe the identifier as absent.
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        if sessions.contains_key(session_id) {
+            return Err(KernelError::DuplicateSession(session_id.clone()));
+        }
+        let mut pending_sessions = self
+            .pending_sessions
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        if !pending_sessions.insert(session_id.clone()) {
+            return Err(KernelError::DuplicateSession(session_id.clone()));
+        }
+        Ok(SessionIdReservation {
+            session_id: session_id.clone(),
+            pending_sessions: Arc::clone(&self.pending_sessions),
+        })
+    }
+
+    /// Reserves one identifier across runtime shutdown and persisted Store deletion.
+    fn reserve_session_deletion(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionIdReservation, KernelError> {
+        // Match construction's lock order and keep the map stable until the id
+        // is reserved, closing both absent-runtime races around registration.
+        let _sessions = self
+            .sessions
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut pending_sessions = self
+            .pending_sessions
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        if !pending_sessions.insert(session_id.clone()) {
+            return Err(KernelError::DuplicateSession(session_id.clone()));
+        }
+        Ok(SessionIdReservation {
+            session_id: session_id.clone(),
+            pending_sessions: Arc::clone(&self.pending_sessions),
+        })
+    }
+
+    /// Invalidates and shuts down a runtime that never entered the Session map.
+    async fn release_unregistered_session(
+        runtime: &Arc<Session>,
+    ) -> Result<(), KernelError> {
+        runtime.extensions.runtime_ref().invalidate();
+        runtime.mcp.shutdown().await
+    }
+
+    /// Keeps the first lifecycle error while logging a later cleanup failure.
+    fn preserve_primary_error(
+        primary: Result<(), KernelError>,
+        secondary: Result<(), KernelError>,
+        secondary_action: &str,
+    ) -> Result<(), KernelError> {
+        match (primary, secondary) {
+            (Ok(()), result) => result,
+            (Err(primary_error), Ok(())) => Err(primary_error),
+            (Err(primary_error), Err(secondary_error)) => {
+                tracing::warn!(
+                    "failed to {} after an earlier lifecycle error: {}",
+                    secondary_action,
+                    secondary_error
+                );
+                Err(primary_error)
+            }
+        }
     }
 
     /// Removes a partially started runtime and optionally its new durable log.
@@ -763,11 +906,20 @@ impl Kernel {
             .map_err(|_poison_error| KernelError::Poisoned)?
             .remove(session_id);
         if let Some(runtime) = runtime {
-            runtime.extensions.invalidate();
-            if let Some(mcp) = &runtime.mcp {
-                mcp.shutdown().await?;
-            }
-            runtime.stop_mcp_projection().await?;
+            runtime.extensions.runtime_ref().invalidate();
+            let mcp_result = runtime.mcp.shutdown().await;
+            let delete_result = if delete_persisted {
+                self.store_factory
+                    .delete(session_id)
+                    .map_err(KernelError::from)
+            } else {
+                Ok(())
+            };
+            return Self::preserve_primary_error(
+                mcp_result,
+                delete_result,
+                "delete persisted Session during registration rollback",
+            );
         }
         if delete_persisted {
             self.store_factory.delete(session_id)?;
@@ -779,16 +931,30 @@ impl Kernel {
     async fn checkpoint_started_session(
         &self,
         session_id: &SessionId,
+        runtime: &Arc<Session>,
         delete_persisted: bool,
     ) -> Result<(), KernelError> {
-        if let Err(error) = self.session(session_id)?.sync_store() {
+        // Activation follows the durable startup checkpoint so no public
+        // operation can observe resources that may still be rolled back.
+        let checkpoint = runtime
+            .sync_store()
+            .and_then(|()| runtime.finish_starting());
+        if let Err(error) = checkpoint {
             tracing::error!(
                 "failed to checkpoint started session {}; rolling back registration: {}",
                 session_id,
                 error
             );
-            self.rollback_session_registration(session_id, delete_persisted)
-                .await?;
+            if let Err(rollback_error) = self
+                .rollback_session_registration(session_id, delete_persisted)
+                .await
+            {
+                tracing::warn!(
+                    "failed to clean up Session {} after checkpoint error: {}",
+                    session_id,
+                    rollback_error
+                );
+            }
             return Err(error);
         }
         Ok(())
@@ -798,19 +964,24 @@ impl Kernel {
     pub(super) fn session(
         &self,
         session_id: &SessionId,
-    ) -> Result<Arc<SessionRuntime>, KernelError> {
-        self.sessions
+    ) -> Result<Arc<Session>, KernelError> {
+        let session = self
+            .sessions
             .read()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .get(session_id)
             .map(Arc::clone)
-            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))
+            .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
+        // Registered startup entries exist for Extension context construction,
+        // but ordinary kernel callers may use only fully initialized Sessions.
+        session.ensure_active()?;
+        Ok(session)
     }
 
     /// Persists one message and then exposes it to subsequent model contexts.
     pub(super) fn persist_message(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         message: &AgentMessage,
     ) -> Result<(), KernelError> {
         let entry_id = EntryId::try_from(self.id_generator.next(IdKind::Entry))
@@ -821,34 +992,17 @@ impl Kernel {
     /// Persists one message at an identifier reserved by queue acceptance.
     pub(super) fn persist_message_at(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         message: &AgentMessage,
         entry_id: EntryId,
     ) -> Result<(), KernelError> {
-        session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .append_entry(
-                &session.lane,
-                NewEntry {
-                    id: entry_id,
-                    kind: EntryKind::Message,
-                    payload: serde_json::to_value(message)?,
-                },
-            )?;
-        session
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .push(message.clone());
-        Ok(())
+        session.transcript.append_context_message(entry_id, message)
     }
 
     /// Sets the first non-empty user line as the default title exactly once.
     pub(super) fn ensure_default_title(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         message: &AgentMessage,
     ) -> Result<Option<String>, KernelError> {
         let title = match &message.content {
@@ -875,21 +1029,13 @@ impl Kernel {
             | MessageContent::CompactionSummary { .. } => None,
         };
         let Some(title) = title else { return Ok(None) };
-        let mut store = session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        if store.name().is_some() {
-            return Ok(None);
-        }
-        store.set_name(Some(title.clone()))?;
-        Ok(Some(title))
+        session.transcript.set_default_name(title)
     }
 
     /// Appends one durable pi v4 lane record for run recovery and inspection.
     pub(super) fn record_operation(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         run_id: &RunId,
         kind: RecordKind,
         payload: serde_json::Value,
@@ -897,19 +1043,15 @@ impl Kernel {
         let record_id =
             RecordId::try_from(self.id_generator.next(IdKind::Record))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        session
-            .store
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .append_record(
-                NewRecord::builder()
-                    .id(record_id)
-                    .lane(session.lane.clone())
-                    .run_id(Some(run_id.clone()))
-                    .kind(kind)
-                    .payload(payload)
-                    .build(),
-            )?;
+        session.transcript.append_record(
+            NewRecord::builder()
+                .id(record_id)
+                .lane(session.transcript.lane())
+                .run_id(Some(run_id.clone()))
+                .kind(kind)
+                .payload(payload)
+                .build(),
+        )?;
         Ok(())
     }
 }

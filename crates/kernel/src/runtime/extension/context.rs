@@ -3,11 +3,10 @@ use std::sync::Arc;
 use extension::{ExtensionContext, ExtensionHostError};
 use protocol::{
     ExtensionId, ExtensionInvocation, ExtensionMessageDraft, ExtensionSnapshot,
-    IdGenerator, IdKind, MessageIdentity, ProductIdentity, RunId,
-    SessionTreeEntry, TurnId,
+    IdGenerator, IdKind, MessageIdentity, ProductIdentity, RunId, TurnId,
 };
 
-use super::super::{Kernel, KernelError, SessionRuntime};
+use super::super::{Kernel, KernelError, Session};
 use super::host::SessionExtensionHost;
 
 /// Assigns durable message identity and complete non-streaming timing.
@@ -91,7 +90,7 @@ impl Kernel {
     /// Captures one lock-free extension snapshot before asynchronous handler execution.
     pub(in crate::runtime) fn extension_context(
         &self,
-        session: &Arc<SessionRuntime>,
+        session: &Arc<Session>,
         run_id: Option<&RunId>,
         turn_id: Option<&TurnId>,
     ) -> Result<ExtensionContext, KernelError> {
@@ -101,7 +100,7 @@ impl Kernel {
     /// Captures an extension context with an operation-local event destination.
     pub(in crate::runtime) fn extension_context_with_event_sink(
         &self,
-        session: &Arc<SessionRuntime>,
+        session: &Arc<Session>,
         run_id: Option<&RunId>,
         turn_id: Option<&TurnId>,
         event_sink: Option<Arc<dyn crate::EventSink>>,
@@ -130,79 +129,35 @@ impl Kernel {
             )
             .snapshot(snapshot)
             .host(Arc::new(host))
-            .generation(session.extensions.generation())
+            .generation(session.extensions.runtime_ref().generation())
             .build())
     }
 }
 
-impl SessionRuntime {
+impl Session {
     /// Captures one complete extension-visible state snapshot without retaining locks.
     pub(in crate::runtime) fn extension_snapshot(
         &self,
     ) -> Result<ExtensionSnapshot, KernelError> {
-        let messages = self
-            .history
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .clone();
-        let pending = self
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .snapshot();
-        let tree = {
-            let store = self
-                .store
-                .lock()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
-            let entries = store
-                .entries()
-                .into_iter()
-                .map(|entry| {
-                    SessionTreeEntry::builder()
-                        .entry_id(entry.id)
-                        .parent_id(entry.parent_id)
-                        .kind(entry.kind.as_str().to_string())
-                        .timestamp_ms(entry.timestamp_ms)
-                        .payload(serde_json::Value::Object(entry.payload))
-                        .build()
-                })
-                .collect();
-            protocol::SessionTreeSnapshot::builder()
-                .session_id(store.session_id().clone())
-                .lane(self.lane.clone())
-                .leaf_id(store.lane(&self.lane).cloned())
-                .entries(entries)
-                .name(store.name().map(ToOwned::to_owned))
-                .build()
-        };
-        let tools = self.tool_state.snapshot()?;
-        let thinking_level = *self
-            .thinking_level
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let model_profile = self
-            .model
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .profile()
-            .clone();
+        let messages = self.transcript.history()?;
+        let pending = self.execution.pending_snapshot()?;
+        let tree = self.transcript.tree_snapshot()?;
+        let tools = self.tools.snapshot()?;
+        // Read both selections under one lock so extension snapshots cannot mix
+        // values from two concurrent setting updates.
+        let (model, thinking_level) = self.model.snapshot()?;
+        let model_profile = model.profile().clone();
         Ok(ExtensionSnapshot::builder()
             .active_model(model_profile)
             .thinking_level(thinking_level)
-            .models(self.models.profiles())
+            .models(self.model.profiles())
             .messages(messages)
             .tree(tree)
             .pending_steer(pending.steering.len())
             .pending_follow_up(pending.follow_up.len())
             .active_tools(tools.active_names())
             .all_tools(tools.available_names())
-            .cancelled(
-                self.cancellation
-                    .lock()
-                    .map_err(|_poison_error| KernelError::Poisoned)?
-                    .is_cancelled(),
-            )
+            .cancelled(self.execution.cancellation()?.is_cancelled())
             .build())
     }
 }

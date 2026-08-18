@@ -12,7 +12,7 @@ use protocol::{
 };
 use store::{EntryKind, NewEntry};
 
-use super::super::SessionRuntime;
+use super::super::Session;
 use super::context::ExtensionMessageMaterializer;
 
 /// Event sink used when an out-of-band extension command has no ACP stream.
@@ -32,7 +32,7 @@ impl crate::EventSink for DiscardEventSink {
 /// Session-local implementation of extension actions that do not replace the runtime.
 #[derive(typed_builder::TypedBuilder)]
 pub(super) struct SessionExtensionHost {
-    session: Arc<SessionRuntime>,
+    session: Arc<Session>,
     kernel: super::super::Kernel,
     clock: Arc<dyn store::Clock>,
     id_generator: Arc<dyn protocol::IdGenerator>,
@@ -50,14 +50,10 @@ impl SessionExtensionHost {
             return Ok(Some(Arc::clone(sink)));
         }
         self.session
-            .event_sink
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "event sink lock poisoned".to_string(),
-                )
-            })
-            .map(|sink| sink.as_ref().map(Arc::clone))
+            .execution
+            .active_run()
+            .map(|active_run| active_run.map(|run| Arc::clone(&run.sink)))
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Converts one generated identifier into a sanitized host-operation error.
@@ -81,21 +77,12 @@ impl SessionExtensionHost {
         payload: serde_json::Value,
     ) -> Result<(), ExtensionHostError> {
         self.session
-            .store
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "session store lock poisoned".to_string(),
-                )
-            })?
-            .append_entry(
-                &self.session.lane,
-                NewEntry {
-                    id: self.entry_id()?,
-                    kind,
-                    payload,
-                },
-            )
+            .transcript
+            .append_store_only_entry(NewEntry {
+                id: self.entry_id()?,
+                kind,
+                payload,
+            })
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
@@ -142,14 +129,9 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<bool, ExtensionHostError> {
         self.session
-            .active_run_id
-            .lock()
-            .map(|run_id| run_id.is_none())
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "active run lock poisoned".to_string(),
-                )
-            })
+            .execution
+            .is_idle()
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Reports whether steering or follow-up messages are queued.
@@ -158,12 +140,9 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<bool, ExtensionHostError> {
         self.session
-            .queue
-            .lock()
-            .map(|queue| !queue.ids().is_empty())
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation("queue lock poisoned".to_string())
-            })
+            .execution
+            .has_pending()
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Cancels active work without waiting while a handler is executing.
@@ -172,15 +151,9 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<(), ExtensionHostError> {
         self.session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "cancellation lock poisoned".to_string(),
-                )
-            })?
-            .cancel();
-        Ok(())
+            .execution
+            .cancel()
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Requests graceful application shutdown through the shared Kernel token.
@@ -216,7 +189,7 @@ impl ExtensionHost for SessionExtensionHost {
     ) -> Result<String, ExtensionHostError> {
         let tools = self
             .session
-            .tool_state
+            .tools
             .snapshot()
             .and_then(|tools| tools.active_registry())
             .map_err(|error| {
@@ -245,59 +218,25 @@ impl ExtensionHost for SessionExtensionHost {
         )?;
         let entry_id = self.entry_id()?;
         self.session
-            .store
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation("store lock poisoned".to_string())
-            })?
-            .append_entry(
-                &self.session.lane,
-                NewEntry {
-                    id: entry_id,
-                    kind: EntryKind::Message,
-                    payload: serde_json::to_value(&message).map_err(
-                        |error| {
-                            ExtensionHostError::Operation(error.to_string())
-                        },
-                    )?,
-                },
-            )
+            .transcript
+            .append_context_message(entry_id, &message)
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
         self.session.sync_store().map_err(|error| {
             ExtensionHostError::Operation(error.to_string())
         })?;
-        self.session
-            .history
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "history lock poisoned".to_string(),
-                )
-            })?
-            .push(message.clone());
         let sink = self.event_sink()?;
         if let Some(sink) = sink {
-            let sequence = self
-                .session
-                .event_sequence
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .checked_add(1)
-                .ok_or_else(|| {
-                    ExtensionHostError::Operation(
-                        "event sequence overflow".to_string(),
-                    )
+            let sequence =
+                self.session.execution.next_sequence().map_err(|error| {
+                    ExtensionHostError::Operation(error.to_string())
                 })?;
             sink.emit(protocol::AgentEvent {
                 metadata: protocol::EventMetadata {
                     turn_id: message.identity.turn_id.clone(),
                     timestamp_ms: self.clock.now(),
-                    sequence: protocol::Sequence::try_from(sequence).map_err(
-                        |error| {
-                            ExtensionHostError::Operation(error.to_string())
-                        },
-                    )?,
+                    sequence,
                 },
                 payload: protocol::AgentEventPayload::MessageEnd {
                     message: message.clone(),
@@ -356,6 +295,7 @@ impl ExtensionHost for SessionExtensionHost {
         let input = self
             .session
             .extensions
+            .runtime_ref()
             .emit_input(
                 protocol::InputEvent {
                     text: original_text.clone(),
@@ -399,12 +339,8 @@ impl ExtensionHost for SessionExtensionHost {
         }
         let entry_id = self.entry_id()?;
         self.session
-            .store
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation("store lock poisoned".to_string())
-            })?
-            .append_extension_entry(&self.session.lane, entry_id.clone(), entry)
+            .transcript
+            .append_extension_entry(entry_id.clone(), entry)
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
@@ -421,11 +357,7 @@ impl ExtensionHost for SessionExtensionHost {
         name: Option<String>,
     ) -> Result<(), ExtensionHostError> {
         self.session
-            .store
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation("store lock poisoned".to_string())
-            })?
+            .transcript
             .set_name(name.clone())
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
@@ -445,6 +377,7 @@ impl ExtensionHost for SessionExtensionHost {
             })?;
         self.session
             .extensions
+            .runtime_ref()
             .emit_session_info_changed(
                 &protocol::SessionInfoChangedEvent { name },
                 &context,
@@ -460,16 +393,9 @@ impl ExtensionHost for SessionExtensionHost {
         entry_id: EntryId,
         label: Option<String>,
     ) -> Result<(), ExtensionHostError> {
-        self.session
-            .store
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation("store lock poisoned".to_string())
-            })?
-            .set_label(entry_id, label)
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
+        self.session.transcript.set_label(entry_id, label).map_err(
+            |error| ExtensionHostError::Operation(error.to_string()),
+        )?;
         self.session
             .sync_store()
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
@@ -489,16 +415,10 @@ impl ExtensionHost for SessionExtensionHost {
                 request.cwd.unwrap_or_else(|| self.session.cwd.clone()),
             )
             .kill_on_drop(true);
-        let cancellation = self
-            .session
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "cancellation lock poisoned".to_string(),
-                )
-            })?
-            .clone();
+        let cancellation =
+            self.session.execution.cancellation().map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
         let output = match request.timeout_ms {
             Some(timeout_ms) => tokio::select! {
                 () = cancellation.cancelled() => {
@@ -538,7 +458,7 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<Vec<String>, ExtensionHostError> {
         self.session
-            .tool_state
+            .tools
             .snapshot()
             .map(|tools| tools.active_names())
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
@@ -550,7 +470,7 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<Vec<String>, ExtensionHostError> {
         self.session
-            .tool_state
+            .tools
             .snapshot()
             .map(|tools| tools.available_names())
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
@@ -562,14 +482,13 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
         names: Vec<String>,
     ) -> Result<(), ExtensionHostError> {
-        let available =
-            self.session.tool_state.snapshot().map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
+        let available = self.session.tools.snapshot().map_err(|error| {
+            ExtensionHostError::Operation(error.to_string())
+        })?;
         // Persist only after validation so recovery never observes an invalid set.
         if let Err(error) = available.validate_active(&names) {
             return match error {
-                tools::ToolError::NotFound(name) => {
+                ::tools::ToolError::NotFound(name) => {
                     Err(ExtensionHostError::UnknownTool(name))
                 }
                 error => Err(ExtensionHostError::Operation(error.to_string())),
@@ -580,8 +499,8 @@ impl ExtensionHost for SessionExtensionHost {
             serde_json::json!({ "activeTools": names }),
         )?;
         self.session
-            .tool_state
-            .set_active(names)
+            .tools
+            .set_active(&available, names)
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
@@ -589,10 +508,10 @@ impl ExtensionHost for SessionExtensionHost {
     async fn register_tool(
         &self,
         _invocation: &ExtensionInvocation,
-        tool: Arc<dyn tools::AgentTool>,
+        tool: Arc<dyn ::tools::AgentTool>,
     ) -> Result<(), ExtensionHostError> {
         self.session
-            .tool_state
+            .tools
             .register(tool)
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
@@ -603,8 +522,8 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<Vec<RegisteredCommand>, ExtensionHostError> {
         self.session
-            .commands
-            .snapshot()
+            .extensions
+            .command_snapshot()
             .map(|commands| commands.commands())
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
@@ -614,7 +533,7 @@ impl ExtensionHost for SessionExtensionHost {
         &self,
         _invocation: &ExtensionInvocation,
     ) -> Result<Vec<ExtensionFlagDefinition>, ExtensionHostError> {
-        Ok(self.session.flags.to_vec())
+        Ok(self.session.extensions.flags().to_vec())
     }
 
     /// Registers or replaces one session-local command.
@@ -626,9 +545,12 @@ impl ExtensionHost for SessionExtensionHost {
         // The host repeats ownership binding so direct trait callers cannot
         // replace commands belonging to another extension identity.
         let command = command.bind_owner(&invocation.extension_id);
-        self.session.commands.upsert(command).map_err(|error| {
-            ExtensionHostError::Operation(error.to_string())
-        })?;
+        self.session
+            .extensions
+            .upsert_command(command)
+            .map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
         self.publish_available_commands(&invocation.session_id)
             .await
     }
@@ -641,8 +563,8 @@ impl ExtensionHost for SessionExtensionHost {
     ) -> Result<(), ExtensionHostError> {
         let removed = self
             .session
-            .commands
-            .remove(&invocation.extension_id, name)
+            .extensions
+            .remove_command(&invocation.extension_id, name)
             .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
@@ -662,7 +584,7 @@ impl ExtensionHost for SessionExtensionHost {
     ) -> Result<ModelProfile, ExtensionHostError> {
         let model = self
             .session
-            .models
+            .model
             .resolve(provider_id, model_id)
             .ok_or_else(|| {
                 ExtensionHostError::Operation(format!(
@@ -672,10 +594,8 @@ impl ExtensionHost for SessionExtensionHost {
         let previous_model = self
             .session
             .model
-            .read()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation("model lock poisoned".to_string())
-            })?
+            .active()
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))?
             .profile()
             .clone();
         if previous_model == *model.profile() {
@@ -688,9 +608,12 @@ impl ExtensionHost for SessionExtensionHost {
                 "modelId": model_id,
             }),
         )?;
-        *self.session.model.write().map_err(|_poison_error| {
-            ExtensionHostError::Operation("model lock poisoned".to_string())
-        })? = Arc::clone(&model);
+        self.session
+            .model
+            .replace_model(Arc::clone(&model))
+            .map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
         let context = self
             .kernel
             .extension_context(
@@ -703,6 +626,7 @@ impl ExtensionHost for SessionExtensionHost {
             })?;
         self.session
             .extensions
+            .runtime_ref()
             .emit_model_select(
                 &protocol::ModelSelectEvent {
                     model: model.profile().clone(),
@@ -721,14 +645,9 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
     ) -> Result<ThinkingLevel, ExtensionHostError> {
         self.session
-            .thinking_level
-            .read()
-            .map(|level| *level)
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "thinking lock poisoned".to_string(),
-                )
-            })
+            .model
+            .thinking_level()
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Persists the selected thinking level and notifies model observers.
@@ -738,15 +657,9 @@ impl ExtensionHost for SessionExtensionHost {
         level: ThinkingLevel,
     ) -> Result<ThinkingLevel, ExtensionHostError> {
         let previous_level =
-            *self
-                .session
-                .thinking_level
-                .read()
-                .map_err(|_poison_error| {
-                    ExtensionHostError::Operation(
-                        "thinking lock poisoned".to_string(),
-                    )
-                })?;
+            self.session.model.thinking_level().map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
         if previous_level == level {
             return Ok(level);
         }
@@ -754,15 +667,12 @@ impl ExtensionHost for SessionExtensionHost {
             EntryKind::ThinkingLevelChange,
             serde_json::json!({ "thinkingLevel": level }),
         )?;
-        *self
-            .session
-            .thinking_level
-            .write()
-            .map_err(|_poison_error| {
-                ExtensionHostError::Operation(
-                    "thinking lock poisoned".to_string(),
-                )
-            })? = level;
+        self.session
+            .model
+            .replace_thinking_level(level)
+            .map_err(|error| {
+                ExtensionHostError::Operation(error.to_string())
+            })?;
         let context = self
             .kernel
             .extension_context(
@@ -775,6 +685,7 @@ impl ExtensionHost for SessionExtensionHost {
             })?;
         self.session
             .extensions
+            .runtime_ref()
             .emit_thinking_level_select(
                 &protocol::ThinkingLevelSelectEvent {
                     level,
@@ -792,7 +703,7 @@ impl ExtensionHost for SessionExtensionHost {
         _invocation: &ExtensionInvocation,
         event: ExtensionEventData,
     ) -> Result<(), ExtensionHostError> {
-        let _receivers = self.session.event_bus.send(event);
+        self.session.extensions.publish_event(event);
         Ok(())
     }
 
@@ -804,21 +715,19 @@ impl ExtensionHost for SessionExtensionHost {
         tokio::sync::broadcast::Receiver<ExtensionEventData>,
         ExtensionHostError,
     > {
-        Ok(self.session.event_bus.subscribe())
+        Ok(self.session.extensions.subscribe_events())
     }
 
     /// Waits until the current active run has released the session.
     async fn wait_for_idle(
         &self,
-        invocation: &ExtensionInvocation,
+        _invocation: &ExtensionInvocation,
     ) -> Result<(), ExtensionHostError> {
-        loop {
-            let notified = self.session.idle_notify.notified();
-            if self.is_idle(invocation)? {
-                return Ok(());
-            }
-            notified.await;
-        }
+        self.session
+            .execution
+            .wait_for_idle()
+            .await
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Creates and registers one new server-side session.

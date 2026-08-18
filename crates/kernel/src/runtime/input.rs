@@ -70,7 +70,7 @@ impl PromptInputExpansion {
     }
 }
 
-impl SessionRuntime {
+impl Session {
     /// Expands one transformed input through Session Skill and Template snapshots once.
     pub(super) fn expand_prompt_input(
         &self,

@@ -130,13 +130,7 @@ impl Kernel {
             }
             BuiltinSlashCommand::Name => {
                 if execution.invocation.arguments.is_empty() {
-                    let name = execution
-                        .session
-                        .store
-                        .lock()
-                        .map_err(|_poison_error| KernelError::Poisoned)?
-                        .name()
-                        .map(ToOwned::to_owned);
+                    let name = execution.session.transcript.name()?;
                     return Ok(name.map_or_else(
                         || {
                             command.output(
@@ -190,13 +184,7 @@ impl Kernel {
                         },
                     ));
                 }
-                let name = execution
-                    .session
-                    .store
-                    .lock()
-                    .map_err(|_poison_error| KernelError::Poisoned)?
-                    .name()
-                    .map(ToOwned::to_owned);
+                let name = execution.session.transcript.name()?;
                 let transcript =
                     self.session_transcript(execution.session_id)?;
                 Ok(command.output(

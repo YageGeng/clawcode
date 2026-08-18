@@ -1,26 +1,32 @@
 use super::*;
 
-impl SessionRuntime {
+impl Session {
     /// Returns the initialized immutable Prompt snapshot for this Session.
     pub(super) fn prompt_session(
         &self,
     ) -> Result<&Arc<::prompt::PromptSession>, KernelError> {
-        self.prompt.get().ok_or_else(|| {
-            KernelError::Protocol(
-                "session Prompt resources are not initialized".to_string(),
-            )
-        })
+        self.resources
+            .get()
+            .map(SessionResources::prompt)
+            .ok_or_else(|| {
+                KernelError::Protocol(
+                    "session Prompt resources are not initialized".to_string(),
+                )
+            })
     }
 
     /// Returns the initialized optional Skill snapshot for this Session.
     pub(super) fn skill_catalog(
         &self,
     ) -> Result<Option<&Arc<skill::SkillCatalog>>, KernelError> {
-        self.skills.get().map(Option::as_ref).ok_or_else(|| {
-            KernelError::Protocol(
-                "session Skill resources are not initialized".to_string(),
-            )
-        })
+        self.resources
+            .get()
+            .map(SessionResources::skills)
+            .ok_or_else(|| {
+                KernelError::Protocol(
+                    "session Skill resources are not initialized".to_string(),
+                )
+            })
     }
 
     /// Builds the current Turn System Prompt from one active Tool snapshot.
@@ -46,7 +52,7 @@ impl Kernel {
     /// Materializes one rendered System Prompt with Turn identity and timing.
     pub(super) fn system_prompt_message(
         &self,
-        session: &SessionRuntime,
+        session: &Session,
         turn_id: TurnId,
         timestamp_ms: TimestampMs,
         tools: &ToolRegistry,
