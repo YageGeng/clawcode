@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::approval::{ApprovalMode, AskForApproval};
 use crate::extensions::ExtensionsConfig;
+use crate::kernel::KernelConfig;
 use crate::llm::{LlmModel, LlmProvider};
 use crate::logging::LoggingConfig;
 use crate::mcp::{McpConfigError, McpServerConfig};
@@ -183,6 +184,9 @@ pub struct AppConfig {
     /// File-backed session persistence configuration.
     #[serde(default)]
     pub session_persistence: SessionPersistenceConfig,
+    /// Kernel runtime configuration.
+    #[serde(default)]
+    pub kernel: KernelConfig,
     /// Manual context compaction configuration.
     #[serde(default)]
     pub compaction: CompactionConfig,
@@ -209,6 +213,7 @@ impl Default for AppConfig {
             extensions: ExtensionsConfig::default(),
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
+            kernel: KernelConfig::default(),
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         }

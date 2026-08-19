@@ -183,6 +183,7 @@ impl ApplicationFactory {
             ))))
             .skill_factory(skill_factory)
             .include_skill_instructions(snapshot.skills.include_instructions)
+            .max_turns(snapshot.kernel.max_turns)
             .compaction_policy(snapshot.compaction)
             .retry_policy(snapshot.retry.agent)
             .build()

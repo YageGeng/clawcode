@@ -1,4 +1,8 @@
-active_model = "moonshotai/kimi-k3"
+active_model = "deepseek/deepseek-v4-flash"
+
+[kernel]
+max_turns = { type = "unlimited" }
+# max_turns = { type = "limited", turns = 64 }
 
 [logging]
 filter = "info,acp::trace=debug"
@@ -78,7 +82,7 @@ max_output_tokens = 131072
 reasoning_effort = "max"
 
 [[mcp_servers]]
-enabled = true
+enabled = false
 name = "legacy-reference"
 protocol = "2025-11-25"
 command = "cargo"
@@ -89,7 +93,7 @@ mrtr_max_rounds = 8
 mrtr_total_timeout_sec = 300
 
 [[mcp_servers]]
-enabled = true
+enabled = false
 name = "modern-reference"
 protocol = "2026-07-28"
 url = "http://127.0.0.1:39128/mcp"

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -751,6 +752,154 @@ async fn streamed_response_produces_one_timed_turn() {
             ..
         })
     ));
+}
+
+/// The default Kernel policy permits Runs beyond the legacy 64-Turn bound.
+#[tokio::test]
+async fn default_turn_limit_is_unlimited() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_050)));
+    let mut scripts = VecDeque::new();
+    for turn in 0..65 {
+        scripts.push_back(ScriptedResponse::events(vec![
+            ModelStreamEvent::ToolCall(ToolCall {
+                tool_call_id: ToolCallId::try_from(format!(
+                    "unlimited-call-{turn}"
+                ))
+                .expect("tool call id"),
+                name: "capture_trace".to_string(),
+                arguments: serde_json::json!({}),
+            }),
+            ScriptedModel::finished(StopReason::ToolUse),
+        ]));
+    }
+    scripts.push_back(ScriptedResponse::events(vec![ScriptedModel::finished(
+        StopReason::EndTurn,
+    )]));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(scripts),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(TraceCaptureToolFactory(Arc::new(Mutex::new(
+            None,
+        )))))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build Kernel");
+    let session_id =
+        SessionId::try_from("session-unlimited-turns").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+
+    let result = kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "continue beyond the legacy limit".into(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("complete an unlimited Run");
+
+    assert_eq!(result.turns.len(), 66);
+}
+
+/// A limited Kernel policy stops before starting a Turn beyond its bound.
+#[tokio::test]
+async fn limited_turn_limit_stops_at_configured_bound() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_075)));
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("limited-call-1")
+                        .expect("tool call id"),
+                    name: "capture_trace".to_string(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("limited-call-2")
+                        .expect("tool call id"),
+                    name: "capture_trace".to_string(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![ScriptedModel::finished(
+                StopReason::EndTurn,
+            )]),
+        ])),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(model)))
+        .tool_factory(Arc::new(TraceCaptureToolFactory(Arc::new(Mutex::new(
+            None,
+        )))))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .max_turns(config::TurnLimit::Limited {
+            turns: NonZeroUsize::new(2).expect("positive Turn limit"),
+        })
+        .build()
+        .build()
+        .expect("build Kernel");
+    let session_id =
+        SessionId::try_from("session-limited-turns").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create Session");
+
+    let error = kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "stop at the configured limit".into(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect_err("reject a Turn beyond the configured limit");
+
+    assert!(matches!(error, kernel::KernelError::TurnLimit(2)));
 }
 
 /// Text-only adaptation changes the provider copy while preserving stored images.
