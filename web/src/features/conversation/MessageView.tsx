@@ -58,6 +58,21 @@ const MarkdownUrlPolicy = {
 } as const;
 
 export function MessageView({ message, entry, cwd, running, controller }: MessageViewProps) {
+  const assistant = message.assistant;
+  // ACP projects Tool Calls into dedicated transcript cards, which leaves a
+  // settled tool-only assistant message with no independently visible content.
+  // Keep that message in workspace state and the Session tree without rendering
+  // an empty Agent shell in the conversation.
+  if (
+    message.role === "assistant"
+    && message.slashCommand === undefined
+    && !message.streaming
+    && message.text.length === 0
+    && message.images.length === 0
+    && message.reasoning.length === 0
+    && assistant?.error === undefined
+  ) return null;
+
   const actions = (
     <MessageActions
       message={message}
@@ -70,7 +85,6 @@ export function MessageView({ message, entry, cwd, running, controller }: Messag
   if (message.slashCommand !== undefined) {
     return <CommandMessageCard message={message} actions={actions} />;
   }
-  const assistant = message.assistant;
   return (
     <article className="message" data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"}>
       <div className="message__label">{message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System"}</div>
