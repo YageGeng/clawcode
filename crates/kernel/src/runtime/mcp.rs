@@ -70,6 +70,10 @@ impl SessionMcpRuntime {
         let Some(state) = self.state() else {
             return Ok(());
         };
+        tracing::info!(
+            "started MCP shutdown for session {}",
+            state.session.session_id()
+        );
         let shutdown_result = state.session.shutdown().await;
         let projection_result =
             if let Some(task) = state.projection.lock().await.take() {
@@ -81,7 +85,10 @@ impl SessionMcpRuntime {
             } else {
                 Ok(())
             };
-        match (shutdown_result, projection_result) {
+        let result: Result<(), KernelError> = match (
+            shutdown_result,
+            projection_result,
+        ) {
             (Ok(()), Ok(())) => Ok(()),
             (Ok(()), Err(error)) => Err(error),
             (Err(error), Ok(())) => Err(error.into()),
@@ -94,7 +101,19 @@ impl SessionMcpRuntime {
                 );
                 Err(error.into())
             }
+        };
+        match &result {
+            Ok(()) => tracing::info!(
+                "completed MCP shutdown for session {}",
+                state.session.session_id()
+            ),
+            Err(error) => tracing::error!(
+                "failed MCP shutdown for session {}: {}",
+                state.session.session_id(),
+                error
+            ),
         }
+        result
     }
 }
 
@@ -536,6 +555,7 @@ impl ::mcp::McpHost for SessionMcpHost {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Write};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -545,6 +565,45 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{SessionMcpRuntime, SessionMcpState};
+
+    /// Shared in-memory writer used to inspect MCP lifecycle logs.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        /// Returns all UTF-8 tracing output written by the subscriber.
+        fn content(&self) -> String {
+            String::from_utf8(self.0.lock().expect("log lock").clone())
+                .expect("UTF-8 logs")
+        }
+    }
+
+    /// One writer handle backed by the shared test buffer.
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        /// Appends one formatted tracing buffer to the shared capture.
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_poison_error| io::Error::other("log lock poisoned"))?
+                .write(buffer)
+        }
+
+        /// The in-memory capture has no buffered state to flush.
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        /// Creates a writer handle sharing the captured byte buffer.
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
 
     struct RejectingHost;
 
@@ -607,5 +666,45 @@ mod tests {
 
         assert!(shutdown.is_cancelled());
         assert!(matches!(error, crate::KernelError::Protocol(_)));
+    }
+
+    /// MCP shutdown logs both third-party call boundaries with Session context.
+    #[tokio::test]
+    async fn shutdown_lifecycle_is_logged_with_session_context() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let shutdown = CancellationToken::new();
+        let session = Arc::new(mcp_session(shutdown.clone()).await);
+        let runtime = SessionMcpRuntime::Enabled(
+            SessionMcpState::builder()
+                .session(session)
+                .projection(AsyncMutex::new(None))
+                .elicitations(Mutex::new(std::collections::HashMap::new()))
+                .build(),
+        );
+
+        tracing_futures::WithSubscriber::with_subscriber(
+            runtime.shutdown(),
+            dispatch,
+        )
+        .await
+        .expect("shut down MCP runtime");
+
+        assert!(shutdown.is_cancelled());
+        let output = logs.content();
+        for lifecycle in [
+            "started MCP shutdown for session session-mcp-cleanup",
+            "completed MCP shutdown for session session-mcp-cleanup",
+        ] {
+            assert!(
+                output.contains(lifecycle),
+                "missing {lifecycle} in captured logs: {output:?}"
+            );
+        }
     }
 }

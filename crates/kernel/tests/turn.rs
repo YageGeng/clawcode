@@ -30,8 +30,16 @@ use tools::{
     ToolFactory, ToolRegistry,
 };
 
+mod support;
+
+use support::CapturedLogs;
+
 type TestModelStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
+
+/// Serializes Tool execution tests around tracing's process-wide callsite cache.
+static TOOL_EXECUTION_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Shared deterministic capabilities used by all local kernel test models.
 static TEST_MODEL_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| {
@@ -826,6 +834,7 @@ async fn text_only_model_receives_placeholder_without_rewriting_history() {
 /// An ingress Trace remains unchanged through Kernel Tool execution.
 #[tokio::test]
 async fn traced_run_propagates_trace_to_tools() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_200)));
     let captured = Arc::new(Mutex::new(None));
@@ -836,7 +845,9 @@ async fn traced_run_propagates_trace_to_tools() {
                     tool_call_id: ToolCallId::try_from("trace-call")
                         .expect("tool call id"),
                     name: "capture_trace".to_string(),
-                    arguments: serde_json::json!({}),
+                    arguments: serde_json::json!({
+                        "secret": "sensitive-tool-argument"
+                    }),
                 }),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
@@ -873,28 +884,51 @@ async fn traced_run_propagates_trace_to_tools() {
         .await
         .expect("create session");
     let trace_id = TraceId::try_from("trace-ingress").expect("Trace id");
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
 
-    kernel
-        .run_traced(
+    tracing_futures::WithSubscriber::with_subscriber(
+        kernel.run_traced(
             RunRequest {
                 session_id,
                 input: "capture trace".into(),
             },
             Arc::new(RecordingSink::default()),
             trace_id.clone(),
-        )
-        .await
-        .expect("run Kernel");
+        ),
+        dispatch,
+    )
+    .await
+    .expect("run Kernel");
 
     assert_eq!(
         captured.lock().expect("Trace capture lock").as_ref(),
         Some(&trace_id)
     );
+    let output = logs.content();
+    for lifecycle in [
+        "started Tool call trace-call (capture_trace)",
+        "completed Tool call trace-call (capture_trace)",
+        "session session-traced-run",
+        "trace trace-ingress",
+    ] {
+        assert!(
+            output.contains(lifecycle),
+            "missing {lifecycle} in captured logs: {output:?}"
+        );
+    }
+    assert!(!output.contains("sensitive-tool-argument"));
 }
 
 /// A pre-Agent replacement applies to every Turn of its Run and not later Runs.
 #[tokio::test]
 async fn system_prompt_override_is_scoped_to_the_complete_run() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_250)));
     let model = Arc::new(SystemPromptCaptureModel {
@@ -1100,6 +1134,7 @@ async fn stream_failures_persist_complete_error_assistants() {
 /// Sibling tools complete concurrently but tool-result messages retain call order.
 #[tokio::test]
 async fn tool_batch_emits_completion_order_and_persists_source_order() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(2_000)));
     let slow_id = ToolCallId::try_from("slow").expect("slow id");
@@ -1212,6 +1247,7 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
 /// Policy-blocked tools persist a typed outcome that protocol clients can distinguish.
 #[tokio::test]
 async fn blocked_tool_result_preserves_policy_outcome() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(2_400)));
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
@@ -1294,6 +1330,7 @@ async fn blocked_tool_result_preserves_policy_outcome() {
 /// Tool snapshots are emitted before the final result and retain correlation metadata.
 #[tokio::test]
 async fn tool_partial_update_precedes_final_result() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(2_500)));
     let tool_call_id = ToolCallId::try_from("stream-1").expect("tool id");
@@ -1403,6 +1440,7 @@ async fn tool_partial_update_precedes_final_result() {
 /// Synchronous tool updates coalesce to the latest snapshot before completion.
 #[tokio::test]
 async fn tool_updates_coalesce_to_the_latest_snapshot() {
+    let _tool_test_guard = TOOL_EXECUTION_TEST_LOCK.lock().await;
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(2_750)));
     let tool_call_id = ToolCallId::try_from("burst-1").expect("tool id");
