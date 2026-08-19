@@ -136,29 +136,47 @@ impl Kernel {
     ) -> Result<PathBuf, KernelError> {
         let session_id = options.session_id.clone();
         let cwd = options.cwd.clone();
-        let _reservation = self.reserve_session_build(&session_id)?;
-        let store = self.store_factory.create(options)?;
-        let path = store.path().to_path_buf();
-        let runtime = self.build_session(store, cwd).await?;
-        self.register_session(session_id.clone(), &runtime).await?;
-        if let Err(error) = self
-            .start_extensions(&runtime, protocol::SessionStartReason::New)
-            .await
-        {
-            if let Err(rollback_error) =
-                self.rollback_session_registration(&session_id, true).await
+        tracing::info!("started Session creation {}", session_id);
+        let result: Result<PathBuf, KernelError> = async {
+            let _reservation = self.reserve_session_build(&session_id)?;
+            let store = self.store_factory.create(options)?;
+            let path = store.path().to_path_buf();
+            let runtime = self.build_session(store, cwd).await?;
+            self.register_session(session_id.clone(), &runtime).await?;
+            if let Err(error) = self
+                .start_extensions(&runtime, protocol::SessionStartReason::New)
+                .await
             {
-                tracing::warn!(
-                    "failed to clean up Session {} after startup error: {}",
-                    session_id,
-                    rollback_error
-                );
+                if let Err(rollback_error) =
+                    self.rollback_session_registration(&session_id, true).await
+                {
+                    tracing::warn!(
+                        "failed to clean up Session {} after startup error: {}",
+                        session_id,
+                        rollback_error
+                    );
+                }
+                return Err(error);
             }
-            return Err(error);
+            self.checkpoint_started_session(&session_id, &runtime, true)
+                .await?;
+            Ok(path)
         }
-        self.checkpoint_started_session(&session_id, &runtime, true)
-            .await?;
-        Ok(path)
+        .await;
+        match result {
+            Ok(path) => {
+                tracing::info!("completed Session creation {}", session_id);
+                Ok(path)
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed Session creation {}: {}",
+                    session_id,
+                    error
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Lists persisted sessions by scanning v4 headers instead of a global index.
@@ -189,6 +207,8 @@ impl Kernel {
         session_id: SessionId,
         cwd: PathBuf,
     ) -> Result<PathBuf, KernelError> {
+        tracing::info!("started Session Resume {}", session_id);
+        let result: Result<PathBuf, KernelError> = async {
         let existing = self
             .sessions
             .read()
@@ -201,7 +221,7 @@ impl Kernel {
             existing.ensure_active()?;
             if existing.cwd != cwd {
                 return Err(KernelError::SessionCwdMismatch {
-                    session_id,
+                    session_id: session_id.clone(),
                     expected: existing.cwd.clone(),
                     received: cwd,
                 });
@@ -233,6 +253,7 @@ impl Kernel {
             // Close won the lifecycle race while the hook was suspended.
             let _operation_guard = existing.acquire_operation().await?;
             existing.sync_store()?;
+            tracing::info!("completed Session Resume {} using live runtime", session_id);
             return Ok(path);
         }
         let _reservation = self.reserve_session_build(&session_id)?;
@@ -290,7 +311,14 @@ impl Kernel {
         }
         self.checkpoint_started_session(&session_id, &runtime, false)
             .await?;
+        tracing::info!("completed Session Resume {} from persisted Store", session_id);
         Ok(path)
+        }
+        .await;
+        if let Err(error) = &result {
+            tracing::error!("failed Session Resume {}: {}", session_id, error);
+        }
+        result
     }
 
     /// Cancels active work, waits for it to settle, and releases in-memory session resources.
@@ -298,62 +326,80 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
-        let session = self.session(session_id)?;
-        session.execution.cancel()?;
-        let _run_guard = session.acquire_operation().await?;
-        // Transition before invoking hooks so reentrant host operations fail
-        // immediately instead of waiting on the gate held by this shutdown.
-        session.begin_closing()?;
-        let context = match self.extension_context(&session, None, None) {
-            Ok(context) => context,
-            Err(error) => {
-                if let Err(abort_error) = session.abort_closing() {
-                    tracing::warn!(
-                        "failed to restore Session {} after shutdown setup error: {}",
-                        session_id,
-                        abort_error
-                    );
+        tracing::info!("started Session close {}", session_id);
+        let result: Result<(), KernelError> = async {
+            let session = self.session(session_id)?;
+            session.execution.cancel()?;
+            let _run_guard = session.acquire_operation().await?;
+            // Transition before invoking hooks so reentrant host operations fail
+            // immediately instead of waiting on the gate held by this shutdown.
+            session.begin_closing()?;
+            let context = match self.extension_context(&session, None, None) {
+                Ok(context) => context,
+                Err(error) => {
+                    if let Err(abort_error) = session.abort_closing() {
+                        tracing::warn!(
+                            "failed to restore Session {} after shutdown setup error: {}",
+                            session_id,
+                            abort_error
+                        );
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
-        session
-            .extensions
-            .runtime_ref()
-            .emit_session_shutdown(
-                &protocol::SessionShutdownEvent {
-                    reason: protocol::SessionShutdownReason::Quit,
-                    target_session_id: None,
-                },
-                &context,
-            )
-            .await;
-        // Once MCP teardown starts the runtime cannot safely become active
-        // again, so every finalization step runs even when an earlier one fails.
-        let mcp_result = session.mcp.shutdown().await;
-        let sync_result = session.sync_store();
-        let lifecycle_result = session.finish_closing();
-        session.extensions.runtime_ref().invalidate();
-        let removal_result = self
-            .sessions
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)
-            .map(|mut sessions| {
-                sessions.remove(session_id);
-            });
-        Self::preserve_primary_error(
+            };
+            session
+                .extensions
+                .runtime_ref()
+                .emit_session_shutdown(
+                    &protocol::SessionShutdownEvent {
+                        reason: protocol::SessionShutdownReason::Quit,
+                        target_session_id: None,
+                    },
+                    &context,
+                )
+                .await;
+            // Once MCP teardown starts the runtime cannot safely become active
+            // again, so every finalization step runs even when an earlier one fails.
+            let mcp_result = session.mcp.shutdown().await;
+            let sync_result = session.sync_store();
+            let lifecycle_result = session.finish_closing();
+            session.extensions.runtime_ref().invalidate();
+            let removal_result = self
+                .sessions
+                .write()
+                .map_err(|_poison_error| KernelError::Poisoned)
+                .map(|mut sessions| {
+                    sessions.remove(session_id);
+                });
             Self::preserve_primary_error(
                 Self::preserve_primary_error(
-                    mcp_result,
-                    sync_result,
-                    "sync Store during Session close",
+                    Self::preserve_primary_error(
+                        mcp_result,
+                        sync_result,
+                        "sync Store during Session close",
+                    ),
+                    lifecycle_result,
+                    "finish Session lifecycle during close",
                 ),
-                lifecycle_result,
-                "finish Session lifecycle during close",
-            ),
-            removal_result,
-            "remove Session runtime after close",
-        )
+                removal_result,
+                "remove Session runtime after close",
+            )
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                tracing::info!("completed Session close {}", session_id);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed Session close {}: {}",
+                    session_id,
+                    error
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Releases an active runtime before removing its persisted session history idempotently.
@@ -361,15 +407,33 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
-        // Reserve before closing so construction cannot claim the identifier
-        // between runtime removal and persisted Store deletion.
-        let _reservation = self.reserve_session_deletion(session_id)?;
-        match self.close_session(session_id).await {
-            Ok(()) | Err(KernelError::SessionNotFound(_)) => {}
-            Err(error) => return Err(error),
+        tracing::info!("started Session deletion {}", session_id);
+        let result: Result<(), KernelError> = async {
+            // Reserve before closing so construction cannot claim the identifier
+            // between runtime removal and persisted Store deletion.
+            let _reservation = self.reserve_session_deletion(session_id)?;
+            match self.close_session(session_id).await {
+                Ok(()) | Err(KernelError::SessionNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+            self.store_factory.delete(session_id)?;
+            Ok(())
         }
-        self.store_factory.delete(session_id)?;
-        Ok(())
+        .await;
+        match result {
+            Ok(()) => {
+                tracing::info!("completed Session deletion {}", session_id);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed Session deletion {}: {}",
+                    session_id,
+                    error
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Cancels the active run for a session; the next run receives a fresh token.
@@ -513,101 +577,129 @@ impl Kernel {
         session: &Arc<Session>,
         reason: protocol::SessionStartReason,
     ) -> Result<(), KernelError> {
-        let context = self.extension_context(session, None, None)?;
-        let trust = session
-            .extensions
-            .runtime_ref()
-            .emit_project_trust(
-                &protocol::ProjectTrustEvent {
-                    cwd: session.cwd.clone(),
-                },
-                &context,
-            )
-            .await;
-        // Pi announces the live session before extensions discover resources
-        // that will be attached to that session runtime.
-        session
-            .extensions
-            .runtime_ref()
-            .emit_session_start(
-                &protocol::SessionStartEvent {
-                    reason,
-                    previous_session_id: None,
-                },
-                &context,
-            )
-            .await;
-        let project_resources_allowed =
-            trust.trusted != protocol::ProjectTrustDecision::No;
-        // Project trust gates built-in project roots; Extension-owned roots
-        // remain discoverable because they are not implicitly project content.
-        let resources = session
-            .extensions
-            .runtime_ref()
-            .emit_resources_discover(
-                &protocol::ResourcesDiscoverEvent {
-                    cwd: session.cwd.clone(),
-                    reason: protocol::ResourcesDiscoverReason::Startup,
-                },
-                &context,
-            )
-            .await;
-        let skills = self
-            .skill_factory
-            .as_ref()
-            .map(|factory| {
-                factory.create(protocol::SkillResourceRequest {
-                    cwd: session.cwd.clone(),
-                    project_resources_allowed,
-                    extension_skill_paths: resources.skill_paths,
+        let session_id = session.transcript.session_id()?;
+        tracing::debug!(
+            "started Session extension startup {} with reason {:?}",
+            session_id,
+            reason
+        );
+        let result: Result<(), KernelError> = async {
+            let context = self.extension_context(session, None, None)?;
+            let trust = session
+                .extensions
+                .runtime_ref()
+                .emit_project_trust(
+                    &protocol::ProjectTrustEvent {
+                        cwd: session.cwd.clone(),
+                    },
+                    &context,
+                )
+                .await;
+            // Pi announces the live session before extensions discover resources
+            // that will be attached to that session runtime.
+            session
+                .extensions
+                .runtime_ref()
+                .emit_session_start(
+                    &protocol::SessionStartEvent {
+                        reason,
+                        previous_session_id: None,
+                    },
+                    &context,
+                )
+                .await;
+            let project_resources_allowed =
+                trust.trusted != protocol::ProjectTrustDecision::No;
+            // Project trust gates built-in project roots; Extension-owned roots
+            // remain discoverable because they are not implicitly project content.
+            let resources = session
+                .extensions
+                .runtime_ref()
+                .emit_resources_discover(
+                    &protocol::ResourcesDiscoverEvent {
+                        cwd: session.cwd.clone(),
+                        reason: protocol::ResourcesDiscoverReason::Startup,
+                    },
+                    &context,
+                )
+                .await;
+            let skills = self
+                .skill_factory
+                .as_ref()
+                .map(|factory| {
+                    factory.create(protocol::SkillResourceRequest {
+                        cwd: session.cwd.clone(),
+                        project_resources_allowed,
+                        extension_skill_paths: resources.skill_paths,
+                    })
                 })
-            })
-            .transpose()?
-            .map(Arc::new);
-        let prompt =
-            self.prompt_factory
-                .create(protocol::PromptResourceRequest {
+                .transpose()?
+                .map(Arc::new);
+            let prompt = self.prompt_factory.create(
+                protocol::PromptResourceRequest {
                     cwd: session.cwd.clone(),
                     project_resources_allowed,
                     extension_prompt_paths: resources.prompt_paths,
+                },
+            )?;
+            // Publish Prompt and Skill resources together so readers cannot observe
+            // a partially initialized startup snapshot.
+            session
+                .resources
+                .set(SessionResources::new(Arc::new(prompt), skills))
+                .map_err(|_resources| {
+                    KernelError::Protocol(
+                        "session resources already initialized".to_string(),
+                    )
                 })?;
-        // Publish Prompt and Skill resources together so readers cannot observe
-        // a partially initialized startup snapshot.
-        session
-            .resources
-            .set(SessionResources::new(Arc::new(prompt), skills))
-            .map_err(|_resources| {
-                KernelError::Protocol(
-                    "session resources already initialized".to_string(),
+            let (restored_model, restored_thinking_level) =
+                session.model.snapshot()?;
+            let restored_model = restored_model.profile().clone();
+            session
+                .extensions
+                .runtime_ref()
+                .emit_model_select(
+                    &protocol::ModelSelectEvent {
+                        model: restored_model,
+                        previous_model: None,
+                        source: protocol::ModelSelectSource::Restore,
+                    },
+                    &context,
                 )
-            })?;
-        let (restored_model, restored_thinking_level) =
-            session.model.snapshot()?;
-        let restored_model = restored_model.profile().clone();
-        session
-            .extensions
-            .runtime_ref()
-            .emit_model_select(
-                &protocol::ModelSelectEvent {
-                    model: restored_model,
-                    previous_model: None,
-                    source: protocol::ModelSelectSource::Restore,
-                },
-                &context,
-            )
-            .await;
-        session
-            .extensions
-            .runtime_ref()
-            .emit_thinking_level_select(
-                &protocol::ThinkingLevelSelectEvent {
-                    level: restored_thinking_level,
-                    previous_level: protocol::ThinkingLevel::Off,
-                },
-                &context,
-            )
-            .await;
-        Ok(())
+                .await;
+            session
+                .extensions
+                .runtime_ref()
+                .emit_thinking_level_select(
+                    &protocol::ThinkingLevelSelectEvent {
+                        level: restored_thinking_level,
+                        previous_level: protocol::ThinkingLevel::Off,
+                    },
+                    &context,
+                )
+                .await;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                tracing::debug!(
+                    "completed Session extension startup {} with reason {:?}",
+                    session_id,
+                    reason
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed Session extension startup {} with reason {:?}: {}",
+                    session_id,
+                    reason,
+                    error
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Builds session-scoped tools and reconstructs model history from the active main branch.
@@ -637,18 +729,37 @@ impl Kernel {
             &self.mcp_factory
         {
             let host = Arc::new(mcp::SessionMcpHost::new(cwd.clone()));
-            let mcp_session = Arc::new(
-                factory
-                    .create(
-                        ::mcp::McpSessionRequest::builder()
-                            .session_id(session_id)
-                            .cwd(cwd.clone())
-                            .host(Arc::clone(&host) as Arc<dyn ::mcp::McpHost>)
-                            .shutdown(self.shutdown.child_token())
-                            .build(),
-                    )
-                    .await?,
+            tracing::info!(
+                "started MCP Session creation for session {}",
+                session_id
             );
+            let mcp_session = match factory
+                .create(
+                    ::mcp::McpSessionRequest::builder()
+                        .session_id(session_id.clone())
+                        .cwd(cwd.clone())
+                        .host(Arc::clone(&host) as Arc<dyn ::mcp::McpHost>)
+                        .shutdown(self.shutdown.child_token())
+                        .build(),
+                )
+                .await
+            {
+                Ok(mcp_session) => {
+                    tracing::info!(
+                        "completed MCP Session creation for session {}",
+                        session_id
+                    );
+                    Arc::new(mcp_session)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        "failed MCP Session creation for session {}: {}",
+                        session_id,
+                        error
+                    );
+                    return Err(error.into());
+                }
+            };
             let mcp_tools = match mcp_session.tool_registry() {
                 Ok(tools) => tools,
                 Err(error) => {

@@ -21,19 +21,28 @@ impl Kernel {
         input: impl Into<protocol::RunInput>,
     ) -> Result<QueuedMessage, KernelError> {
         let input = input.into();
-        let session = self.session(session_id)?;
-        let run_id = session
-            .execution
-            .active_run()?
-            .map(|active_run| active_run.run_id)
-            .ok_or_else(|| {
-                KernelError::SessionNotRunning(session_id.clone())
-            })?;
-        if let Some(command_input) = input.slash_command_text()
-            && let Ok(invocation) =
-                protocol::SlashCommandInvocation::try_from(command_input)
-        {
-            match session.resolve_direct_slash_command(&invocation)? {
+        tracing::debug!(
+            "started Queue enqueue {:?} for session {}",
+            kind,
+            session_id
+        );
+        let result: Result<(QueuedMessage, protocol::RunId), KernelError> =
+            async {
+                let session = self.session(session_id)?;
+                let run_id = session
+                    .execution
+                    .active_run()?
+                    .map(|active_run| active_run.run_id)
+                    .ok_or_else(|| {
+                        KernelError::SessionNotRunning(session_id.clone())
+                    })?;
+                if let Some(command_input) = input.slash_command_text()
+                    && let Ok(invocation) =
+                        protocol::SlashCommandInvocation::try_from(
+                            command_input,
+                        )
+                {
+                    match session.resolve_direct_slash_command(&invocation)? {
                 super::command::DirectSlashCommandResolution::Command(
                     command,
                 ) => {
@@ -48,84 +57,117 @@ impl Kernel {
                 } => return Err(KernelError::SlashCommandRejected(error)),
                 super::command::DirectSlashCommandResolution::NotFound => {}
             }
-        }
-        let expanded = match input {
-            protocol::RunInput::Text(text) => {
-                session.expand_prompt_input(session_id, &text)?
-            }
-            protocol::RunInput::Blocks(blocks) => {
-                PromptInputExpansion::from_blocks(blocks)
-            }
-        };
-        if let Some(diagnostic) = expanded.diagnostic().cloned() {
-            // Expansion performs synchronous resource I/O, so refresh the
-            // active Turn before correlating a diagnostic emitted afterward.
-            let active_run = session
-                .execution
-                .active_run()?
-                .filter(|active_run| active_run.run_id == run_id)
-                .ok_or_else(|| {
-                    KernelError::SessionNotRunning(session_id.clone())
-                })?;
-            let sink = Arc::clone(&active_run.sink);
-            let turn_id = active_run.turn_id.clone();
-            EventEmitter {
-                clock: Arc::clone(&self.clock),
-                sink,
-                session: Arc::clone(&session),
-            }
-            .emit(
-                turn_id,
-                protocol::AgentEventPayload::SkillDiagnostic { diagnostic },
-            )
-            .await?;
-        }
-        let content = expanded.message_content();
-        let timestamp = self.clock.now();
-        let queued = QueuedMessage::builder()
-            .queue_id(
-                QueueId::try_from(self.id_generator.next(IdKind::Queue))
-                    .map_err(|error| {
-                        KernelError::Protocol(error.to_string())
-                    })?,
-            )
-            .kind(kind)
-            .message(AgentMessage {
-                identity: MessageIdentity {
-                    message_id: self.message_id()?,
-                    turn_id: TurnId::try_from(
-                        self.id_generator.next(IdKind::Turn),
+                }
+                let expanded = match input {
+                    protocol::RunInput::Text(text) => {
+                        session.expand_prompt_input(session_id, &text)?
+                    }
+                    protocol::RunInput::Blocks(blocks) => {
+                        PromptInputExpansion::from_blocks(blocks)
+                    }
+                };
+                if let Some(diagnostic) = expanded.diagnostic().cloned() {
+                    // Expansion performs synchronous resource I/O, so refresh the
+                    // active Turn before correlating a diagnostic emitted afterward.
+                    let active_run = session
+                        .execution
+                        .active_run()?
+                        .filter(|active_run| active_run.run_id == run_id)
+                        .ok_or_else(|| {
+                            KernelError::SessionNotRunning(session_id.clone())
+                        })?;
+                    let sink = Arc::clone(&active_run.sink);
+                    let turn_id = active_run.turn_id.clone();
+                    EventEmitter {
+                        clock: Arc::clone(&self.clock),
+                        sink,
+                        session: Arc::clone(&session),
+                    }
+                    .emit(
+                        turn_id,
+                        protocol::AgentEventPayload::SkillDiagnostic {
+                            diagnostic,
+                        },
                     )
-                    .map_err(|error| {
-                        KernelError::Protocol(error.to_string())
-                    })?,
-                },
-                timing: MessageTiming::try_from((
-                    timestamp, timestamp, timestamp,
-                ))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?,
-                content,
-            })
-            .build();
-        let item = PendingQueueItem::new(
-            queued.clone(),
-            EntryId::try_from(self.id_generator.next(IdKind::Entry))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?,
-        );
-        let record_id =
-            RecordId::try_from(self.id_generator.next(IdKind::Record))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        session.enqueue_pending(
-            NewRecord::builder()
-                .id(record_id)
-                .lane(session.transcript.lane())
-                .run_id(Some(run_id))
-                .kind(RecordKind::QueueEnqueued)
-                .payload(item.enqueued_payload()?)
-                .build(),
-            item,
-        )?;
-        Ok(queued)
+                    .await?;
+                }
+                let content = expanded.message_content();
+                let timestamp = self.clock.now();
+                let queued = QueuedMessage::builder()
+                    .queue_id(
+                        QueueId::try_from(
+                            self.id_generator.next(IdKind::Queue),
+                        )
+                        .map_err(|error| {
+                            KernelError::Protocol(error.to_string())
+                        })?,
+                    )
+                    .kind(kind)
+                    .message(AgentMessage {
+                        identity: MessageIdentity {
+                            message_id: self.message_id()?,
+                            turn_id: TurnId::try_from(
+                                self.id_generator.next(IdKind::Turn),
+                            )
+                            .map_err(|error| {
+                                KernelError::Protocol(error.to_string())
+                            })?,
+                        },
+                        timing: MessageTiming::try_from((
+                            timestamp, timestamp, timestamp,
+                        ))
+                        .map_err(|error| {
+                            KernelError::Protocol(error.to_string())
+                        })?,
+                        content,
+                    })
+                    .build();
+                let item = PendingQueueItem::new(
+                    queued.clone(),
+                    EntryId::try_from(self.id_generator.next(IdKind::Entry))
+                        .map_err(|error| {
+                            KernelError::Protocol(error.to_string())
+                        })?,
+                );
+                let record_id =
+                    RecordId::try_from(self.id_generator.next(IdKind::Record))
+                        .map_err(|error| {
+                            KernelError::Protocol(error.to_string())
+                        })?;
+                session.enqueue_pending(
+                    NewRecord::builder()
+                        .id(record_id)
+                        .lane(session.transcript.lane())
+                        .run_id(Some(run_id.clone()))
+                        .kind(RecordKind::QueueEnqueued)
+                        .payload(item.enqueued_payload()?)
+                        .build(),
+                    item,
+                )?;
+                Ok((queued, run_id))
+            }
+            .await;
+        match result {
+            Ok((queued, run_id)) => {
+                tracing::info!(
+                    "completed Queue enqueue {} as {:?} for session {} and Kernel Run {}",
+                    queued.queue_id,
+                    queued.kind,
+                    session_id,
+                    run_id
+                );
+                Ok(queued)
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed Queue enqueue {:?} for session {}: {}",
+                    kind,
+                    session_id,
+                    error
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Returns a defensive snapshot of complete queued messages.
@@ -143,6 +185,11 @@ impl Kernel {
         session_id: &SessionId,
         queue_id: &QueueId,
     ) -> Result<(), KernelError> {
+        tracing::debug!(
+            "started queued message removal {} for session {}",
+            queue_id,
+            session_id
+        );
         let session = self.session(session_id)?;
         let exists = session
             .execution
@@ -159,6 +206,11 @@ impl Kernel {
             QueueCancellationReason::Removed,
         )?;
         session.remove_pending(record, queue_id)?;
+        tracing::info!(
+            "completed queued message removal {} for session {}",
+            queue_id,
+            session_id
+        );
         Ok(())
     }
 
@@ -167,6 +219,10 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
+        tracing::debug!(
+            "started queued message clear for session {}",
+            session_id
+        );
         let session = self.session(session_id)?;
         let queue_ids = session.execution.pending_ids()?;
         let records = queue_ids
@@ -181,6 +237,11 @@ impl Kernel {
             })
             .collect::<Result<Vec<_>, _>>()?;
         session.clear_pending(records, &queue_ids)?;
+        tracing::info!(
+            "completed queued message clear of {} items for session {}",
+            queue_ids.len(),
+            session_id
+        );
         Ok(())
     }
 

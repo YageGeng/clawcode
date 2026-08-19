@@ -40,8 +40,16 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
 
+mod support;
+
+use support::CapturedLogs;
+
 type TestModelStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
+
+/// Serializes MCP Session construction tests around tracing's callsite cache.
+static MCP_SESSION_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Shared deterministic capabilities used by session-level model fixtures.
 static TEST_MODEL_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| {
@@ -883,6 +891,7 @@ fn filesystem_skill_factory(global_root: PathBuf) -> FilesystemSkillFactory {
 /// Resume cancellation shuts down its unregistered MCP runtime without deleting Store.
 #[tokio::test]
 async fn resume_cancellation_shuts_down_unregistered_mcp() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("store root");
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
@@ -949,6 +958,7 @@ async fn resume_cancellation_shuts_down_unregistered_mcp() {
 /// Rejects a second Resume before it can construct another runtime for the same id.
 #[tokio::test]
 async fn concurrent_resume_reserves_session_before_construction() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("store root");
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
@@ -1025,6 +1035,7 @@ async fn concurrent_resume_reserves_session_before_construction() {
 /// Rejects Delete while an unregistered Resume owns the same Session identifier.
 #[tokio::test]
 async fn delete_rejects_session_reserved_by_resume_construction() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("store root");
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
@@ -1077,6 +1088,7 @@ async fn delete_rejects_session_reserved_by_resume_construction() {
 /// Rejects public operations while a registered Session is still starting.
 #[tokio::test]
 async fn starting_session_rejects_close_until_resources_are_ready() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("store root");
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
@@ -1120,6 +1132,7 @@ async fn starting_session_rejects_close_until_resources_are_ready() {
 /// Rejects a live Resume that loses the lifecycle race while its hook is paused.
 #[tokio::test]
 async fn live_resume_rechecks_lifecycle_after_before_switch_hook() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("store root");
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
@@ -2311,6 +2324,7 @@ async fn skill_expansion_failure_preserves_input_and_emits_diagnostic() {
 /// Kernel retains the session factory's MCP status without reconnecting on reads.
 #[tokio::test]
 async fn mcp_status_is_available_from_the_registered_session() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
     let root = tempfile::tempdir().expect("store root");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(40_000)));
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
@@ -2337,19 +2351,38 @@ async fn mcp_status_is_available_from_the_registered_session() {
     let session_id = SessionId::try_from("session-mcp").expect("session id");
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
-    kernel
-        .create_session(SessionCreateOptions {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing_futures::WithSubscriber::with_subscriber(
+        kernel.create_session(SessionCreateOptions {
             session_id: session_id.clone(),
             cwd,
             parent_session_id: None,
-        })
-        .await
-        .expect("create session");
+        }),
+        dispatch,
+    )
+    .await
+    .expect("create session");
 
     let status = kernel.mcp_status(&session_id).expect("MCP status");
     assert_eq!(status.servers.len(), 1);
     assert_eq!(status.servers[0].server_id.as_str(), "docs");
     assert_eq!(status.servers[0].state, McpServerState::Disabled);
+    let output = logs.content();
+    for lifecycle in [
+        "started MCP Session creation for session session-mcp",
+        "completed MCP Session creation for session session-mcp",
+    ] {
+        assert!(
+            output.contains(lifecycle),
+            "missing {lifecycle} in captured logs: {output:?}"
+        );
+    }
 }
 
 /// Deleting an active session releases its runtime and removes persistent history.

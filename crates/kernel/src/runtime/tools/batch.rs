@@ -66,6 +66,17 @@ impl Kernel {
         &self,
         mut batch: ToolBatch<'_>,
     ) -> Result<ToolBatchResult, KernelError> {
+        let call_count = batch.calls.len();
+        if call_count > 0 {
+            tracing::info!(
+                "started Tool batch of {} calls for session {}, Run {}, Turn {}, trace {}",
+                call_count,
+                batch.session_id,
+                batch.run_id,
+                batch.turn_id,
+                batch.trace_id
+            );
+        }
         let mut pending = futures::stream::FuturesUnordered::new();
         let (update_channel, mut update_stream) = ToolUpdateChannel::new();
         let mut terminate = false;
@@ -73,6 +84,15 @@ impl Kernel {
         let calls = std::mem::take(&mut batch.calls);
         for (index, mut call) in calls.into_iter().enumerate() {
             let started_at = self.clock.now();
+            tracing::info!(
+                "started Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}",
+                call.tool_call_id,
+                call.name,
+                batch.session_id,
+                batch.run_id,
+                batch.turn_id,
+                batch.trace_id
+            );
             let extension_context = self.extension_context(
                 batch.session,
                 Some(batch.run_id),
@@ -116,6 +136,15 @@ impl Kernel {
                 }
                 protocol::ToolCallResult::Block(block) => {
                     terminate |= block.terminate;
+                    tracing::warn!(
+                        "blocked Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}",
+                        call.tool_call_id,
+                        call.name,
+                        batch.session_id,
+                        batch.run_id,
+                        batch.turn_id,
+                        batch.trace_id
+                    );
                     // Preserve policy disposition so ACP clients can distinguish
                     // a blocked call from a tool implementation failure.
                     immediate_result = Some(ToolResult::from((
@@ -127,6 +156,16 @@ impl Kernel {
             if immediate_result.is_none()
                 && let Err(error) = batch.tools.validate(&call)
             {
+                tracing::warn!(
+                    "rejected invalid Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}: {}",
+                    call.tool_call_id,
+                    call.name,
+                    batch.session_id,
+                    batch.run_id,
+                    batch.turn_id,
+                    batch.trace_id,
+                    error
+                );
                 immediate_result = Some(
                     ToolResult::builder()
                         .tool_call_id(call.tool_call_id.clone())
@@ -139,6 +178,7 @@ impl Kernel {
             }
 
             let tools = Arc::clone(&batch.tools);
+            let run_id = batch.run_id.clone();
             let context = ToolExecutionContext::builder()
                 .session_id(batch.session_id.clone())
                 .turn_id(batch.turn_id.clone())
@@ -152,13 +192,25 @@ impl Kernel {
                     Some(result) => result,
                     None => match tools.execute(call.clone(), &context).await {
                         Ok(result) => result,
-                        Err(error) => ToolResult::builder()
-                            .tool_call_id(call.tool_call_id.clone())
-                            .blocks(vec![ContentBlock::Text {
-                                text: error.to_string(),
-                            }])
-                            .is_error(true)
-                            .build(),
+                        Err(error) => {
+                            tracing::warn!(
+                                "failed Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}: {}",
+                                call.tool_call_id,
+                                call.name,
+                                context.session_id,
+                                run_id,
+                                context.turn_id,
+                                context.trace_id,
+                                error
+                            );
+                            ToolResult::builder()
+                                .tool_call_id(call.tool_call_id.clone())
+                                .blocks(vec![ContentBlock::Text {
+                                    text: error.to_string(),
+                                }])
+                                .is_error(true)
+                                .build()
+                        }
                     },
                 };
                 (index, started_at, call, result)
@@ -185,6 +237,13 @@ impl Kernel {
                 }
                 () = batch.cancellation.cancelled(), if !cancelled => {
                     cancelled = true;
+                    tracing::warn!(
+                        "cancelled Tool batch for session {}, Run {}, Turn {}, trace {}",
+                        batch.session_id,
+                        batch.run_id,
+                        batch.turn_id,
+                        batch.trace_id
+                    );
                     continue;
                 }
                 completed = pending.next() => completed,
@@ -222,6 +281,17 @@ impl Kernel {
                 result.is_error = is_error;
             }
             let timestamp = self.clock.now();
+            tracing::info!(
+                "completed Tool call {} ({}) for session {}, Run {}, Turn {}, trace {} in {} ms with error {}",
+                call.tool_call_id,
+                call.name,
+                batch.session_id,
+                batch.run_id,
+                batch.turn_id,
+                batch.trace_id,
+                timestamp.get().saturating_sub(started_at.get()),
+                result.is_error
+            );
             batch
                 .session
                 .extensions
@@ -271,6 +341,18 @@ impl Kernel {
             .into_iter()
             .map(|(_index, message, result)| (message, result))
             .unzip();
+        if call_count > 0 {
+            tracing::info!(
+                "completed Tool batch with {} results for session {}, Run {}, Turn {}, trace {}; cancelled {}, terminate {}",
+                results.len(),
+                batch.session_id,
+                batch.run_id,
+                batch.turn_id,
+                batch.trace_id,
+                cancelled,
+                terminate
+            );
+        }
         Ok(ToolBatchResult::builder()
             .messages(messages)
             .results(results)

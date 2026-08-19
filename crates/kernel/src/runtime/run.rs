@@ -48,9 +48,10 @@ impl Kernel {
         let _run_guard = session.acquire_operation().await?;
         let cancellation = session.execution.install_cancellation()?;
         tracing::info!(
-            "started Kernel Run {} for session {}",
+            "started Kernel Run {} for session {} with trace {}",
             run_id,
-            request.session_id
+            request.session_id,
+            trace_id
         );
         let _active_run = session.execution.install_run(ActiveRunContext {
             run_id: run_id.clone(),
@@ -89,9 +90,10 @@ impl Kernel {
                         // when they consume the request before an Agent Turn starts.
                         session.sync_store()?;
                         tracing::info!(
-                            "completed Kernel Run {} for session {} because an extension handled the input",
+                            "completed Kernel Run {} for session {} with trace {} because an extension handled the input",
                             run_id,
-                            request.session_id
+                            request.session_id,
+                            trace_id
                         );
                         return Ok(RunResult {
                             run_id,
@@ -964,9 +966,10 @@ impl Kernel {
                     .settle()
                     .await?;
                 tracing::info!(
-                    "settled Kernel Run {} for session {} with outcome {:?} after {} Turns",
+                    "settled Kernel Run {} for session {} with trace {} and outcome {:?} after {} Turns",
                     run_id,
                     request.session_id,
+                    trace_id,
                     completion.outcome,
                     completion.result.turns.len()
                 );
@@ -989,9 +992,10 @@ impl Kernel {
                     .settle()
                     .await?;
                 tracing::error!(
-                    "failed Kernel Run {} for session {}: {}",
+                    "failed Kernel Run {} for session {} with trace {}: {}",
                     run_id,
                     request.session_id,
+                    trace_id,
                     error
                 );
                 Err(error)

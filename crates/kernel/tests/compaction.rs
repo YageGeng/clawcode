@@ -29,6 +29,10 @@ use store::{
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
 
+mod support;
+
+use support::CapturedLogs;
+
 type TestModelStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
 
@@ -787,6 +791,45 @@ async fn compact_streams_summary_and_persists_pi_v4_payload() {
         fixture.messages_before,
         "protocol replay must retain messages hidden from active model context"
     );
+}
+
+/// Compaction lifecycle logs retain operation correlation without summary content.
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_lifecycle_is_logged_without_summary_content() {
+    let fixture = CompactionFixture::with_history_and_summary(
+        "sensitive-compaction-summary",
+    )
+    .await;
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact session");
+
+    let output = logs.content();
+    for lifecycle in [
+        "started Compaction Run",
+        "completed Compaction Run",
+        "session session-compact",
+        "reason Manual",
+    ] {
+        assert!(
+            output.contains(lifecycle),
+            "missing {lifecycle} in captured logs: {output:?}"
+        );
+    }
+    assert!(!output.contains("sensitive-compaction-summary"));
 }
 
 /// Compaction records pi's read/write/edit file metadata and carries it across checkpoints.

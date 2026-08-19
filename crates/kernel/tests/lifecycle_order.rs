@@ -38,6 +38,10 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
 
+mod support;
+
+use support::CapturedLogs;
+
 /// Model that emits one text update followed by a terminal response.
 struct LifecycleModel {
     profile: ModelProfile,
@@ -1125,6 +1129,189 @@ async fn queue_mutations_sync_before_returning() {
     run.await.expect("join run").expect("complete blocked run");
 }
 
+/// Durable queue acceptance and removal are logged without exposing message content.
+#[tokio::test]
+async fn queue_lifecycle_is_logged_without_message_content() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let model = Arc::new(BlockingModel {
+        profile: ModelProfile::builder()
+            .provider_id("fixture".to_string())
+            .model_id("blocking".to_string())
+            .display_name("Blocking".to_string())
+            .context_tokens(128_000)
+            .max_output_tokens(8_000)
+            .build(),
+        started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    });
+
+    tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            let kernel = Arc::new(
+                KernelFactory::builder()
+                    .model_factory(Arc::new(BlockingModelFactory(Arc::clone(
+                        &model,
+                    ))))
+                    .tool_factory(Arc::new(BuiltinToolFactory::new()))
+                    .store_factory(Arc::new(JsonlStoreFactory::new(
+                        root.path(),
+                        Arc::new(SystemClock),
+                    )))
+                    .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                        root.path().join("config"),
+                        protocol::PromptPolicy::default(),
+                    )))
+                    .extension_factory(Arc::new(StaticExtensionFactory::new(
+                        StaticExtensionRegistration::default(),
+                        Vec::new(),
+                    )))
+                    .clock(Arc::new(SystemClock))
+                    .id_generator(Arc::new(NanoidIdGenerator))
+                    .build()
+                    .build()
+                    .expect("build kernel"),
+            );
+            let session_id =
+                SessionId::try_from("session-queue-log").expect("session id");
+            kernel
+                .create_session(SessionCreateOptions {
+                    session_id: session_id.clone(),
+                    cwd,
+                    parent_session_id: None,
+                })
+                .await
+                .expect("create session");
+            let run_kernel = Arc::clone(&kernel);
+            let run_session_id = session_id.clone();
+            let run = tokio::spawn(async move {
+                run_kernel
+                    .run(
+                        RunRequest {
+                            session_id: run_session_id,
+                            input: "hold".into(),
+                        },
+                        Arc::new(DiscardSink),
+                    )
+                    .await
+            });
+            model.started.notified().await;
+
+            let queued = kernel
+                .queue_message(
+                    &session_id,
+                    QueueKind::FollowUp,
+                    "sensitive-queued-message",
+                )
+                .await
+                .expect("queue message");
+            kernel
+                .remove_pending_message(&session_id, &queued.queue_id)
+                .expect("remove queued message");
+
+            model.release.notify_one();
+            run.await.expect("join run").expect("complete blocked run");
+        },
+        dispatch,
+    )
+    .await;
+
+    let output = logs.content();
+    for lifecycle in [
+        "started Queue enqueue FollowUp for session session-queue-log",
+        "completed Queue enqueue",
+        "started queued message removal",
+        "completed queued message removal",
+    ] {
+        assert!(
+            output.contains(lifecycle),
+            "missing {lifecycle} in captured logs: {output:?}"
+        );
+    }
+    assert!(!output.contains("sensitive-queued-message"));
+}
+
+/// Queue rejection is logged with Session context before the error is returned.
+#[tokio::test]
+async fn queue_rejection_is_logged_before_returning() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+
+    tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            let kernel = KernelFactory::builder()
+                .model_factory(Arc::new(LifecycleModelFactory))
+                .tool_factory(Arc::new(BuiltinToolFactory::new()))
+                .store_factory(Arc::new(JsonlStoreFactory::new(
+                    root.path(),
+                    Arc::new(SystemClock),
+                )))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
+                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::new(
+                    StaticExtensionRegistration::default(),
+                    Vec::new(),
+                )))
+                .clock(Arc::new(SystemClock))
+                .id_generator(Arc::new(NanoidIdGenerator))
+                .build()
+                .build()
+                .expect("build kernel");
+            let session_id = SessionId::try_from("session-queue-rejection-log")
+                .expect("session id");
+            kernel
+                .create_session(SessionCreateOptions {
+                    session_id: session_id.clone(),
+                    cwd,
+                    parent_session_id: None,
+                })
+                .await
+                .expect("create session");
+
+            let error = kernel
+                .queue_message(
+                    &session_id,
+                    QueueKind::FollowUp,
+                    "sensitive-rejected-message",
+                )
+                .await
+                .expect_err("reject queue without active run");
+            assert!(matches!(error, kernel::KernelError::SessionNotRunning(_)));
+        },
+        dispatch,
+    )
+    .await;
+
+    let output = logs.content();
+    assert!(
+        output.contains(
+            "failed Queue enqueue FollowUp for session session-queue-rejection-log: session is not running: session-queue-rejection-log"
+        ),
+        "missing contextual queue rejection in captured logs: {output:?}"
+    );
+    assert!(!output.contains("sensitive-rejected-message"));
+}
+
 /// Session metadata changes are synced before their public operation completes.
 #[tokio::test]
 async fn rename_session_syncs_before_returning() {
@@ -1339,6 +1526,265 @@ async fn session_maintenance_operations_sync_before_returning() {
         .await
         .expect("close session");
     assert_eq!(*order.lock().expect("durability lock"), vec!["sync"]);
+}
+
+/// Session lifecycle boundaries are logged without exposing submitted prompt content.
+#[tokio::test]
+async fn session_lifecycle_boundaries_are_logged_without_prompt_content() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+
+    tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            let kernel = KernelFactory::builder()
+                .model_factory(Arc::new(LifecycleModelFactory))
+                .tool_factory(Arc::new(BuiltinToolFactory::new()))
+                .store_factory(Arc::new(JsonlStoreFactory::new(
+                    root.path(),
+                    Arc::new(SystemClock),
+                )))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
+                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::new(
+                    StaticExtensionRegistration::default(),
+                    Vec::new(),
+                )))
+                .clock(Arc::new(SystemClock))
+                .id_generator(Arc::new(NanoidIdGenerator))
+                .build()
+                .build()
+                .expect("build kernel");
+            let session_id = SessionId::try_from("session-lifecycle-log")
+                .expect("session id");
+            kernel
+                .create_session(SessionCreateOptions {
+                    session_id: session_id.clone(),
+                    cwd: cwd.clone(),
+                    parent_session_id: None,
+                })
+                .await
+                .expect("create session");
+            kernel
+                .run(
+                    RunRequest {
+                        session_id: session_id.clone(),
+                        input: "sensitive-prompt-sentinel".into(),
+                    },
+                    Arc::new(DiscardSink),
+                )
+                .await
+                .expect("run session");
+            kernel
+                .close_session(&session_id)
+                .await
+                .expect("close session");
+            kernel
+                .resume_session(session_id.clone(), cwd.clone())
+                .await
+                .expect("resume session");
+            kernel
+                .delete_session(&session_id)
+                .await
+                .expect("delete session");
+            let close_error = kernel
+                .close_session(&session_id)
+                .await
+                .expect_err("reject close after deletion");
+            assert!(matches!(
+                close_error,
+                kernel::KernelError::SessionNotFound(_)
+            ));
+            let resume_error = kernel
+                .resume_session(session_id.clone(), cwd)
+                .await
+                .expect_err("reject Resume after deletion");
+            assert!(matches!(
+                resume_error,
+                kernel::KernelError::SessionNotFound(_)
+            ));
+        },
+        dispatch,
+    )
+    .await;
+
+    let output = logs.content();
+    for lifecycle in [
+        "started Session creation session-lifecycle-log",
+        "completed Session creation session-lifecycle-log",
+        "started Session close session-lifecycle-log",
+        "completed Session close session-lifecycle-log",
+        "started Session Resume session-lifecycle-log",
+        "completed Session Resume session-lifecycle-log",
+        "started Session deletion session-lifecycle-log",
+        "completed Session deletion session-lifecycle-log",
+        "failed Session close session-lifecycle-log: session not found: session-lifecycle-log",
+        "failed Session Resume session-lifecycle-log: session not found: session-lifecycle-log",
+        "started Session extension startup session-lifecycle-log with reason New",
+        "completed Session extension startup session-lifecycle-log with reason New",
+        "started Session extension startup session-lifecycle-log with reason Resume",
+        "completed Session extension startup session-lifecycle-log with reason Resume",
+    ] {
+        assert!(
+            output.contains(lifecycle),
+            "missing {lifecycle} in captured logs: {output:?}"
+        );
+    }
+    let run_start = output
+        .lines()
+        .find(|line| line.contains("started Kernel Run"))
+        .unwrap_or_else(|| panic!("missing Kernel Run start in {output:?}"));
+    assert!(
+        run_start.contains("trace trace-"),
+        "Kernel Run start lacks Trace correlation: {run_start:?}"
+    );
+    assert!(!output.contains("Tool batch of 0 calls"));
+    assert!(!output.contains("sensitive-prompt-sentinel"));
+}
+
+/// Session creation failures are logged with operation and Session context.
+#[tokio::test]
+async fn session_creation_failure_is_logged_before_returning() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+
+    tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            let kernel = KernelFactory::builder()
+                .model_factory(Arc::new(LifecycleModelFactory))
+                .tool_factory(Arc::new(BuiltinToolFactory::new()))
+                .store_factory(Arc::new(JsonlStoreFactory::new(
+                    root.path(),
+                    Arc::new(SystemClock),
+                )))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
+                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::new(
+                    StaticExtensionRegistration::default(),
+                    Vec::new(),
+                )))
+                .clock(Arc::new(SystemClock))
+                .id_generator(Arc::new(NanoidIdGenerator))
+                .build()
+                .build()
+                .expect("build kernel");
+            let session_id = SessionId::try_from("session-duplicate-log")
+                .expect("session id");
+            let options = SessionCreateOptions {
+                session_id: session_id.clone(),
+                cwd,
+                parent_session_id: None,
+            };
+            kernel
+                .create_session(options.clone())
+                .await
+                .expect("create initial session");
+            let error = kernel
+                .create_session(options)
+                .await
+                .expect_err("reject duplicate session");
+            assert!(matches!(error, kernel::KernelError::DuplicateSession(_)));
+        },
+        dispatch,
+    )
+    .await;
+
+    let output = logs.content();
+    assert!(
+        output.contains(
+            "failed Session creation session-duplicate-log: session already exists: session-duplicate-log"
+        ),
+        "missing contextual creation failure in captured logs: {output:?}"
+    );
+}
+
+/// Session deletion failures are logged with Session and Store context.
+#[tokio::test]
+async fn session_deletion_failure_is_logged_before_returning() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+
+    tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            let inner: Arc<dyn StoreFactory> = Arc::new(
+                JsonlStoreFactory::new(root.path(), Arc::new(SystemClock)),
+            );
+            let kernel = KernelFactory::builder()
+                .model_factory(Arc::new(LifecycleModelFactory))
+                .tool_factory(Arc::new(BuiltinToolFactory::new()))
+                .store_factory(Arc::new(DeleteFailingStoreFactory {
+                    inner,
+                    delete_attempted: Arc::new(AtomicBool::new(false)),
+                }))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
+                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::new(
+                    StaticExtensionRegistration::default(),
+                    Vec::new(),
+                )))
+                .clock(Arc::new(SystemClock))
+                .id_generator(Arc::new(NanoidIdGenerator))
+                .build()
+                .build()
+                .expect("build kernel");
+            let session_id = SessionId::try_from("session-delete-failure-log")
+                .expect("session id");
+            kernel
+                .create_session(SessionCreateOptions {
+                    session_id: session_id.clone(),
+                    cwd,
+                    parent_session_id: None,
+                })
+                .await
+                .expect("create session");
+
+            let error = kernel
+                .delete_session(&session_id)
+                .await
+                .expect_err("inject Session deletion failure");
+            assert!(matches!(error, kernel::KernelError::Store(_)));
+        },
+        dispatch,
+    )
+    .await;
+
+    let output = logs.content();
+    assert!(
+        output.contains(
+            "failed Session deletion session-delete-failure-log: store subsystem failed:"
+        ) && output.contains("injected delete failure"),
+        "missing contextual deletion failure in captured logs: {output:?}"
+    );
 }
 
 /// User Bash output is durable before its complete message event is published.

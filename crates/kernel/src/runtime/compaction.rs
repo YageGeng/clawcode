@@ -163,7 +163,7 @@ impl Kernel {
         execution: CompactionExecution<'_>,
     ) -> Result<CompactionResult, KernelError> {
         let CompactionExecution {
-            session_id: _session_id,
+            session_id,
             session,
             sink,
             reason,
@@ -196,6 +196,11 @@ impl Kernel {
             .chain(&preparation.turn_prefix)
             .any(|message| message.estimated_tokens() > 0)
         {
+            tracing::warn!(
+                "rejected Compaction for session {} with reason {:?}: there is no model context to compact",
+                session_id,
+                reason
+            );
             return Err(KernelError::NoContextToCompact);
         }
         let identity = match identity {
@@ -220,6 +225,19 @@ impl Kernel {
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let will_retry = reason == CompactionReason::Overflow
             && excluded_message_id.is_some();
+        let log_lifecycle = |stage: &str, elapsed_ms: u64| {
+            tracing::info!(
+                "{} Compaction Run {} Turn {} for session {} with reason {:?} in {} ms; will retry {}",
+                stage,
+                run_id,
+                turn_id,
+                session_id,
+                reason,
+                elapsed_ms,
+                will_retry
+            );
+        };
+        log_lifecycle("started", 0);
         let extension_context =
             self.extension_context(session, Some(&run_id), Some(&turn_id))?;
         let extension_result = session
@@ -237,6 +255,13 @@ impl Kernel {
             )
             .await;
         if extension_result.cancel {
+            tracing::warn!(
+                "cancelled Compaction Run {} Turn {} for session {} with reason {:?} by extension",
+                run_id,
+                turn_id,
+                session_id,
+                reason
+            );
             return Err(KernelError::ExtensionBlocked(
                 "session compaction cancelled".to_string(),
             ));
@@ -550,6 +575,14 @@ impl Kernel {
         let result = match compaction_result {
             Ok(result) => result,
             Err(error) => {
+                tracing::error!(
+                    "failed Compaction Run {} Turn {} for session {} with reason {:?}: {}",
+                    run_id,
+                    turn_id,
+                    session_id,
+                    reason,
+                    error
+                );
                 if let Err(terminal_error) = lifecycle.fail(&error).await {
                     tracing::error!(
                         "failed to settle compaction Run {} after execution failure {}: {}",
@@ -575,8 +608,29 @@ impl Kernel {
                 &extension_context,
             )
             .await;
-        terminal_result?;
-        Ok(result)
+        match terminal_result {
+            Ok(()) => {
+                log_lifecycle(
+                    "completed",
+                    result
+                        .ended_at_ms
+                        .get()
+                        .saturating_sub(result.started_at_ms.get()),
+                );
+                Ok(result)
+            }
+            Err(error) => {
+                tracing::error!(
+                    "failed to settle Compaction Run {} Turn {} for session {} with reason {:?}: {}",
+                    run_id,
+                    turn_id,
+                    session_id,
+                    reason,
+                    error
+                );
+                Err(error)
+            }
+        }
     }
 
     /// Streams a tool-free summary request and rejects empty or tool-producing output.
