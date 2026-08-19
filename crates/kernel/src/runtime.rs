@@ -38,6 +38,7 @@ use ::tools::{
     BashExecutionRequest, BashExecutor, ToolExecutionContext, ToolFactory,
     ToolRegistry,
 };
+use config::TurnLimit;
 use futures::StreamExt;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
@@ -182,9 +183,9 @@ pub struct KernelFactory {
     /// Controls whether effective Skills are listed in System Prompts.
     #[builder(default = true)]
     include_skill_instructions: bool,
-    /// Bounds accidental endless tool loops while remaining configurable.
-    #[builder(default = 64)]
-    max_turns: usize,
+    /// Controls whether sequential Turns are unlimited or explicitly bounded.
+    #[builder(default)]
+    max_turns: TurnLimit,
     /// Controls how many recent user Turns remain verbatim after compaction.
     #[builder(default)]
     compaction_policy: CompactionPolicy,
@@ -241,7 +242,7 @@ pub struct Kernel {
     #[builder(default)]
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
     include_skill_instructions: bool,
-    max_turns: usize,
+    max_turns: TurnLimit,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,

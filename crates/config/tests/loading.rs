@@ -94,6 +94,47 @@ fn defaults_match_pi_retry_and_compaction() {
     assert_eq!(config.compaction.keep_recent_tokens, 20_000);
 }
 
+/// Missing Kernel configuration serializes the explicit unlimited Turn policy.
+#[test]
+fn kernel_turn_limit_defaults_to_unlimited() {
+    let value = serde_json::to_value(AppConfig::default())
+        .expect("serialize default application config");
+
+    assert_eq!(value["kernel"]["max_turns"]["type"], "unlimited");
+    assert!(value["kernel"]["max_turns"].get("turns").is_none());
+}
+
+/// Kernel configuration accepts an explicit positive Turn limit.
+#[test]
+fn kernel_turn_limit_loads_limited_variant() {
+    let config: AppConfig = toml::from_str(
+        r#"
+[kernel]
+max_turns = { type = "limited", turns = 3 }
+"#,
+    )
+    .expect("parse limited Kernel Turn configuration");
+    let value = serde_json::to_value(config)
+        .expect("serialize limited application config");
+
+    assert_eq!(value["kernel"]["max_turns"]["type"], "limited");
+    assert_eq!(value["kernel"]["max_turns"]["turns"], 3);
+}
+
+/// A limited Kernel policy rejects zero because it would never permit a Turn.
+#[test]
+fn kernel_turn_limit_rejects_zero() {
+    let error = toml::from_str::<AppConfig>(
+        r#"
+[kernel]
+max_turns = { type = "limited", turns = 0 }
+"#,
+    )
+    .expect_err("reject a zero Kernel Turn limit");
+
+    assert!(error.to_string().contains("nonzero"));
+}
+
 /// Missing logging configuration keeps info filtering and plain-text output.
 #[test]
 fn logging_defaults_to_info_filter() {

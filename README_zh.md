@@ -69,6 +69,10 @@ enabled = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
 
+[kernel]
+max_turns = { type = "unlimited" }
+# max_turns = { type = "limited", turns = 64 }
+
 [prompt]
 load_project_instructions = true
 load_templates = true
@@ -88,6 +92,9 @@ name = "example"
 command = "example-mcp-server"
 args = []
 ```
+
+省略 `[kernel]` 时，`max_turns` 默认为 `unlimited`。如需防止工具循环无限
+执行，可使用 `limited` 并将 `turns` 配置为正整数。
 
 模型的 `id` 是 `active_model`、Session 元数据和模型选择使用的稳定本地标识。
 如果上游 API 要求不同的 `model` 参数，可配置可选的 `upstream_id`；省略时请求继续

@@ -69,6 +69,10 @@ enabled = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
 
+[kernel]
+max_turns = { type = "unlimited" }
+# max_turns = { type = "limited", turns = 64 }
+
 [prompt]
 load_project_instructions = true
 load_templates = true
@@ -87,6 +91,9 @@ name = "example"
 command = "example-mcp-server"
 args = []
 ```
+
+Omitting `[kernel]` defaults `max_turns` to `unlimited`. Use the `limited`
+variant with a positive `turns` value to stop accidental endless Tool loops.
 
 Model `id` is the stable local identifier used by `active_model`, Session
 metadata, and model selection. When an upstream API expects a different
