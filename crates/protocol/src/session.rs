@@ -100,6 +100,16 @@ pub struct RunResult {
     pub turns: Vec<TurnRecord>,
 }
 
+/// Point-in-time execution state for one persisted or live Session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRuntimeSnapshot {
+    /// Session whose runtime was inspected.
+    pub session_id: SessionId,
+    /// Whether one Run currently owns the Session execution gate.
+    pub running: bool,
+}
+
 /// One durable active-branch item projected to ACP in original entry order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionReplayItem {

@@ -14,6 +14,7 @@ fn acp_extension_methods_use_the_product_namespace() {
         AcpExtensionMethod::PendingMessageRemove,
         AcpExtensionMethod::ClearQueue,
         AcpExtensionMethod::SessionRename,
+        AcpExtensionMethod::SessionRuntime,
         AcpExtensionMethod::InvokeSkill,
         AcpExtensionMethod::SkillList,
         AcpExtensionMethod::McpStatus,
@@ -49,6 +50,10 @@ fn webui_extension_methods_are_centralized() {
     assert_eq!(
         AcpExtensionMethod::SessionRename.as_str(),
         format!("_{}/session/rename", ProductIdentity::ACP_NAMESPACE)
+    );
+    assert_eq!(
+        AcpExtensionMethod::SessionRuntime.as_str(),
+        format!("_{}/session/runtime", ProductIdentity::ACP_NAMESPACE)
     );
     assert_eq!(
         AcpExtensionMethod::McpStatus.as_str(),

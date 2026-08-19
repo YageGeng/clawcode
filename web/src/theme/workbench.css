@@ -269,7 +269,7 @@
   display: block;
   width: 100%;
   min-width: 0;
-  padding: 0 64px 0 0;
+  padding: 0 90px 0 0;
   overflow: hidden;
   text-align: left;
   background: transparent;
@@ -282,6 +282,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-item__status {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.session-item__status svg {
+  animation: spin 1s linear infinite;
 }
 
 .session-item__title {
@@ -320,6 +336,11 @@
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
+}
+
+.session-item:hover .session-item__status,
+.session-item:focus-within .session-item__status {
+  visibility: hidden;
 }
 
 .session-item__menu button {

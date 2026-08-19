@@ -113,8 +113,9 @@ pub use scalar::{
     ScalarError, Sequence, SessionId, TimestampMs, ToolCallId, TraceId, TurnId,
 };
 pub use session::{
-    RunInput, RunRequest, RunResult, SessionReplayItem, SessionSummary,
-    SessionTreeEntry, SessionTreeSnapshot, UserBashInput, UserBashRequest,
+    RunInput, RunRequest, RunResult, SessionReplayItem, SessionRuntimeSnapshot,
+    SessionSummary, SessionTreeEntry, SessionTreeSnapshot, UserBashInput,
+    UserBashRequest,
 };
 pub use skill::{
     SkillCollision, SkillDiagnostic, SkillDiagnosticCode,

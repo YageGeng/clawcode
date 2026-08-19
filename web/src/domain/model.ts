@@ -177,6 +177,11 @@ export type PendingMessages = Readonly<{
   followUp: readonly QueuedMessage[];
 }>;
 
+export type SessionRuntimeSnapshot = Readonly<{
+  sessionId: SessionId;
+  running: boolean;
+}>;
+
 export type SessionTree = Readonly<{
   sessionId: SessionId;
   lane: string;

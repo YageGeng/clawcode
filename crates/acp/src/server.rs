@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
@@ -198,6 +199,7 @@ impl AcpServerFactory {
                         AcpExtensionMethod::PendingMessageRemove,
                         AcpExtensionMethod::ClearQueue,
                         AcpExtensionMethod::SessionRename,
+                        AcpExtensionMethod::SessionRuntime,
                         AcpExtensionMethod::InvokeSkill,
                         AcpExtensionMethod::SkillList,
                         AcpExtensionMethod::McpStatus,
@@ -508,49 +510,71 @@ impl AcpServerFactory {
 
                         let task_connection = connection.clone();
                         let task_session_id = session_id.clone();
-                        connection.spawn(task_operation.settle(async move {
-                            let sink: Arc<dyn EventSink> = Arc::new(AcpEventSink {
-                                session_id: task_session_id.clone(),
-                                connection: task_connection.clone(),
-                            });
-                            if let Err(error) = kernel
-                                .run_traced(
-                                    RunRequest {
-                                        session_id: task_session_id.clone(),
-                                        input,
-                                    },
-                                    sink,
-                                    trace_id,
-                                )
-                                .await
-                            {
-                                tracing::error!(
-                                    "Kernel Run for session {} failed: {}",
-                                    task_session_id,
+                        // A Prompt Run belongs to the Kernel Session rather than
+                        // the requesting socket. Detaching it lets reconnecting
+                        // clients recover through runtime polling and replay.
+                        tokio::spawn(async move {
+                            let detached_session_id = task_session_id.clone();
+                            let result: Result<
+                                (),
+                                agent_client_protocol::Error,
+                            > = task_operation
+                                .settle(Box::pin(async move {
+                                    let sink: Arc<dyn EventSink> = Arc::new(
+                                        AcpEventSink::new(
+                                            task_session_id.clone(),
+                                            task_connection.clone(),
+                                        ),
+                                    );
+                                    if let Err(error) = kernel
+                                        .run_traced(
+                                            RunRequest {
+                                                session_id: task_session_id
+                                                    .clone(),
+                                                input,
+                                            },
+                                            sink,
+                                            trace_id,
+                                        )
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            "Kernel Run for session {} failed: {}",
+                                            task_session_id,
+                                            error
+                                        );
+                                        task_connection.send_notification(
+                                            wire::UpdateSessionNotification::new(
+                                                task_session_id.to_string(),
+                                                wire::SessionUpdate::StateUpdate(
+                                                    wire::StateUpdate::Idle(
+                                                        wire::IdleStateUpdate::new().stop_reason(
+                                                            wire::StopReason::Other(format!(
+                                                                "_{}/error",
+                                                                ProductIdentity::ACP_NAMESPACE
+                                                            )),
+                                                        ),
+                                                    ),
+                                                ),
+                                            )
+                                            .meta(wire::Meta::from_iter([(
+                                                ProductIdentity::ACP_NAMESPACE.to_string(),
+                                                serde_json::json!({ "error": error.to_string() }),
+                                            )])),
+                                        )?;
+                                    }
+                                    Ok(())
+                                }))
+                                .await;
+                            if let Err(error) = result {
+                                tracing::warn!(
+                                    "detached ACP projection for session {} ended with error: {}",
+                                    detached_session_id,
                                     error
                                 );
-                                task_connection.send_notification(
-                                    wire::UpdateSessionNotification::new(
-                                        task_session_id.to_string(),
-                                        wire::SessionUpdate::StateUpdate(
-                                            wire::StateUpdate::Idle(
-                                                wire::IdleStateUpdate::new().stop_reason(
-                                                    wire::StopReason::Other(format!(
-                                                        "_{}/error",
-                                                        ProductIdentity::ACP_NAMESPACE
-                                                    )),
-                                                ),
-                                            ),
-                                        ),
-                                    )
-                                    .meta(wire::Meta::from_iter([(
-                                        ProductIdentity::ACP_NAMESPACE.to_string(),
-                                        serde_json::json!({ "error": error.to_string() }),
-                                    )])),
-                                )?;
                             }
-                            Ok(())
-                        }))
+                        });
+                        Ok(())
                     }).await;
                     if let Err(error) = &result {
                         operation.fail(error);
@@ -615,6 +639,7 @@ impl AcpServerFactory {
 pub(crate) struct AcpEventSink {
     session_id: SessionId,
     connection: ConnectionTo<Client>,
+    disconnected: AtomicBool,
 }
 
 impl AcpEventSink {
@@ -626,6 +651,7 @@ impl AcpEventSink {
         Self {
             session_id,
             connection,
+            disconnected: AtomicBool::new(false),
         }
     }
 }
@@ -634,20 +660,32 @@ impl AcpEventSink {
 impl EventSink for AcpEventSink {
     /// Converts and forwards every kernel event as ordered ACP v2 session updates.
     async fn emit(&self, event: AgentEvent) -> Result<(), SinkError> {
+        if self.disconnected.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let metadata = AcpEventMapper::metadata(&event)
             .map_err(|error| SinkError::Consumer(error.to_string()))?;
         let updates = AcpEventMapper::map(event)
             .map_err(|error| SinkError::Consumer(error.to_string()))?;
         for update in updates {
-            self.connection
-                .send_notification(
-                    wire::UpdateSessionNotification::new(
-                        self.session_id.to_string(),
-                        update,
-                    )
-                    .meta(metadata.clone()),
+            if let Err(error) = self.connection.send_notification(
+                wire::UpdateSessionNotification::new(
+                    self.session_id.to_string(),
+                    update,
                 )
-                .map_err(|error| SinkError::Consumer(error.to_string()))?;
+                .meta(metadata.clone()),
+            ) {
+                // Persistence remains authoritative while the old connection
+                // is gone; suppress subsequent sends until replay attaches.
+                if !self.disconnected.swap(true, Ordering::AcqRel) {
+                    tracing::warn!(
+                        "stopped live ACP projection for session {} after connection error: {}",
+                        self.session_id,
+                        error
+                    );
+                }
+                return Ok(());
+            }
         }
         Ok(())
     }

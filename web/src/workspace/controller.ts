@@ -5,8 +5,10 @@ import { AcpProtocol } from "../acp/protocol";
 import type { InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
 import type { BranchEditPlan } from "../domain/messageActions";
-import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { useWorkspaceStore } from "./store";
+import type { SessionWorkspaceAction } from "./sessionState";
+import { sessionWorkspace } from "./state";
 import type { WorkspaceAction } from "./state";
 import { SessionUpdateRouter } from "./updateRouter";
 import type { WorkspaceStoreAccess } from "./updateRouter";
@@ -20,9 +22,9 @@ export class WorkspaceController {
   private readonly updateRouter: SessionUpdateRouter;
   private connection: AcpConnection | undefined;
   private reconnectAttempt = 0;
-  private sessionOpenRevision = 0;
   private sessionDeleteSupported = false;
   private readonly deletingSessionIds = new Set<SessionId>();
+  private readonly runtimePolls = new Map<SessionId, number>();
   private stopped = false;
 
   constructor(bootstrap: UiBootstrap) {
@@ -46,18 +48,34 @@ export class WorkspaceController {
   }
 
   async openSession(sessionId: SessionId): Promise<void> {
-    const session = useWorkspaceStore.getState().sessions.find((item) => item.sessionId === sessionId);
+    const state = useWorkspaceStore.getState();
+    const session = state.sessions.find((item) => item.sessionId === sessionId);
     if (session === undefined) throw new Error("Session is not in the current list");
-    const revision = this.sessionOpenRevision + 1;
-    this.sessionOpenRevision = revision;
-    this.dispatch({ type: "transcript/cleared" });
     this.dispatch({ type: "session/activated", sessionId });
-    await this.requireConnection().request(AcpProtocol.methods.sessionResume, {
-      sessionId,
-      cwd: session.cwd,
-      replayFrom: { type: "start" }
-    });
-    if (!this.isCurrentSessionOpen(sessionId, revision)) return;
+
+    const pendingPoll = this.runtimePolls.get(sessionId);
+    if (pendingPoll !== undefined) {
+      window.clearTimeout(pendingPoll);
+      this.runtimePolls.delete(sessionId);
+    }
+    const runtime = await this.requireConnection().request<SessionRuntimeSnapshot>(
+      this.methods.sessionRuntime,
+      { sessionId }
+    );
+    this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
+
+    if (!runtime.running) {
+      // Idle sessions are replayed on every activation because another ACP
+      // client may have changed the persisted transcript while this tab slept.
+      this.dispatchSession(sessionId, { type: "transcript/cleared" });
+      await this.requireConnection().request(AcpProtocol.methods.sessionResume, {
+        sessionId,
+        cwd: session.cwd,
+        replayFrom: { type: "start" }
+      });
+      this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
+    }
+
     const [tree, pending, skills, mcpSnapshot, mcpElicitations] = await Promise.all([
       this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId }),
       this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
@@ -65,12 +83,12 @@ export class WorkspaceController {
       this.requireConnection().request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId }),
       this.requireConnection().request<McpElicitationSnapshot>(this.methods.mcpElicitationList, { sessionId })
     ]);
-    if (!this.isCurrentSessionOpen(sessionId, revision)) return;
-    this.dispatch({ type: "tree/replaced", tree });
-    this.dispatch({ type: "queue/replaced", pending });
-    this.dispatch({ type: "skills/replaced", result: skills });
-    this.dispatch({ type: "mcp/replaced", snapshot: mcpSnapshot });
-    this.dispatch({ type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
+    this.dispatchSession(sessionId, { type: "tree/replaced", tree });
+    this.dispatchSession(sessionId, { type: "queue/replaced", pending });
+    this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
+    this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
+    this.dispatchSession(sessionId, { type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
+    if (runtime.running) this.scheduleSessionRuntimePoll(sessionId);
   }
 
   async newSession(cwd: string): Promise<SessionId> {
@@ -97,7 +115,6 @@ export class WorkspaceController {
     try {
       await this.requireConnection().request(AcpProtocol.methods.sessionDelete, { sessionId });
       if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-        this.sessionOpenRevision += 1;
         this.dispatch({ type: "session/deactivated" });
       }
       await this.refreshSessions();
@@ -109,6 +126,8 @@ export class WorkspaceController {
   async send(input: PromptInput): Promise<void> {
     const state = useWorkspaceStore.getState();
     if (state.activeSessionId === undefined) throw new Error("No active session");
+    const sessionId = state.activeSessionId;
+    const workspace = sessionWorkspace(state, sessionId);
     const text = input.text;
     if (text.trim().length === 0 && input.resources.length === 0 && input.images.length === 0) throw new Error("Prompt is empty");
     const prompt: PromptContentBlock[] = [
@@ -116,19 +135,19 @@ export class WorkspaceController {
       ...input.resources.map((resource) => ({ type: "resource_link" as const, name: resource.name, uri: resource.uri })),
       ...input.images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))
     ];
-    this.dispatch({ type: "outcome/unknown", value: false });
+    this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
     try {
-      if (state.running) {
-        await this.requireConnection().request(this.methods.followUp, { sessionId: state.activeSessionId, prompt });
-        await this.refreshPending(state.activeSessionId);
+      if (workspace.running) {
+        await this.requireConnection().request(this.methods.followUp, { sessionId, prompt });
+        await this.refreshPending(sessionId);
       } else {
         await this.requireConnection().request(AcpProtocol.methods.sessionPrompt, {
-          sessionId: state.activeSessionId,
+          sessionId,
           prompt
         });
       }
     } catch (reason: unknown) {
-      if (this.connection === undefined) this.dispatch({ type: "outcome/unknown", value: true });
+      if (this.connection === undefined) this.dispatchSession(sessionId, { type: "outcome/unknown", value: true });
       throw reason;
     }
   }
@@ -151,6 +170,7 @@ export class WorkspaceController {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
     await this.requireConnection().request(this.methods.navigate, { sessionId, entryId });
+    this.dispatchSession(sessionId, { type: "transcript/cleared" });
     await this.openSession(sessionId);
   }
 
@@ -158,6 +178,7 @@ export class WorkspaceController {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
     await this.requireConnection().request(this.methods.branch, { sessionId, entryId });
+    this.dispatchSession(sessionId, { type: "transcript/cleared" });
     await this.openSession(sessionId);
   }
 
@@ -179,6 +200,7 @@ export class WorkspaceController {
       entryId: plan.branchEntryId
     });
     this.dispatch({ type: "draft/activated", sessionId, draft: plan.draft });
+    this.dispatchSession(sessionId, { type: "transcript/cleared" });
     await this.openSession(sessionId);
   }
 
@@ -192,8 +214,9 @@ export class WorkspaceController {
     this.dispatch({ type: "draft/cleared", sessionId });
   }
 
-  cancel(): void {
-    const sessionId = useWorkspaceStore.getState().activeSessionId;
+  /** Cancels the active Session or an explicitly selected background Session. */
+  cancel(targetSessionId?: SessionId): void {
+    const sessionId = targetSessionId ?? useWorkspaceStore.getState().activeSessionId;
     if (sessionId !== undefined) {
       this.requireConnection().notify(AcpProtocol.methods.sessionCancel, { sessionId });
     }
@@ -214,7 +237,7 @@ export class WorkspaceController {
       this.methods.mcpReconnect,
       { sessionId, serverId }
     );
-    this.dispatch({ type: "mcp/replaced", snapshot });
+    this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
   }
 
   /** Completes a pending MCP OAuth browser round and replaces the atomic snapshot. */
@@ -225,9 +248,7 @@ export class WorkspaceController {
       this.methods.mcpOAuthContinue,
       { sessionId, serverId, result: { responseUri } }
     );
-    if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-      this.dispatch({ type: "mcp/replaced", snapshot });
-    }
+    this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
   }
 
   /** Resolves one pending MCP elicitation through its Session-scoped ACP route. */
@@ -241,9 +262,8 @@ export class WorkspaceController {
       requestId: request.requestId,
       result: { action, ...(content === undefined ? {} : { content }) }
     });
-    this.dispatch({
+    this.dispatchSession(request.context.sessionId, {
       type: "mcp/elicitation-resolved",
-      sessionId: request.context.sessionId,
       requestId: request.requestId
     });
   }
@@ -284,6 +304,8 @@ export class WorkspaceController {
 
   close(): void {
     this.stopped = true;
+    for (const timer of this.runtimePolls.values()) window.clearTimeout(timer);
+    this.runtimePolls.clear();
     this.connection?.close();
     this.connection = undefined;
     this.dispatch({ type: "connection/changed", connection: { type: "disconnected" } });
@@ -291,6 +313,11 @@ export class WorkspaceController {
 
   private async connect(reconnecting: boolean): Promise<void> {
     const attempt = reconnecting ? this.reconnectAttempt : 1;
+    if (reconnecting) {
+      for (const timer of this.runtimePolls.values()) window.clearTimeout(timer);
+      this.runtimePolls.clear();
+      this.dispatch({ type: "sessions/invalidated" });
+    }
     this.dispatch({ type: "connection/changed", connection: reconnecting ? { type: "reconnecting", attempt } : { type: "connecting", attempt } });
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(this.bootstrap.acpPath, `${protocol}//${location.host}`);
@@ -313,7 +340,28 @@ export class WorkspaceController {
       this.reconnectAttempt = 0;
       this.dispatch({ type: "connection/changed", connection: { type: "ready" } });
       const active = useWorkspaceStore.getState().activeSessionId;
-      if (reconnecting && active !== undefined) await this.openSession(active);
+      if (reconnecting) {
+        // Background Sessions cannot replay through their original connection,
+        // but their Run state remains queryable and cancellable after reconnect.
+        const backgroundSessionIds = [...useWorkspaceStore.getState().sessionWorkspaces.keys()]
+          .filter((sessionId) => sessionId !== active);
+        await Promise.all(backgroundSessionIds.map(async (sessionId) => {
+          try {
+            const runtime = await this.requireConnection().request<SessionRuntimeSnapshot>(
+              this.methods.sessionRuntime,
+              { sessionId }
+            );
+            this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
+            if (runtime.running) this.scheduleSessionRuntimePoll(sessionId);
+          } catch (reason: unknown) {
+            this.dispatchSession(sessionId, {
+              type: "diagnostic/added",
+              message: reason instanceof Error ? reason.message : String(reason)
+            });
+          }
+        }));
+        if (active !== undefined) await this.openSession(active);
+      }
     } catch (reason: unknown) {
       connection.close();
       this.connection = undefined;
@@ -362,13 +410,14 @@ export class WorkspaceController {
   private notification(method: string, params: unknown): void {
     if (method === this.notifications.mcpUpdated) {
       const update = AcpProtocol.decodeRecord(params, "MCP revision notification");
-      const activeSessionId = useWorkspaceStore.getState().activeSessionId;
       if (
         typeof update.sessionId === "string"
-        && update.sessionId === activeSessionId
         && !this.deletingSessionIds.has(update.sessionId as SessionId)
         && typeof update.revision === "number"
-        && update.revision > useWorkspaceStore.getState().mcpSnapshot.revision
+        && update.revision > sessionWorkspace(
+          useWorkspaceStore.getState(),
+          update.sessionId as SessionId
+        ).mcpSnapshot.revision
       ) {
         void this.refreshMcpSnapshot(update.sessionId as SessionId);
       }
@@ -384,42 +433,74 @@ export class WorkspaceController {
 
   private async refreshPending(sessionId: SessionId): Promise<void> {
     const pending = await this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId });
-    if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-      this.dispatch({ type: "queue/replaced", pending });
-    }
+    this.dispatchSession(sessionId, { type: "queue/replaced", pending });
   }
 
-  /** Reads and applies the latest atomic MCP snapshot only to its active Session. */
+  /** Reads and applies the latest atomic MCP snapshot to its owning Session. */
   private async refreshMcpSnapshot(sessionId: SessionId): Promise<void> {
     try {
       const snapshot = await this.requireConnection().request<McpSessionSnapshot>(
         this.methods.mcpStatus,
         { sessionId }
       );
-      if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-        this.dispatch({ type: "mcp/replaced", snapshot });
-      }
+      this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
     } catch (reason: unknown) {
-      this.dispatch({
+      this.dispatchSession(sessionId, {
         type: "diagnostic/added",
         message: reason instanceof Error ? reason.message : String(reason)
       });
     }
   }
 
+  /** Refreshes terminal Run state plus mutable Session snapshots after settlement. */
   private async refreshSessionRuntime(sessionId: SessionId): Promise<void> {
-    const [tree, pending] = await Promise.all([
+    const [runtime, tree, pending] = await Promise.all([
+      this.requireConnection().request<SessionRuntimeSnapshot>(this.methods.sessionRuntime, { sessionId }),
       this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId }),
       this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId })
     ]);
-    if (useWorkspaceStore.getState().activeSessionId === sessionId) {
-      this.dispatch({ type: "tree/replaced", tree });
-      this.dispatch({ type: "queue/replaced", pending });
-    }
+    this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
+    this.dispatchSession(sessionId, { type: "tree/replaced", tree });
+    this.dispatchSession(sessionId, { type: "queue/replaced", pending });
+  }
+
+  /** Polls a detached active Run until its durable transcript can be replayed. */
+  private scheduleSessionRuntimePoll(sessionId: SessionId): void {
+    if (this.stopped || this.runtimePolls.has(sessionId)) return;
+    const timer = window.setTimeout(() => {
+      this.runtimePolls.delete(sessionId);
+      void (async () => {
+        if (this.stopped || this.connection === undefined) return;
+        try {
+          const runtime = await this.requireConnection().request<SessionRuntimeSnapshot>(
+            this.methods.sessionRuntime,
+            { sessionId }
+          );
+          this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
+          if (runtime.running) {
+            this.scheduleSessionRuntimePoll(sessionId);
+          } else if (useWorkspaceStore.getState().activeSessionId === sessionId) {
+            // The old event sink cannot follow a replacement ACP connection;
+            // replay once the Run releases the Session operation gate.
+            await this.openSession(sessionId);
+          }
+        } catch (reason: unknown) {
+          if (!this.stopped && this.connection !== undefined) {
+            this.dispatchSession(sessionId, {
+              type: "diagnostic/added",
+              message: reason instanceof Error ? reason.message : String(reason)
+            });
+          }
+        }
+      })();
+    }, 1_000);
+    this.runtimePolls.set(sessionId, timer);
   }
 
   private disconnected(reason: string): void {
     this.connection = undefined;
+    for (const timer of this.runtimePolls.values()) window.clearTimeout(timer);
+    this.runtimePolls.clear();
     if (this.stopped) return;
     this.scheduleReconnect(reason);
   }
@@ -439,12 +520,12 @@ export class WorkspaceController {
     return this.connection;
   }
 
-  /** Verifies that an asynchronous session open still owns the active projection. */
-  private isCurrentSessionOpen(sessionId: SessionId, revision: number): boolean {
-    return this.sessionOpenRevision === revision
-      && useWorkspaceStore.getState().activeSessionId === sessionId;
+  /** Dispatches one state transition into the projection owned by a Session. */
+  private dispatchSession(sessionId: SessionId, action: SessionWorkspaceAction): void {
+    this.dispatch({ type: "session/updated", sessionId, action });
   }
 
+  /** Dispatches one global workspace state transition. */
   private dispatch(action: WorkspaceAction): void {
     useWorkspaceStore.getState().dispatch(action);
   }

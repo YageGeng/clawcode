@@ -1129,6 +1129,96 @@ async fn queue_mutations_sync_before_returning() {
     run.await.expect("join run").expect("complete blocked run");
 }
 
+/// Runtime snapshots expose an active Run without waiting for its operation gate.
+#[tokio::test]
+async fn session_runtime_tracks_active_run_without_blocking() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("create workspace");
+    let model = Arc::new(BlockingModel {
+        profile: ModelProfile::builder()
+            .provider_id("fixture".to_string())
+            .model_id("blocking".to_string())
+            .display_name("Blocking".to_string())
+            .context_tokens(128_000)
+            .max_output_tokens(8_000)
+            .build(),
+        started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    });
+    let kernel = Arc::new(
+        KernelFactory::builder()
+            .model_factory(Arc::new(BlockingModelFactory(Arc::clone(&model))))
+            .tool_factory(Arc::new(BuiltinToolFactory::new()))
+            .store_factory(Arc::new(JsonlStoreFactory::new(
+                root.path(),
+                Arc::new(SystemClock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.path().join("config"),
+                protocol::PromptPolicy::default(),
+            )))
+            .extension_factory(Arc::new(StaticExtensionFactory::new(
+                StaticExtensionRegistration::default(),
+                Vec::new(),
+            )))
+            .clock(Arc::new(SystemClock))
+            .id_generator(Arc::new(NanoidIdGenerator))
+            .build()
+            .build()
+            .expect("build kernel"),
+    );
+    let session_id =
+        SessionId::try_from("session-runtime-snapshot").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let run_kernel = Arc::clone(&kernel);
+    let run_session_id = session_id.clone();
+    let run = tokio::spawn(async move {
+        run_kernel
+            .run(
+                RunRequest {
+                    session_id: run_session_id,
+                    input: "hold".into(),
+                },
+                Arc::new(DiscardSink),
+            )
+            .await
+    });
+    model.started.notified().await;
+
+    let active = kernel
+        .session_runtime(&session_id)
+        .expect("read active runtime");
+    assert_eq!(active.session_id, session_id);
+    assert!(active.running);
+
+    model.release.notify_one();
+    run.await.expect("join run").expect("complete blocked run");
+
+    let idle = kernel
+        .session_runtime(&session_id)
+        .expect("read idle runtime");
+    assert!(!idle.running);
+
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("unload persisted session");
+    let unloaded = kernel
+        .session_runtime(&session_id)
+        .expect("read unloaded persisted runtime");
+    assert_eq!(unloaded.session_id, session_id);
+    assert!(!unloaded.running);
+}
+
 /// Durable queue acceptance and removal are logged without exposing message content.
 #[tokio::test]
 async fn queue_lifecycle_is_logged_without_message_content() {
