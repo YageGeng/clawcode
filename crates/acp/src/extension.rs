@@ -356,6 +356,17 @@ impl AcpExtensionDispatcher {
                     )?;
                 serde_json::json!({ "title": title.as_str() })
             }
+            AcpExtensionMethod::SessionRuntime => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel.session_runtime(&input.session_id).map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
             AcpExtensionMethod::InvokeSkill => {
                 let input: AcpSkillParameters =
                     serde_json::from_value(request.parameters)

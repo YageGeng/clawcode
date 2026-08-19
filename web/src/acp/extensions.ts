@@ -9,6 +9,7 @@ export type AcpExtensionMethods = Readonly<{
   pendingMessageRemove: string;
   clearQueue: string;
   sessionRename: string;
+  sessionRuntime: string;
   invokeSkill: string;
   skillList: string;
   mcpStatus: string;
@@ -36,6 +37,7 @@ export const AcpMethods = {
       pendingMessageRemove: `${prefix}/session/pending_message/remove`,
       clearQueue: `${prefix}/session/clear_queue`,
       sessionRename: `${prefix}/session/rename`,
+      sessionRuntime: `${prefix}/session/runtime`,
       invokeSkill: `${prefix}/skill/invoke`,
       skillList: `${prefix}/skill/list`,
       mcpStatus: `${prefix}/mcp/status`,

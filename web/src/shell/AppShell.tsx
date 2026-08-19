@@ -9,6 +9,7 @@ import { Inspector } from "../features/inspector/Inspector";
 import { McpPanel } from "../features/mcp/McpPanel";
 import { McpElicitationDialog } from "../features/mcp/McpElicitationDialog";
 import { SkillsPanel } from "../features/skills/SkillsPanel";
+import { initialSessionWorkspaceState } from "../workspace/sessionState";
 import { useWorkspaceStore } from "../workspace/store";
 import type { WorkspaceController } from "../workspace/controller";
 
@@ -20,13 +21,18 @@ export type AppShellProps = Readonly<{
 }>;
 
 export function AppShell({ bootstrap, controller }: AppShellProps) {
-  const state = useWorkspaceStore();
+  const connection = useWorkspaceStore((state) => state.connection);
+  const sessions = useWorkspaceStore((state) => state.sessions);
+  const activeSessionId = useWorkspaceStore((state) => state.activeSessionId);
+  const workspace = useWorkspaceStore((state) => state.activeSessionId === undefined
+    ? initialSessionWorkspaceState
+    : state.sessionWorkspaces.get(state.activeSessionId) ?? initialSessionWorkspaceState);
+  const runningSessionIds = useWorkspaceStore((state) => state.runningSessionIds);
   const [section, setSection] = useState<PrimarySection>("sessions");
   const [sessionsOpen, setSessionsOpen] = useState(() => window.innerWidth >= 820);
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1100);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-
   useEffect(() => {
     const sessionsQuery = window.matchMedia("(min-width: 820px)");
     const inspectorQuery = window.matchMedia("(min-width: 1100px)");
@@ -41,23 +47,23 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   }, []);
 
   useEffect(() => {
-    if (state.retry?.type !== "waiting") return undefined;
+    if (workspace.retry?.type !== "waiting") return undefined;
     const timer = window.setInterval(() => setNowMs(Date.now()), 250);
     return () => window.clearInterval(timer);
-  }, [state.retry]);
+  }, [workspace.retry]);
 
-  const activeSession = state.sessions.find((session) => session.sessionId === state.activeSessionId);
-  const pendingElicitation = state.activeSessionId === undefined
+  const activeSession = sessions.find((session) => session.sessionId === activeSessionId);
+  const pendingElicitation = activeSessionId === undefined
     ? undefined
-    : state.mcpElicitations.get(state.activeSessionId)?.values().next().value;
-  const connectionLabel = state.connection.type === "ready" ? "已连接" :
-    state.connection.type === "connecting" ? `正在连接 · 第 ${state.connection.attempt} 次` :
-    state.connection.type === "initializing" ? "正在初始化 ACP" :
-    state.connection.type === "reconnecting" ? `连接中断，正在重连 · 第 ${state.connection.attempt} 次` :
-    state.connection.type === "failed" ? state.connection.message : "已断开";
-  const connectionTone = state.connection.type === "ready" ? "success" : state.connection.type === "failed" ? "danger" : "warning";
-  const retryRemainingMs = state.retry?.type === "waiting"
-    ? Math.max(0, Number(BigInt(state.retry.scheduledAtMs) + BigInt(state.retry.delayMs) - BigInt(nowMs)))
+    : workspace.mcpElicitations.values().next().value;
+  const connectionLabel = connection.type === "ready" ? "已连接" :
+    connection.type === "connecting" ? `正在连接 · 第 ${connection.attempt} 次` :
+    connection.type === "initializing" ? "正在初始化 ACP" :
+    connection.type === "reconnecting" ? `连接中断，正在重连 · 第 ${connection.attempt} 次` :
+    connection.type === "failed" ? connection.message : "已断开";
+  const connectionTone = connection.type === "ready" ? "success" : connection.type === "failed" ? "danger" : "warning";
+  const retryRemainingMs = workspace.retry?.type === "waiting"
+    ? Math.max(0, Number(BigInt(workspace.retry.scheduledAtMs) + BigInt(workspace.retry.delayMs) - BigInt(nowMs)))
     : 0;
 
   return (
@@ -73,11 +79,13 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
 
       <div className="side-panel session-panel">
         <SessionSidebar
-          sessions={state.sessions}
-          {...(state.activeSessionId === undefined ? {} : { activeSessionId: state.activeSessionId })}
+          sessions={sessions}
+          runningSessionIds={runningSessionIds}
+          {...(activeSessionId === undefined ? {} : { activeSessionId })}
           onCollapse={() => setSessionsOpen(false)}
           onCreate={() => setNewSessionOpen(true)}
           onOpen={(sessionId) => controller.openSession(sessionId)}
+          onCancel={(sessionId) => controller.cancel(sessionId)}
           onRename={(sessionId, title) => controller.renameSession(sessionId, title)}
           onDelete={(sessionId) => controller.deleteSession(sessionId)}
         />
@@ -92,22 +100,22 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
             <p>{bootstrap.activeModel.displayName}{activeSession === undefined ? "" : ` · ${activeSession.cwd}`}</p>
           </div>
           <div className="runtime-status" aria-label="Agent 运行状态">
-            {state.contextUsage === undefined ? null : (
-              <span className="runtime-chip" title={`输入 ${state.contextUsage.exact.inputTokens} · 输出 ${state.contextUsage.exact.outputTokens} · 缓存读取 ${state.contextUsage.exact.cacheReadTokens}`}>
-                Context {state.contextUsage.used.toLocaleString()} / {state.contextUsage.size.toLocaleString()}
+            {workspace.contextUsage === undefined ? null : (
+              <span className="runtime-chip" title={`输入 ${workspace.contextUsage.exact.inputTokens} · 输出 ${workspace.contextUsage.exact.outputTokens} · 缓存读取 ${workspace.contextUsage.exact.cacheReadTokens}`}>
+                Context {workspace.contextUsage.used.toLocaleString()} / {workspace.contextUsage.size.toLocaleString()}
               </span>
             )}
-            {state.retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {state.retry.attempt}/{state.retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}
-            {state.retry?.type === "running" ? <span className="runtime-chip" data-tone="warning">Retry {state.retry.attempt}/{state.retry.maxAttempts}</span> : null}
-            {state.retry?.type === "finished" && !state.retry.success ? <span className="runtime-chip" data-tone="danger">Retry 失败</span> : null}
+            {workspace.retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {workspace.retry.attempt}/{workspace.retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}
+            {workspace.retry?.type === "running" ? <span className="runtime-chip" data-tone="warning">Retry {workspace.retry.attempt}/{workspace.retry.maxAttempts}</span> : null}
+            {workspace.retry?.type === "finished" && !workspace.retry.success ? <span className="runtime-chip" data-tone="danger">Retry 失败</span> : null}
           </div>
           <button className="icon-button" type="button" title={inspectorOpen ? "收起详情栏" : "展开详情栏"} onClick={() => setInspectorOpen((value) => !value)}>
             {inspectorOpen ? <Boxes size={18} /> : <PanelRightOpen size={18} />}
           </button>
         </header>
         {section === "sessions" ? <Conversation bootstrap={bootstrap} controller={controller} /> : null}
-        {section === "skills" ? <SkillsPanel skills={state.skills} diagnostics={state.skillDiagnostics} hasSession={state.activeSessionId !== undefined} controller={controller} /> : null}
-        {section === "mcp" ? <McpPanel snapshot={state.mcpSnapshot} controller={controller} /> : null}
+        {section === "skills" ? <SkillsPanel skills={workspace.skills} diagnostics={workspace.skillDiagnostics} hasSession={activeSessionId !== undefined} controller={controller} /> : null}
+        {section === "mcp" ? <McpPanel snapshot={workspace.mcpSnapshot} controller={controller} /> : null}
         {section === "about" ? <section className="conversation-placeholder"><div className="empty-state"><h2>{bootstrap.product.name}</h2><p>基于 ACP v2 WebSocket 的本机 Agent 工作台。当前模型：{bootstrap.activeModel.displayName}。</p></div></section> : null}
       </main>
 

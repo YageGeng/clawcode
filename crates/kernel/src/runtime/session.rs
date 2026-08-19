@@ -201,6 +201,37 @@ impl Kernel {
             .collect())
     }
 
+    /// Reads active Run state without waiting for the Session operation gate.
+    pub fn session_runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<protocol::SessionRuntimeSnapshot, KernelError> {
+        let running = match self.session(session_id) {
+            Ok(session) => session.execution.active_run()?.is_some(),
+            Err(KernelError::SessionNotFound(_)) => {
+                // Persisted Sessions are idle before their first Resume in this
+                // process, so runtime discovery must not require loading them.
+                if self
+                    .store_factory
+                    .list(None)?
+                    .iter()
+                    .any(|metadata| &metadata.id == session_id)
+                {
+                    false
+                } else {
+                    return Err(KernelError::SessionNotFound(
+                        session_id.clone(),
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(protocol::SessionRuntimeSnapshot {
+            session_id: session_id.clone(),
+            running,
+        })
+    }
+
     /// Opens one persisted session or reuses the matching live runtime idempotently.
     pub async fn resume_session(
         &self,

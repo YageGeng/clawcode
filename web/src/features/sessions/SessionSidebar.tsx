@@ -1,4 +1,4 @@
-import { Check, Edit3, PanelLeftClose, Plus, Search, Trash2, X } from "lucide-react";
+import { Check, Edit3, LoaderCircle, PanelLeftClose, Plus, Search, Square, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -8,9 +8,11 @@ import type { SessionSummary } from "../../domain/model";
 export type SessionSidebarProps = Readonly<{
   sessions: readonly SessionSummary[];
   activeSessionId?: SessionId;
+  runningSessionIds: ReadonlySet<SessionId>;
   onCollapse: () => void;
   onCreate: () => void;
   onOpen: (sessionId: SessionId) => Promise<void>;
+  onCancel: (sessionId: SessionId) => void;
   onRename: (sessionId: SessionId, title: string) => Promise<void>;
   onDelete: (sessionId: SessionId) => Promise<void>;
 }>;
@@ -101,10 +103,12 @@ export function SessionSidebar(props: SessionSidebarProps) {
         {groups.length === 0 ? <div className="empty-list">没有匹配的会话</div> : groups.map((group) => (
           <section className="session-group" key={group.label}>
             <h3>{group.label}</h3>
-            {group.sessions.map((session) => (
-              <div
+            {group.sessions.map((session) => {
+              const running = props.runningSessionIds.has(session.sessionId);
+              return <div
                 className="session-item"
                 data-active={session.sessionId === props.activeSessionId}
+                data-running={running}
                 key={session.sessionId}
                 onBlurCapture={() => setPreview(undefined)}
                 onFocusCapture={(event) => showPreview(session, event.currentTarget)}
@@ -137,15 +141,17 @@ export function SessionSidebar(props: SessionSidebarProps) {
                       <span className="session-item__title">{session.title}</span>
                       <span className="session-item__cwd">{session.cwd}</span>
                     </button>
+                    {running ? <span className="session-item__status" role="status"><LoaderCircle size={11} aria-hidden="true" />运行中</span> : null}
                     <span className="session-item__menu">
+                      {running ? <button type="button" title="停止运行" onClick={() => props.onCancel(session.sessionId)}><Square size={12} aria-hidden="true" /></button> : null}
                       <button type="button" title="重命名" onClick={() => { setEditingSessionId(session.sessionId); setEditingTitle(session.title); setDeletingSessionId(undefined); }}><Edit3 size={13} aria-hidden="true" /></button>
                       <button type="button" title="删除会话" onClick={() => { setDeletingSessionId(session.sessionId); setEditingSessionId(undefined); }}><Trash2 size={14} aria-hidden="true" /></button>
                     </span>
                   </div>
                 )}
                 {deletingSessionId === session.sessionId ? <div className="session-item__confirm"><span>永久删除会话？此操作不可撤销。</span><button type="button" onClick={() => setDeletingSessionId(undefined)}>取消</button><button type="button" onClick={() => void run(async () => { await props.onDelete(session.sessionId); setDeletingSessionId(undefined); })}>确认删除</button></div> : null}
-              </div>
-            ))}
+              </div>;
+            })}
           </section>
         ))}
       </div>

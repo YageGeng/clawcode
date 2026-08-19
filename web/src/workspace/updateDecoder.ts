@@ -15,13 +15,12 @@ import type {
   SlashCommandSource,
   ToolCallEntity
 } from "../domain/model";
-import type { WorkspaceAction, WorkspaceState } from "./state";
+import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
+import type { WorkspaceAction } from "./state";
 
-export type DecodedSessionUpdate = Readonly<{
-  scope: "global" | "session";
-  actions: readonly WorkspaceAction[];
-  refreshRuntime: boolean;
-}>;
+export type DecodedSessionUpdate =
+  | Readonly<{ scope: "global"; actions: readonly WorkspaceAction[]; refreshRuntime: false }>
+  | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean }>;
 
 /** Narrows ACP wire updates into typed workspace actions without owning UI state. */
 export class SessionUpdateDecoder {
@@ -35,7 +34,7 @@ export class SessionUpdateDecoder {
   /** Decodes one ACP notification while preserving omitted-field upsert semantics. */
   decode(
     notification: SessionUpdateNotification,
-    state: WorkspaceState,
+    state: SessionWorkspaceState,
     receivedOrder: number
   ): DecodedSessionUpdate {
     const update = notification.update;
@@ -48,7 +47,7 @@ export class SessionUpdateDecoder {
       };
     }
 
-    const actions: WorkspaceAction[] = [];
+    const actions: SessionWorkspaceAction[] = [];
     const updateContent = typeof update.content === "object" && update.content !== null && !Array.isArray(update.content) ? update.content as Record<string, unknown> : undefined;
     const rawMeta = update._meta ?? notification._meta;
     const meta = AcpProtocol.eventMeta(rawMeta, this.namespace) ?? AcpProtocol.eventMeta(updateContent?._meta, this.namespace);
@@ -69,7 +68,7 @@ export class SessionUpdateDecoder {
       if (decoded.commands !== undefined) {
         actions.push({ type: "commands/replaced", commands: decoded.commands });
       }
-      actions.push(...decoded.diagnostics.map((message): WorkspaceAction => ({ type: "diagnostic/added", message })));
+      actions.push(...decoded.diagnostics.map((message): SessionWorkspaceAction => ({ type: "diagnostic/added", message })));
     } else if ((kind === "agent_message_chunk" || kind === "user_message_chunk") && typeof update.messageId === "string" && typeof update.content === "object" && update.content !== null) {
       const content = update.content as Record<string, unknown>;
       const contentMeta = AcpProtocol.eventMeta(content._meta, this.namespace) ?? meta;
@@ -214,7 +213,7 @@ export class SessionUpdateDecoder {
             actions.push({ type: "mcp/elicitation-requested", request: elicitation });
           }
         } else if (event === "mcp_elicitation_resolved" && typeof payload.request_id === "string") {
-          actions.push({ type: "mcp/elicitation-resolved", sessionId: notification.sessionId, requestId: payload.request_id });
+          actions.push({ type: "mcp/elicitation-resolved", requestId: payload.request_id });
         } else if (event === "retry_scheduled" && meta !== undefined && typeof payload.attempt === "number" && typeof payload.max_attempts === "number" && typeof payload.delay_ms === "number" && typeof payload.error === "string") {
           actions.push({ type: "retry/changed", retry: { type: "waiting", attempt: payload.attempt, maxAttempts: payload.max_attempts, scheduledAtMs: meta.timestampMs, delayMs: payload.delay_ms, error: payload.error } });
         } else if (event === "retry_start" && typeof payload.attempt === "number" && typeof payload.max_attempts === "number") {

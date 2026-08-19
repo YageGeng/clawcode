@@ -133,6 +133,8 @@ pub enum AcpExtensionMethod {
     ClearQueue,
     /// Changes the persisted display title for one session.
     SessionRename,
+    /// Reads whether one Session currently owns an active Run.
+    SessionRuntime,
     /// Invokes a discovered skill explicitly.
     InvokeSkill,
     /// Lists effective discovered skills without returning their bodies.
@@ -183,6 +185,7 @@ impl AcpExtensionMethod {
             }
             Self::ClearQueue => "_clawcode/session/clear_queue",
             Self::SessionRename => "_clawcode/session/rename",
+            Self::SessionRuntime => "_clawcode/session/runtime",
             Self::InvokeSkill => "_clawcode/skill/invoke",
             Self::SkillList => "_clawcode/skill/list",
             Self::McpStatus => "_clawcode/mcp/status",
@@ -211,6 +214,7 @@ impl AcpExtensionMethod {
             Self::PendingMessageRemove,
             Self::ClearQueue,
             Self::SessionRename,
+            Self::SessionRuntime,
             Self::InvokeSkill,
             Self::SkillList,
             Self::McpStatus,

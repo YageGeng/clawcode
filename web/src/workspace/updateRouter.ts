@@ -1,4 +1,5 @@
 import type { SessionId, SessionUpdateNotification } from "../acp/protocol";
+import { sessionWorkspace } from "./state";
 import type { WorkspaceAction, WorkspaceState } from "./state";
 import { SessionUpdateDecoder } from "./updateDecoder";
 
@@ -25,25 +26,28 @@ export class SessionUpdateRouter {
     this.refreshSessionRuntime = refreshSessionRuntime;
   }
 
-  /** Applies global updates while retaining inactive Session elicitation lifecycle state. */
+  /** Routes every update into its owning Session, including background Sessions. */
   apply(notification: SessionUpdateNotification): void {
     const state = this.store.getState();
-    const decoded = this.decoder.decode(notification, state, ++this.receivedOrder);
-    if (decoded.scope === "session" && state.activeSessionId !== notification.sessionId) {
+    const decoded = this.decoder.decode(
+      notification,
+      sessionWorkspace(state, notification.sessionId),
+      ++this.receivedOrder
+    );
+    if (decoded.scope === "global") {
+      for (const action of decoded.actions) this.store.dispatch(action);
+    } else {
       for (const action of decoded.actions) {
-        if (
-          action.type === "mcp/elicitation-requested"
-          || action.type === "mcp/elicitation-resolved"
-        ) {
-          this.store.dispatch(action);
-        }
+        this.store.dispatch({ type: "session/updated", sessionId: notification.sessionId, action });
       }
-      return;
     }
-    for (const action of decoded.actions) this.store.dispatch(action);
     if (decoded.refreshRuntime) {
       void this.refreshSessionRuntime(notification.sessionId).catch((reason: unknown) => {
-        this.store.dispatch({ type: "diagnostic/added", message: reason instanceof Error ? reason.message : String(reason) });
+        this.store.dispatch({
+          type: "session/updated",
+          sessionId: notification.sessionId,
+          action: { type: "diagnostic/added", message: reason instanceof Error ? reason.message : String(reason) }
+        });
       });
     }
   }
