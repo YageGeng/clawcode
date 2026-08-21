@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::AppSectionConfig;
 use crate::approval::{ApprovalMode, AskForApproval};
 use crate::extensions::ExtensionsConfig;
 use crate::kernel::KernelConfig;
@@ -151,6 +152,9 @@ pub enum ConfigValidationError {
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AppConfig {
+    /// Application-level runtime configuration.
+    #[serde(default)]
+    pub app: AppSectionConfig,
     /// Immutable process logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -202,6 +206,7 @@ fn default_active_model() -> String {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            app: AppSectionConfig::default(),
             logging: LoggingConfig::default(),
             prompt: PromptPolicy::default(),
             providers: Vec::new(),
@@ -333,6 +338,42 @@ mod tests {
     fn app_config_default_is_empty() {
         let cfg = AppConfig::default();
         assert!(cfg.providers.is_empty());
+    }
+
+    /// App runtime recovery batching defaults to the current transport limit.
+    #[test]
+    fn app_config_default_recory_batch_size_is_128() {
+        let cfg = AppConfig::default();
+
+        assert_eq!(cfg.app.recory.max_batch_size.get(), 128);
+    }
+
+    /// App runtime recovery batching reads the nested configured limit.
+    #[test]
+    fn app_config_reads_recory_batch_size() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[app.recory]
+max_batch_size = 32
+"#,
+        )
+        .expect("parse app recory config");
+
+        assert_eq!(cfg.app.recory.max_batch_size.get(), 32);
+    }
+
+    /// App runtime recovery batching rejects a zero-sized transport batch.
+    #[test]
+    fn app_config_rejects_zero_recory_batch_size() {
+        let error = toml::from_str::<AppConfig>(
+            r#"
+[app.recory]
+max_batch_size = 0
+"#,
+        )
+        .expect_err("reject zero app recory batch size");
+
+        assert!(error.to_string().contains("nonzero"));
     }
 
     /// AppConfig enables all built-in tool groups by default.

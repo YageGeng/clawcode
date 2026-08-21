@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -59,6 +60,8 @@ pub struct WebServerOptions {
     pub browser_origin: String,
     /// Whether the official ACP transport exposes `/health`.
     pub health_endpoint: bool,
+    /// Maximum number of queued Session updates emitted in one ACP batch.
+    pub max_batch_size: NonZeroUsize,
 }
 
 /// Validated loopback-only listen address for the local single-user WebUI.
@@ -101,6 +104,7 @@ impl Application {
         let router = AcpServerFactory::http_router(
             Arc::clone(&self.kernel),
             Arc::clone(&self.id_generator),
+            options.max_batch_size,
             HttpTransportOptions {
                 path: options.acp_path,
                 allowed_origins: vec![options.browser_origin],

@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -177,8 +178,12 @@ async fn prompt_trace_reaches_the_provider_background_task() {
     let workspace = tempfile::tempdir().expect("workspace directory");
     let reached = Arc::new(Notify::new());
     let kernel = traced_kernel(state.path(), Arc::clone(&reached));
-    let server = AcpServerFactory::new(kernel, Arc::new(TraceIds::default()))
-        .component(AcpTransportKind::Stdio);
+    let server = AcpServerFactory::new(
+        kernel,
+        Arc::new(TraceIds::default()),
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
 
     Client
         .v2()

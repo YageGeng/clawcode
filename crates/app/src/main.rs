@@ -52,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
 /// Parses CLI options, composes dependencies, and serves the selected transport.
 async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Capture the immutable ACP replay batching policy before the config handle
+    // moves into the composition factory.
+    let max_batch_size = config.current().app.recory.max_batch_size;
     let application = ApplicationFactory::new(config).build()?;
     match cli.command {
         Command::Stdio => {
@@ -62,6 +65,7 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
             let server = AcpServerFactory::new(
                 Arc::clone(&application.kernel),
                 Arc::clone(&application.id_generator),
+                max_batch_size,
             );
             tokio::select! {
                 result = server.serve_stdio() => result?,
@@ -81,6 +85,7 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
                     .web_root(web_root)
                     .browser_origin(bind.http_origin())
                     .health_endpoint(true)
+                    .max_batch_size(max_batch_size)
                     .build(),
             )?;
             let bind = bind.into_inner();

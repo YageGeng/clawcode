@@ -21,6 +21,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "io-util", "net", "sync"] }
+tokio-util = { workspace = true }
 
 # http
 agent-client-protocol-http = { workspace = true, features = ["server"] }
@@ -29,6 +30,9 @@ axum = { workspace = true }
 # serde
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
 
 # protocol
 agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] }

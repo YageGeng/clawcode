@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -145,6 +146,9 @@ impl WebFixture {
                     .web_root(web_root)
                     .browser_origin("http://127.0.0.1:3000".to_string())
                     .health_endpoint(true)
+                    .max_batch_size(
+                        NonZeroUsize::new(128).expect("positive batch size"),
+                    )
                     .build(),
             )
             .expect("router");

@@ -45,7 +45,6 @@ export type SessionWorkspaceState = Readonly<{
 }>;
 
 export type SessionWorkspaceAction =
-  | { readonly type: "session/invalidated" }
   | { readonly type: "transcript/cleared" }
   | { readonly type: "message/upserted"; readonly message: MessageEntity; readonly order: EventOrder }
   | { readonly type: "message/text-delta"; readonly messageId: MessageId; readonly role: "user" | "assistant"; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
@@ -100,11 +99,6 @@ export function reduceSessionWorkspace(
   action: SessionWorkspaceAction
 ): SessionWorkspaceState {
   switch (action.type) {
-    case "session/invalidated": return {
-      ...state,
-      running: false,
-      outcomeUnknown: state.running || state.outcomeUnknown
-    };
     case "transcript/cleared": return {
       ...initialSessionWorkspaceState,
       // Clearing stale entities must not hide a disconnected Run whose final

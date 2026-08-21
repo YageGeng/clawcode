@@ -1,36 +1,91 @@
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
 use agent_client_protocol::{
     Agent, Client, ConnectTo, ConnectionTo, JsonRpcMessage, Responder,
 };
-use async_trait::async_trait;
-use kernel::{EventSink, Kernel, SinkError};
+use kernel::{Kernel, KernelError};
 use protocol::{
     AcpExtensionMethod, AcpWorkingDirectory, AgentEvent, AgentEventPayload,
     EventMetadata, IdGenerator, McpSessionChange,
     McpSessionRevisionNotification, ProductIdentity, RunRequest, Sequence,
     SessionId, TimestampMs,
 };
+use tokio_util::sync::CancellationToken;
 
+use crate::AcpEventMapper;
+use crate::batching::BatchComponent;
 use crate::extension::{
     AcpExtensionDispatcher, AcpExtensionRequest, AcpMcpUpdateNotification,
 };
 use crate::input::PromptInput;
+use crate::projection::{
+    DurableResumeSelection, EventGroup, ProjectionFeed, ProjectionRegistry,
+};
+use crate::recovery::{
+    AcpReplayRequest, CursorErrorData, RECOVERY_VERSION, RecoveryMode,
+    RecoveryRequest, RecoveryResponse, ResumeMeta,
+};
 use crate::trace::AcpTraceFactory;
-use crate::{AcpEventMapper, AcpMappingError};
 
 /// Cohesive ACP notification operations backed by one shared Kernel.
 pub(crate) struct AcpServer {
     kernel: Arc<Kernel>,
+    projections: Arc<ProjectionRegistry>,
+}
+
+/// Snapshot and live stream installed for one connection-level Session watcher.
+#[derive(typed_builder::TypedBuilder)]
+pub(crate) struct ProjectionWatch {
+    backlog: Vec<Arc<EventGroup>>,
+    receiver: tokio::sync::broadcast::Receiver<Arc<EventGroup>>,
+    #[builder(default, setter(strip_option))]
+    run_id: Option<protocol::RunId>,
+    #[builder(default, setter(strip_option))]
+    next_sequence: Option<Sequence>,
+}
+
+impl From<ProjectionFeed> for ProjectionWatch {
+    /// Converts an atomic recovery snapshot into a connection watcher input.
+    fn from(subscription: ProjectionFeed) -> Self {
+        Self::builder()
+            .backlog(subscription.backlog)
+            .receiver(subscription.receiver)
+            .run_id(subscription.run_id)
+            .next_sequence(subscription.next_sequence)
+            .build()
+    }
+}
+
+impl ProjectionWatch {
+    /// Advances the recoverable cursor after one projection group is sent.
+    fn record_sent(&mut self, group: &EventGroup) {
+        let Some(run_id) = &group.run_id else {
+            // Ungrouped updates do not invalidate the last recoverable journal
+            // cursor; explicit projection invalidation is handled by the registry.
+            return;
+        };
+        self.run_id = Some(run_id.clone());
+        self.next_sequence = group
+            .sequence
+            .get()
+            .checked_add(1)
+            .and_then(|sequence| Sequence::try_from(sequence).ok());
+    }
 }
 
 impl AcpServer {
     /// Binds ACP notification operations to one Kernel instance.
-    pub(crate) fn new(kernel: Arc<Kernel>) -> Self {
-        Self { kernel }
+    pub(crate) fn new(
+        kernel: Arc<Kernel>,
+        projections: Arc<ProjectionRegistry>,
+    ) -> Self {
+        Self {
+            kernel,
+            projections,
+        }
     }
 
     /// Sends the complete Session command snapshot through native ACP v2.
@@ -55,6 +110,63 @@ impl AcpServer {
                 )
                 .meta(metadata.clone()),
             )?;
+        }
+        Ok(())
+    }
+
+    /// Sends durable replay items through their standard ACP Session updates.
+    fn send_replay_items(
+        &self,
+        session_id: &SessionId,
+        connection: &ConnectionTo<Client>,
+        items: Vec<protocol::SessionReplayItem>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        for (index, item) in items.into_iter().enumerate() {
+            let sequence = Sequence::try_from(
+                u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
+            )
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+            let event = match item {
+                protocol::SessionReplayItem::Message(message) => AgentEvent {
+                    metadata: EventMetadata {
+                        turn_id: message.identity.turn_id.clone(),
+                        timestamp_ms: message.timing.ended_at_ms,
+                        sequence,
+                    },
+                    payload: AgentEventPayload::MessageEnd { message },
+                },
+                protocol::SessionReplayItem::Compaction {
+                    run_id,
+                    reason,
+                    result,
+                } => AgentEvent {
+                    metadata: EventMetadata {
+                        turn_id: result.turn_id.clone(),
+                        timestamp_ms: result.ended_at_ms,
+                        sequence,
+                    },
+                    payload: AgentEventPayload::CompactionEnd {
+                        run_id,
+                        reason,
+                        outcome: protocol::CompactionOutcome::Completed {
+                            result,
+                        },
+                    },
+                },
+            };
+            let metadata = AcpEventMapper::metadata(&event)
+                .map_err(agent_client_protocol::Error::into_internal_error)?;
+            for update in AcpEventMapper::map(event)
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            {
+                connection.send_notification(
+                    wire::UpdateSessionNotification::new(
+                        session_id.to_string(),
+                        update,
+                    )
+                    .meta(metadata.clone()),
+                )?;
+            }
         }
         Ok(())
     }
@@ -128,12 +240,174 @@ impl AcpServer {
         })?;
         Ok(())
     }
+
+    /// Installs or replaces one connection-level Session projection watcher.
+    pub(crate) fn watch_projection(
+        &self,
+        session_id: &SessionId,
+        connection: &ConnectionTo<Client>,
+        watched: Arc<Mutex<BTreeMap<SessionId, Arc<CancellationToken>>>>,
+        mut watch: ProjectionWatch,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let cancellation = Arc::new(CancellationToken::new());
+        {
+            let mut watchers = watched.lock().map_err(|_poison_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("ACP Session watcher lock poisoned"),
+                )
+            })?;
+            if let Some(previous) =
+                watchers.insert(session_id.clone(), Arc::clone(&cancellation))
+            {
+                previous.cancel();
+            }
+        }
+        for group in std::mem::take(&mut watch.backlog) {
+            for notification in group
+                .notifications(session_id, ProductIdentity::ACP_NAMESPACE)
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            {
+                connection.send_notification(notification)?;
+            }
+            watch.record_sent(&group);
+        }
+        let projections = Arc::clone(&self.projections);
+        let task_connection = connection.clone();
+        let task_session_id = session_id.clone();
+        let task_cancellation = Arc::clone(&cancellation);
+        connection.spawn(async move {
+            tracing::info!(
+                "started ACP Session watcher for Session {}",
+                task_session_id
+            );
+            let outcome: Result<(), agent_client_protocol::Error> = 'watch: loop {
+                let received = tokio::select! {
+                    () = task_cancellation.cancelled() => break Ok(()),
+                    received = watch.receiver.recv() => received,
+                };
+                let groups = match received {
+                    Ok(group) => vec![group],
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                        skipped,
+                    )) => {
+                        let Some(run_id) = &watch.run_id else {
+                            tracing::warn!(
+                                "stopped ACP Session watcher for Session {} after lagging by {} groups without a recovery cursor",
+                                task_session_id,
+                                skipped
+                            );
+                            break Err(agent_client_protocol::Error::into_internal_error(
+                                std::io::Error::other(
+                                    "ACP Session watcher lagged without a recovery cursor",
+                                ),
+                            ));
+                        };
+                        let Some(sequence) = watch.next_sequence else {
+                            tracing::warn!(
+                                "stopped ACP Session watcher for Session {} because lag recovery had no next sequence",
+                                task_session_id
+                            );
+                            break Err(agent_client_protocol::Error::into_internal_error(
+                                std::io::Error::other(
+                                    "ACP Session watcher lag recovery has no next sequence",
+                                ),
+                            ));
+                        };
+                        match projections.snapshot_from(
+                            &task_session_id,
+                            run_id,
+                            sequence,
+                        ) {
+                            Ok(groups) => groups,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "stopped ACP Session watcher for Session {} after lag recovery failed at sequence {}: {}",
+                                    task_session_id,
+                                    sequence,
+                                    error
+                                );
+                                break Err(
+                                    agent_client_protocol::Error::into_internal_error(error),
+                                );
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break Ok(());
+                    }
+                };
+                for group in groups {
+                    if watch.next_sequence.is_some_and(|sequence| {
+                        group.sequence < sequence
+                    }) {
+                        continue;
+                    }
+                    let notifications = group
+                        .notifications(
+                            &task_session_id,
+                            ProductIdentity::ACP_NAMESPACE,
+                        )
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?;
+                    for notification in notifications {
+                        if let Err(error) =
+                            task_connection.send_notification(notification)
+                        {
+                            tracing::warn!(
+                                "stopped ACP Session watcher for Session {} after connection send failed: {}",
+                                task_session_id,
+                                error
+                            );
+                            break 'watch Ok(());
+                        }
+                    }
+                    watch.record_sent(&group);
+                }
+            };
+            if let Ok(mut watchers) = watched.lock()
+                && watchers.get(&task_session_id).is_some_and(|current| {
+                    Arc::ptr_eq(current, &task_cancellation)
+                })
+            {
+                watchers.remove(&task_session_id);
+            }
+            tracing::info!(
+                "stopped ACP Session watcher for Session {}",
+                task_session_id
+            );
+            outcome
+        })?;
+        Ok(())
+    }
 }
 
 /// Factory that creates an isolated ACP v2 connection over a shared kernel.
 pub struct AcpServerFactory {
     kernel: Arc<Kernel>,
     id_generator: Arc<dyn IdGenerator>,
+    runtime: AcpServerRuntime,
+}
+
+/// Shared projection state and immutable transport batching policy.
+struct AcpServerRuntime {
+    projections: Arc<ProjectionRegistry>,
+    max_batch_size: NonZeroUsize,
+}
+
+/// Dependencies and watcher state shared by handlers on one ACP connection.
+#[derive(typed_builder::TypedBuilder)]
+struct ComponentContext {
+    kernel: Arc<Kernel>,
+    projections: Arc<ProjectionRegistry>,
+    traces: AcpTraceFactory,
+    watchers: ConnectionWatchers,
+}
+
+/// Mutable watcher collections shared by handlers on one ACP connection.
+struct ConnectionWatchers {
+    mcp: Arc<Mutex<BTreeSet<SessionId>>>,
+    sessions: Arc<Mutex<BTreeMap<SessionId, Arc<CancellationToken>>>>,
 }
 
 impl AcpServerFactory {
@@ -142,10 +416,17 @@ impl AcpServerFactory {
     pub fn new(
         kernel: Arc<Kernel>,
         id_generator: Arc<dyn IdGenerator>,
+        max_batch_size: NonZeroUsize,
     ) -> Self {
+        let projections =
+            Arc::new(ProjectionRegistry::new(Arc::clone(&kernel)));
         Self {
             kernel,
             id_generator,
+            runtime: AcpServerRuntime {
+                projections,
+                max_batch_size,
+            },
         }
     }
 
@@ -154,40 +435,76 @@ impl AcpServerFactory {
         &self,
         transport: crate::AcpTransportKind,
     ) -> impl ConnectTo<Client> + 'static + use<> {
-        let session_kernel = Arc::clone(&self.kernel);
-        let list_kernel = Arc::clone(&self.kernel);
-        let resume_kernel = Arc::clone(&self.kernel);
-        let close_kernel = Arc::clone(&self.kernel);
-        let delete_kernel = Arc::clone(&self.kernel);
-        let prompt_kernel = Arc::clone(&self.kernel);
-        let cancel_kernel = Arc::clone(&self.kernel);
-        let extension_kernel = Arc::clone(&self.kernel);
-        let mcp_watchers = Arc::new(Mutex::new(BTreeSet::new()));
-        let session_mcp_watchers = Arc::clone(&mcp_watchers);
-        let resume_mcp_watchers = Arc::clone(&mcp_watchers);
-        let extension_mcp_watchers = mcp_watchers;
-        let traces =
-            AcpTraceFactory::new(Arc::clone(&self.id_generator), transport);
-        let initialize_traces = traces.clone();
-        let session_traces = traces.clone();
-        let list_traces = traces.clone();
-        let resume_traces = traces.clone();
-        let close_traces = traces.clone();
-        let delete_traces = traces.clone();
-        let prompt_traces = traces.clone();
-        let cancel_traces = traces.clone();
-        let extension_traces = traces;
+        // One connection context keeps handler captures compact while retaining
+        // explicit Arc clones at the ownership boundaries that need them.
+        let context = Arc::new(
+            ComponentContext::builder()
+                .kernel(Arc::clone(&self.kernel))
+                .projections(Arc::clone(&self.runtime.projections))
+                .traces(AcpTraceFactory::new(
+                    Arc::clone(&self.id_generator),
+                    transport,
+                ))
+                .watchers(ConnectionWatchers {
+                    mcp: Arc::new(Mutex::new(BTreeSet::new())),
+                    sessions: Arc::new(Mutex::new(BTreeMap::new())),
+                })
+                .build(),
+        );
 
-        Agent
-            .v2()
+        BatchComponent::new(
+            Agent.v2()
             .on_receive_request(
-                async move |request: wire::InitializeRequest,
-                            responder: Responder<wire::InitializeResponse>,
-                            _connection: ConnectionTo<Client>| {
-                    let trace_factory = initialize_traces.clone();
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::InitializeRequest,
+                                responder: Responder<wire::InitializeResponse>,
+                                _connection: ConnectionTo<Client>| {
+                    let projections = Arc::clone(&context.projections);
+                    let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
+                        let recovery = RecoveryRequest::from_meta(
+                            request.meta.as_ref(),
+                            ProductIdentity::ACP_NAMESPACE,
+                        )
+                        .map_err(|error| {
+                            agent_client_protocol::Error::invalid_params()
+                                .data(error.to_string())
+                        })?;
+                        if recovery.as_ref().is_some_and(|recovery| {
+                            recovery.version != RECOVERY_VERSION
+                        }) {
+                            return Err(
+                                agent_client_protocol::Error::invalid_params()
+                                    .data("unsupported session recovery version"),
+                            );
+                        }
+                        let recovery_plans = recovery
+                            .map(|recovery| {
+                                recovery
+                                    .sessions
+                                    .iter()
+                                    .map(|cursor| {
+                                        projections.recovery_plan(cursor)
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()
+                            })
+                            .transpose()
+                            .map_err(
+                                agent_client_protocol::Error::into_internal_error,
+                            )?;
+                        if let Some(plans) = &recovery_plans {
+                            let watch_count = plans
+                                .iter()
+                                .filter(|plan| plan.mode == RecoveryMode::Watch)
+                                .count();
+                            tracing::info!(
+                                "planned ACP Session recovery for {} Sessions: {} watch, {} full Resume",
+                                plans.len(),
+                                watch_count,
+                                plans.len().saturating_sub(watch_count)
+                            );
+                        }
                         let methods = [
                         AcpExtensionMethod::FollowUp,
                         AcpExtensionMethod::Tree,
@@ -216,9 +533,25 @@ impl AcpServerFactory {
                     .into_iter()
                     .map(|method| serde_json::Value::String(method.to_string()))
                     .collect::<Vec<_>>();
+                    let mut product_meta = serde_json::Map::from_iter([(
+                        "methods".to_string(),
+                        serde_json::Value::Array(methods),
+                    )]);
+                    if let Some(sessions) = recovery_plans {
+                        product_meta.insert(
+                            "sessionRecovery".to_string(),
+                            serde_json::to_value(RecoveryResponse {
+                                version: RECOVERY_VERSION,
+                                sessions,
+                            })
+                            .map_err(
+                                agent_client_protocol::Error::into_internal_error,
+                            )?,
+                        );
+                    }
                     let capabilities_meta = wire::Meta::from_iter([(
                         ProductIdentity::ACP_NAMESPACE.to_string(),
-                        serde_json::json!({ "methods": methods }),
+                        serde_json::Value::Object(product_meta),
                     )]);
                         responder.respond(
                             wire::InitializeResponse::new(
@@ -245,18 +578,21 @@ impl AcpServerFactory {
                             .meta(capabilities_meta),
                         )
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: wire::NewSessionRequest,
-                            responder: Responder<wire::NewSessionResponse>,
-                            connection: ConnectionTo<Client>| {
-                    let trace_factory = session_traces.clone();
-                    let kernel = Arc::clone(&session_kernel);
-                    let mcp_watchers = Arc::clone(&session_mcp_watchers);
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::NewSessionRequest,
+                                responder: Responder<wire::NewSessionResponse>,
+                                connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let projections = Arc::clone(&context.projections);
+                    let mcp_watchers = Arc::clone(&context.watchers.mcp);
+                    let session_watchers = Arc::clone(&context.watchers.sessions);
+                    let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         let cwd = AcpWorkingDirectory::try_from(
                             request.cwd.into_inner(),
@@ -269,28 +605,43 @@ impl AcpServerFactory {
                             .create_generated_session(cwd.into_inner())
                             .await
                             .map_err(agent_client_protocol::Error::into_internal_error)?;
-                        responder.respond(wire::NewSessionResponse::new(
-                            session_id.to_string(),
-                        ))?;
-                        let server = AcpServer::new(kernel);
+                        let receiver = projections
+                            .subscribe_live(&session_id)
+                            .map_err(
+                                agent_client_protocol::Error::into_internal_error,
+                            )?;
+                        let server = AcpServer::new(kernel, projections);
                         server.send_available_commands(&session_id, &connection)?;
                         server.watch_mcp(
                             &session_id,
                             &connection,
                             mcp_watchers,
-                        )
+                        )?;
+                        server.watch_projection(
+                            &session_id,
+                            &connection,
+                            session_watchers,
+                            ProjectionWatch::builder()
+                                .backlog(Vec::new())
+                                .receiver(receiver)
+                                .build(),
+                        )?;
+                        responder.respond(wire::NewSessionResponse::new(
+                            session_id.to_string(),
+                        ))
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: wire::ListSessionsRequest,
-                            responder: Responder<wire::ListSessionsResponse>,
-                            _connection: ConnectionTo<Client>| {
-                    let trace_factory = list_traces.clone();
-                    let kernel = Arc::clone(&list_kernel);
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::ListSessionsRequest,
+                                responder: Responder<wire::ListSessionsResponse>,
+                                _connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         if request.cursor.is_some() {
                             return Err(agent_client_protocol::Error::invalid_params()
@@ -323,36 +674,34 @@ impl AcpServerFactory {
                             .collect();
                         responder.respond(wire::ListSessionsResponse::new(sessions))
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: wire::ResumeSessionRequest,
-                            responder: Responder<wire::ResumeSessionResponse>,
-                            connection: ConnectionTo<Client>| {
-                    let trace_factory = resume_traces.clone();
-                    let kernel = Arc::clone(&resume_kernel);
-                    let mcp_watchers = Arc::clone(&resume_mcp_watchers);
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::ResumeSessionRequest,
+                                responder: Responder<wire::ResumeSessionResponse>,
+                                connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let projections = Arc::clone(&context.projections);
+                    let mcp_watchers = Arc::clone(&context.watchers.mcp);
+                    let session_watchers = Arc::clone(&context.watchers.sessions);
+                    let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         let session_id = SessionId::try_from(request.session_id.to_string())
                             .map_err(|error| {
                                 agent_client_protocol::Error::invalid_params()
                                     .data(error.to_string())
                             })?;
-                        let replay_from_start = match request.replay_from {
-                            Some(wire::ReplayFrom::Start(_)) => true,
-                            Some(wire::ReplayFrom::Other(_)) => {
-                                return Err(agent_client_protocol::Error::invalid_params()
-                                    .data("unsupported session replay cursor"));
-                            }
-                            None => false,
-                            _ => false,
-                        };
-                        // Resume carries Extension dispatch and lifecycle
-                        // arbitration state; box it so the enclosing ACP
-                        // request future does not retain that large state inline.
+                        let replay = AcpReplayRequest::try_from(
+                            request.replay_from,
+                        )
+                        .map_err(|error| {
+                            agent_client_protocol::Error::invalid_params()
+                                .data(error.to_string())
+                        })?;
                         let cwd = AcpWorkingDirectory::try_from(
                             request.cwd.into_inner(),
                         )
@@ -361,87 +710,234 @@ impl AcpServerFactory {
                                 .data(error.to_string())
                         })?
                         .into_inner();
-                        Box::pin(kernel.resume_session(session_id.clone(), cwd))
-                            .await
-                            .map_err(agent_client_protocol::Error::into_internal_error)?;
-                        if replay_from_start {
-                            for (index, item) in kernel
-                                .session_replay(&session_id)
-                                .map_err(agent_client_protocol::Error::into_internal_error)?
-                                .into_iter()
-                                .enumerate()
-                            {
-                                let sequence = Sequence::try_from(
-                                    u64::try_from(index)
-                                        .unwrap_or(u64::MAX)
-                                        .saturating_add(1),
-                                )
-                                .map_err(agent_client_protocol::Error::into_internal_error)?;
-                                let event = match item {
-                                    protocol::SessionReplayItem::Message(message) => AgentEvent {
-                                        metadata: EventMetadata {
-                                            turn_id: message.identity.turn_id.clone(),
-                                            timestamp_ms: message.timing.ended_at_ms,
-                                            sequence,
-                                        },
-                                        payload: AgentEventPayload::MessageEnd { message },
-                                    },
-                                    protocol::SessionReplayItem::Compaction {
-                                        run_id,
-                                        reason,
-                                        result,
-                                    } => AgentEvent {
-                                        metadata: EventMetadata {
-                                            turn_id: result.turn_id.clone(),
-                                            timestamp_ms: result.ended_at_ms,
-                                            sequence,
-                                        },
-                                        payload: AgentEventPayload::CompactionEnd {
-                                            run_id,
-                                            reason,
-                                            outcome: protocol::CompactionOutcome::Completed {
-                                                result,
-                                            },
-                                        },
-                                    },
-                                };
-                                let metadata = AcpEventMapper::metadata(&event)
+                        let use_retained_projection = if matches!(
+                            &replay,
+                            AcpReplayRequest::Start
+                        ) && projections.has_journal(&session_id).map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )? {
+                            match kernel.validate_session_attachment(
+                                &session_id,
+                                &cwd,
+                            ) {
+                                Ok(_snapshot) => true,
+                                Err(KernelError::SessionNotFound(_)) => {
+                                    // A direct Kernel close can outlive the ACP
+                                    // journal, so durable Resume must replace it.
+                                    projections.remove(&session_id).map_err(
+                                        agent_client_protocol::Error::into_internal_error,
+                                    )?;
+                                    false
+                                }
+                                Err(error) => {
+                                    return Err(
+                                        agent_client_protocol::Error::into_internal_error(
+                                            error,
+                                        ),
+                                    );
+                                }
+                            }
+                        } else {
+                            false
+                        };
+                        let server = AcpServer::new(
+                            Arc::clone(&kernel),
+                            Arc::clone(&projections),
+                        );
+                        let durable_replay_from_start =
+                            matches!(&replay, AcpReplayRequest::Start);
+                        let (watch, recovery_metadata) = match replay {
+                            AcpReplayRequest::Event(cursor) => {
+                                kernel
+                                    .validate_session_attachment(
+                                        &session_id,
+                                        &cwd,
+                                    )
                                     .map_err(
                                         agent_client_protocol::Error::into_internal_error,
                                     )?;
-                                for update in AcpEventMapper::map(event)
-                                    .map_err(agent_client_protocol::Error::into_internal_error)?
-                                {
-                                    connection.send_notification(
-                                        wire::UpdateSessionNotification::new(
-                                            session_id.to_string(),
-                                            update,
-                                        )
-                                        .meta(metadata.clone()),
+                                let subscription = match projections
+                                    .subscribe_from_cursor(
+                                        &session_id,
+                                        &cursor.run_id,
+                                        cursor.sequence,
+                                    ) {
+                                    Ok(subscription) => subscription,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "failed incremental ACP Resume for Session {}, Run {}, sequence {}: {}",
+                                            session_id,
+                                            cursor.run_id,
+                                            cursor.sequence,
+                                            error
+                                        );
+                                        let data = CursorErrorData::builder()
+                                            .session_id(session_id.clone())
+                                            .run_id(cursor.run_id.clone())
+                                            .sequence(cursor.sequence)
+                                            .build();
+                                        let data = serde_json::to_value(data)
+                                            .map_err(
+                                                agent_client_protocol::Error::into_internal_error,
+                                            )?;
+                                        return Err(
+                                            agent_client_protocol::Error::invalid_params()
+                                                .data(data),
+                                        );
+                                    }
+                                };
+                                let metadata = ResumeMeta::builder()
+                                    .mode(RecoveryMode::Watch)
+                                    .run_id(subscription.run_id.clone())
+                                    .journal_tail_sequence(
+                                        subscription.tail_sequence,
+                                    )
+                                    .running(subscription.running)
+                                    .build();
+                                (ProjectionWatch::from(subscription), metadata)
+                            }
+                            AcpReplayRequest::Start if use_retained_projection =>
+                            {
+                                let subscription = projections
+                                    .subscribe_from_start(&session_id)
+                                    .map_err(
+                                        agent_client_protocol::Error::into_internal_error,
                                     )?;
+                                server.send_replay_items(
+                                    &session_id,
+                                    &connection,
+                                    subscription.baseline.clone(),
+                                )?;
+                                let metadata = ResumeMeta::builder()
+                                    .mode(RecoveryMode::Resume)
+                                    .run_id(subscription.run_id.clone())
+                                    .journal_tail_sequence(
+                                        subscription.tail_sequence,
+                                    )
+                                    .running(subscription.running)
+                                    .build();
+                                (ProjectionWatch::from(subscription), metadata)
+                            }
+                            AcpReplayRequest::None | AcpReplayRequest::Start => {
+                                // Subscribe before attaching the durable Session so a
+                                // concurrent connection cannot publish RunStart into
+                                // the resume/replay gap.
+                                let live_receiver = projections
+                                    .subscribe_live(&session_id)
+                                    .map_err(
+                                        agent_client_protocol::Error::into_internal_error,
+                                    )?;
+                                Box::pin(kernel.resume_session(
+                                    session_id.clone(),
+                                    cwd,
+                                ))
+                                .await
+                                .map_err(
+                                    agent_client_protocol::Error::into_internal_error,
+                                )?;
+                                // Capture durable state before choosing a projection
+                                // strategy. If a Run starts during this snapshot, its
+                                // journal is selected exclusively and the snapshot is
+                                // discarded, preventing duplicate persisted messages.
+                                let durable_replay = if durable_replay_from_start {
+                                    Some(kernel.session_replay(&session_id).map_err(
+                                        agent_client_protocol::Error::into_internal_error,
+                                    )?)
+                                } else {
+                                    None
+                                };
+                                if let Some(durable_replay) = durable_replay {
+                                    match projections.select_durable_resume(
+                                        &session_id,
+                                        live_receiver,
+                                        durable_replay,
+                                    ).map_err(
+                                        agent_client_protocol::Error::into_internal_error,
+                                    )? {
+                                        DurableResumeSelection::Retained(subscription) => {
+                                            server.send_replay_items(
+                                                &session_id,
+                                                &connection,
+                                                subscription.baseline.clone(),
+                                            )?;
+                                            let metadata = ResumeMeta::builder()
+                                                .mode(RecoveryMode::Resume)
+                                                .run_id(subscription.run_id.clone())
+                                                .journal_tail_sequence(
+                                                    subscription.tail_sequence,
+                                                )
+                                                .running(subscription.running)
+                                                .build();
+                                            (ProjectionWatch::from(subscription), metadata)
+                                        }
+                                        DurableResumeSelection::Live { replay, receiver } => {
+                                            server.send_replay_items(
+                                                &session_id,
+                                                &connection,
+                                                replay,
+                                            )?;
+                                            (
+                                                ProjectionWatch::builder()
+                                                    .backlog(Vec::new())
+                                                    .receiver(receiver)
+                                                    .build(),
+                                                ResumeMeta::builder()
+                                                    .mode(RecoveryMode::Resume)
+                                                    .running(false)
+                                                    .build(),
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    (
+                                        ProjectionWatch::builder()
+                                            .backlog(Vec::new())
+                                            .receiver(live_receiver)
+                                            .build(),
+                                        ResumeMeta::builder()
+                                            .mode(RecoveryMode::Resume)
+                                            .running(false)
+                                            .build(),
+                                    )
                                 }
                             }
-                        }
-                        AcpServer::new(Arc::clone(&kernel))
-                            .send_available_commands(&session_id, &connection)?;
-                        AcpServer::new(kernel).watch_mcp(
+                        };
+                        server.send_available_commands(&session_id, &connection)?;
+                        server.watch_mcp(
                             &session_id,
                             &connection,
                             mcp_watchers,
                         )?;
-                        responder.respond(wire::ResumeSessionResponse::new())
+                        server.watch_projection(
+                            &session_id,
+                            &connection,
+                            session_watchers,
+                            watch,
+                        )?;
+                        responder.respond(
+                            wire::ResumeSessionResponse::new().meta(
+                                wire::Meta::from_iter([(
+                                    ProductIdentity::ACP_NAMESPACE.to_string(),
+                                    serde_json::json!({
+                                        "sessionRecovery": recovery_metadata
+                                    }),
+                                )]),
+                            ),
+                        )
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: wire::CloseSessionRequest,
-                            responder: Responder<wire::CloseSessionResponse>,
-                            _connection: ConnectionTo<Client>| {
-                    let trace_factory = close_traces.clone();
-                    let kernel = Arc::clone(&close_kernel);
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::CloseSessionRequest,
+                                responder: Responder<wire::CloseSessionResponse>,
+                                _connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let projections = Arc::clone(&context.projections);
+                    let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         let session_id = SessionId::try_from(request.session_id.to_string())
                             .map_err(|error| {
@@ -452,19 +948,26 @@ impl AcpServerFactory {
                             .close_session(&session_id)
                             .await
                             .map_err(agent_client_protocol::Error::into_internal_error)?;
+                        projections
+                            .remove(&session_id)
+                            .map_err(
+                                agent_client_protocol::Error::into_internal_error,
+                            )?;
                         responder.respond(wire::CloseSessionResponse::new())
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: wire::DeleteSessionRequest,
-                            responder: Responder<wire::DeleteSessionResponse>,
-                            _connection: ConnectionTo<Client>| {
-                    let trace_factory = delete_traces.clone();
-                    let kernel = Arc::clone(&delete_kernel);
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::DeleteSessionRequest,
+                                responder: Responder<wire::DeleteSessionResponse>,
+                                _connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let projections = Arc::clone(&context.projections);
+                    let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         let session_id =
                             SessionId::try_from(request.session_id.to_string())
@@ -478,19 +981,26 @@ impl AcpServerFactory {
                             .map_err(
                                 agent_client_protocol::Error::into_internal_error,
                             )?;
+                        projections
+                            .remove(&session_id)
+                            .map_err(
+                                agent_client_protocol::Error::into_internal_error,
+                            )?;
                         responder.respond(wire::DeleteSessionResponse::new())
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: wire::PromptRequest,
-                            responder: Responder<wire::PromptResponse>,
-                            connection: ConnectionTo<Client>| {
-                    let trace_factory = prompt_traces.clone();
-                    let kernel = Arc::clone(&prompt_kernel);
-                    let operation =
-                        trace_factory.request(&responder, &request)?;
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::PromptRequest,
+                                responder: Responder<wire::PromptResponse>,
+                                _connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let projections = Arc::clone(&context.projections);
+                    let operation = context.traces.request(&responder, &request)?;
                     let trace_id = operation.trace_id().clone();
                     operation.start();
                     let task_operation = operation.clone();
@@ -508,7 +1018,6 @@ impl AcpServerFactory {
                             .into_inner();
                         responder.respond(wire::PromptResponse::new())?;
 
-                        let task_connection = connection.clone();
                         let task_session_id = session_id.clone();
                         // A Prompt Run belongs to the Kernel Session rather than
                         // the requesting socket. Detaching it lets reconnecting
@@ -520,12 +1029,8 @@ impl AcpServerFactory {
                                 agent_client_protocol::Error,
                             > = task_operation
                                 .settle(Box::pin(async move {
-                                    let sink: Arc<dyn EventSink> = Arc::new(
-                                        AcpEventSink::new(
-                                            task_session_id.clone(),
-                                            task_connection.clone(),
-                                        ),
-                                    );
+                                    let sink = projections
+                                        .sink(task_session_id.clone());
                                     if let Err(error) = kernel
                                         .run_traced(
                                             RunRequest {
@@ -543,25 +1048,17 @@ impl AcpServerFactory {
                                             task_session_id,
                                             error
                                         );
-                                        task_connection.send_notification(
-                                            wire::UpdateSessionNotification::new(
-                                                task_session_id.to_string(),
-                                                wire::SessionUpdate::StateUpdate(
-                                                    wire::StateUpdate::Idle(
-                                                        wire::IdleStateUpdate::new().stop_reason(
-                                                            wire::StopReason::Other(format!(
-                                                                "_{}/error",
-                                                                ProductIdentity::ACP_NAMESPACE
-                                                            )),
-                                                        ),
-                                                    ),
-                                                ),
+                                        if let Err(fallback_error) = projections
+                                            .publish_terminal_fallback(
+                                                &task_session_id,
                                             )
-                                            .meta(wire::Meta::from_iter([(
-                                                ProductIdentity::ACP_NAMESPACE.to_string(),
-                                                serde_json::json!({ "error": error.to_string() }),
-                                            )])),
-                                        )?;
+                                        {
+                                            tracing::error!(
+                                                "failed to publish terminal ACP fallback for Session {}: {}",
+                                                task_session_id,
+                                                fallback_error
+                                            );
+                                        }
                                     }
                                     Ok(())
                                 }))
@@ -580,15 +1077,17 @@ impl AcpServerFactory {
                         operation.fail(error);
                     }
                     result
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_notification(
-                async move |notification: wire::CancelSessionNotification,
-                            _connection: ConnectionTo<Client>| {
-                    let trace_factory = cancel_traces.clone();
-                    let kernel = Arc::clone(&cancel_kernel);
-                    let operation = trace_factory.notification(
+                {
+                    let context = Arc::clone(&context);
+                    async move |notification: wire::CancelSessionNotification,
+                                _connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let operation = context.traces.notification(
                         notification.method(),
                         &notification,
                     )?;
@@ -604,107 +1103,94 @@ impl AcpServerFactory {
                             .cancel_session(&session_id)
                             .map_err(agent_client_protocol::Error::into_internal_error)
                     }).await
+                    }
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_request(
-                async move |request: AcpExtensionRequest,
-                            responder,
-                            connection: ConnectionTo<Client>| {
-                    let trace_factory = extension_traces.clone();
-                    let kernel = Arc::clone(&extension_kernel);
-                    let mcp_watchers = Arc::clone(&extension_mcp_watchers);
-                    let operation = trace_factory.request(
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: AcpExtensionRequest,
+                                responder,
+                                connection: ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let projections = Arc::clone(&context.projections);
+                    let mcp_watchers = Arc::clone(&context.watchers.mcp);
+                    let session_watchers = Arc::clone(&context.watchers.sessions);
+                    let operation = context.traces.request(
                         &responder,
                         request.parameters(),
                     )?;
                     // The extension dispatcher covers every product method;
                     // boxing keeps that large state machine out of the ACP handler future.
                     operation.run(Box::pin(async move {
-                        let response = AcpExtensionDispatcher {
-                            kernel,
-                            connection,
-                            mcp_watchers,
-                        }
+                        let response = AcpExtensionDispatcher::builder()
+                            .kernel(kernel)
+                            .connection(connection)
+                            .mcp_watchers(mcp_watchers)
+                            .projections(projections)
+                            .session_watchers(session_watchers)
+                            .build()
                         .execute(request)
                         .await?;
                         responder.respond(response)
                     })).await
+                    }
                 },
                 agent_client_protocol::on_receive_request!(),
-            )
-    }
-}
-
-pub(crate) struct AcpEventSink {
-    session_id: SessionId,
-    connection: ConnectionTo<Client>,
-    disconnected: AtomicBool,
-}
-
-impl AcpEventSink {
-    /// Binds one ACP connection sink to the session receiving notifications.
-    pub(crate) fn new(
-        session_id: SessionId,
-        connection: ConnectionTo<Client>,
-    ) -> Self {
-        Self {
-            session_id,
-            connection,
-            disconnected: AtomicBool::new(false),
-        }
-    }
-}
-
-#[async_trait]
-impl EventSink for AcpEventSink {
-    /// Converts and forwards every kernel event as ordered ACP v2 session updates.
-    async fn emit(&self, event: AgentEvent) -> Result<(), SinkError> {
-        if self.disconnected.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let metadata = AcpEventMapper::metadata(&event)
-            .map_err(|error| SinkError::Consumer(error.to_string()))?;
-        let updates = AcpEventMapper::map(event)
-            .map_err(|error| SinkError::Consumer(error.to_string()))?;
-        for update in updates {
-            if let Err(error) = self.connection.send_notification(
-                wire::UpdateSessionNotification::new(
-                    self.session_id.to_string(),
-                    update,
-                )
-                .meta(metadata.clone()),
-            ) {
-                // Persistence remains authoritative while the old connection
-                // is gone; suppress subsequent sends until replay attaches.
-                if !self.disconnected.swap(true, Ordering::AcqRel) {
-                    tracing::warn!(
-                        "stopped live ACP projection for session {} after connection error: {}",
-                        self.session_id,
-                        error
-                    );
-                }
-                return Ok(());
-            }
-        }
-        Ok(())
-    }
-}
-
-impl From<AcpMappingError> for SinkError {
-    /// Preserves mapping diagnostics at the kernel event-sink boundary.
-    fn from(error: AcpMappingError) -> Self {
-        Self::Consumer(error.to_string())
+            ),
+            self.runtime.max_batch_size,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::input::PromptInput;
+    use crate::projection::EventGroup;
+    use crate::recovery::OperationPhase;
     use agent_client_protocol::schema::v2 as wire;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use protocol::{ContentBlock, RunInput};
+    use protocol::{ContentBlock, RunId, RunInput, Sequence};
+
+    use super::ProjectionWatch;
+
+    /// A live-only watcher adopts the first recoverable Run cursor it sends.
+    #[test]
+    fn live_only_watch_tracks_cursor_for_lag_recovery() {
+        let (_sender, receiver) = tokio::sync::broadcast::channel(8);
+        let mut watch = ProjectionWatch::builder()
+            .backlog(Vec::new())
+            .receiver(receiver)
+            .build();
+        let group = Arc::new(
+            EventGroup::builder()
+                .run_id(RunId::try_from("run-live").expect("Run id"))
+                .sequence(Sequence::try_from(7_u64).expect("sequence"))
+                .metadata(wire::Meta::default())
+                .updates(Vec::new())
+                .operation_phase(OperationPhase::Start)
+                .build(),
+        );
+
+        watch.record_sent(&group);
+
+        assert_eq!(watch.run_id.as_ref().map(RunId::as_str), Some("run-live"));
+        assert_eq!(watch.next_sequence.map(Sequence::get), Some(8));
+
+        let ungrouped = EventGroup::builder()
+            .sequence(Sequence::try_from(8_u64).expect("ungrouped sequence"))
+            .metadata(wire::Meta::default())
+            .updates(Vec::new())
+            .build();
+        watch.record_sent(&ungrouped);
+
+        assert_eq!(watch.run_id.as_ref().map(RunId::as_str), Some("run-live"));
+        assert_eq!(watch.next_sequence.map(Sequence::get), Some(8));
+    }
 
     /// Ordered ACP text and image blocks remain lossless at Kernel ingress.
     #[test]
