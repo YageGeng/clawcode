@@ -133,6 +133,41 @@ fn logging_factory_flattens_span_context_to_one_trace_id() {
     assert!(!output.contains("provider_request"));
 }
 
+/// ACP handler diagnostics omit the recursively escaped handler chain.
+#[test]
+fn logging_factory_compacts_acp_handler_chain_diagnostics() {
+    let logs = CapturedLogs::default();
+    let subscriber = LoggingFactory::new("warn", false)
+        .expect("valid filter")
+        .build(logs.clone());
+    let escaped_handler = format!(
+        "NamedHandler({:?}, {:?})",
+        "agent_client_protocol_schema::v2::agent::InitializeRequest",
+        "\\\"\\\\\\\"\\\\\\\\\\\\\\\"(null)"
+    );
+
+    tracing::subscriber::with_default(subscriber, || {
+        // This reproduces the structured event emitted by the external ACP SDK.
+        tracing::warn!(
+            target: "agent_client_protocol::jsonrpc::incoming_actor",
+            method = ?"_clawcode/mcp/status",
+            id = ?Some(10_u64),
+            err = ?"session not found: session-test",
+            handler = ?escaped_handler,
+            "Handler errored"
+        );
+    });
+
+    let output = logs.content();
+    assert!(output.contains("Handler errored"));
+    assert!(output.contains("method=\"_clawcode/mcp/status\""));
+    assert!(output.contains("id=Some(10)"));
+    assert!(output.contains("session not found: session-test"));
+    assert!(output.contains("handler=<omitted>"));
+    assert!(!output.contains("NamedHandler"));
+    assert!(output.len() < 512, "unexpectedly large log: {output}");
+}
+
 /// Process startup uses the TOML filter unless `RUST_LOG` explicitly overrides it.
 #[test]
 fn process_logging_prefers_environment_over_toml_filter() {

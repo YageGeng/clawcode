@@ -18,6 +18,7 @@
 6. 断线期间保留 Session 投影和运行状态；无法确认 Prompt 是否受理时只标记结果未知，不自动重发。
 7. 使用标准 ACP 请求完成空闲连接存活检测，不增加产品 Ping 方法。
 8. 使用 ACP v2 支持的标准 JSON-RPC batch 批量发送连续 Session 更新，减少恢复期间的 WebSocket 帧数、前端解码次数和状态渲染次数。
+9. 对同一文本块下已经排队的连续 Assistant 文本或思考流式 chunk 合并正文，减少 batch 内重复 JSON-RPC、ACP 和恢复元数据 envelope 的字节开销，不引入等待窗口。
 
 ## 3. 非目标
 
@@ -27,6 +28,8 @@
 4. 不自动重发结果未知的 `session/prompt`，避免重复执行 Agent Run。
 5. 不改变 ACP 标准方法名称或 JSON-RPC envelope。
 6. 不保证一个客户端跨过两个及以上完整 Operation 后仍恢复所有非持久化 Tool、Retry 和流式事件；超过最近 Operation 恢复窗口时以持久化 transcript 为权威。
+7. 不合并 ToolCall、ToolCall result、ToolExecution update、MessageEnd、Operation 生命周期事件或任意非文本 chunk，不改变它们的数量、顺序和状态语义。
+8. 不重写 Operation journal，不压缩持久化 transcript，也不以本次传输优化解决 journal 的长期内存占用。
 
 ## 4. 协议方案
 
@@ -181,12 +184,33 @@ User Bash 当前只在完成并持久化后发送一个 `MessageEnd`，没有可
 2. adapter 只合并当前已经排队的连续 `session/update`；不使用定时窗口，不为等待更多消息增加实时延迟。
 3. 遇到请求、响应、其他 notification、已有 batch 或队列暂时为空时，立即发送当前 batch，再按原顺序发送边界消息。
 4. 单条 `session/update` 可以保持单消息 frame；两个及以上连续更新才构造 batch。
-5. batch 不改变 Projection Group 的 `runId`、Kernel sequence、`projectionIndex` 或 `projectionCount`。一个 Projection Group 可以跨 batch 边界，前端仍按分组元数据判断完整性。
+5. 除 4.6 节限定的连续文本 chunk 合并外，batch 不改变 Projection Group 的 `runId`、Kernel sequence、`projectionIndex` 或 `projectionCount`。一个 Projection Group 可以跨 batch 边界，前端仍按分组元数据判断完整性。
 6. stdio、HTTP 和 WebSocket 共用同一个 frame adapter，确保协议测试和生产 transport 行为一致。
 
 前端 `AcpConnection` 同时接受单个 JSON-RPC 对象和非空 JSON-RPC batch 数组。一个 batch 内的 notification 按数组顺序交给 Controller；响应仍按各自 id 解析。Controller 将同一 transport batch 内所有可完整提交的 Projection Group 解码到临时 WorkspaceState，最后只安装一次已经计算完成的 WorkspaceState，不重复执行同一组 reducer，随后统一推进对应 Recovery cursor。若任一通知解码失败，本批涉及的 Session 都标记为只能全量 Resume，当前连接主动关闭并通过统一重连流程执行恢复，不能提交半批状态。
 
 该优化覆盖 `replayFrom: start`、`_clawcode/event` cursor backlog 和恰好在同一调度轮次产生的实时 Projection Group。实时流没有积压时仍立即发送，不为了批量率牺牲首 token 延迟。
+
+### 4.6 连续文本 chunk envelope 合并
+
+frame adapter 在构造 JSON-RPC batch 前，可以把当前已经排队的连续 `AgentMessageChunk` 或连续 `AgentThoughtChunk` 合并为一条同类型 ACP `session/update` notification。该优化只拼接文本正文，目标是消除同一文本块每个小 delta 重复携带的 JSON-RPC、`session/update`、SessionId、MessageId 和 `_meta` envelope；它不是业务状态压缩，也不修改 Operation journal 中保存的原始 EventGroup。
+
+只有同时满足以下条件的相邻 notification 才可以合并：
+
+1. update 类型同为 `agent_message_chunk`，或同为 `agent_thought_chunk`；两种类型之间不能互相合并。
+2. SessionId、RunId、MessageId 和 TurnId 分别相同。
+3. 两条 update 都只携带一个文本 ContentBlock、具有相同 annotations，并具有合法的恢复分组元数据；annotations 不同意味着正文语义边界，不能合并。
+4. 每个来源 Projection Group 都只包含这一条 update，即 `projectionIndex = 0` 且 `projectionCount = 1`，并且没有 `operationPhase`。
+5. 后一条 Kernel sequence 严格大于前一条；允许中间存在没有进入该 Operation journal 的 sequence 空洞。
+6. 合并消耗的原始 notification 数量不超过当前 `[app.recory] max_batch_size`，避免一个合并结果无限增长。
+
+任一条件不满足时，adapter 立即结束当前文本合并段，并按现有顺序处理边界 notification。ToolCall start、ToolCall update、ToolCall end/result、MessageEnd、状态更新、扩展事件、请求、响应和已有 batch 都是不可跨越的边界。adapter 只检查当前已经排队的 notification，不启动 timer、不等待下一条 delta；队列暂时为空时立即发送已经合并的正文，因此没有额外首 token 延迟。
+
+合并后的 notification 继续使用第一条来源事件的 `sequence` 作为 `firstSequence`，并在外层 `_meta.clawcode.sessionRecovery.lastSequence` 中记录最后一条来源事件的 sequence。未携带 `lastSequence` 的普通 Projection Group 等价于 `lastSequence = sequence`。合并结果的 `projectionIndex` 固定为 0、`projectionCount` 固定为 1，并保留第一条来源事件的 RunId；文本内容按来源顺序连接，相同 annotations 保留一份，chunk 级事件 `_meta` 保留区间首事件的数据，恢复终点只由外层 `lastSequence` 表达。用于投影排序和恢复组起点的 sequence 必须保持第一条来源 sequence。
+
+前端把 `[sequence, lastSequence]` 视为一个原子提交区间。只有完整解码并应用该 notification 后，才把 Recovery cursor 推进到 `lastSequence + 1`。如果连接在该 notification 到达前断开，cursor 仍停留在 `sequence`；重连后服务端可以从未压缩的 journal 按原始 EventGroup 重放。实时流和重放流的物理分组允许不同，但拼接后的文本、事件顺序和最终 cursor 必须一致。
+
+由于本优化不修改已经发布或保留的 journal，不引入 journal revision。服务端收到 cursor 后仍按原始 EventGroup sequence 选择 backlog；前端不得产生落在一个已完整提交合并区间内部的 cursor。
 
 ## 5. Session 事件流
 
@@ -283,9 +307,9 @@ Session 空闲时 watcher 保持订阅，下一次 Prompt 创建 Run 后所有�
 
 - 当前可恢复 `runId`；
 - 下一个期望的 Kernel sequence；
-- 当前 sequence 的临时投影组，包括 `projectionCount` 和已经收到的 `projectionIndex`。
+- 当前 sequence 的临时投影组，包括 `lastSequence`、`projectionCount` 和已经收到的 `projectionIndex`。
 
-收到带合法 sessionRecovery 分组元数据且 `operationPhase` 为 `start` 的完整 Operation 起始组后建立 Run cursor。之后只有 RunId 一致且 sequence 单调前进的完整投影组才可以按 `projectionIndex` 顺序一次应用，并把 `nextSequence` 推进到已提交 sequence 加一。同一个 Kernel 事件映射出的多条 ACP 更新共享 sequence；组未收齐时不得修改正式 Session 投影。WebSocket 和 watcher 都按序发送，广播 lag 也先从 journal 补偿，因此观察到更大 sequence 表示中间序号属于直接 ACP 更新或没有 mapper 输出，可以安全前进；sequence 回退、RunId 变化但缺少合法起始组、重复 index、越界 index、互相矛盾的 count 或非法 phase 则丢弃当前临时组，记录诊断并把当前 Session 标记为只能全量 Resume。
+收到带合法 sessionRecovery 分组元数据且 `operationPhase` 为 `start` 的完整 Operation 起始组后建立 Run cursor。之后只有 RunId 一致且 sequence 单调前进、`lastSequence >= sequence` 的完整投影组才可以按 `projectionIndex` 顺序一次应用，并把 `nextSequence` 推进到已提交 `lastSequence` 加一；缺少 `lastSequence` 时使用当前 sequence。同一个 Kernel 事件映射出的多条 ACP 更新共享 sequence；组未收齐时不得修改正式 Session 投影。WebSocket 和 watcher 都按序发送，广播 lag 也先从 journal 补偿，因此观察到更大 sequence 表示中间序号属于已经合并提交的文本 chunk、直接 ACP 更新或没有 mapper 输出，可以安全前进；sequence 回退、`lastSequence` 回退、RunId 变化但缺少合法起始组、重复 index、越界 index、互相矛盾的 count 或非法 phase 则丢弃当前临时组，记录诊断并把当前 Session 标记为只能全量 Resume。
 
 收到带 `operationPhase: "end"` 的完整组后先应用终态，再清除活跃 Run cursor。Session 的通用 transcript 排序继续使用现有 `receivedOrder`，恢复 cursor 不替代 UI 排序模型。
 
@@ -346,6 +370,8 @@ Rust 修改遵循 TDD，测试代码只放在 crate 级 `tests/` 或标准 `#[cf
 
 ACP adapter 增加 frame batching 单元测试，覆盖单消息透传、2 到配置上限条 notification 合并、超过配置上限一条时分片、非 Session 消息刷新边界和消息顺序，并验证 `max_batch_size = 1` 的合法边界。前端通过静态检查和真实 WebUI 验收确认单对象与 batch 数组都能解码，并且一个恢复 batch 只触发一次 Workspace 状态提交。
 
+连续文本 chunk 合并测试必须覆盖：同一 Agent message chunk 正文按序拼接、同一 Agent thought chunk 正文按序拼接、不同 MessageId、chunk 类型或 annotations 不合并、ToolCall 和其他 update 刷新合并边界、非文本 ContentBlock 不合并、来源组不是单 update 时不合并、合并数量受 `max_batch_size` 限制，以及合并结果携带首 sequence 和正确 `lastSequence`。前端验收必须确认提交合并通知后 cursor 使用 `lastSequence + 1`，而未携带 `lastSequence` 的现有通知仍使用 `sequence + 1`。
+
 WebUI E2E 使用生产 `app` 后端和当前配置 Provider，不使用 fixture backend：
 
 1. 发起一个持续时间足以断线的真实 Agent Run。
@@ -356,6 +382,7 @@ WebUI E2E 使用生产 `app` 后端和当前配置 Provider，不使用 fixture 
 6. 在 Prompt 响应结果未知的窗口断线，确认前端不重复发送 Prompt。
 7. 以本项目目录创建真实 Session，让当前 Provider 执行代码审查；Run 期间断开并恢复浏览器网络，确认 Run 未取消、Running 未错误清零、断线 backlog 通过 JSON-RPC batch 补齐，最终 Assistant 内容和 Idle 各出现一次。
 8. 检查恢复流中的 WebSocket frame，确认包含多个标准 `session/update` 成员的 JSON-RPC batch，且单个 batch 不超过当前 `[app.recory] max_batch_size` 配置值。
+9. 检查同一 Assistant 文本块产生积压时，至少一个发送 notification 拼接了多个来源 delta，ToolCall 和终态消息仍保持独立顺序；断线重连后最终文本无重复、无缺失，恢复 cursor 位于合并区间末尾之后。
 
 ## 10. 实施边界
 

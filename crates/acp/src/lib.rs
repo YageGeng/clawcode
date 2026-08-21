@@ -1,6 +1,7 @@
 //! ACP v2 adaptation and stdio, HTTP/SSE, and WebSocket transports.
 
 mod batching;
+mod coalescing;
 mod content;
 mod extension;
 mod input;
