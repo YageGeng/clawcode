@@ -14,6 +14,7 @@ export type RecoveryBatch = Readonly<{
   cursor?: Readonly<{
     runId: RunId;
     sequence: EventSequence;
+    lastSequence: EventSequence;
     operationPhase?: ProjectionGroupMeta["operationPhase"];
   }>;
 }>;
@@ -21,6 +22,7 @@ export type RecoveryBatch = Readonly<{
 type PendingGroup = {
   runId: RunId;
   sequence: EventSequence;
+  lastSequence: EventSequence;
   count: number;
   operationPhase?: ProjectionGroupMeta["operationPhase"];
   notifications: Map<number, SessionUpdateNotification>;
@@ -50,6 +52,11 @@ export class SessionRecoveryBuffer {
       throw new Error("Recoverable ACP notification is missing a valid event sequence");
     }
     const sequence = event.sequence as EventSequence;
+    const lastSequence = group.lastSequence ?? sequence;
+    if (!AcpProtocol.validSequence(lastSequence) || lastSequence < sequence) {
+      this.requireFullReplay(notification.sessionId);
+      throw new Error("ACP projection sequence range is invalid");
+    }
     const cursor = this.committed.get(notification.sessionId);
     if (this.fullOnly.has(notification.sessionId) && group.operationPhase !== "start") {
       return undefined;
@@ -68,6 +75,7 @@ export class SessionRecoveryBuffer {
       pending = {
         runId: group.runId,
         sequence,
+        lastSequence,
         count: group.projectionCount,
         ...(group.operationPhase === undefined ? {} : { operationPhase: group.operationPhase }),
         notifications: new Map()
@@ -76,6 +84,7 @@ export class SessionRecoveryBuffer {
     } else if (
       pending.runId !== group.runId
       || pending.sequence !== sequence
+      || pending.lastSequence !== lastSequence
       || pending.count !== group.projectionCount
       || pending.operationPhase !== group.operationPhase
     ) {
@@ -98,6 +107,7 @@ export class SessionRecoveryBuffer {
       cursor: {
         runId: pending.runId,
         sequence: pending.sequence,
+        lastSequence: pending.lastSequence,
         ...(pending.operationPhase === undefined ? {} : { operationPhase: pending.operationPhase })
       }
     };
@@ -114,7 +124,9 @@ export class SessionRecoveryBuffer {
     this.committed.set(batch.sessionId, {
       sessionId: batch.sessionId,
       runId: batch.cursor.runId,
-      nextSequence: (batch.cursor.sequence + 1) as EventSequence
+      // A coalesced notification atomically covers every source sequence
+      // through lastSequence, while ordinary groups default it to sequence.
+      nextSequence: (batch.cursor.lastSequence + 1) as EventSequence
     });
     this.fullOnly.delete(batch.sessionId);
   }

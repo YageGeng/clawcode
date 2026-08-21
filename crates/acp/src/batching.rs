@@ -8,6 +8,8 @@ use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 
+use crate::coalescing::coalesce_updates;
+
 /// ACP component wrapper that batches queued outbound Session notifications.
 pub(crate) struct BatchComponent<C> {
     inner: C,
@@ -81,6 +83,9 @@ async fn forward_outbound(
                 None => break,
             }
         }
+        // Coalesce only the messages already drained for this frame so the
+        // optimization cannot add a timer or delay the first streaming token.
+        let mut messages = coalesce_updates(messages);
         let frame = if messages.len() == 1 {
             TransportFrame::Single(
                 messages.pop().expect("one queued Session update"),
@@ -180,6 +185,82 @@ mod tests {
         )
     }
 
+    /// Builds one recoverable Agent message chunk for relay integration tests.
+    fn stream_chunk(sequence: u64, text: &str) -> TransportFrame {
+        TransportFrame::Single(
+            RawJsonRpcMessage::notification(
+                "session/update".to_string(),
+                serde_json::json!({
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": "message-1",
+                        "content": { "type": "text", "text": text }
+                    },
+                    "_meta": {
+                        "clawcode": {
+                            "turnId": "turn-1",
+                            "timestampMs": sequence.to_string(),
+                            "sequence": sequence,
+                            "sessionRecovery": {
+                                "runId": "run-1",
+                                "projectionIndex": 0,
+                                "projectionCount": 1
+                            }
+                        }
+                    }
+                }),
+            )
+            .expect("valid stream notification"),
+        )
+    }
+
+    /// Builds one ToolCall update that must remain between streaming segments.
+    fn tool_call_update() -> TransportFrame {
+        TransportFrame::Single(
+            RawJsonRpcMessage::notification(
+                "session/update".to_string(),
+                serde_json::json!({
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-1",
+                        "status": "in_progress"
+                    }
+                }),
+            )
+            .expect("valid ToolCall notification"),
+        )
+    }
+
+    /// Reads text and an optional merged sequence endpoint from one stream frame.
+    fn stream_chunk_data(frame: &TransportFrame) -> (&str, Option<u64>) {
+        let TransportFrame::Single(RawJsonRpcMessage::Notification(
+            notification,
+        )) = frame
+        else {
+            panic!("expected one stream notification");
+        };
+        let Some(agent_client_protocol::RawJsonRpcParams::Object(params)) =
+            notification.params.as_ref()
+        else {
+            panic!("expected named stream params");
+        };
+        let text = params
+            .get("update")
+            .and_then(|update| update.get("content"))
+            .and_then(|content| content.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .expect("stream text");
+        let last_sequence = params
+            .get("_meta")
+            .and_then(|meta| meta.get("clawcode"))
+            .and_then(|product| product.get("sessionRecovery"))
+            .and_then(|recovery| recovery.get("lastSequence"))
+            .and_then(serde_json::Value::as_u64);
+        (text, last_sequence)
+    }
+
     /// Runs the outbound relay with an explicit configured batch limit.
     async fn relay(
         frames: Vec<TransportFrame>,
@@ -220,6 +301,89 @@ mod tests {
             panic!("three queued updates must produce one batch");
         };
         assert_eq!(batch.len(), 3);
+    }
+
+    /// Queued chunks for one text block share one Session notification envelope.
+    #[tokio::test]
+    async fn forward_outbound_coalesces_queued_text_chunks() {
+        let frames =
+            relay(vec![stream_chunk(41, "Hel"), stream_chunk(42, "lo")], 8)
+                .await;
+
+        assert_eq!(frames.len(), 1);
+        let TransportFrame::Single(RawJsonRpcMessage::Notification(
+            notification,
+        )) = &frames[0]
+        else {
+            panic!("coalesced chunks must produce one notification");
+        };
+        let text = notification
+            .params
+            .as_ref()
+            .and_then(|params| match params {
+                agent_client_protocol::RawJsonRpcParams::Object(params) => {
+                    params.get("update")
+                }
+                agent_client_protocol::RawJsonRpcParams::Array(_) => None,
+            })
+            .and_then(|update| update.get("content"))
+            .and_then(|content| content.get("text"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(text, Some("Hello"));
+    }
+
+    /// Coalescing never consumes more source chunks than one configured drain.
+    #[tokio::test]
+    async fn forward_outbound_limits_coalescing_to_batch_size() {
+        let frames = relay(
+            vec![
+                stream_chunk(51, "Hel"),
+                stream_chunk(52, "lo"),
+                stream_chunk(53, "!"),
+            ],
+            2,
+        )
+        .await;
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(stream_chunk_data(&frames[0]), ("Hello", Some(52)));
+        assert_eq!(stream_chunk_data(&frames[1]), ("!", None));
+    }
+
+    /// ToolCall updates stay ordered between two unmerged streaming notifications.
+    #[tokio::test]
+    async fn forward_outbound_keeps_tool_call_boundary() {
+        let frames = relay(
+            vec![
+                stream_chunk(61, "before"),
+                tool_call_update(),
+                stream_chunk(62, "after"),
+            ],
+            8,
+        )
+        .await;
+
+        assert_eq!(frames.len(), 1);
+        let TransportFrame::Batch(batch) = &frames[0] else {
+            panic!("three boundary updates must remain one ordered batch");
+        };
+        assert_eq!(batch.len(), 3);
+        let middle = batch.entries().nth(1).expect("middle batch entry");
+        assert!(matches!(
+            middle,
+            agent_client_protocol::TransportBatchEntry::Message(
+                RawJsonRpcMessage::Notification(notification)
+            ) if notification.params.as_ref().is_some_and(|params| {
+                matches!(
+                    params,
+                    agent_client_protocol::RawJsonRpcParams::Object(params)
+                        if params.get("update")
+                            .and_then(|update| update.get("sessionUpdate"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("tool_call_update")
+                )
+            })
+        ));
     }
 
     /// One transport batch never exceeds the configured bounded size.

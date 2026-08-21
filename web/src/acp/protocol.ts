@@ -65,6 +65,7 @@ export type ProjectionGroupMeta = Readonly<{
   runId: RunId;
   projectionIndex: number;
   projectionCount: number;
+  lastSequence?: EventSequence;
   operationPhase?: "start" | "end";
 }>;
 
@@ -206,6 +207,7 @@ export const AcpProtocol = {
       || (group.projectionIndex as number) < 0
       || (group.projectionCount as number) <= 0
       || (group.projectionIndex as number) >= (group.projectionCount as number)
+      || (group.lastSequence !== undefined && !this.validSequence(group.lastSequence))
       || (group.operationPhase !== undefined && group.operationPhase !== "start" && group.operationPhase !== "end")
     ) {
       throw new Error("ACP projection group metadata is invalid");
@@ -214,6 +216,9 @@ export const AcpProtocol = {
       runId: group.runId as RunId,
       projectionIndex: group.projectionIndex as number,
       projectionCount: group.projectionCount as number,
+      ...(this.validSequence(group.lastSequence)
+        ? { lastSequence: group.lastSequence as EventSequence }
+        : {}),
       ...(group.operationPhase === "start" || group.operationPhase === "end"
         ? { operationPhase: group.operationPhase }
         : {})
