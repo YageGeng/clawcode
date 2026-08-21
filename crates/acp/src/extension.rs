@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v2 as wire;
@@ -15,10 +15,11 @@ use protocol::{
     McpSessionRevisionNotification, ProductIdentity, QueueKind, SessionTitle,
 };
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::input::PromptInput;
-use crate::server::AcpEventSink;
-use crate::server::AcpServer;
+use crate::projection::ProjectionRegistry;
+use crate::server::{AcpServer, ProjectionWatch};
 
 /// Parameters for adding one multimodal follow-up to the active run.
 #[derive(Debug, Deserialize)]
@@ -151,10 +152,14 @@ impl JsonRpcResponse for AcpExtensionResponse {
 }
 
 /// Type-driven dispatcher for every advertised non-standard ACP method.
+#[derive(typed_builder::TypedBuilder)]
 pub(crate) struct AcpExtensionDispatcher {
     pub kernel: Arc<Kernel>,
     pub connection: ConnectionTo<Client>,
     pub mcp_watchers: Arc<Mutex<BTreeSet<protocol::SessionId>>>,
+    pub projections: Arc<ProjectionRegistry>,
+    pub session_watchers:
+        Arc<Mutex<BTreeMap<protocol::SessionId, Arc<CancellationToken>>>>,
 }
 
 impl AcpExtensionDispatcher {
@@ -254,12 +259,28 @@ impl AcpExtensionDispatcher {
                             agent_client_protocol::Error::into_internal_error,
                         )?,
                 };
-                AcpServer::new(Arc::clone(&self.kernel))
-                    .send_available_commands(&fork_id, &self.connection)?;
-                AcpServer::new(Arc::clone(&self.kernel)).watch_mcp(
+                let receiver =
+                    self.projections.subscribe_live(&fork_id).map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?;
+                let server = AcpServer::new(
+                    Arc::clone(&self.kernel),
+                    Arc::clone(&self.projections),
+                );
+                server.send_available_commands(&fork_id, &self.connection)?;
+                server.watch_mcp(
                     &fork_id,
                     &self.connection,
                     Arc::clone(&self.mcp_watchers),
+                )?;
+                server.watch_projection(
+                    &fork_id,
+                    &self.connection,
+                    Arc::clone(&self.session_watchers),
+                    ProjectionWatch::builder()
+                        .backlog(Vec::new())
+                        .receiver(receiver)
+                        .build(),
                 )?;
                 serde_json::json!({ "sessionId": fork_id.to_string() })
             }
@@ -272,10 +293,7 @@ impl AcpExtensionDispatcher {
                     .kernel
                     .compact_session(
                         &session_id,
-                        Arc::new(AcpEventSink::new(
-                            session_id.clone(),
-                            self.connection.clone(),
-                        )),
+                        self.projections.sink(session_id.clone()),
                     )
                     .await
                     .map_err(
@@ -503,10 +521,7 @@ impl AcpExtensionDispatcher {
                     self.kernel
                         .execute_user_bash(
                             input,
-                            Arc::new(AcpEventSink::new(
-                                session_id,
-                                self.connection.clone(),
-                            )),
+                            self.projections.sink(session_id),
                         )
                         .await
                         .map_err(

@@ -232,6 +232,47 @@ impl Kernel {
         })
     }
 
+    /// Validates a live Session attachment without waiting for its operation gate.
+    pub fn validate_session_attachment(
+        &self,
+        session_id: &SessionId,
+        cwd: &std::path::Path,
+    ) -> Result<protocol::SessionRuntimeSnapshot, KernelError> {
+        let session = self.session(session_id).map_err(|error| {
+            tracing::warn!(
+                "failed to validate attachment for Session {}: {}",
+                session_id,
+                error
+            );
+            error
+        })?;
+        if session.cwd.as_path() != cwd {
+            let error = KernelError::SessionCwdMismatch {
+                session_id: session_id.clone(),
+                expected: session.cwd.clone(),
+                received: cwd.to_path_buf(),
+            };
+            tracing::warn!(
+                "failed to validate attachment for Session {}: {}",
+                session_id,
+                error
+            );
+            return Err(error);
+        }
+        let running = session.execution.active_run().map_err(|error| {
+            tracing::warn!(
+                "failed to read active Run while validating attachment for Session {}: {}",
+                session_id,
+                error
+            );
+            error
+        })?;
+        Ok(protocol::SessionRuntimeSnapshot {
+            session_id: session_id.clone(),
+            running: running.is_some(),
+        })
+    }
+
     /// Opens one persisted session or reuses the matching live runtime idempotently.
     pub async fn resume_session(
         &self,

@@ -888,6 +888,103 @@ fn filesystem_skill_factory(global_root: PathBuf) -> FilesystemSkillFactory {
         .build()
 }
 
+/// Attachment validation observes an active Run without waiting for its operation gate.
+#[tokio::test]
+async fn validate_session_attachment_does_not_wait_for_active_run() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let entered = Arc::new(Notify::new());
+    let model: Arc<dyn Model> = Arc::new(PendingModel {
+        entered: Arc::clone(&entered),
+    });
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(3_000)));
+    let ids: Arc<dyn IdGenerator> = Arc::new(SequentialIds(AtomicU64::new(0)));
+    let kernel =
+        build_kernel(root.path().to_path_buf(), model, clock, ids, None);
+    let session_id =
+        SessionId::try_from("session-attachment").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let running_kernel = Arc::clone(&kernel);
+    let running_session_id = session_id.clone();
+    let run = tokio::spawn(async move {
+        running_kernel
+            .run(
+                RunRequest {
+                    session_id: running_session_id,
+                    input: "hold attachment gate".into(),
+                },
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+    });
+    entered.notified().await;
+
+    let snapshot = tokio::time::timeout(Duration::from_millis(100), async {
+        kernel.validate_session_attachment(&session_id, &cwd)
+    })
+    .await
+    .expect("attachment validation must not wait for the active operation")
+    .expect("validate active Session attachment");
+    assert!(snapshot.running);
+
+    kernel
+        .cancel_session(&session_id)
+        .expect("cancel active Run");
+    run.await
+        .expect("join active Run")
+        .expect("settle active Run");
+}
+
+/// Attachment validation rejects a client that names a different working directory.
+#[tokio::test]
+async fn validate_session_attachment_rejects_cwd_mismatch() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    let other_cwd = root.path().join("other-workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    fs::create_dir_all(&other_cwd).expect("create alternate cwd");
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(3_500)));
+    let ids: Arc<dyn IdGenerator> = Arc::new(SequentialIds(AtomicU64::new(0)));
+    let kernel =
+        build_kernel(root.path().to_path_buf(), model, clock, ids, None);
+    let session_id =
+        SessionId::try_from("session-attachment-cwd").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+
+    let error = kernel
+        .validate_session_attachment(&session_id, &other_cwd)
+        .expect_err("mismatched cwd must reject attachment");
+    assert!(matches!(
+        error,
+        kernel::KernelError::SessionCwdMismatch {
+            session_id: failed_session_id,
+            expected,
+            received,
+        } if failed_session_id == session_id
+            && expected == cwd
+            && received == other_cwd
+    ));
+}
+
 /// Resume cancellation shuts down its unregistered MCP runtime without deleting Store.
 #[tokio::test]
 async fn resume_cancellation_shuts_down_unregistered_mcp() {
@@ -1116,6 +1213,13 @@ async fn starting_session_rejects_close_until_resources_are_ready() {
     });
     entered.notified().await;
 
+    let attachment_error = kernel
+        .validate_session_attachment(&session_id, root.path())
+        .expect_err("starting Session must reject attachment");
+    assert!(matches!(
+        attachment_error,
+        kernel::KernelError::SessionStarting
+    ));
     let close_result = kernel.close_session(&session_id).await;
     release.notify_waiters();
     let create_result = create.await.expect("join Session creation");
@@ -1170,6 +1274,13 @@ async fn live_resume_rechecks_lifecycle_after_before_switch_hook() {
         .close_session(&session_id)
         .await
         .expect("close live session while Resume hook is paused");
+    let attachment_error = kernel
+        .validate_session_attachment(&session_id, &cwd)
+        .expect_err("closed Session must reject attachment");
+    assert!(matches!(
+        attachment_error,
+        kernel::KernelError::SessionNotFound(id) if id == session_id
+    ));
     release.notify_waiters();
 
     let resume_error = resume

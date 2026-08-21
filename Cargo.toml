@@ -119,7 +119,7 @@ reqwest-middleware = { version = "0.5", default-features = false }
 
 # serde
 figment = { version = "0.10", features = ["toml", "env"] }
-jsonschema = { version = "0.49", default-features = false }
+jsonschema = { version = "0.50", default-features = false }
 quick-xml = "0.41"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

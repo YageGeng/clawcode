@@ -1,5 +1,8 @@
 active_model = "deepseek/deepseek-v4-flash-vision-exp"
 
+[app.recory]
+max_batch_size = 128
+
 [kernel]
 max_turns = { type = "unlimited" }
 # max_turns = { type = "limited", turns = 64 }

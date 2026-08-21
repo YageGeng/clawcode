@@ -1,5 +1,6 @@
 //! Configuration crate: typed TOML configuration and immutable loading.
 
+pub mod app;
 pub mod approval;
 pub mod config;
 pub mod extensions;
@@ -14,6 +15,7 @@ pub mod retry;
 pub mod skills;
 pub mod tools;
 
+pub use app::{AppSectionConfig, RecoryConfig};
 pub use approval::{ApprovalMode, AskForApproval, GranularApprovalConfig};
 pub use config::{
     AppConfig, CompactionConfig, ConfigValidationError,

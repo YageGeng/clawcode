@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -323,8 +324,12 @@ async fn send_request(
     Client
         .v2()
         .connect_with(
-            AcpServerFactory::new(kernel, Arc::new(NanoidIdGenerator))
-                .component(AcpTransportKind::Stdio),
+            AcpServerFactory::new(
+                kernel,
+                Arc::new(NanoidIdGenerator),
+                NonZeroUsize::new(128).expect("positive batch size"),
+            )
+            .component(AcpTransportKind::Stdio),
             async move |connection| {
                 connection
                     .send_request(wire::InitializeRequest::new(
@@ -468,8 +473,12 @@ async fn native_session_delete_is_advertised_and_idempotent() {
     Client
         .v2()
         .connect_with(
-            AcpServerFactory::new(kernel, Arc::new(NanoidIdGenerator))
-                .component(AcpTransportKind::Stdio),
+            AcpServerFactory::new(
+                kernel,
+                Arc::new(NanoidIdGenerator),
+                NonZeroUsize::new(128).expect("positive batch size"),
+            )
+            .component(AcpTransportKind::Stdio),
             async move |connection| {
                 let initialized = connection
                     .send_request(wire::InitializeRequest::new(
@@ -681,9 +690,12 @@ async fn session_activation_publishes_available_commands() {
     )
     .expect("write Prompt Template");
     let kernel = integration_kernel(state.path());
-    let server =
-        AcpServerFactory::new(Arc::clone(&kernel), Arc::new(NanoidIdGenerator))
-            .component(AcpTransportKind::Stdio);
+    let server = AcpServerFactory::new(
+        Arc::clone(&kernel),
+        Arc::new(NanoidIdGenerator),
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
     let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
         async move |notification: wire::UpdateSessionNotification,
@@ -828,9 +840,12 @@ async fn slash_command_messages_round_trip_through_acp_replay() {
     let workspace = tempfile::tempdir().expect("workspace directory");
     let state = tempfile::tempdir().expect("store directory");
     let kernel = integration_kernel(state.path());
-    let server =
-        AcpServerFactory::new(Arc::clone(&kernel), Arc::new(NanoidIdGenerator))
-            .component(AcpTransportKind::Stdio);
+    let server = AcpServerFactory::new(
+        Arc::clone(&kernel),
+        Arc::new(NanoidIdGenerator),
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
     let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
         async move |notification: wire::UpdateSessionNotification,
@@ -1110,8 +1125,12 @@ async fn compaction_card_replays_in_persisted_branch_order() {
     drop(store);
 
     let kernel = integration_kernel(state.path());
-    let server = AcpServerFactory::new(kernel, Arc::new(NanoidIdGenerator))
-        .component(AcpTransportKind::Stdio);
+    let server = AcpServerFactory::new(
+        kernel,
+        Arc::new(NanoidIdGenerator),
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
     let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client.v2().on_receive_notification(
         async move |notification: wire::UpdateSessionNotification,

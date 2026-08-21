@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use agent_client_protocol::{ConnectTo, Stdio};
@@ -54,6 +55,7 @@ impl AcpServerFactory {
     pub fn http_router(
         kernel: Arc<Kernel>,
         id_generator: Arc<dyn IdGenerator>,
+        max_batch_size: NonZeroUsize,
         options: HttpTransportOptions,
     ) -> Result<Router, AcpTransportError> {
         let cors = if options.allowed_origins.is_empty() {
@@ -68,12 +70,17 @@ impl AcpServerFactory {
             cors,
             health_endpoint: options.health_endpoint,
         };
+
+        // Every HTTP/SSE or WebSocket connection inherits the immutable
+        // application batch limit captured at router construction time.
+        let factory = Arc::new(AcpServerFactory::new(
+            kernel,
+            id_generator,
+            max_batch_size,
+        ));
+
         Ok(AcpHttpServer::new(move || {
-            AcpServerFactory::new(
-                Arc::clone(&kernel),
-                Arc::clone(&id_generator),
-            )
-            .component(AcpTransportKind::Http)
+            factory.component(AcpTransportKind::Http)
         })
         .with_options(server_options)
         .into_router())

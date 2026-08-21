@@ -1,6 +1,8 @@
 export type Brand<T, Name extends string> = T & { readonly __brand: Name };
 
 export type SessionId = Brand<string, "SessionId">;
+export type RunId = Brand<string, "RunId">;
+export type EventSequence = Brand<number, "EventSequence">;
 export type TurnId = Brand<string, "TurnId">;
 export type MessageId = Brand<string, "MessageId">;
 export type ToolCallId = Brand<string, "ToolCallId">;
@@ -38,6 +40,46 @@ export type InitializeResult = Readonly<{
     }> | null;
   }>;
   _meta?: AcpMeta;
+}>;
+
+export type SessionRecoveryCursor = Readonly<{
+  sessionId: SessionId;
+  runId: RunId;
+  nextSequence: EventSequence;
+}>;
+
+export type SessionRecoveryPlan = Readonly<{
+  sessionId: SessionId;
+  mode: "watch" | "resume";
+  runId?: RunId;
+  nextSequence?: EventSequence;
+  running?: boolean;
+}>;
+
+export type InitializeRecovery = Readonly<{
+  version: 1;
+  sessions: readonly SessionRecoveryPlan[];
+}>;
+
+export type ProjectionGroupMeta = Readonly<{
+  runId: RunId;
+  projectionIndex: number;
+  projectionCount: number;
+  operationPhase?: "start" | "end";
+}>;
+
+export type ResumeRecoveryMeta = Readonly<{
+  mode: "watch" | "resume";
+  runId?: RunId;
+  journalTailSequence?: EventSequence;
+  running: boolean;
+}>;
+
+export type CursorUnavailableData = Readonly<{
+  code: "_clawcode/session_recovery_cursor_unavailable";
+  sessionId: SessionId;
+  runId: RunId;
+  sequence: EventSequence;
 }>;
 
 export type SessionInfo = Readonly<{
@@ -119,5 +161,66 @@ export const AcpProtocol = {
       timestampMs: value.timestampMs as TimestampMs,
       sequence: value.sequence
     };
+  },
+  /** Decodes optional initialization recovery plans from one product namespace. */
+  initializeRecovery(meta: unknown, namespace: string): InitializeRecovery | undefined {
+    const product = this.productMeta(meta, namespace);
+    if (product?.sessionRecovery === undefined) return undefined;
+    const recovery = this.decodeRecord(product.sessionRecovery, "ACP session recovery metadata");
+    if (recovery.version !== 1 || !Array.isArray(recovery.sessions)) {
+      throw new Error("ACP session recovery metadata has an unsupported version or sessions value");
+    }
+    const sessions = recovery.sessions.map((value, index) => {
+      const plan = this.decodeRecord(value, `ACP recovery plan ${index}`);
+      if (
+        typeof plan.sessionId !== "string"
+        || (plan.mode !== "watch" && plan.mode !== "resume")
+        || (plan.runId !== undefined && typeof plan.runId !== "string")
+        || (plan.nextSequence !== undefined && !this.validSequence(plan.nextSequence))
+        || (plan.running !== undefined && typeof plan.running !== "boolean")
+      ) {
+        throw new Error(`ACP recovery plan ${index} is invalid`);
+      }
+      if (plan.mode === "watch" && (typeof plan.runId !== "string" || !this.validSequence(plan.nextSequence))) {
+        throw new Error(`ACP watch recovery plan ${index} is missing its cursor`);
+      }
+      return {
+        sessionId: plan.sessionId as SessionId,
+        mode: plan.mode,
+        ...(typeof plan.runId === "string" ? { runId: plan.runId as RunId } : {}),
+        ...(this.validSequence(plan.nextSequence) ? { nextSequence: plan.nextSequence as EventSequence } : {}),
+        ...(typeof plan.running === "boolean" ? { running: plan.running } : {})
+      } satisfies SessionRecoveryPlan;
+    });
+    return { version: 1, sessions };
+  },
+  /** Decodes optional atomic projection metadata from one Session notification. */
+  projectionGroupMeta(meta: unknown, namespace: string): ProjectionGroupMeta | undefined {
+    const product = this.productMeta(meta, namespace);
+    if (product?.sessionRecovery === undefined) return undefined;
+    const group = this.decodeRecord(product.sessionRecovery, "ACP projection group metadata");
+    if (
+      typeof group.runId !== "string"
+      || !Number.isSafeInteger(group.projectionIndex)
+      || !Number.isSafeInteger(group.projectionCount)
+      || (group.projectionIndex as number) < 0
+      || (group.projectionCount as number) <= 0
+      || (group.projectionIndex as number) >= (group.projectionCount as number)
+      || (group.operationPhase !== undefined && group.operationPhase !== "start" && group.operationPhase !== "end")
+    ) {
+      throw new Error("ACP projection group metadata is invalid");
+    }
+    return {
+      runId: group.runId as RunId,
+      projectionIndex: group.projectionIndex as number,
+      projectionCount: group.projectionCount as number,
+      ...(group.operationPhase === "start" || group.operationPhase === "end"
+        ? { operationPhase: group.operationPhase }
+        : {})
+    };
+  },
+  /** Returns whether a JSON value is a positive ACP event sequence. */
+  validSequence(value: unknown): value is number {
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
   }
 } as const;

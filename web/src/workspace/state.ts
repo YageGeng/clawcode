@@ -26,13 +26,13 @@ export type WorkspaceState = Readonly<{
 }>;
 
 export type WorkspaceAction =
+  | { readonly type: "workspace/committed"; readonly state: WorkspaceState }
   | { readonly type: "connection/changed"; readonly connection: ConnectionState }
   | { readonly type: "session/listed"; readonly sessions: readonly SessionSummary[] }
   | { readonly type: "session/activated"; readonly sessionId: SessionId }
   | { readonly type: "session/deactivated" }
   | { readonly type: "session/title"; readonly sessionId: SessionId; readonly title: string }
   | { readonly type: "session/updated"; readonly sessionId: SessionId; readonly action: SessionWorkspaceAction }
-  | { readonly type: "sessions/invalidated" }
   | { readonly type: "draft/activated"; readonly sessionId: SessionId; readonly draft: PromptInput }
   | { readonly type: "draft/changed"; readonly sessionId: SessionId; readonly draft: PromptInput }
   | { readonly type: "draft/cleared"; readonly sessionId: SessionId }
@@ -63,6 +63,9 @@ export function reduceWorkspace(
   action: WorkspaceAction
 ): WorkspaceState {
   switch (action.type) {
+    // SessionUpdateRouter has already reduced an entire transport frame against
+    // one local projection, so install that result without replaying its actions.
+    case "workspace/committed": return action.state;
     case "connection/changed": return { ...state, connection: action.connection };
     case "session/listed": {
       const sessionIds = new Set(action.sessions.map((session) => session.sessionId));
@@ -106,15 +109,6 @@ export function reduceWorkspace(
       if (next.running) runningSessionIds.add(action.sessionId);
       else runningSessionIds.delete(action.sessionId);
       return { ...state, sessionWorkspaces, runningSessionIds };
-    }
-    case "sessions/invalidated": {
-      const sessionWorkspaces = new Map(
-        [...state.sessionWorkspaces].map(([sessionId, workspace]) => [
-          sessionId,
-          reduceSessionWorkspace(workspace, { type: "session/invalidated" })
-        ])
-      );
-      return { ...state, sessionWorkspaces, runningSessionIds: new Set() };
     }
     case "draft/activated": {
       const drafts = new Map(state.drafts);
