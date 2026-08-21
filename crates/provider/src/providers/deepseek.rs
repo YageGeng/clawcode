@@ -14,7 +14,7 @@
 
 use bytes::Bytes;
 use http::Request;
-use tracing::{Instrument, Level};
+use tracing::Instrument;
 
 use crate::client::{
     self, BearerAuth, Capabilities, Capable, DebugExt, ModelLister, Provider,
@@ -22,7 +22,7 @@ use crate::client::{
 };
 use crate::completion::{GetFinishReason, GetTokenUsage, ProviderFinishReason};
 use crate::http_client::{self, HttpClientExt};
-use crate::message::{Document, DocumentSourceKind, TryIntoMany};
+use crate::message::{Document, DocumentSourceKind, MimeType, TryIntoMany};
 use crate::model::{Model, ModelList, ModelListingError};
 use crate::providers::internal::openai_chat_completions_compatible::{
     self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason,
@@ -230,6 +230,129 @@ pub struct Choice {
     pub finish_reason: String,
 }
 
+/// DeepSeek user-message content, preserving the legacy text form when no image exists.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(untagged)]
+pub enum UserMessageContent {
+    /// Plain text accepted by every DeepSeek chat model.
+    Text(String),
+    /// OpenAI-compatible content blocks required by DeepSeek vision models.
+    Blocks(Vec<UserContent>),
+}
+
+/// OpenAI-compatible user content blocks accepted by DeepSeek vision models.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserContent {
+    /// Plain text placed alongside one or more images.
+    Text { text: String },
+    /// Image passed through an external or inline data URL.
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// URL payload and optional processing detail for one DeepSeek image block.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ImageUrl {
+    /// External HTTP URL or an inline Base64 data URL.
+    pub url: String,
+    /// Optional image-detail preference supported by the compatible API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<message::ImageDetail>,
+}
+
+impl TryFrom<message::UserContent> for UserContent {
+    type Error = message::MessageError;
+
+    /// Converts one provider-neutral block into DeepSeek's vision wire format.
+    fn try_from(value: message::UserContent) -> Result<Self, Self::Error> {
+        match value {
+            message::UserContent::Text(message::Text { text }) => {
+                Ok(Self::Text { text })
+            }
+            message::UserContent::Image(message::Image {
+                data: DocumentSourceKind::Base64(data),
+                media_type,
+                detail,
+                ..
+            }) => {
+                let media_type = media_type.ok_or_else(|| {
+                    tracing::warn!(
+                        "Rejected DeepSeek Base64 image without a media type"
+                    );
+                    message::MessageError::ConversionError(
+                        "DeepSeek Base64 images require a media type".into(),
+                    )
+                })?;
+                if !matches!(
+                    media_type,
+                    message::ImageMediaType::JPEG
+                        | message::ImageMediaType::PNG
+                        | message::ImageMediaType::GIF
+                        | message::ImageMediaType::WEBP
+                ) {
+                    tracing::warn!(
+                        "Rejected unsupported DeepSeek Base64 image format {}",
+                        media_type.to_mime_type()
+                    );
+                    return Err(message::MessageError::ConversionError(
+                        format!(
+                            "DeepSeek does not support Base64 images with media type {}",
+                            media_type.to_mime_type()
+                        ),
+                    ));
+                }
+                Ok(Self::ImageUrl {
+                    image_url: ImageUrl {
+                        url: format!(
+                            "data:{};base64,{}",
+                            media_type.to_mime_type(),
+                            data
+                        ),
+                        detail,
+                    },
+                })
+            }
+            message::UserContent::Image(message::Image {
+                data: DocumentSourceKind::Url(url),
+                detail,
+                ..
+            }) => Ok(Self::ImageUrl {
+                image_url: ImageUrl { url, detail },
+            }),
+            message::UserContent::Image(_) => {
+                tracing::warn!("Rejected unsupported DeepSeek image source");
+                Err(message::MessageError::ConversionError(
+                    "DeepSeek image source is not supported".into(),
+                ))
+            }
+            message::UserContent::Document(Document {
+                data:
+                    DocumentSourceKind::Base64(text)
+                    | DocumentSourceKind::String(text),
+                ..
+            }) => Ok(Self::Text { text }),
+            message::UserContent::Document(_) => {
+                tracing::warn!(
+                    "Rejected unsupported DeepSeek document source in image content blocks"
+                );
+                Err(message::MessageError::ConversionError(
+                    "DeepSeek document source is not supported in image content blocks"
+                        .into(),
+                ))
+            }
+            message::UserContent::ToolResult(_) => {
+                tracing::warn!(
+                    "Rejected DeepSeek tool result during user content block conversion"
+                );
+                Err(message::MessageError::ConversionError(
+                    "DeepSeek tool results must be converted into tool messages"
+                        .into(),
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
@@ -239,7 +362,7 @@ pub enum Message {
         name: Option<String>,
     },
     User {
-        content: String,
+        content: UserMessageContent,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
@@ -328,6 +451,27 @@ impl TryIntoMany<Message> for message::Message {
 
                 messages.extend(tool_results);
 
+                let has_image = content
+                    .iter()
+                    .any(|item| matches!(item, message::UserContent::Image(_)));
+
+                if has_image {
+                    let blocks = content
+                        .into_iter()
+                        .filter(|item| {
+                            !matches!(item, message::UserContent::ToolResult(_))
+                        })
+                        .map(UserContent::try_from)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if !blocks.is_empty() {
+                        messages.push(Message::User {
+                            content: UserMessageContent::Blocks(blocks),
+                            name: None,
+                        });
+                    }
+                    return Ok(messages);
+                }
+
                 let text_content: String = content
                     .into_iter()
                     .filter_map(|content| match content {
@@ -345,7 +489,7 @@ impl TryIntoMany<Message> for message::Message {
 
                 if !text_content.is_empty() {
                     messages.push(Message::User {
-                        content: text_content,
+                        content: UserMessageContent::Text(text_content),
                         name: None,
                     });
                 }
@@ -628,12 +772,11 @@ where
             completion_request,
         ))?;
 
-        if tracing::enabled!(Level::TRACE) {
-            tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
-                "DeepSeek completion request: {}",
-                serde_json::to_string_pretty(&request)?
-            );
-        }
+        tracing::debug!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
+            "Sending DeepSeek completion request for model {} with {} messages",
+            self.model,
+            request.messages.len()
+        );
 
         let (body, prepared_hooks) =
             completion::prepare_json_request(&request, request_hooks).await?;
@@ -651,6 +794,11 @@ where
             let status = response.status();
             let response_body =
                 response.into_body().into_future().await?.to_vec();
+            tracing::debug!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
+                "Received DeepSeek completion response for model {} with status {}",
+                self.model,
+                status
+            );
 
             if status.is_success() {
                 match serde_json::from_slice::<ApiResponse<CompletionResponse>>(
@@ -670,19 +818,22 @@ where
                             "gen_ai.usage.cache_read.input_tokens",
                             response.usage.cached_input_tokens(),
                         );
-                        if tracing::enabled!(Level::TRACE) {
-                            tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
-                                "DeepSeek completion response: {}",
-                                serde_json::to_string_pretty(&response)?
-                            );
-                        }
                         response.try_into()
                     }
                     ApiResponse::Err(err) => {
+                        tracing::warn!(
+                            "DeepSeek completion API returned an error: {}",
+                            err.message
+                        );
                         Err(CompletionError::ProviderError(err.message))
                     }
                 }
             } else {
+                tracing::warn!(
+                    "DeepSeek completion API returned status {} with {} response bytes",
+                    status,
+                    response_body.len()
+                );
                 Err(CompletionError::ProviderError(
                     String::from_utf8_lossy(&response_body).to_string(),
                 ))
@@ -713,12 +864,11 @@ where
 
         request.additional_params = Some(params);
 
-        if tracing::enabled!(Level::TRACE) {
-            tracing::trace!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
-                "DeepSeek streaming completion request: {}",
-                serde_json::to_string_pretty(&request)?
-            );
-        }
+        tracing::debug!(target: protocol::ProductIdentity::TRACING_COMPLETIONS_TARGET,
+            "Sending DeepSeek streaming completion request for model {} with {} messages",
+            self.model,
+            request.messages.len()
+        );
 
         let (body, prepared_hooks) =
             completion::prepare_json_request(&request, request_hooks).await?;
@@ -750,11 +900,23 @@ where
             tracing::Span::current()
         };
 
-        tracing::Instrument::instrument(
+        let result = tracing::Instrument::instrument(
             send_compatible_streaming_request(self.client.clone(), req),
             span,
         )
-        .await
+        .await;
+        match &result {
+            Ok(_) => tracing::debug!(
+                "Established DeepSeek streaming completion for model {}",
+                self.model
+            ),
+            Err(error) => tracing::warn!(
+                "Failed to establish DeepSeek streaming completion for model {}: {}",
+                self.model,
+                error
+            ),
+        }
+        result
     }
 }
 
@@ -989,6 +1151,8 @@ where
 // DeepSeek Completion API
 // ================================================================
 pub const DEEPSEEK_V4_FLASH: &str = "deepseek-v4-flash";
+/// Experimental DeepSeek V4 Flash model that accepts vision input.
+pub const DEEPSEEK_V4_FLASH_VISION_EXP: &str = "deepseek-v4-flash-vision-exp";
 pub const DEEPSEEK_V4_PRO: &str = "deepseek-v4-pro";
 
 #[cfg(test)]
@@ -1014,5 +1178,116 @@ mod tests {
         assert_eq!(mapped.output_tokens, 7);
         assert_eq!(mapped.total_tokens, 27);
         assert_eq!(mapped.cached_input_tokens, 15);
+    }
+
+    /// Ensures a Base64 image remains in the DeepSeek user-message payload.
+    #[test]
+    fn user_message_serializes_base64_image_as_content_block() {
+        let input = message::Message::User {
+            content: OneOrMany::many([
+                message::UserContent::text("Describe this image."),
+                message::UserContent::image_base64(
+                    "Q0xBVw==",
+                    Some(message::ImageMediaType::PNG),
+                    Some(message::ImageDetail::High),
+                ),
+            ])
+            .expect("non-empty user content"),
+        };
+
+        let messages: Vec<Message> =
+            input.try_into_many().expect("DeepSeek messages");
+        let payload = serde_json::to_value(&messages[0]).expect("JSON payload");
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,Q0xBVw==",
+                            "detail": "high"
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    /// Ensures an external image URL remains in the DeepSeek user-message payload.
+    #[test]
+    fn user_message_serializes_external_image_url_as_content_block() {
+        let input = message::Message::User {
+            content: OneOrMany::many([
+                message::UserContent::text("Inspect this diagram."),
+                message::UserContent::image_url(
+                    "https://example.com/diagram.webp",
+                    Some(message::ImageMediaType::WEBP),
+                    None,
+                ),
+            ])
+            .expect("non-empty user content"),
+        };
+
+        let messages: Vec<Message> =
+            input.try_into_many().expect("DeepSeek messages");
+        let payload = serde_json::to_value(&messages[0]).expect("JSON payload");
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Inspect this diagram."},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://example.com/diagram.webp"
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    /// Keeps text-only DeepSeek messages in the backward-compatible string form.
+    #[test]
+    fn user_message_preserves_text_only_content_shape() {
+        let input = message::Message::user("Keep this as plain text.");
+
+        let messages: Vec<Message> =
+            input.try_into_many().expect("DeepSeek messages");
+        let payload = serde_json::to_value(&messages[0]).expect("JSON payload");
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "role": "user",
+                "content": "Keep this as plain text."
+            })
+        );
+    }
+
+    /// Rejects image formats that the DeepSeek vision endpoint cannot decode.
+    #[test]
+    fn user_message_rejects_unsupported_base64_image_format() {
+        let input = message::Message::User {
+            content: OneOrMany::one(message::UserContent::image_base64(
+                "Q0xBVw==",
+                Some(message::ImageMediaType::HEIC),
+                None,
+            )),
+        };
+
+        let result: Result<Vec<Message>, message::MessageError> =
+            input.try_into_many();
+
+        assert!(matches!(
+            result,
+            Err(message::MessageError::ConversionError(_))
+        ));
     }
 }
