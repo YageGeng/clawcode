@@ -24,6 +24,22 @@ export type EventOrder = Readonly<{
   receivedOrder: number;
 }>;
 
+export type EventSequenceRange = Readonly<{
+  start: number;
+  end: number;
+}>;
+
+export type RecoveryNotice = Readonly<{
+  recoveryId: string;
+  eventCount: number;
+  sequenceRange: EventSequenceRange;
+}>;
+
+export type RecoveryCommit = Readonly<{
+  notice: RecoveryNotice;
+  order: EventOrder;
+}>;
+
 export const EventOrdering = {
   /** Preserves ACP v2 update application order across replay and live WebSocket delivery. */
   compare(left: EventOrder, right: EventOrder): number {
@@ -92,6 +108,7 @@ export type MessageEntity = Readonly<{
   startedAtMs: TimestampMs;
   endedAtMs: TimestampMs;
   streaming: boolean;
+  sequenceRange?: EventSequenceRange;
   assistant?: AssistantDiagnostics;
   slashCommand?: SlashCommandMessageMeta;
 }>;
@@ -116,6 +133,7 @@ export type ToolCallEntity = Readonly<{
   content: readonly unknown[];
   startedAtMs?: TimestampMs;
   endedAtMs?: TimestampMs;
+  sequenceRange?: EventSequenceRange;
   meta?: EventMeta;
 }>;
 
@@ -363,4 +381,5 @@ export type TranscriptEntry =
   | Readonly<{ type: "tool"; toolCallId: ToolCallId; order: EventOrder }>
   | Readonly<{ type: "bash"; messageId: MessageId; order: EventOrder }>
   | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>
-  | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>;
+  | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>
+  | Readonly<{ type: "recovery"; notice: RecoveryNotice; order: EventOrder }>;

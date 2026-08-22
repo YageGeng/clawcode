@@ -12,10 +12,12 @@
     "build": "tsc -b && vite build"
   },
   "dependencies": {
+    "highlight.js": "11.11.2",
     "lucide-react": "1.31.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
+    "rehype-highlight": "7.0.2",
     "remark-gfm": "4.0.1",
     "zustand": "5.0.15"
   },

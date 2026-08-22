@@ -14,7 +14,10 @@ body,
 body {
   overflow: hidden;
   color: var(--text-primary);
-  background: var(--surface-canvas);
+  background:
+    radial-gradient(circle at 8% 6%, rgb(83 216 207 / 20%), transparent 30%),
+    radial-gradient(circle at 94% 94%, rgb(83 111 241 / 18%), transparent 38%),
+    var(--surface-canvas);
 }
 
 button,
@@ -37,14 +40,24 @@ button:disabled {
   opacity: 0.55;
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent);
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
+  box-shadow: var(--focus-ring);
 }
 
 ::selection {
   color: var(--text-primary);
-  background: #cfe0ff;
+  background: rgb(83 216 207 / 34%);
+}
+
+* {
+  scrollbar-color: rgb(95 112 137 / 34%) transparent;
+  scrollbar-width: thin;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -55,5 +68,13 @@ button:disabled {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  *,
+  *::before,
+  *::after {
+    backdrop-filter: none !important;
   }
 }

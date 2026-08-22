@@ -92,6 +92,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const matchingCommands = commandQuery === undefined ? [] : CommandPaletteModel.matches(availableCommands, commandQuery);
   const paletteOpen = commandQuery !== undefined && !paletteDismissed;
   const activeCommandIndex = matchingCommands.length === 0 ? 0 : selectedCommandIndex % matchingCommands.length;
+  const canSubmit = !submitting && !readingImages && (text.trim().length > 0 || resources.length > 0 || images.length > 0);
 
   const persist = (draft: PromptInput) => {
     sessionStorage.setItem(storageKey, JSON.stringify({ text: draft.text, resources: draft.resources } satisfies StoredDraft));
@@ -181,24 +182,35 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
             setPaletteDismissed(false);
           }}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-              if (!submitting && !readingImages) void submit({ text, resources, images });
-              return;
+            // IME confirmation and command selection take precedence over the
+            // Composer's Enter-to-send shortcut to prevent accidental prompts.
+            if (event.nativeEvent.isComposing) return;
+            if (paletteOpen) {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setPaletteDismissed(true);
+                return;
+              }
+              if (matchingCommands.length > 0 && event.key === "ArrowDown") {
+                event.preventDefault();
+                setSelectedCommandIndex((activeCommandIndex + 1) % matchingCommands.length);
+                return;
+              }
+              if (matchingCommands.length > 0 && event.key === "ArrowUp") {
+                event.preventDefault();
+                setSelectedCommandIndex((activeCommandIndex - 1 + matchingCommands.length) % matchingCommands.length);
+                return;
+              }
+              if (matchingCommands.length > 0 && ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab")) {
+                event.preventDefault();
+                const command = matchingCommands[activeCommandIndex];
+                if (command !== undefined) selectCommand(command);
+                return;
+              }
             }
-            if (!paletteOpen) return;
-            if (event.key === "Escape") {
+            if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              setPaletteDismissed(true);
-            } else if (matchingCommands.length > 0 && event.key === "ArrowDown") {
-              event.preventDefault();
-              setSelectedCommandIndex((activeCommandIndex + 1) % matchingCommands.length);
-            } else if (matchingCommands.length > 0 && event.key === "ArrowUp") {
-              event.preventDefault();
-              setSelectedCommandIndex((activeCommandIndex - 1 + matchingCommands.length) % matchingCommands.length);
-            } else if (matchingCommands.length > 0 && (event.key === "Enter" || event.key === "Tab")) {
-              event.preventDefault();
-              const command = matchingCommands[activeCommandIndex];
-              if (command !== undefined) selectCommand(command);
+              if (canSubmit) void submit({ text, resources, images });
             }
           }}
         />
@@ -259,9 +271,9 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           }} />
           <button className="icon-button" type="button" title={readingImages ? "正在读取图片" : "添加图片"} disabled={readingImages} onClick={() => imageInput.current?.click()}><ImagePlus size={17} /></button>
           <button className="icon-button" type="button" title="添加资源链接" onClick={() => setShowResourceForm((value) => !value)}><Link2 size={17} /></button>
-          <span>{readingImages ? "正在读取图片…" : "Ctrl/⌘ + Enter 发送"}</span>
+          <span>{readingImages ? "正在读取图片…" : "Enter 发送 · Shift+Enter 换行"}</span>
           {running ? <button className="danger-button" type="button" onClick={() => controller.cancel()}><Square size={13} /> 停止</button> : null}
-          <button className="primary-button" type="button" disabled={submitting || readingImages || (text.trim().length === 0 && resources.length === 0 && images.length === 0)} onClick={() => void submit({ text, resources, images })}><Send size={14} /> {running ? "加入队列" : "发送"}</button>
+          <button aria-keyshortcuts="Enter" className="primary-button" type="button" disabled={!canSubmit} onClick={() => void submit({ text, resources, images })}><Send size={14} /> {running ? "加入队列" : "发送"}</button>
         </div>
       </div>
     </div>

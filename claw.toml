@@ -1,7 +1,8 @@
 active_model = "deepseek/deepseek-v4-flash-vision-exp"
 
 [app.recory]
-max_batch_size = 128
+# Caps source Session updates consumed into one outbound ACP frame.
+max_batch_size = 512
 
 [kernel]
 max_turns = { type = "unlimited" }

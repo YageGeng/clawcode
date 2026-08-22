@@ -1,8 +1,7 @@
-import ReactMarkdown from "react-markdown";
 import type { ReactNode } from "react";
-import remarkGfm from "remark-gfm";
 
 import type { MessageEntity, SlashCommandSource } from "../../domain/model";
+import { MarkdownContent } from "./MarkdownContent";
 
 const SOURCE_LABELS: Readonly<Record<SlashCommandSource, string>> = {
   builtin: "Builtin",
@@ -28,7 +27,7 @@ export function CommandMessageCard({ message, actions }: CommandMessageCardProps
         <span className="command-message__kind">{command.messageKind === "output" ? "结果" : command.messageKind === "expansion" ? "展开调用" : "调用"}</span>
         {command.status === undefined ? null : <span className="command-message__status">{command.status === "succeeded" ? "成功" : "失败"}</span>}
       </header>
-      {message.text.length === 0 ? null : <div className="command-message__body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div>}
+      {message.text.length === 0 ? null : <div className="command-message__body"><MarkdownContent text={message.text} /></div>}
       {actions}
       <details className="message__diagnostics">
         <summary>消息详情</summary>

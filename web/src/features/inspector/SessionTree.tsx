@@ -1,5 +1,5 @@
 import { GitBranch, GitFork, LocateFixed, Minimize2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { EntryId } from "../../acp/protocol";
 import type { SessionTree as SessionTreeModel, SessionTreeEntry } from "../../domain/model";
@@ -8,15 +8,17 @@ import type { WorkspaceController } from "../../workspace/controller";
 export type SessionTreeProps = Readonly<{
   tree?: SessionTreeModel;
   cwd?: string;
+  focusEntryId?: EntryId;
   controller: WorkspaceController;
 }>;
 
 type PresentedEntry = Readonly<{ entry: SessionTreeEntry; depth: number }>;
 
-export function SessionTree({ tree, cwd, controller }: SessionTreeProps) {
-  const [selected, setSelected] = useState<EntryId | null>();
+export function SessionTree({ tree, cwd, focusEntryId, controller }: SessionTreeProps) {
+  const [selected, setSelected] = useState<EntryId | null | undefined>(focusEntryId);
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
+  const focusedEntryRef = useRef<HTMLButtonElement>(null);
   const entries = useMemo<readonly PresentedEntry[]>(() => {
     if (tree === undefined) return [];
     const parents = new Map(tree.entries.map((entry) => [entry.entryId, entry.parentId ?? null]));
@@ -32,6 +34,16 @@ export function SessionTree({ tree, cwd, controller }: SessionTreeProps) {
       return { entry, depth };
     });
   }, [tree]);
+
+  useEffect(() => {
+    if (focusEntryId === undefined || tree === undefined) return;
+    // Inspector remounts for each locate request, so one effect can reveal the
+    // exact durable node without fighting later manual Tree selections.
+    focusedEntryRef.current?.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      block: "center"
+    });
+  }, [focusEntryId, tree]);
 
   const operate = async (name: string, operation: () => Promise<unknown>) => {
     setBusy(name);
@@ -59,14 +71,18 @@ export function SessionTree({ tree, cwd, controller }: SessionTreeProps) {
       </div>
       {busy === undefined ? null : <div className="operation-status">{busy} 进行中…</div>}
       {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}
+      {focusEntryId === undefined ? null : <span aria-hidden="true" className="tree-locate-spacer" data-position="before" />}
       <button className="tree-root" data-selected={target === null} type="button" onClick={() => setSelected(null)}>根节点</button>
       <div className="tree-entries">
         {entries.map(({ entry, depth }) => (
           <button
+            aria-pressed={entry.entryId === target}
             className="tree-entry"
             data-active={entry.entryId === tree.leafId}
+            data-located={entry.entryId === focusEntryId}
             data-selected={entry.entryId === target}
             key={entry.entryId}
+            {...(entry.entryId === focusEntryId ? { ref: focusedEntryRef } : {})}
             style={{ paddingLeft: `${10 + Math.min(depth, 8) * 13}px` }}
             type="button"
             onClick={() => setSelected(entry.entryId)}
@@ -78,6 +94,7 @@ export function SessionTree({ tree, cwd, controller }: SessionTreeProps) {
         ))}
       </div>
       {target === null ? null : <details className="tree-preview"><summary>所选节点数据</summary><pre>{JSON.stringify(tree.entries.find((entry) => entry.entryId === target)?.payload ?? {}, null, 2)}</pre></details>}
+      {focusEntryId === undefined ? null : <span aria-hidden="true" className="tree-locate-spacer" />}
     </div>
   );
 }

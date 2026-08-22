@@ -6,18 +6,20 @@ import type {
   CompactionStatus,
   ContextUsage,
   EventOrder,
+  EventSequenceRange,
   ExtensionEntity,
   McpElicitation,
   McpElicitationSnapshot,
   McpSessionSnapshot,
   MessageEntity,
   PendingMessages,
+  RecoveryNotice,
+  RetryStatus,
   SessionEvent,
   SessionTree,
   SkillListResult,
   ToolCallEntity,
-  TranscriptEntry,
-  RetryStatus
+  TranscriptEntry
 } from "../domain/model";
 import { EventOrdering as Ordering } from "../domain/model";
 
@@ -53,6 +55,7 @@ export type SessionWorkspaceAction =
   | { readonly type: "bash/upserted"; readonly bash: BashExecutionEntity; readonly order: EventOrder }
   | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
   | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
+  | { readonly type: "recovery/completed"; readonly notice: RecoveryNotice; readonly order: EventOrder }
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
   | { readonly type: "queue/removed"; readonly queueId: QueueId }
@@ -69,6 +72,9 @@ export type SessionWorkspaceAction =
   | { readonly type: "compaction/changed"; readonly compaction: CompactionStatus }
   | { readonly type: "outcome/unknown"; readonly value: boolean }
   | { readonly type: "diagnostic/added"; readonly message: string };
+
+/** Cap on retained ACP events; the performance blueprint treats these as debug-only. */
+export const MAX_RETAINED_SESSION_EVENTS = 2_000;
 
 export const initialSessionWorkspaceState: SessionWorkspaceState = {
   messages: new Map(),
@@ -93,6 +99,16 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   diagnostics: []
 };
 
+export const EventSequenceRanges = {
+  /** Extends one UI sequence range without replacing the source event order. */
+  include(range: EventSequenceRange | undefined, sequence: number): EventSequenceRange {
+    return {
+      start: Math.min(range?.start ?? sequence, sequence),
+      end: Math.max(range?.end ?? sequence, sequence)
+    };
+  }
+} as const;
+
 /** Applies one update to the isolated projection owned by a single Session. */
 export function reduceSessionWorkspace(
   state: SessionWorkspaceState,
@@ -107,8 +123,12 @@ export function reduceSessionWorkspace(
     };
     case "message/upserted": {
       const messages = new Map(state.messages);
-      const exists = messages.has(action.message.messageId);
-      messages.set(action.message.messageId, action.message);
+      const previous = messages.get(action.message.messageId);
+      const exists = previous !== undefined;
+      messages.set(action.message.messageId, {
+        ...action.message,
+        sequenceRange: EventSequenceRanges.include(previous?.sequenceRange, action.order.sequence)
+      });
       const transcript = exists ? state.transcript : [...state.transcript, { type: "message" as const, messageId: action.message.messageId, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, messages, transcript };
@@ -129,17 +149,22 @@ export function reduceSessionWorkspace(
         endedAtMs: action.meta.timestampMs,
         streaming: true
       };
+      const sequenceRange = EventSequenceRanges.include(base.sequenceRange, action.order.sequence);
       messages.set(action.messageId, action.type === "message/text-delta"
-        ? { ...base, text: base.text + action.delta, endedAtMs: action.meta.timestampMs, streaming: true }
-        : { ...base, reasoning: base.reasoning + action.delta, endedAtMs: action.meta.timestampMs, streaming: true });
+        ? { ...base, text: base.text + action.delta, endedAtMs: action.meta.timestampMs, streaming: true, sequenceRange }
+        : { ...base, reasoning: base.reasoning + action.delta, endedAtMs: action.meta.timestampMs, streaming: true, sequenceRange });
       const transcript = previous === undefined ? [...state.transcript, { type: "message" as const, messageId: action.messageId, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order)) : state.transcript;
       return { ...state, messages, transcript };
     }
     case "tool/upserted": {
       const tools = new Map(state.tools);
-      const exists = tools.has(action.tool.toolCallId);
-      tools.set(action.tool.toolCallId, action.tool);
+      const previous = tools.get(action.tool.toolCallId);
+      const exists = previous !== undefined;
+      tools.set(action.tool.toolCallId, {
+        ...action.tool,
+        sequenceRange: EventSequenceRanges.include(previous?.sequenceRange, action.order.sequence)
+      });
       const transcript = exists ? state.transcript : [...state.transcript, { type: "tool" as const, toolCallId: action.tool.toolCallId, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, tools, transcript };
@@ -168,7 +193,22 @@ export function reduceSessionWorkspace(
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, compactions, transcript };
     }
-    case "event/received": return { ...state, events: [...state.events, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
+    case "recovery/completed": {
+      const exists = state.transcript.some((entry) => entry.type === "recovery"
+        && entry.notice.recoveryId === action.notice.recoveryId);
+      if (exists) return state;
+      return {
+        ...state,
+        transcript: [...state.transcript, { type: "recovery" as const, notice: action.notice, order: action.order }]
+          .sort((left, right) => Ordering.compare(left.order, right.order))
+      };
+    }
+    case "event/received": {
+      const retained = state.events.length >= MAX_RETAINED_SESSION_EVENTS
+        ? state.events.slice(state.events.length - (MAX_RETAINED_SESSION_EVENTS - 1))
+        : state.events;
+      return { ...state, events: [...retained, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
+    }
     case "queue/replaced": return {
       ...state,
       // A delayed snapshot must not reintroduce a queue item whose user

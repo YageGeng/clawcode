@@ -1,4 +1,4 @@
-import { Check, Copy, GitFork, Pencil } from "lucide-react";
+import { Check, Copy, GitFork, Pencil, ScanSearch } from "lucide-react";
 import { useState } from "react";
 
 import { MessageActionModel } from "../../domain/messageActions";
@@ -10,11 +10,13 @@ export type MessageActionsProps = Readonly<{
   entry?: SessionTreeEntry;
   cwd?: string;
   running: boolean;
+  inspecting: boolean;
+  onInspect: (message: MessageEntity) => void;
   controller: WorkspaceController;
 }>;
 
 /** Renders Codex-style actions bound to one persisted transcript message. */
-export function MessageActions({ message, entry, cwd, running, controller }: MessageActionsProps) {
+export function MessageActions({ message, entry, cwd, running, inspecting, onInspect, controller }: MessageActionsProps) {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState<"edit" | "fork">();
   const [error, setError] = useState<string>();
@@ -25,6 +27,14 @@ export function MessageActions({ message, entry, cwd, running, controller }: Mes
   return (
     <div className="message__action-area">
       <div className="message__actions">
+        <button
+          className="message-action"
+          type="button"
+          aria-label="在 Context Lens 中检查消息"
+          aria-pressed={inspecting}
+          title="在 Context Lens 中检查"
+          onClick={() => onInspect(message)}
+        ><ScanSearch size={15} aria-hidden="true" /></button>
         <button
           className="message-action"
           type="button"

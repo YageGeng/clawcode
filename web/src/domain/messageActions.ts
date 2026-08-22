@@ -29,6 +29,25 @@ export const MessageActionModel = {
     });
   },
 
+  /** Builds a durable messageId to Tree entry index for O(1) transcript lookup. */
+  index(tree: SessionTree | undefined): ReadonlyMap<MessageId, SessionTreeEntry> {
+    const index = new Map<MessageId, SessionTreeEntry>();
+    const entries = tree?.entries ?? [];
+    for (const entry of entries) {
+      if (entry.kind !== "message") continue;
+      const identity = record(entry.payload.identity);
+      const primaryMessageId = entry.payload.message_id;
+      if (typeof primaryMessageId === "string" && !index.has(primaryMessageId as MessageId)) {
+        index.set(primaryMessageId as MessageId, entry);
+      }
+      const identityMessageId = identity?.message_id;
+      if (typeof identityMessageId === "string" && !index.has(identityMessageId as MessageId)) {
+        index.set(identityMessageId as MessageId, entry);
+      }
+    }
+    return index;
+  },
+
   /** Builds a same-Session Branch plan that reopens one user prompt for editing. */
   editPlan(entry: SessionTreeEntry): BranchEditPlan | undefined {
     if (entry.kind !== "message") return undefined;
