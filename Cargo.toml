@@ -169,7 +169,7 @@ fastrand = "2"
 futures-timer = "3"
 getrandom = "0.4"
 nanoid = "0.5"
-ordered-float = "5.3"
+ordered-float = "5.5"
 rmcp = { version = "3", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
 strum = { version = "0.28", features = ["derive"] }
