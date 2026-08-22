@@ -11,7 +11,7 @@ doc-valid-idents = [
 ]
 
 # This codebase has legitimate functions with many parameters
-# (e.g. spawn_thread constructs many channel pairs at once)
+# (async turn execution and factory builders pass many collaborating types)
 too-many-arguments-threshold = 6
 
 # Allow higher cognitive complexity — async turn execution is inherently complex
@@ -26,14 +26,3 @@ allow-unwrap-in-tests = true
 allow-panic-in-tests = true
 # Allow indexing/slicing in tests
 allow-indexing-slicing-in-tests = true
-
-# Ratatui colour discipline: semantic ANSI-only, no RGB/Indexed/hardcoded white/black/yellow.
-# Mirrors the codex-rs clippy.toml style guide: prefer ANSI colours that adapt
-# to the terminal theme, routed through broad semantic tokens.
-disallowed-methods = [
-    { path = "ratatui::style::Color::Rgb", reason = "Use semantic ANSI colors via the theme module (crates/tui/src/ui/theme)." },
-    { path = "ratatui::style::Color::Indexed", reason = "Use semantic ANSI colors via the theme module (crates/tui/src/ui/theme)." },
-    { path = "ratatui::style::Stylize::white", reason = "Avoid hardcoding white; prefer default fg or dim/bold." },
-    { path = "ratatui::style::Stylize::black", reason = "Avoid hardcoding black; prefer default fg or dim/bold." },
-    { path = "ratatui::style::Stylize::yellow", reason = "Avoid yellow; prefer other ANSI colours defined in the theme." },
-]

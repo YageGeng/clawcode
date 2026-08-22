@@ -54,7 +54,7 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Capture the immutable ACP replay batching policy before the config handle
     // moves into the composition factory.
-    let max_batch_size = config.current().app.recory.max_batch_size;
+    let max_batch_size = config.current().app.recovery.max_batch_size;
     let application = ApplicationFactory::new(config).build()?;
     match cli.command {
         Command::Stdio => {

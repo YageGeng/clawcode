@@ -180,7 +180,7 @@ User Bash 当前只在完成并持久化后发送一个 `MessageEnd`，没有可
 
 批量规则如下：
 
-1. 每个 batch 最多包含 `[app.recory] max_batch_size` 条 notification，避免超大单帧阻塞浏览器主线程；该配置必须为正整数，默认值为 128。
+1. 每个 batch 最多包含 `[app.recovery] max_batch_size` 条 notification，避免超大单帧阻塞浏览器主线程；该配置必须为正整数，默认值为 128。
 2. adapter 只合并当前已经排队的连续 `session/update`；不使用定时窗口，不为等待更多消息增加实时延迟。
 3. 遇到请求、响应、其他 notification、已有 batch 或队列暂时为空时，立即发送当前 batch，再按原顺序发送边界消息。
 4. 单条 `session/update` 可以保持单消息 frame；两个及以上连续更新才构造 batch。
@@ -202,7 +202,7 @@ frame adapter 在构造 JSON-RPC batch 前，可以把当前已经排队的连�
 3. 两条 update 都只携带一个文本 ContentBlock、具有相同 annotations，并具有合法的恢复分组元数据；annotations 不同意味着正文语义边界，不能合并。
 4. 每个来源 Projection Group 都只包含这一条 update，即 `projectionIndex = 0` 且 `projectionCount = 1`，并且没有 `operationPhase`。
 5. 后一条 Kernel sequence 严格大于前一条；允许中间存在没有进入该 Operation journal 的 sequence 空洞。
-6. 合并消耗的原始 notification 数量不超过当前 `[app.recory] max_batch_size`，避免一个合并结果无限增长。
+6. 合并消耗的原始 notification 数量不超过当前 `[app.recovery] max_batch_size`，避免一个合并结果无限增长。
 
 任一条件不满足时，adapter 立即结束当前文本合并段，并按现有顺序处理边界 notification。ToolCall start、ToolCall update、ToolCall end/result、MessageEnd、状态更新、扩展事件、请求、响应和已有 batch 都是不可跨越的边界。adapter 只检查当前已经排队的 notification，不启动 timer、不等待下一条 delta；队列暂时为空时立即发送已经合并的正文，因此没有额外首 token 延迟。
 
@@ -381,7 +381,7 @@ WebUI E2E 使用生产 `app` 后端和当前配置 Provider，不使用 fixture 
 5. 让服务器短暂不可用，确认每个页面只有一个重连链路，恢复后只有一个当前连接。
 6. 在 Prompt 响应结果未知的窗口断线，确认前端不重复发送 Prompt。
 7. 以本项目目录创建真实 Session，让当前 Provider 执行代码审查；Run 期间断开并恢复浏览器网络，确认 Run 未取消、Running 未错误清零、断线 backlog 通过 JSON-RPC batch 补齐，最终 Assistant 内容和 Idle 各出现一次。
-8. 检查恢复流中的 WebSocket frame，确认包含多个标准 `session/update` 成员的 JSON-RPC batch，且单个 batch 不超过当前 `[app.recory] max_batch_size` 配置值。
+8. 检查恢复流中的 WebSocket frame，确认包含多个标准 `session/update` 成员的 JSON-RPC batch，且单个 batch 不超过当前 `[app.recovery] max_batch_size` 配置值。
 9. 检查同一 Assistant 文本块产生积压时，至少一个发送 notification 拼接了多个来源 delta，ToolCall 和终态消息仍保持独立顺序；断线重连后最终文本无重复、无缺失，恢复 cursor 位于合并区间末尾之后。
 
 ## 10. 实施边界

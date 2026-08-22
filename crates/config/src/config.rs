@@ -342,36 +342,36 @@ mod tests {
 
     /// App runtime recovery batching defaults to the current transport limit.
     #[test]
-    fn app_config_default_recory_batch_size_is_128() {
+    fn app_config_default_recovery_batch_size_is_128() {
         let cfg = AppConfig::default();
 
-        assert_eq!(cfg.app.recory.max_batch_size.get(), 128);
+        assert_eq!(cfg.app.recovery.max_batch_size.get(), 128);
     }
 
     /// App runtime recovery batching reads the nested configured limit.
     #[test]
-    fn app_config_reads_recory_batch_size() {
+    fn app_config_reads_recovery_batch_size() {
         let cfg: AppConfig = toml::from_str(
             r#"
-[app.recory]
+[app.recovery]
 max_batch_size = 32
 "#,
         )
-        .expect("parse app recory config");
+        .expect("parse app recovery config");
 
-        assert_eq!(cfg.app.recory.max_batch_size.get(), 32);
+        assert_eq!(cfg.app.recovery.max_batch_size.get(), 32);
     }
 
     /// App runtime recovery batching rejects a zero-sized transport batch.
     #[test]
-    fn app_config_rejects_zero_recory_batch_size() {
+    fn app_config_rejects_zero_recovery_batch_size() {
         let error = toml::from_str::<AppConfig>(
             r#"
-[app.recory]
+[app.recovery]
 max_batch_size = 0
 "#,
         )
-        .expect_err("reject zero app recory batch size");
+        .expect_err("reject zero app recovery batch size");
 
         assert!(error.to_string().contains("nonzero"));
     }

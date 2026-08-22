@@ -15,7 +15,7 @@ pub mod retry;
 pub mod skills;
 pub mod tools;
 
-pub use app::{AppSectionConfig, RecoryConfig};
+pub use app::{AppSectionConfig, RecoveryConfig};
 pub use approval::{ApprovalMode, AskForApproval, GranularApprovalConfig};
 pub use config::{
     AppConfig, CompactionConfig, ConfigValidationError,

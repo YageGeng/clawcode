@@ -226,9 +226,14 @@ impl AssistantAttempt {
                                 retry_disposition:
                                     ModelRetryDisposition::NonRetryable,
                             },
-                            ModelError::Cancelled => unreachable!(
-                                "cancelled errors are handled above"
-                            ),
+                            // Cancelled is handled above; keep this fallback
+                            // non-panicking so a logic drift degrades gracefully.
+                            ModelError::Cancelled => ModelFailure {
+                                summary: "model request cancelled".to_string(),
+                                status: None,
+                                retry_disposition:
+                                    ModelRetryDisposition::NonRetryable,
+                            },
                         };
                         (
                             Self::terminal_final(StopReason::Error),
