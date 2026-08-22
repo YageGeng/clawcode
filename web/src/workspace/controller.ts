@@ -37,6 +37,10 @@ export class WorkspaceController {
   private listenersInstalled = false;
   private stopped = false;
   private readonly onlineListener = () => this.wakeConnection();
+  /** Applies browser back and forward navigation to the selected Session. */
+  private readonly popStateListener = () => {
+    void this.restoreSessionFromUrl();
+  };
   private readonly visibilityListener = () => {
     if (document.visibilityState === "visible") this.wakeConnection();
   };
@@ -62,12 +66,14 @@ export class WorkspaceController {
     await this.ensureConnected(false);
   }
 
-  async openSession(sessionId: SessionId): Promise<void> {
+  /** Opens one listed Session and optionally records the selection in browser history. */
+  async openSession(sessionId: SessionId, updateUrl = true): Promise<void> {
     const state = useWorkspaceStore.getState();
     const session = state.sessions.find((item) => item.sessionId === sessionId);
     if (session === undefined) throw new Error("Session is not in the current list");
     const wasLoaded = state.sessionWorkspaces.has(sessionId);
     this.dispatch({ type: "session/activated", sessionId });
+    if (updateUrl) this.pushSessionUrl(sessionId);
     const connection = this.requireConnection();
     const runtime = await connection.request<SessionRuntimeSnapshot>(
       this.methods.sessionRuntime,
@@ -127,6 +133,7 @@ export class WorkspaceController {
       await this.requireConnection().request(AcpProtocol.methods.sessionDelete, { sessionId });
       if (useWorkspaceStore.getState().activeSessionId === sessionId) {
         this.dispatch({ type: "session/deactivated" });
+        this.replaceRootUrl();
       }
       this.updateRouter.resetRecovery(sessionId);
       await this.refreshSessions();
@@ -333,6 +340,7 @@ export class WorkspaceController {
     this.connection = undefined;
     if (this.listenersInstalled) {
       window.removeEventListener("online", this.onlineListener);
+      window.removeEventListener("popstate", this.popStateListener);
       document.removeEventListener("visibilitychange", this.visibilityListener);
       this.listenersInstalled = false;
     }
@@ -412,6 +420,9 @@ export class WorkspaceController {
       this.clearReconnectTimer();
       this.dispatch({ type: "connection/changed", connection: { type: "ready" } });
       this.startHeartbeat(generation, connection);
+      // URL restoration must wait for the authoritative Session list and any
+      // retained projections before it decides whether the target still exists.
+      await this.restoreSessionFromUrl();
     } catch (reason: unknown) {
       connection.close();
       // A close callback may already have cleared this connection while the
@@ -479,27 +490,45 @@ export class WorkspaceController {
         this.updateRouter.resetRecovery(sessionId);
         return;
       }
-      const plan = plans.get(sessionId);
-      if (plan?.mode === "watch" && plan.runId !== undefined && plan.nextSequence !== undefined) {
-        try {
-          await connection.request(AcpProtocol.methods.sessionResume, {
-            sessionId,
-            cwd: session.cwd,
-            replayFrom: {
-              type: "_clawcode/event",
-              runId: plan.runId,
-              sequence: plan.nextSequence
-            }
-          });
-        } catch (reason: unknown) {
-          if (!this.isCursorUnavailable(reason)) throw reason;
+      this.updateRouter.beginRecovery(sessionId);
+      try {
+        const plan = plans.get(sessionId);
+        if (plan?.mode === "watch" && plan.runId !== undefined && plan.nextSequence !== undefined) {
+          try {
+            await connection.request(AcpProtocol.methods.sessionResume, {
+              sessionId,
+              cwd: session.cwd,
+              replayFrom: {
+                type: "_clawcode/event",
+                runId: plan.runId,
+                sequence: plan.nextSequence
+              }
+            });
+          } catch (reason: unknown) {
+            if (!this.isCursorUnavailable(reason)) throw reason;
+            await this.fullResume(connection, generation, sessionId, session.cwd);
+          }
+        } else {
           await this.fullResume(connection, generation, sessionId, session.cwd);
         }
-      } else {
-        await this.fullResume(connection, generation, sessionId, session.cwd);
+        this.assertCurrentConnection(generation, connection);
+        // ACP guarantees that session/resume resolves only after the replay
+        // stream is fully delivered, so this boundary is safe: replay batches
+        // are all present above the divider while subsequent live updates keep
+        // their higher sequence and stay below it.
+        const commit = this.updateRouter.finishRecovery(sessionId);
+        if (commit !== undefined) {
+          this.dispatchSession(sessionId, {
+            type: "recovery/completed",
+            notice: commit.notice,
+            order: commit.order
+          });
+        }
+        await this.refreshRecoveredSession(connection, generation, sessionId);
+      } catch (reason: unknown) {
+        this.updateRouter.cancelRecovery(sessionId);
+        throw reason;
       }
-      this.assertCurrentConnection(generation, connection);
-      await this.refreshRecoveredSession(connection, generation, sessionId);
     }));
   }
 
@@ -721,8 +750,63 @@ export class WorkspaceController {
   private installNetworkListeners(): void {
     if (this.listenersInstalled) return;
     window.addEventListener("online", this.onlineListener);
+    window.addEventListener("popstate", this.popStateListener);
     document.addEventListener("visibilitychange", this.visibilityListener);
     this.listenersInstalled = true;
+  }
+
+  /** Opens the Session encoded in the current URL without creating another history entry. */
+  private async restoreSessionFromUrl(): Promise<void> {
+    const sessionId = this.sessionIdFromUrl();
+    if (sessionId === undefined) {
+      if (location.pathname !== "/") this.replaceRootUrl();
+      if (useWorkspaceStore.getState().activeSessionId !== undefined) {
+        this.dispatch({ type: "session/deactivated" });
+      }
+      return;
+    }
+    const state = useWorkspaceStore.getState();
+    if (!state.sessions.some((session) => session.sessionId === sessionId)) {
+      this.replaceRootUrl();
+      if (state.activeSessionId !== undefined) {
+        this.dispatch({ type: "session/deactivated" });
+      }
+      return;
+    }
+    if (state.activeSessionId === sessionId) return;
+    try {
+      await this.openSession(sessionId, false);
+    } catch (reason: unknown) {
+      this.dispatch({
+        type: "diagnostic/added",
+        message: reason instanceof Error ? reason.message : String(reason)
+      });
+    }
+  }
+
+  /** Decodes an exact `/sessions/:sessionId` route into its branded identifier. */
+  private sessionIdFromUrl(): SessionId | undefined {
+    const match = /^\/sessions\/([^/]+)$/.exec(location.pathname);
+    if (match?.[1] === undefined) return undefined;
+    try {
+      const sessionId = decodeURIComponent(match[1]);
+      return sessionId.length === 0 ? undefined : sessionId as SessionId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Pushes one selected Session route unless the browser already shows it. */
+  private pushSessionUrl(sessionId: SessionId): void {
+    const path = `/sessions/${encodeURIComponent(sessionId)}`;
+    if (location.pathname === path && location.search.length === 0 && location.hash.length === 0) return;
+    window.history.pushState(null, "", path);
+  }
+
+  /** Replaces an invalid or deleted Session route with the application root. */
+  private replaceRootUrl(): void {
+    if (location.pathname === "/" && location.search.length === 0 && location.hash.length === 0) return;
+    window.history.replaceState(null, "", "/");
   }
 
   /** Returns whether an asynchronous callback still owns the active connection. */

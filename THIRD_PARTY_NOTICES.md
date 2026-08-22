@@ -16,10 +16,12 @@ by their respective package archives.
 
 | Package | Version | License |
 |---|---:|---|
+| highlight.js | 11.11.2 | BSD-3-Clause |
 | lucide-react | 1.31.0 | ISC |
 | react | 19.2.8 | MIT |
 | react-dom | 19.2.8 | MIT |
 | react-markdown | 10.1.0 | MIT |
+| rehype-highlight | 7.0.2 | MIT |
 | remark-gfm | 4.0.1 | MIT |
 | zustand | 5.0.15 | MIT |
 | @eslint/js | 10.0.1 | MIT |

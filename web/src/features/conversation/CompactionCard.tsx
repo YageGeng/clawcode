@@ -1,8 +1,7 @@
 import { ArchiveRestore, ChevronRight } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import type { CompactionEntity } from "../../domain/model";
+import { MarkdownContent } from "./MarkdownContent";
 
 export type CompactionCardProps = Readonly<{
   compaction: CompactionEntity;
@@ -26,7 +25,7 @@ export function CompactionCard({ compaction }: CompactionCardProps) {
       </summary>
       <div className="compaction-card__details">
         <div className="compaction-card__meta">{reason} · {elapsed.toLocaleString()} ms · Turn {compaction.turnId}</div>
-        <div className="compaction-card__summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{compaction.summary}</ReactMarkdown></div>
+        <div className="compaction-card__summary"><MarkdownContent text={compaction.summary} /></div>
       </div>
     </details>
   );

@@ -149,7 +149,13 @@ export function SessionSidebar(props: SessionSidebarProps) {
                     </span>
                   </div>
                 )}
-                {deletingSessionId === session.sessionId ? <div className="session-item__confirm"><span>永久删除会话？此操作不可撤销。</span><button type="button" onClick={() => setDeletingSessionId(undefined)}>取消</button><button type="button" onClick={() => void run(async () => { await props.onDelete(session.sessionId); setDeletingSessionId(undefined); })}>确认删除</button></div> : null}
+                {deletingSessionId === session.sessionId ? <div className="session-item__confirm"><span>永久删除会话？此操作不可撤销。</span><button type="button" onClick={() => setDeletingSessionId(undefined)}>取消</button><button type="button" onClick={() => void run(async () => {
+                  // A successful delete unmounts the hovered row before it can
+                  // emit mouseleave, so close its body-level Portal explicitly.
+                  setPreview(undefined);
+                  await props.onDelete(session.sessionId);
+                  setDeletingSessionId(undefined);
+                })}>确认删除</button></div> : null}
               </div>;
             })}
           </section>

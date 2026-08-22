@@ -1,13 +1,9 @@
-import { Check, Copy } from "lucide-react";
-import { Children, isValidElement, useState } from "react";
-import type { ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import type { Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { memo } from "react";
 
 import type { MessageEntity, SessionTreeEntry } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandMessageCard } from "./CommandMessageCard";
+import { MarkdownContent } from "./MarkdownContent";
 import { MessageActions } from "./MessageActions";
 import { ReasoningBlock } from "./ReasoningBlock";
 
@@ -16,48 +12,12 @@ export type MessageViewProps = Readonly<{
   entry?: SessionTreeEntry;
   cwd?: string;
   running: boolean;
+  inspecting: boolean;
+  onInspect: (message: MessageEntity) => void;
   controller: WorkspaceController;
 }>;
 
-function CodeBlock({ text }: Readonly<{ text: string }>) {
-  const [copied, setCopied] = useState(false);
-  const value = text.replace(/\n$/, "");
-  return (
-    <div className="code-block">
-      <button type="button" title="复制代码" onClick={() => {
-        void navigator.clipboard.writeText(value).then(() => {
-          setCopied(true);
-          window.setTimeout(() => setCopied(false), 1_200);
-        });
-      }}>{copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "已复制" : "复制"}</button>
-      <pre><code>{text}</code></pre>
-    </div>
-  );
-}
-
-const MARKDOWN_COMPONENTS: Components = {
-  a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>,
-  pre: ({ children }) => {
-    const code = Children.count(children) === 1 ? Children.only(children) : undefined;
-    if (isValidElement<Readonly<{ children?: ReactNode }>>(code) && code.type === "code") {
-      const text = Children.toArray(code.props.children).map((child) =>
-        typeof child === "string" ? child : typeof child === "number" || typeof child === "bigint" ? child.toString() : ""
-      ).join("");
-      return <CodeBlock text={text} />;
-    }
-    return <pre>{children}</pre>;
-  }
-};
-
-const MarkdownUrlPolicy = {
-  transform: (url: string): string => {
-    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase();
-    if (scheme === undefined) return defaultUrlTransform(url);
-    return ["http", "https", "mailto", "file", "urn"].includes(scheme) ? url : "";
-  }
-} as const;
-
-export function MessageView({ message, entry, cwd, running, controller }: MessageViewProps) {
+export const MessageView = memo(function MessageView({ message, entry, cwd, running, inspecting, onInspect, controller }: MessageViewProps) {
   const assistant = message.assistant;
   // ACP projects Tool Calls into dedicated transcript cards, which leaves a
   // settled tool-only assistant message with no independently visible content.
@@ -79,6 +39,8 @@ export function MessageView({ message, entry, cwd, running, controller }: Messag
       {...(entry === undefined ? {} : { entry })}
       {...(cwd === undefined ? {} : { cwd })}
       running={running}
+      inspecting={inspecting}
+      onInspect={onInspect}
       controller={controller}
     />
   );
@@ -86,13 +48,13 @@ export function MessageView({ message, entry, cwd, running, controller }: Messag
     return <CommandMessageCard message={message} actions={actions} />;
   }
   return (
-    <article className="message" data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"}>
+    <article className="message" data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming}>
       <div className="message__label">{message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System"}</div>
       <ReasoningBlock message={message} />
       {assistant?.error === undefined ? null : <div className="message-error" role="alert"><strong>模型调用失败</strong><span>{assistant.error}</span></div>}
       {message.text.length === 0 ? null : (
         <div className="message__body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS} urlTransform={MarkdownUrlPolicy.transform}>{message.text}</ReactMarkdown>
+          <MarkdownContent text={message.text} highlight={!message.streaming} />
           {message.streaming ? <span className="streaming-cursor" aria-label="正在生成" /> : null}
         </div>
       )}
@@ -110,6 +72,7 @@ export function MessageView({ message, entry, cwd, running, controller }: Messag
           <dt>TimestampMs</dt><dd>{message.timestampMs}</dd>
           <dt>StartedAtMs</dt><dd>{message.startedAtMs}</dd>
           <dt>EndedAtMs</dt><dd>{message.endedAtMs}</dd>
+          {message.sequenceRange === undefined ? null : <><dt>SequenceRange</dt><dd>{message.sequenceRange.start}–{message.sequenceRange.end}</dd></>}
           {assistant === undefined ? null : <>
             <dt>Provider</dt><dd>{assistant.providerId}</dd>
             <dt>Model</dt><dd>{assistant.modelId}</dd>
@@ -121,4 +84,4 @@ export function MessageView({ message, entry, cwd, running, controller }: Messag
       </details>
     </article>
   );
-}
+});
