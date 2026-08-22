@@ -1,5 +1,5 @@
 import { AcpProtocol } from "../acp/protocol";
-import type { EntryId, ImageContentBlock, MessageId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
+import type { EntryId, ImageContentBlock, MessageId, RunId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   AssistantDiagnostics,
@@ -170,7 +170,18 @@ export class SessionUpdateDecoder {
       const payload = typeof update.payload === "object" && update.payload !== null && !Array.isArray(update.payload) ? update.payload as Record<string, unknown> : undefined;
       if (payload !== undefined) {
         const event = payload.event;
-        if (event === "message_end" && meta !== undefined && typeof payload.message === "object" && payload.message !== null && !Array.isArray(payload.message)) {
+        if (event === "turn_end" && meta !== undefined && typeof payload.turn === "object" && payload.turn !== null && !Array.isArray(payload.turn)) {
+          const turn = payload.turn as Record<string, unknown>;
+          // TurnEnd contributes usage to the owning Run but does not publish a
+          // row because Pi may immediately begin another model Turn.
+          if (turn.turn_id === meta.turnId && typeof turn.run_id === "string") {
+            actions.push({ type: "turn/settled", turnId: meta.turnId, runId: turn.run_id as RunId });
+          }
+        } else if (event === "run_end" && typeof payload.run_id === "string") {
+          // RunEnd is Pi's agent_end boundary and therefore the only point that
+          // publishes one complete Agent Usage row.
+          actions.push({ type: "run/settled", runId: payload.run_id as RunId, order });
+        } else if (event === "message_end" && meta !== undefined && typeof payload.message === "object" && payload.message !== null && !Array.isArray(payload.message)) {
           const message = payload.message as Record<string, unknown>;
           const identity = typeof message.identity === "object" && message.identity !== null && !Array.isArray(message.identity) ? message.identity as Record<string, unknown> : undefined;
           // AgentMessage flattens identity on the wire; retain nested support for

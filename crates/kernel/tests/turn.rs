@@ -14,12 +14,13 @@ use futures::{Stream, stream};
 use kernel::{EventSink, KernelFactory, Model, ModelError, ModelFactory};
 use prompt::FilesystemPromptFactory;
 use protocol::{
-    AgentEvent, AgentEventPayload, AgentOutcome, ContentBlock, EntryId,
-    ExtensionDescriptor, ExtensionId, IdGenerator, IdKind, LaneId,
-    MessageContent, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
+    AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
+    AssistantMetadata, ContentBlock, EntryId, ExtensionDescriptor, ExtensionId,
+    IdGenerator, IdKind, LaneId, MessageContent, MessageId, MessageIdentity,
+    MessageTiming, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
     ModelRetryDisposition, ModelStreamEvent, ModelUsage, RunInput, RunRequest,
-    SessionId, StopReason, TimestampMs, ToolBlock, ToolCall, ToolCallId,
-    ToolCallResult, ToolDefinition, ToolResult, TraceId,
+    SessionId, SessionTitle, StopReason, TimestampMs, ToolBlock, ToolCall,
+    ToolCallId, ToolCallResult, ToolDefinition, ToolResult, TraceId, TurnId,
 };
 use store::{
     Clock, EntryKind, JsonlStoreFactory, NewEntry, SessionCreateOptions,
@@ -1774,13 +1775,12 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::new()),
     });
+    let store_factory =
+        Arc::new(JsonlStoreFactory::new(temporary.path(), Arc::clone(&clock)));
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(StaticModelFactory(model)))
         .tool_factory(Arc::new(BuiltinToolFactory::new()))
-        .store_factory(Arc::new(JsonlStoreFactory::new(
-            temporary.path(),
-            Arc::clone(&clock),
-        )))
+        .store_factory(store_factory.clone())
         .prompt_factory(Arc::new(FilesystemPromptFactory::new(
             temporary.path().join("config"),
             protocol::PromptPolicy::default(),
@@ -1794,7 +1794,7 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
     let session_id = SessionId::try_from("session-resume").expect("session id");
     let cwd = temporary.path().join("workspace/resume");
     std::fs::create_dir_all(&cwd).expect("create project cwd");
-    kernel
+    let session_path = kernel
         .create_session(SessionCreateOptions {
             session_id: session_id.clone(),
             cwd: cwd.clone(),
@@ -1809,6 +1809,13 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, session_id);
     kernel
+        .rename_session(
+            &session_id,
+            SessionTitle::try_from("Persisted title").expect("session title"),
+        )
+        .await
+        .expect("rename session");
+    kernel
         .close_session(&session_id)
         .await
         .expect("close session");
@@ -1816,6 +1823,57 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
         kernel.cancel_session(&session_id),
         Err(kernel::KernelError::SessionNotFound(_))
     ));
+    let mut persisted =
+        store_factory.open(&session_path).expect("open session");
+    let lane = LaneId::try_from("main").expect("main lane");
+    for index in 0_u64..4 {
+        let timestamp = TimestampMs::from(5_000 + index);
+        persisted
+            .append_entry(
+                &lane,
+                NewEntry {
+                    id: EntryId::try_from(format!("entry-replay-{index}"))
+                        .expect("entry id"),
+                    kind: EntryKind::Message,
+                    payload: serde_json::to_value(AgentMessage {
+                        identity: MessageIdentity {
+                            message_id: MessageId::try_from(format!(
+                                "message-replay-{index}"
+                            ))
+                            .expect("message id"),
+                            turn_id: TurnId::try_from(format!(
+                                "turn-replay-{index}"
+                            ))
+                            .expect("turn id"),
+                        },
+                        timing: MessageTiming::try_from((
+                            timestamp, timestamp, timestamp,
+                        ))
+                        .expect("message timing"),
+                        content: MessageContent::Assistant {
+                            blocks: Vec::new(),
+                            metadata: AssistantMetadata::builder()
+                                .provider_id("fixture".to_string())
+                                .model_id("scripted".to_string())
+                                .stop_reason(StopReason::EndTurn)
+                                .usage(
+                                    ModelUsage::builder()
+                                        .input_tokens(1)
+                                        .output_tokens(1)
+                                        .cache_read_tokens(0)
+                                        .cache_write_tokens(0)
+                                        .total_tokens(2)
+                                        .build(),
+                                )
+                                .build(),
+                        },
+                    })
+                    .expect("serialize Assistant"),
+                },
+            )
+            .expect("append replay Assistant");
+    }
+    drop(persisted);
     let resumed_path = kernel
         .resume_session(session_id.clone(), cwd.clone())
         .await
@@ -1825,6 +1883,16 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
         .await
         .expect("repeat resume session");
     assert_eq!(repeated_path, resumed_path);
+    let resumed_sequence = kernel
+        .available_commands_event(&session_id)
+        .expect("available commands event")
+        .metadata
+        .sequence
+        .get();
+    assert!(
+        resumed_sequence > 8,
+        "resumed event sequence {resumed_sequence} must advance beyond expanded replay events"
+    );
     kernel
         .cancel_session(&session_id)
         .expect("resumed session is active");

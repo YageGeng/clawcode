@@ -332,6 +332,11 @@ impl SessionStore for DurabilityStore {
         self.inner.records()
     }
 
+    /// Returns the delegated shared mutation sequence.
+    fn last_sequence(&self) -> u64 {
+        self.inner.last_sequence()
+    }
+
     /// Records and delegates session-name persistence.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
         self.order.lock().expect("durability lock").push("set_name");

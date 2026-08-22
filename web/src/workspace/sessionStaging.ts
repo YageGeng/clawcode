@@ -1,5 +1,6 @@
-import type { EntryId, MessageId } from "../acp/protocol";
+import type { EntryId, MessageId, RunId, TurnId } from "../acp/protocol";
 import type {
+  AgentRunUsage,
   BashExecutionEntity,
   CompactionEntity,
   CompactionStatus,
@@ -8,6 +9,7 @@ import type {
   McpElicitation,
   McpSessionSnapshot,
   MessageEntity,
+  ModelUsage,
   PendingMessages,
   RetryStatus,
   SessionEvent,
@@ -16,7 +18,7 @@ import type {
   ToolCallEntity,
   TranscriptEntry
 } from "../domain/model";
-import { EventOrdering as Ordering } from "../domain/model";
+import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
 import { EventSequenceRanges, initialSessionWorkspaceState, MAX_RETAINED_SESSION_EVENTS } from "./sessionState";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 
@@ -54,6 +56,8 @@ export class SessionWorkspaceStager {
   private readonly bashExecutions: MapDraft<MessageId, BashExecutionEntity>;
   private readonly extensions: MapDraft<string, ExtensionEntity>;
   private readonly compactions: MapDraft<EntryId, CompactionEntity>;
+  private readonly turnRuns: MapDraft<TurnId, RunId>;
+  private readonly runUsages: MapDraft<RunId, AgentRunUsage>;
   private readonly mcpElicitations: MapDraft<string, McpElicitation>;
   private transcript: readonly TranscriptEntry[];
   private appendedTranscript: TranscriptEntry[] = [];
@@ -80,6 +84,8 @@ export class SessionWorkspaceStager {
     this.bashExecutions = new MapDraft(base.bashExecutions);
     this.extensions = new MapDraft(base.extensions);
     this.compactions = new MapDraft(base.compactions);
+    this.turnRuns = new MapDraft(base.turnRuns);
+    this.runUsages = new MapDraft(base.runUsages);
     this.mcpElicitations = new MapDraft(base.mcpElicitations);
     this.transcript = base.transcript;
     this.events = base.events;
@@ -109,6 +115,8 @@ export class SessionWorkspaceStager {
         this.bashExecutions.replace(new Map());
         this.extensions.replace(new Map());
         this.compactions.replace(new Map());
+        this.turnRuns.replace(new Map());
+        this.runUsages.replace(new Map());
         this.mcpElicitations.replace(new Map());
         this.transcript = [];
         this.appendedTranscript = [];
@@ -199,6 +207,30 @@ export class SessionWorkspaceStager {
         }
         return;
       }
+      case "turn/settled": {
+        if (this.turnRuns.read().has(action.turnId)) return;
+        const usages = [...this.messages.read().values()]
+          .filter((message) => message.turnId === action.turnId && message.assistant !== undefined)
+          .map((message) => message.assistant?.usage)
+          .filter((usage): usage is ModelUsage => usage !== undefined);
+        this.turnRuns.write().set(action.turnId, action.runId);
+        if (usages.length === 0) return;
+        const previous = this.runUsages.read().get(action.runId);
+        // The frame-local accumulator deduplicates TurnEnd and avoids scanning
+        // every message again when the complete Agent Run later settles.
+        this.runUsages.write().set(action.runId, {
+          usage: ModelUsages.sum(previous === undefined ? usages : [previous.usage, ...usages]),
+          settled: previous?.settled ?? false
+        });
+        return;
+      }
+      case "run/settled": {
+        const previous = this.runUsages.read().get(action.runId);
+        if (previous === undefined || previous.settled) return;
+        this.runUsages.write().set(action.runId, { ...previous, settled: true });
+        this.appendedTranscript.push({ type: "agent_usage", runId: action.runId, order: action.order });
+        return;
+      }
       case "recovery/completed": {
         const exists = this.transcript.some((entry) => entry.type === "recovery"
           && entry.notice.recoveryId === action.notice.recoveryId)
@@ -276,6 +308,8 @@ export class SessionWorkspaceStager {
       bashExecutions: this.bashExecutions.read(),
       extensions: this.extensions.read(),
       compactions: this.compactions.read(),
+      turnRuns: this.turnRuns.read(),
+      runUsages: this.runUsages.read(),
       events: this.events,
       pending: this.pending,
       tree: this.tree,
@@ -308,6 +342,8 @@ export class SessionWorkspaceStager {
       bashExecutions: this.bashExecutions.read(),
       extensions: this.extensions.read(),
       compactions: this.compactions.read(),
+      turnRuns: this.turnRuns.read(),
+      runUsages: this.runUsages.read(),
       events,
       pending: this.pending,
       tree: this.tree,

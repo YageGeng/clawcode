@@ -121,51 +121,104 @@ impl AcpServer {
         connection: &ConnectionTo<Client>,
         items: Vec<protocol::SessionReplayItem>,
     ) -> Result<(), agent_client_protocol::Error> {
-        for (index, item) in items.into_iter().enumerate() {
-            let sequence = Sequence::try_from(
-                u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1),
-            )
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
-            let event = match item {
-                protocol::SessionReplayItem::Message(message) => AgentEvent {
-                    metadata: EventMetadata {
-                        turn_id: message.identity.turn_id.clone(),
-                        timestamp_ms: message.timing.ended_at_ms,
-                        sequence,
-                    },
-                    payload: AgentEventPayload::MessageEnd { message },
-                },
+        let mut event_index = 0_usize;
+        for item in items {
+            let events = match item {
+                protocol::SessionReplayItem::Message {
+                    message,
+                    context_window,
+                } => {
+                    let usage = match (&message.content, context_window) {
+                        (
+                            protocol::MessageContent::Assistant {
+                                metadata,
+                                ..
+                            },
+                            Some(context_window),
+                        ) => Some((metadata.usage.clone(), context_window)),
+                        _ => None,
+                    };
+                    let turn_id = message.identity.turn_id.clone();
+                    let timestamp_ms = message.timing.ended_at_ms;
+                    // Replay preserves the live MessageEnd -> UsageUpdated order
+                    // so clients rebuild Context without a separate snapshot.
+                    let mut events = vec![(
+                        turn_id.clone(),
+                        timestamp_ms,
+                        AgentEventPayload::MessageEnd { message },
+                    )];
+                    if let Some((usage, context_window)) = usage {
+                        events.push((
+                            turn_id,
+                            timestamp_ms,
+                            AgentEventPayload::UsageUpdated {
+                                usage,
+                                context_window,
+                            },
+                        ));
+                    }
+                    events
+                }
+                protocol::SessionReplayItem::Turn(turn) => vec![(
+                    turn.identity.turn_id.clone(),
+                    turn.timing.ended_at_ms,
+                    AgentEventPayload::TurnEnd { turn },
+                )],
+                protocol::SessionReplayItem::RunEnd {
+                    run_id,
+                    turn_id,
+                    outcome,
+                    ended_at_ms,
+                } => vec![(
+                    turn_id,
+                    ended_at_ms,
+                    AgentEventPayload::RunEnd { run_id, outcome },
+                )],
                 protocol::SessionReplayItem::Compaction {
                     run_id,
                     reason,
                     result,
-                } => AgentEvent {
-                    metadata: EventMetadata {
-                        turn_id: result.turn_id.clone(),
-                        timestamp_ms: result.ended_at_ms,
-                        sequence,
-                    },
-                    payload: AgentEventPayload::CompactionEnd {
+                } => vec![(
+                    result.turn_id.clone(),
+                    result.ended_at_ms,
+                    AgentEventPayload::CompactionEnd {
                         run_id,
                         reason,
                         outcome: protocol::CompactionOutcome::Completed {
                             result,
                         },
                     },
-                },
+                )],
             };
-            let metadata = AcpEventMapper::metadata(&event)
-                .map_err(agent_client_protocol::Error::into_internal_error)?;
-            for update in AcpEventMapper::map(event)
-                .map_err(agent_client_protocol::Error::into_internal_error)?
-            {
-                connection.send_notification(
-                    wire::UpdateSessionNotification::new(
-                        session_id.to_string(),
-                        update,
-                    )
-                    .meta(metadata.clone()),
+            for (turn_id, timestamp_ms, payload) in events {
+                event_index = event_index.saturating_add(1);
+                let event = AgentEvent {
+                    metadata: EventMetadata {
+                        turn_id,
+                        timestamp_ms,
+                        sequence: Sequence::try_from(
+                            u64::try_from(event_index).unwrap_or(u64::MAX),
+                        )
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?,
+                    },
+                    payload,
+                };
+                let metadata = AcpEventMapper::metadata(&event).map_err(
+                    agent_client_protocol::Error::into_internal_error,
                 )?;
+                for update in AcpEventMapper::map(event).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )? {
+                    connection.send_notification(
+                        wire::UpdateSessionNotification::new(
+                            session_id.to_string(),
+                            update,
+                        )
+                        .meta(metadata.clone()),
+                    )?;
+                }
             }
         }
         Ok(())

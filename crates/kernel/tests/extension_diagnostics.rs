@@ -260,6 +260,11 @@ impl SessionStore for FailingDiagnosticStore {
         self.inner.records()
     }
 
+    /// Returns the delegated shared mutation sequence.
+    fn last_sequence(&self) -> u64 {
+        self.inner.last_sequence()
+    }
+
     /// Delegates session-name persistence.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
         self.inner.set_name(name)

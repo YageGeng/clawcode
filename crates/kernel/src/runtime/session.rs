@@ -864,10 +864,10 @@ impl Kernel {
                 &tools,
             )?;
             let history = Self::history_from_store(store.as_ref(), &lane)?;
-            // Resume starts after persisted entry order so replayed transcript events
-            // always sort before newly emitted live events in ACP clients.
+            // Resume starts above both shared Store mutations and the extra
+            // Usage events synthesized from persisted Assistant messages.
             let initial_event_sequence =
-                u64::try_from(store.entries().len()).unwrap_or(u64::MAX);
+                Self::replay_sequence_floor(store.as_ref(), &lane)?;
             let queue = PendingQueue::from_records(&store.records())?;
             let commands =
                 DynamicCommandRegistry::new(extension_registry.commands())

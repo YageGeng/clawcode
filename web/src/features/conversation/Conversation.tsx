@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 
 import type { UiBootstrap } from "../../bootstrap/model";
 import { MessageActionModel } from "../../domain/messageActions";
-import type { EntryId, MessageId } from "../../acp/protocol";
+import type { EntryId, MessageId, RunId } from "../../acp/protocol";
 import type { MessageEntity, SessionTreeEntry, ToolCallEntity } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { initialSessionWorkspaceState } from "../../workspace/sessionState";
@@ -16,6 +16,7 @@ import { ToolCallCard } from "./ToolCallCard";
 import { BashExecutionCard } from "./BashExecutionCard";
 import { CompactionCard } from "./CompactionCard";
 import { useTranscriptScroll } from "./useTranscriptScroll";
+import { AgentUsage } from "./AgentUsage";
 
 export type ConversationProps = Readonly<{
   bootstrap: UiBootstrap;
@@ -69,6 +70,12 @@ const ExtensionRow = memo(function ExtensionRow({ id }: Readonly<{ id: string }>
 const CompactionRow = memo(function CompactionRow({ entryId }: Readonly<{ entryId: EntryId }>) {
   const compaction = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.compactions.get(entryId));
   return compaction === undefined ? null : <CompactionCard compaction={compaction} />;
+});
+
+/** Agent Usage row subscribes only to its immutable Run settlement snapshot. */
+const AgentUsageRow = memo(function AgentUsageRow({ runId }: Readonly<{ runId: RunId }>) {
+  const usage = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.runUsages.get(runId));
+  return usage === undefined ? null : <AgentUsage runId={runId} usage={usage.usage} />;
 });
 
 export function Conversation({ bootstrap, controller, contextSelection, onInspect }: ConversationProps) {
@@ -171,6 +178,7 @@ export function Conversation({ bootstrap, controller, contextSelection, onInspec
           if (entry.type === "extension") return <ExtensionRow key={`extension:${entry.extensionEventId}`} id={entry.extensionEventId} />;
           if (entry.type === "bash") return <BashRow key={`bash:${entry.messageId}`} messageId={entry.messageId} />;
           if (entry.type === "compaction") return <CompactionRow key={`compaction:${entry.entryId}`} entryId={entry.entryId} />;
+          if (entry.type === "agent_usage") return <AgentUsageRow key={`agent-usage:${entry.runId}`} runId={entry.runId} />;
           return <ToolRow
             key={`tool:${entry.toolCallId}`}
             toolCallId={entry.toolCallId}
