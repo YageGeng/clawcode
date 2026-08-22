@@ -26,7 +26,7 @@ Clawcode WebUI 已支持 ACP v2 multi-message、`replayFrom`、cursor 恢复、�
 ## 3. 非目标
 
 - 不修改 ACP Rust 后端或 WebSocket frame 格式。
-- `[app.recory] max_batch_size` 保持部署配置；仓库当前明确配置为 `512`，WebUI 只消费形成后的物理 frame，不硬编码、覆盖或解释该配置。
+- `[app.recovery] max_batch_size` 保持部署配置；仓库当前明确配置为 `512`，WebUI 只消费形成后的物理 frame，不硬编码、覆盖或解释该配置。
 - 不引入 Immer、虚拟列表框架或新的状态管理依赖。
 - 不改变 Message、Tool Call、recovery divider 和 Tree 的用户可见顺序。
 - 不把诊断事件作为持久化或恢复数据来源；它仍只服务 Inspector 的调试视图。

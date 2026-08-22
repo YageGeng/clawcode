@@ -81,26 +81,17 @@ thiserror = "2"
 # tracing & log
 tracing = "0.1"
 tracing-futures = "0.2.5"
-serenity = "0.12"
-opentelemetry = "0.32"
-opentelemetry-otlp = "0.32"
-opentelemetry_sdk = "0.32"
-tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3", features = ["chrono", "env-filter"] }
 
 # async
 futures = "0.3"
 async-trait = "0.1"
 async-stream = "0.3"
-tokio-stream = "0.1"
 tokio-test = "0.4"
 tokio-util = "0.7"
 pin-project-lite = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-tungstenite = { version = "0.30", default-features = false }
-
-# multi thread
-rayon = "1"
 
 # http
 bytes = "1"
@@ -108,11 +99,9 @@ http = "1"
 httpdate = "=1.0.3"
 axum = "0.8"
 url = "2.5"
-hyper-util = "0.1"
 agent-client-protocol-http = { version = "2", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["cors", "fs"] }
-reqwest-retry = "0.9"
 eventsource-stream = "0.2"
 reqwest = { version = "0.13", default-features = false }
 reqwest-middleware = { version = "0.5", default-features = false }
@@ -120,7 +109,6 @@ reqwest-middleware = { version = "0.5", default-features = false }
 # serde
 figment = { version = "0.10", features = ["toml", "env"] }
 jsonschema = { version = "0.50", default-features = false }
-quick-xml = "0.41"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -133,11 +121,7 @@ typed-builder = "0.23"
 # wasm
 wasm-bindgen-futures = "0.4"
 
-# date & time
-chrono = { version = "0.4", default-features = false }
-
 # fs
-assert_fs = "1"
 ignore = "0.4"
 mime = "0.3.17"
 mime_guess = "2.0.5"
@@ -150,31 +134,18 @@ agent-client-protocol = "2"
 # cli
 clap = { version = "4", features = ["derive"] }
 
-# tui
-crossterm = "0.29"
-ratatui = "0.30"
-unicode-width = "0.2"
-
 # pty
-portable-pty = "0.9"
 nix = { version = "0.31", features = ["signal", "process"] }
 
 # misc
 arc-swap = "1.9"
-wiremock = "0.6"
 dirs = "6"
 base64 = "0.23"
-rand = "0.10"
 fastrand = "2"
 futures-timer = "3"
 getrandom = "0.4"
 nanoid = "0.5"
-ordered-float = "5.5"
 rmcp = { version = "3", default-features = false }
-uuid = { version = "1", features = ["v4", "serde"] }
-strum = { version = "0.28", features = ["derive"] }
-strum_macros = "0.28"
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
 shlex = "2"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 similar = "3"

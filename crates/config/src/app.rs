@@ -4,21 +4,21 @@ use std::num::NonZeroUsize;
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_RECORY_MAX_BATCH_SIZE: NonZeroUsize =
-    NonZeroUsize::new(128).expect("default recory batch size must be positive");
+const DEFAULT_RECOVERY_MAX_BATCH_SIZE: NonZeroUsize = NonZeroUsize::new(128)
+    .expect("default recovery batch size must be positive");
 
-/// Recovery transport settings grouped under the intentionally named `recory` section.
+/// Recovery transport settings grouped under the `recovery` section.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct RecoryConfig {
+pub struct RecoveryConfig {
     /// Maximum number of queued ACP Session updates emitted in one JSON-RPC batch.
     pub max_batch_size: NonZeroUsize,
 }
 
-impl Default for RecoryConfig {
+impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
-            max_batch_size: DEFAULT_RECORY_MAX_BATCH_SIZE,
+            max_batch_size: DEFAULT_RECOVERY_MAX_BATCH_SIZE,
         }
     }
 }
@@ -28,5 +28,5 @@ impl Default for RecoryConfig {
 pub struct AppSectionConfig {
     /// ACP recovery replay batching policy.
     #[serde(default)]
-    pub recory: RecoryConfig,
+    pub recovery: RecoveryConfig,
 }

@@ -557,7 +557,7 @@ impl ::mcp::McpHost for SessionMcpHost {
 mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use async_trait::async_trait;
     use protocol::{McpHostRequest, McpHostResponse, SessionId};
@@ -566,8 +566,30 @@ mod tests {
 
     use super::{SessionMcpRuntime, SessionMcpState};
 
+    /// Process-wide MCP test capture buffer written by the global subscriber.
+    static BUFFER: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+
+    /// Returns the shared capture buffer, installing the global subscriber once.
+    ///
+    /// `set_default` is thread-local and is lost when a `tokio` task migrates
+    /// between worker threads, which makes lifecycle log capture flaky. A global
+    /// subscriber retains every emitted log on whichever thread it fires.
+    fn buffer() -> &'static Arc<Mutex<Vec<u8>>> {
+        BUFFER.get_or_init(|| {
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(CapturedLogWriter(Arc::clone(&buf)))
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("global MCP tracing subscriber already installed");
+            buf
+        })
+    }
+
     /// Shared in-memory writer used to inspect MCP lifecycle logs.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
 
     impl CapturedLogs {
@@ -575,6 +597,13 @@ mod tests {
         fn content(&self) -> String {
             String::from_utf8(self.0.lock().expect("log lock").clone())
                 .expect("UTF-8 logs")
+        }
+    }
+
+    impl Default for CapturedLogs {
+        /// Creates a handle over the shared capture buffer.
+        fn default() -> Self {
+            CapturedLogs(Arc::clone(buffer()))
         }
     }
 
@@ -597,6 +626,17 @@ mod tests {
     }
 
     impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        /// Creates a writer handle sharing the captured byte buffer.
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer>
+        for CapturedLogWriter
+    {
         type Writer = CapturedLogWriter;
 
         /// Creates a writer handle sharing the captured byte buffer.
