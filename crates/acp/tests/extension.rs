@@ -14,15 +14,17 @@ use kernel::{
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
-    AcpExtensionMethod, AgentMessage, CompactionData, CompactionDetails,
-    CompactionReason, ContentBlock, EntryId, MessageContent, MessageId,
-    MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
-    ProductIdentity, RunId, SessionId, TimestampMs, TurnId,
+    AcpExtensionMethod, AgentMessage, AssistantMetadata, CompactionData,
+    CompactionDetails, CompactionReason, ContentBlock, EntryId, MessageContent,
+    MessageId, MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
+    ModelUsage, ProductIdentity, RecordId, RunId, SessionId, StopReason,
+    TimestampMs, ToolCallId, TurnId, TurnIdentity, TurnOutcome, TurnRecord,
+    TurnTiming,
 };
 use skill::FilesystemSkillFactory;
 use store::{
-    EntryKind, JsonlStoreFactory, NewEntry, SessionCreateOptions, StoreFactory,
-    SystemClock,
+    EntryKind, JsonlStoreFactory, NewEntry, NewRecord, RecordKind,
+    SessionCreateOptions, StoreFactory, SystemClock,
 };
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
@@ -1007,6 +1009,254 @@ async fn slash_command_messages_round_trip_through_acp_replay() {
         })
         .await
         .expect("Slash Command ACP replay lifecycle");
+}
+
+/// ACP resume settles Agent Usage only after the persisted Run has ended.
+#[tokio::test]
+async fn assistant_usage_replays_at_run_end() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+    let store_factory = JsonlStoreFactory::new(state.path(), clock);
+    let session_id =
+        SessionId::try_from("session-usage-replay").expect("session id");
+    let mut store = store_factory
+        .create(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: workspace.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .expect("create persisted session");
+    let timestamp = TimestampMs::from(2_000);
+    let assistant = AgentMessage {
+        identity: MessageIdentity {
+            message_id: MessageId::try_from("message-assistant")
+                .expect("message id"),
+            turn_id: TurnId::try_from("turn-assistant").expect("turn id"),
+        },
+        timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
+            .expect("message timing"),
+        content: MessageContent::Assistant {
+            blocks: vec![ContentBlock::Text {
+                text: "persisted answer".to_string(),
+            }],
+            metadata: AssistantMetadata::builder()
+                .provider_id("integration".to_string())
+                .model_id("unused".to_string())
+                .stop_reason(StopReason::EndTurn)
+                .usage(
+                    ModelUsage::builder()
+                        .input_tokens(120)
+                        .output_tokens(30)
+                        .cache_read_tokens(50)
+                        .cache_write_tokens(0)
+                        .total_tokens(200)
+                        .build(),
+                )
+                .build(),
+        },
+    };
+    let lane = protocol::LaneId::try_from("main").expect("lane id");
+    store
+        .append_entry(
+            &lane,
+            NewEntry {
+                id: EntryId::try_from("entry-assistant").expect("entry id"),
+                kind: EntryKind::Message,
+                payload: serde_json::to_value(assistant)
+                    .expect("serialize Assistant message"),
+            },
+        )
+        .expect("append Assistant message");
+    store
+        .append_entry(
+            &lane,
+            NewEntry {
+                id: EntryId::try_from("entry-tool-result").expect("entry id"),
+                kind: EntryKind::Message,
+                payload: serde_json::to_value(AgentMessage {
+                    identity: MessageIdentity {
+                        message_id: MessageId::try_from("message-tool-result")
+                            .expect("message id"),
+                        turn_id: TurnId::try_from("turn-assistant")
+                            .expect("turn id"),
+                    },
+                    timing: MessageTiming::try_from((
+                        TimestampMs::from(2_001),
+                        TimestampMs::from(2_001),
+                        TimestampMs::from(2_001),
+                    ))
+                    .expect("message timing"),
+                    content: MessageContent::ToolResult {
+                        tool_call_id: ToolCallId::try_from("tool-call-replay")
+                            .expect("tool call id"),
+                        blocks: vec![ContentBlock::Text {
+                            text: "tool completed".to_string(),
+                        }],
+                        is_error: false,
+                        details: None,
+                    },
+                })
+                .expect("serialize ToolResult message"),
+            },
+        )
+        .expect("append ToolResult message");
+    let run_id = RunId::try_from("run-usage-replay").expect("run id");
+    store
+        .append_record(
+            NewRecord::builder()
+                .id(RecordId::try_from("record-turn-end").expect("record id"))
+                .lane(lane.clone())
+                .run_id(Some(run_id.clone()))
+                .kind(RecordKind::StepAttempt)
+                .payload(
+                    serde_json::to_value(TurnRecord {
+                        identity: TurnIdentity {
+                            run_id: run_id.clone(),
+                            turn_id: TurnId::try_from("turn-assistant")
+                                .expect("turn id"),
+                        },
+                        timing: TurnTiming::try_from((
+                            timestamp,
+                            TimestampMs::from(2_002),
+                        ))
+                        .expect("turn timing"),
+                        outcome: TurnOutcome::Completed {
+                            stop_reason: StopReason::ToolUse,
+                        },
+                    })
+                    .expect("serialize Turn record"),
+                )
+                .build(),
+        )
+        .expect("append Turn record");
+    store
+        .append_record(
+            NewRecord::builder()
+                .id(RecordId::try_from("record-run-end").expect("record id"))
+                .lane(lane)
+                .run_id(Some(run_id))
+                .kind(RecordKind::OperationFinished)
+                .payload(serde_json::json!({ "status": "completed" }))
+                .build(),
+        )
+        .expect("append Run settlement record");
+    drop(store);
+
+    let kernel = integration_kernel(state.path());
+    let server = AcpServerFactory::new(
+        kernel,
+        Arc::new(NanoidIdGenerator),
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
+    let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |notification: wire::UpdateSessionNotification,
+                    _connection| {
+            updates_tx.send(notification).map_err(|_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("notification receiver closed"),
+                )
+            })?;
+            Ok(())
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+
+    client
+        .connect_with(server, async move |connection| {
+            connection
+                .send_request(wire::InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    wire::Implementation::new("usage-replay-test", "0.1.0"),
+                ))
+                .block_task()
+                .await?;
+            connection
+                .send_request(
+                    wire::ResumeSessionRequest::new(
+                        session_id.to_string(),
+                        workspace.path().to_path_buf(),
+                    )
+                    .replay_from(wire::ReplayFrom::from(
+                        wire::ReplayFromStart::new(),
+                    )),
+                )
+                .block_task()
+                .await?;
+
+            let mut replay = Vec::new();
+            loop {
+                let notification = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    updates_rx.recv(),
+                )
+                .await
+                .expect("replay update")
+                .expect("replay notification");
+                if matches!(
+                    notification.update,
+                    wire::SessionUpdate::AvailableCommandsUpdate(_)
+                ) {
+                    break;
+                }
+                replay.push(
+                    serde_json::to_value(notification.update)
+                        .expect("serialize update"),
+                );
+            }
+
+            assert_eq!(replay.len(), 5);
+            assert_eq!(replay[0]["sessionUpdate"], "agent_message");
+            assert_eq!(replay[1]["sessionUpdate"], "usage_update");
+            assert_eq!(replay[2]["sessionUpdate"], "tool_call_update");
+            assert_eq!(
+                replay[3]["sessionUpdate"],
+                format!("_{}/event", ProductIdentity::ACP_NAMESPACE)
+            );
+            assert_eq!(replay[3]["payload"]["event"], "turn_end");
+            assert_eq!(
+                replay[4]["sessionUpdate"],
+                format!("_{}/event", ProductIdentity::ACP_NAMESPACE)
+            );
+            assert_eq!(replay[4]["payload"]["event"], "run_end");
+            assert_eq!(replay[1]["used"], 200);
+            assert_eq!(replay[1]["size"], 8_192);
+            assert_eq!(
+                replay[0]["_meta"][ProductIdentity::ACP_NAMESPACE]
+                    ["sequence"],
+                1
+            );
+            assert_eq!(
+                replay[1]["_meta"][ProductIdentity::ACP_NAMESPACE]
+                    ["sequence"],
+                2
+            );
+            assert_eq!(
+                replay[2]["_meta"][ProductIdentity::ACP_NAMESPACE]
+                    ["sequence"],
+                3
+            );
+            assert_eq!(
+                replay[3]["_meta"][ProductIdentity::ACP_NAMESPACE]
+                    ["sequence"],
+                4
+            );
+            assert_eq!(
+                replay[4]["_meta"][ProductIdentity::ACP_NAMESPACE]
+                    ["sequence"],
+                5
+            );
+            assert_eq!(
+                replay[1]["_meta"][ProductIdentity::ACP_NAMESPACE]["usage"]
+                    ["total_tokens"],
+                "200"
+            );
+            Ok(())
+        })
+        .await
+        .expect("Assistant Usage ACP replay lifecycle");
 }
 
 /// ACP resume replays a durable compaction card between its neighboring messages.

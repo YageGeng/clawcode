@@ -134,6 +134,14 @@ impl SessionTranscript {
         Ok(state.store.branch(leaf)?)
     }
 
+    /// Returns durable operation records for replay and recovery inspection.
+    pub(super) fn records(&self) -> Result<Vec<SessionRecord>, KernelError> {
+        self.state
+            .lock()
+            .map(|state| state.store.records())
+            .map_err(|_poison_error| KernelError::Poisoned)
+    }
+
     /// Builds the public tree snapshot from one consistent Store view.
     pub(super) fn tree_snapshot(
         &self,
@@ -765,6 +773,11 @@ mod tests {
         /// Returns all delegated operation records.
         fn records(&self) -> Vec<SessionRecord> {
             self.inner.records()
+        }
+
+        /// Delegates the latest shared mutation sequence.
+        fn last_sequence(&self) -> u64 {
+            self.inner.last_sequence()
         }
 
         /// Delegates Session naming.

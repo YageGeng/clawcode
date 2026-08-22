@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, CompactionReason, CompactionResult, ContentBlock, EntryId,
-    LaneId, RunId, SessionId, TimestampMs, TurnRecord,
+    AgentMessage, AgentOutcome, CompactionReason, CompactionResult,
+    ContentBlock, EntryId, LaneId, RunId, SessionId, TimestampMs, TurnId,
+    TurnRecord,
 };
 
 /// Ordered prompt input plus whether text-only command dispatch is safe.
@@ -110,11 +111,29 @@ pub struct SessionRuntimeSnapshot {
     pub running: bool,
 }
 
-/// One durable active-branch item projected to ACP in original entry order.
+/// One active-branch item projected to ACP in original entry order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionReplayItem {
-    /// A persisted transcript message.
-    Message(AgentMessage),
+    /// A persisted transcript message plus its reconstructable model window.
+    Message {
+        /// Complete persisted message projected through native ACP updates.
+        message: AgentMessage,
+        /// Context window used to reconstruct Usage after an Assistant message.
+        context_window: Option<u64>,
+    },
+    /// A persisted Turn settlement emitted after all messages in that Turn.
+    Turn(TurnRecord),
+    /// A persisted Agent Run settlement emitted after all of its Turns.
+    RunEnd {
+        /// Stable identifier shared by every Turn in the Run.
+        run_id: RunId,
+        /// Last Turn used to correlate ACP event metadata.
+        turn_id: TurnId,
+        /// Typed reason the Agent Run stopped.
+        outcome: AgentOutcome,
+        /// Durable settlement timestamp assigned by the Store.
+        ended_at_ms: TimestampMs,
+    },
     /// A persisted compaction boundary rendered as a replayable card.
     Compaction {
         /// Run-shaped identifier originally emitted by the compaction.

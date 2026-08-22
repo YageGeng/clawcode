@@ -1,5 +1,6 @@
-import type { EntryId, EventMeta, MessageId, QueueId } from "../acp/protocol";
+import type { EntryId, EventMeta, MessageId, QueueId, RunId, TurnId } from "../acp/protocol";
 import type {
+  AgentRunUsage,
   AvailableCommandEntity,
   BashExecutionEntity,
   CompactionEntity,
@@ -12,6 +13,7 @@ import type {
   McpElicitationSnapshot,
   McpSessionSnapshot,
   MessageEntity,
+  ModelUsage,
   PendingMessages,
   RecoveryNotice,
   RetryStatus,
@@ -21,7 +23,7 @@ import type {
   ToolCallEntity,
   TranscriptEntry
 } from "../domain/model";
-import { EventOrdering as Ordering } from "../domain/model";
+import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
 
 export type SessionWorkspaceState = Readonly<{
   messages: ReadonlyMap<MessageId, MessageEntity>;
@@ -30,6 +32,8 @@ export type SessionWorkspaceState = Readonly<{
   bashExecutions: ReadonlyMap<MessageId, BashExecutionEntity>;
   extensions: ReadonlyMap<string, ExtensionEntity>;
   compactions: ReadonlyMap<EntryId, CompactionEntity>;
+  turnRuns: ReadonlyMap<TurnId, RunId>;
+  runUsages: ReadonlyMap<RunId, AgentRunUsage>;
   events: readonly SessionEvent[];
   pending: PendingMessages;
   tree: SessionTree | undefined;
@@ -55,6 +59,8 @@ export type SessionWorkspaceAction =
   | { readonly type: "bash/upserted"; readonly bash: BashExecutionEntity; readonly order: EventOrder }
   | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
   | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
+  | { readonly type: "turn/settled"; readonly turnId: TurnId; readonly runId: RunId }
+  | { readonly type: "run/settled"; readonly runId: RunId; readonly order: EventOrder }
   | { readonly type: "recovery/completed"; readonly notice: RecoveryNotice; readonly order: EventOrder }
   | { readonly type: "event/received"; readonly event: SessionEvent }
   | { readonly type: "queue/replaced"; readonly pending: PendingMessages }
@@ -83,6 +89,8 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   bashExecutions: new Map(),
   extensions: new Map(),
   compactions: new Map(),
+  turnRuns: new Map(),
+  runUsages: new Map(),
   events: [],
   pending: { steering: [], followUp: [] },
   tree: undefined,
@@ -192,6 +200,41 @@ export function reduceSessionWorkspace(
       const transcript = exists ? state.transcript : [...state.transcript, { type: "compaction" as const, entryId: action.compaction.entryId, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, compactions, transcript };
+    }
+    case "turn/settled": {
+      if (state.turnRuns.has(action.turnId)) return state;
+      const usages = [...state.messages.values()]
+        .filter((message) => message.turnId === action.turnId && message.assistant !== undefined)
+        .map((message) => message.assistant?.usage)
+        .filter((usage): usage is ModelUsage => usage !== undefined);
+      const turnRuns = new Map(state.turnRuns);
+      turnRuns.set(action.turnId, action.runId);
+      if (usages.length === 0) return { ...state, turnRuns };
+      const runUsages = new Map(state.runUsages);
+      const previous = runUsages.get(action.runId);
+      // TurnEnd contributes exactly once to its owning Run, but presentation
+      // waits for the later RunEnd boundary of the complete Agent loop.
+      runUsages.set(action.runId, {
+        usage: ModelUsages.sum(previous === undefined ? usages : [previous.usage, ...usages]),
+        settled: previous?.settled ?? false
+      });
+      return {
+        ...state,
+        turnRuns,
+        runUsages
+      };
+    }
+    case "run/settled": {
+      const previous = state.runUsages.get(action.runId);
+      if (previous === undefined || previous.settled) return state;
+      const runUsages = new Map(state.runUsages);
+      runUsages.set(action.runId, { ...previous, settled: true });
+      return {
+        ...state,
+        runUsages,
+        transcript: [...state.transcript, { type: "agent_usage" as const, runId: action.runId, order: action.order }]
+          .sort((left, right) => Ordering.compare(left.order, right.order))
+      };
     }
     case "recovery/completed": {
       const exists = state.transcript.some((entry) => entry.type === "recovery"

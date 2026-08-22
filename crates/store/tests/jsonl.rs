@@ -206,6 +206,7 @@ fn append_record_and_facts_use_pi_v4_mutations() {
         .expect("set entry label");
 
     assert_eq!(record.sequence.get(), 2);
+    assert_eq!(store.last_sequence(), 4);
     let content = fs::read_to_string(store.path()).expect("read session file");
     let lines = content.lines().collect::<Vec<_>>();
     let record_line: serde_json::Value =
@@ -220,6 +221,11 @@ fn append_record_and_facts_use_pi_v4_mutations() {
     assert_eq!(record_line["timestamp"], "9007199254740993");
     assert_eq!(name_line["fact"], "name");
     assert_eq!(label_line["fact"], "label");
+
+    let path = store.path().to_path_buf();
+    drop(store);
+    let reopened = factory.open(&path).expect("reopen session");
+    assert_eq!(reopened.last_sequence(), 4);
 }
 
 /// Reopening a session repairs an unacknowledged partial final append.

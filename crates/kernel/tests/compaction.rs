@@ -391,6 +391,11 @@ impl SessionStore for FailingCompactionStore {
         self.inner.records()
     }
 
+    /// Returns the delegated shared mutation sequence.
+    fn last_sequence(&self) -> u64 {
+        self.inner.last_sequence()
+    }
+
     /// Delegates session-name persistence.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
         self.inner.set_name(name)
@@ -1056,7 +1061,7 @@ async fn compaction_rejects_tool_use_terminal_result() {
     )));
 }
 
-/// Replay preserves the durable message-compaction order and card identity.
+/// Replay preserves durable Turn, Run settlement, and compaction order.
 #[tokio::test]
 async fn session_replay_includes_persisted_compaction_boundary() {
     let fixture =
@@ -1075,7 +1080,15 @@ async fn session_replay_includes_persisted_compaction_boundary() {
         .session_replay(&fixture.session_id)
         .expect("session replay");
 
-    assert_eq!(replay.len(), fixture.messages_before.len() + 1);
+    assert_eq!(replay.len(), fixture.messages_before.len() + 3);
+    assert!(matches!(
+        replay.get(replay.len().saturating_sub(3)),
+        Some(SessionReplayItem::Turn(_))
+    ));
+    assert!(matches!(
+        replay.get(replay.len().saturating_sub(2)),
+        Some(SessionReplayItem::RunEnd { .. })
+    ));
     assert!(matches!(
         replay.last(),
         Some(SessionReplayItem::Compaction {

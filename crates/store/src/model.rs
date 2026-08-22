@@ -379,6 +379,9 @@ pub trait SessionStore: Send {
     /// Returns all durable lane records in shared sequence order.
     fn records(&self) -> Vec<SessionRecord>;
 
+    /// Returns the latest shared mutation sequence, or zero for a new Store.
+    fn last_sequence(&self) -> u64;
+
     /// Sets or clears the global session name fact.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError>;
 

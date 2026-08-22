@@ -410,6 +410,11 @@ impl SessionStore for JsonlSessionStore {
         self.state.records.clone()
     }
 
+    /// Returns the latest sequence across entries, records, lanes, and facts.
+    fn last_sequence(&self) -> u64 {
+        self.state.next_sequence
+    }
+
     /// Persists the current optional session name as a global fact mutation.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
         let mutation = NameFactMutation::builder()

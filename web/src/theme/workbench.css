@@ -716,6 +716,60 @@
   border-color: #efc5cb;
 }
 
+.agent-usage {
+  display: flex;
+  width: min(760px, 92%);
+  max-width: 100%;
+  margin: 0 auto 14px 0;
+  padding: 7px 10px;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-small);
+  color: var(--text-secondary);
+  background: linear-gradient(110deg, var(--accent-soft), var(--spatial-cyan-soft));
+  font-size: 11px;
+}
+
+.agent-usage__heading {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent-strong);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.agent-usage__metrics {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+}
+
+.agent-usage__metric {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.agent-usage__metric dt {
+  color: var(--text-tertiary);
+}
+
+.agent-usage__metric dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
 .message__action-area {
   display: flex;
   min-height: 28px;
@@ -1548,6 +1602,13 @@
 
   .transcript {
     padding: 20px 14px;
+  }
+
+  .agent-usage {
+    width: auto;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .composer-area {

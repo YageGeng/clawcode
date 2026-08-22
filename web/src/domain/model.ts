@@ -3,6 +3,7 @@ import type {
   EventMeta,
   MessageId,
   QueueId,
+  RunId,
   SessionId,
   TimestampMs,
   ToolCallId,
@@ -55,6 +56,43 @@ export type ModelUsage = Readonly<{
   reasoningTokens?: string;
   totalTokens: string;
 }>;
+
+export type AgentRunUsage = Readonly<{
+  usage: ModelUsage;
+  settled: boolean;
+}>;
+
+export const ModelUsages = {
+  /** Aggregates exact per-attempt token counters without losing integer precision. */
+  sum(usages: readonly ModelUsage[]): ModelUsage {
+    let inputTokens = 0n;
+    let outputTokens = 0n;
+    let cacheReadTokens = 0n;
+    let cacheWriteTokens = 0n;
+    let reasoningTokens = 0n;
+    let hasReasoningTokens = false;
+    let totalTokens = 0n;
+    for (const usage of usages) {
+      inputTokens += BigInt(usage.inputTokens);
+      outputTokens += BigInt(usage.outputTokens);
+      cacheReadTokens += BigInt(usage.cacheReadTokens);
+      cacheWriteTokens += BigInt(usage.cacheWriteTokens);
+      totalTokens += BigInt(usage.totalTokens);
+      if (usage.reasoningTokens !== undefined) {
+        reasoningTokens += BigInt(usage.reasoningTokens);
+        hasReasoningTokens = true;
+      }
+    }
+    return {
+      inputTokens: inputTokens.toString(),
+      outputTokens: outputTokens.toString(),
+      cacheReadTokens: cacheReadTokens.toString(),
+      cacheWriteTokens: cacheWriteTokens.toString(),
+      ...(hasReasoningTokens ? { reasoningTokens: reasoningTokens.toString() } : {}),
+      totalTokens: totalTokens.toString()
+    };
+  }
+} as const;
 
 export type AssistantDiagnostics = Readonly<{
   providerId: string;
@@ -382,4 +420,5 @@ export type TranscriptEntry =
   | Readonly<{ type: "bash"; messageId: MessageId; order: EventOrder }>
   | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>
   | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>
+  | Readonly<{ type: "agent_usage"; runId: RunId; order: EventOrder }>
   | Readonly<{ type: "recovery"; notice: RecoveryNotice; order: EventOrder }>;
