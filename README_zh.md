@@ -39,6 +39,7 @@ Agent Client Protocol（ACP）v2 提供 stdio、HTTP/SSE 和 WebSocket，并包�
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
+approval = "request_approval"
 
 [[providers]]
 id = "deepseek"
@@ -54,10 +55,27 @@ input = ["text"]
 context_tokens = 1000000
 max_output_tokens = 384000
 
+[providers.models.extra_param]
+thinking = { type = "enabled" }
+reasoning_effort = "high"
+
+[app.recovery]
+# 限制一次出站 ACP 帧可消费的源 Session 更新数。
+max_batch_size = 512
+
+[kernel]
+max_turns = { type = "unlimited" }
+# max_turns = { type = "limited", turns = 64 }
+
+[logging]
+filter = "info,acp::trace=debug"
+color = true
+
 [retry]
 enabled = true
 max_retries = 3
 base_delay_ms = 2000
+max_retry_delay_ms = 60000
 
 [retry.provider]
 timeout_ms = 120000
@@ -68,10 +86,6 @@ max_retry_delay_ms = 60000
 enabled = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
-
-[kernel]
-max_turns = { type = "unlimited" }
-# max_turns = { type = "limited", turns = 64 }
 
 [prompt]
 load_project_instructions = true
@@ -86,11 +100,34 @@ paths = ["./team-skills"]
 name = "manual-review"
 enabled = false
 
+[extensions]
+enabled = ["command-guard"]
+
+[tools]
+enable_fs = true
+enable_shell = true
+enable_skill = true
+
 [[mcp_servers]]
-enabled = false
+enabled = true
 name = "example"
+protocol = "2026-07-28"
 command = "example-mcp-server"
 args = []
+startup_timeout_sec = 30
+request_timeout_sec = 120
+mrtr_max_rounds = 8
+mrtr_total_timeout_sec = 300
+
+[[mcp_servers]]
+enabled = true
+name = "remote"
+protocol = "2026-07-28"
+url = "https://example.com/mcp"
+startup_timeout_sec = 30
+request_timeout_sec = 120
+mrtr_max_rounds = 8
+mrtr_total_timeout_sec = 300
 ```
 
 省略 `[kernel]` 时，`max_turns` 默认为 `unlimited`。如需防止工具循环无限
@@ -170,9 +207,10 @@ HTTP 503，但 ACP 与 health 仍可用。
 Session 使用 pi v4 兼容 JSONL，按 cwd 编码目录保存。项目不创建全局
 `index.jsonl`，列表通过扫描 v4 header 获得。存储支持 lane、树导航、branch
 读取、fork、全局 name/label fact、operation record 和 torn-tail 恢复。Compact
-保存 `summary`、`retainedTail`、`tokensBefore` 及完整关联时间。
+检查点保存 `summary`、`tokensBefore`、`readFiles` 与 `modifiedFiles`，并带完整关联时间。
 
-Agent 级瞬时失败使用 2/4/8 秒指数退避；provider 请求级 retry 独立配置。上下文超过
+Agent 级瞬时失败使用 2/4/8 秒指数退避，并由 `[retry] max_retry_delay_ms`
+设上限；provider 请求级 retry 独立配置。上下文超过
 `context_tokens - reserve_tokens` 时在成功响应后压缩但不重放；显式 overflow 或可恢复的
 length stop 会移除失败 Assistant 的活动上下文，压缩后最多恢复一次。旧版按 Turn 数保留
 的 compaction 字段不兼容。
@@ -184,7 +222,8 @@ ACP 原生能力继续使用标准 `session/new`、`session/list`、`session/res
 Tree、Navigate、Branch、Fork、Compact、队列、Skill 和 MCP 状态使用集中定义的
 ACP v2 扩展方法与 `SessionUpdate::Other`。Extension Command、Skill 和 Prompt
 Template 使用 ACP v2 原生 `available_commands_update`。Agent 不声明或调用客户端
-文件系统和 terminal callback。
+文件系统和 terminal callback。恢复扩展会在 WebSocket 客户端重连时恢复进行中的
+Session，通过回放游标核对客户端最后应用的 Kernel 序列。
 
 ## 验证
 
