@@ -4,8 +4,10 @@ import type { ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { Components } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import type { PluggableList } from "unified";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 import type { MarkdownContentProps } from "./MarkdownContent";
 
@@ -31,8 +33,10 @@ const MARKDOWN_COMPONENTS: Components = {
   a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>,
   pre: ({ children }) => <CodeFrame>{children}</CodeFrame>
 };
-const REMARK_PLUGINS: PluggableList = [remarkGfm];
-const HIGHLIGHT_PLUGINS: PluggableList = [[rehypeHighlight, { detect: false }]];
+const REMARK_PLUGINS: PluggableList = [remarkGfm, remarkMath];
+// Keep formula rendering active while syntax highlighting is deferred for streaming messages.
+const MATH_REHYPE_PLUGINS: PluggableList = [rehypeKatex];
+const SETTLED_REHYPE_PLUGINS: PluggableList = [rehypeKatex, [rehypeHighlight, { detect: false }]];
 
 const MarkdownUrlPolicy = {
   /** Allows useful local and remote links while rejecting executable URL schemes. */
@@ -48,7 +52,7 @@ export default function MarkdownRenderer({ text, highlight = true }: MarkdownCon
   return (
     <ReactMarkdown
       remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={highlight ? HIGHLIGHT_PLUGINS : undefined}
+      rehypePlugins={highlight ? SETTLED_REHYPE_PLUGINS : MATH_REHYPE_PLUGINS}
       components={MARKDOWN_COMPONENTS}
       urlTransform={MarkdownUrlPolicy.transform}
     >
