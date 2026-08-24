@@ -156,6 +156,9 @@ pub struct RetryPolicy {
     /// Initial retry delay in milliseconds before exponential growth.
     #[serde(default = "RetryPolicy::default_base_delay_ms")]
     pub base_delay_ms: u64,
+    /// Maximum retry delay in milliseconds; zero disables the cap.
+    #[serde(default = "RetryPolicy::default_max_retry_delay_ms")]
+    pub max_retry_delay_ms: u64,
 }
 
 impl RetryPolicy {
@@ -173,6 +176,11 @@ impl RetryPolicy {
     const fn default_base_delay_ms() -> u64 {
         2_000
     }
+
+    /// Returns pi's default maximum assistant retry delay, bounding exponential backoff.
+    const fn default_max_retry_delay_ms() -> u64 {
+        60_000
+    }
 }
 
 impl Default for RetryPolicy {
@@ -182,6 +190,7 @@ impl Default for RetryPolicy {
             .enabled(Self::default_enabled())
             .max_retries(Self::default_max_retries())
             .base_delay_ms(Self::default_base_delay_ms())
+            .max_retry_delay_ms(Self::default_max_retry_delay_ms())
             .build()
     }
 }

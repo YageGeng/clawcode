@@ -536,6 +536,7 @@ impl CompactionFixture {
                         .enabled(true)
                         .max_retries(3)
                         .base_delay_ms(0)
+                        .max_retry_delay_ms(60_000)
                         .build(),
                 )
                 .compaction_policy(
@@ -1660,6 +1661,7 @@ impl OverflowFixture {
                     .enabled(true)
                     .max_retries(3)
                     .base_delay_ms(0)
+                    .max_retry_delay_ms(60_000)
                     .build(),
             )
             .compaction_policy(
