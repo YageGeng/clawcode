@@ -111,7 +111,12 @@ impl RetryState {
         }
         let attempt = self.attempts.checked_add(1)?;
         let factor = 1_u64.checked_shl(attempt.checked_sub(1)?)?;
-        let delay_ms = policy.base_delay_ms.checked_mul(factor)?;
+        // Saturating multiplication keeps the delay bounded for large user config;
+        // the explicit cap then enforces a hard ceiling on the backoff sleep.
+        let mut delay_ms = policy.base_delay_ms.saturating_mul(factor);
+        if policy.max_retry_delay_ms > 0 {
+            delay_ms = delay_ms.min(policy.max_retry_delay_ms);
+        }
         self.attempts = attempt;
         Some(RetrySchedule {
             attempt,

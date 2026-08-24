@@ -312,6 +312,7 @@ async fn transient_errors_retry_three_times_with_pi_backoff() {
             .enabled(true)
             .max_retries(3)
             .base_delay_ms(2_000)
+            .max_retry_delay_ms(60_000)
             .build(),
     )
     .await;
@@ -380,6 +381,48 @@ async fn transient_errors_retry_three_times_with_pi_backoff() {
     assert!(run_end < settled);
 }
 
+/// Exponential backoff is capped so a large retry budget cannot sleep forever.
+#[tokio::test(start_paused = true)]
+async fn retry_backoff_respects_max_delay_cap() {
+    let failures = (0..6).map(|_| {
+        ScriptedResponse::Failure(ModelFailure {
+            summary: "rate limited".to_string(),
+            status: Some(503),
+            retry_disposition: ModelRetryDisposition::Retryable,
+        })
+    });
+    let fixture = RetryFixture::new(
+        failures
+            .chain([ScriptedModel::text("ok")])
+            .collect::<Vec<_>>(),
+        RetryPolicy::builder()
+            .enabled(true)
+            .max_retries(6)
+            .base_delay_ms(2_000)
+            .max_retry_delay_ms(5_000)
+            .build(),
+    )
+    .await;
+    let run = fixture.start();
+
+    for (attempt, delay_ms) in [
+        (1, 2_000),
+        (2, 4_000),
+        (3, 5_000),
+        (4, 5_000),
+        (5, 5_000),
+        (6, 5_000),
+    ] {
+        assert_eq!(fixture.sink.retry_delay(attempt).await, delay_ms);
+        tokio::time::advance(Duration::from_millis(delay_ms)).await;
+        tokio::task::yield_now().await;
+    }
+
+    let result = run.await.expect("join run").expect("retry run");
+    assert_eq!(result.turns.len(), 7);
+    assert_eq!(fixture.model.calls.load(Ordering::Relaxed), 7);
+}
+
 /// Authentication failures settle immediately even when the provider marks them transient.
 #[tokio::test(start_paused = true)]
 async fn non_retryable_failure_does_not_consume_retry_budget() {
@@ -393,6 +436,7 @@ async fn non_retryable_failure_does_not_consume_retry_budget() {
             .enabled(true)
             .max_retries(3)
             .base_delay_ms(2_000)
+            .max_retry_delay_ms(60_000)
             .build(),
     )
     .await;
@@ -430,6 +474,7 @@ async fn cancellation_during_backoff_settles_and_preserves_follow_up() {
             .enabled(true)
             .max_retries(3)
             .base_delay_ms(2_000)
+            .max_retry_delay_ms(60_000)
             .build(),
     )
     .await;

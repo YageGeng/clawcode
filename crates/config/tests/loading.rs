@@ -88,6 +88,7 @@ fn defaults_match_pi_retry_and_compaction() {
     assert!(config.retry.agent.enabled);
     assert_eq!(config.retry.agent.max_retries, 3);
     assert_eq!(config.retry.agent.base_delay_ms, 2_000);
+    assert_eq!(config.retry.agent.max_retry_delay_ms, 60_000);
     assert_eq!(config.retry.provider.max_retry_delay_ms, 60_000);
     assert!(config.compaction.enabled);
     assert_eq!(config.compaction.reserve_tokens, 16_384);

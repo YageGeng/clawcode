@@ -56,6 +56,12 @@ impl RetryConfig {
             return true;
         }
 
+        // A positive cap bounds every scheduled delay to a safe finite value.
+        if self.agent.max_retry_delay_ms > 0 {
+            return true;
+        }
+
+        // Without a cap the multiplicative backoff must still fit in milliseconds.
         1_u64
             .checked_shl(self.agent.max_retries - 1)
             .and_then(|factor| self.agent.base_delay_ms.checked_mul(factor))
