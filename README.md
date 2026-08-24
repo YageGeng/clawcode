@@ -8,7 +8,7 @@ WebSocket and includes a local, light-themed Agent WebUI.
 
 | Crate | Responsibility |
 |---|---|
-| `app` | Production composition root and CLI |
+| `app` | Production composition root, CLI, bootstrap, and WebUI static serving |
 | `protocol` | Shared domain types, Turn/message events, and product identity |
 | `config` | Immutable TOML configuration |
 | `provider` | LLM API adapters and provider factory |
@@ -27,6 +27,12 @@ factories. Every runtime message and event carries a `turn_id` and a decimal
 string millisecond timestamp. Persisted messages also include creation,
 first-output, and last-output timestamps.
 
+## Environment requirements
+
+- Rust stable (see `rust-toolchain.toml`)
+- Node.js 22.12 or newer (only required to build the WebUI)
+- An API key for the configured model
+
 ## Configuration
 
 Configuration is loaded once at startup. Search order is:
@@ -39,6 +45,7 @@ Example:
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
+approval = "request_approval"
 
 [[providers]]
 id = "deepseek"
@@ -54,10 +61,27 @@ input = ["text"]
 context_tokens = 1000000
 max_output_tokens = 384000
 
+[providers.models.extra_param]
+thinking = { type = "enabled" }
+reasoning_effort = "high"
+
+[app.recovery]
+# Caps source Session updates consumed into one outbound ACP frame.
+max_batch_size = 512
+
+[kernel]
+max_turns = { type = "unlimited" }
+# max_turns = { type = "limited", turns = 64 }
+
+[logging]
+filter = "info,acp::trace=debug"
+color = true
+
 [retry]
 enabled = true
 max_retries = 3
 base_delay_ms = 2000
+max_retry_delay_ms = 60000
 
 [retry.provider]
 timeout_ms = 120000
@@ -68,10 +92,6 @@ max_retry_delay_ms = 60000
 enabled = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
-
-[kernel]
-max_turns = { type = "unlimited" }
-# max_turns = { type = "limited", turns = 64 }
 
 [prompt]
 load_project_instructions = true
@@ -86,10 +106,34 @@ paths = ["./team-skills"]
 name = "manual-review"
 enabled = false
 
+[extensions]
+enabled = ["command-guard"]
+
+[tools]
+enable_fs = true
+enable_shell = true
+enable_skill = true
+
 [[mcp_servers]]
+enabled = true
 name = "example"
+protocol = "2026-07-28"
 command = "example-mcp-server"
 args = []
+startup_timeout_sec = 30
+request_timeout_sec = 120
+mrtr_max_rounds = 8
+mrtr_total_timeout_sec = 300
+
+[[mcp_servers]]
+enabled = true
+name = "remote"
+protocol = "2026-07-28"
+url = "https://example.com/mcp"
+startup_timeout_sec = 30
+request_timeout_sec = 120
+mrtr_max_rounds = 8
+mrtr_total_timeout_sec = 300
 ```
 
 Omitting `[kernel]` defaults `max_turns` to `unlimited`. Use the `limited`
@@ -195,9 +239,11 @@ directories. There is no global `index.jsonl`; listing scans v4 headers.
 Storage supports lanes, tree navigation, branch reads, branch forks, global
 name/label facts, operation records, and torn-tail recovery.
 
-Agent-level transient failures use 2/4/8-second exponential backoff, while
-provider request retry is configured independently. Threshold compaction does
-not replay a successful Assistant. Explicit overflow and recoverable length
+Agent-level transient failures use 2/4/8-second exponential backoff capped at
+`[retry] max_retry_delay_ms`, while provider request retry is configured
+independently. A Compaction checkpoint persists its `summary`, `tokensBefore`,
+`readFiles`, and `modifiedFiles` alongside full timing. Threshold compaction
+does not replay a successful Assistant. Explicit overflow and recoverable length
 stops remove the failed Assistant from active context and compact-and-retry at
 most once. The former Turn-count compaction fields are not backward compatible.
 
@@ -206,11 +252,15 @@ most once. The former Turn-count compaction fields are not backward compatible.
 Pi concepts without native ACP equivalents use ACP v2 extension methods and
 `SessionUpdate::Other` values under the product namespace. Native
 `session/new`, `session/list`, `session/resume`, `session/prompt`,
-`session/cancel`, and `session/close` remain standard ACP methods. The agent
-uses native ACP v2 `available_commands_update` for Builtins, Extension
-Commands, Skills, and Prompt Templates. Product metadata records each source,
-qualified alias, and command-message status. It does not advertise or invoke
-client filesystem or terminal callbacks.
+`session/cancel`, and `session/close` remain standard ACP methods. The ACP
+extensions cover session Tree navigation, Navigate, Branch, Fork, Compact,
+queued follow-ups, Skill invoke/list, and MCP status. Extension Commands,
+Skills, and Prompt Templates are advertised through the native ACP v2
+`available_commands_update`. Product metadata records each source, qualified
+alias, and command-message status. It does not advertise or invoke client
+filesystem or terminal callbacks. A recovery extension reconnects an in-flight
+Session when a WebSocket client reconnects, confirming the client's last
+applied Kernel sequence against a replay cursor.
 
 ## Validation
 
