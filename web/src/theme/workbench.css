@@ -1919,6 +1919,13 @@
   white-space: pre-wrap;
 }
 
+/* Keep wide display formulas within the message surface without shrinking their notation. */
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .inspector-tools {
   padding: 10px;
 }

@@ -26,3 +26,6 @@
 *.tmp
 *.swp
 .superpowers/brainstorm/62366-1783431529/
+
+# Misc
+.pi/skills
