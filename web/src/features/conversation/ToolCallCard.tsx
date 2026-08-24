@@ -64,7 +64,9 @@ function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "ra
 
 /** Renders one ACP tool lifecycle with product-specific blocked refinement. */
 export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = false, onInspect }: ToolCallCardProps) {
-  const [open, setOpen] = useState(false);
+  // Bash cards first mount from the in-progress ACP update, so reveal streamed
+  // output immediately while preserving the user's later expand/collapse choice.
+  const [open, setOpen] = useState(tool.title === "bash" && tool.status === "in_progress");
   const statusLabel = tool.status === "completed" ? "完成" : tool.status === "blocked" ? "已阻止" : tool.status === "failed" ? "失败" : tool.status === "in_progress" ? "执行中" : "等待中";
   const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);
