@@ -1,4 +1,4 @@
-import { Activity, GitFork, Wrench, X } from "lucide-react";
+import { Activity, GitFork, SquareTerminal, Wrench, X } from "lucide-react";
 import { useState } from "react";
 
 import type { EntryId } from "../../acp/protocol";
@@ -9,8 +9,9 @@ import { useWorkspaceStore } from "../../workspace/store";
 import { ToolCallCard } from "../conversation/ToolCallCard";
 import { EventLog } from "./EventLog";
 import { SessionTree } from "./SessionTree";
+import { TerminalPanel } from "./TerminalPanel";
 
-type InspectorTab = "tree" | "events" | "tools";
+type InspectorTab = "tree" | "events" | "tools" | "terminals";
 
 export type InspectorProps = Readonly<{
   controller: WorkspaceController;
@@ -49,7 +50,7 @@ function ToolsPanel() {
 
 export function Inspector({ controller, treeEntryId, onClose }: InspectorProps) {
   const [tab, setTab] = useState<InspectorTab>("tree");
-  const tabs: readonly InspectorTab[] = ["tree", "events", "tools"];
+  const tabs: readonly InspectorTab[] = ["tree", "events", "tools", "terminals"];
   return (
     <aside className="inspector" aria-label="运行详情">
       <header className="inspector__overlay-header">
@@ -58,8 +59,8 @@ export function Inspector({ controller, treeEntryId, onClose }: InspectorProps) 
       </header>
       <div className="inspector-tabs" role="tablist">
         {tabs.map((item) => {
-          const icon = item === "tree" ? <GitFork size={14} aria-hidden="true" /> : item === "events" ? <Activity size={14} aria-hidden="true" /> : <Wrench size={14} aria-hidden="true" />;
-          const label = item === "tree" ? "Tree" : item === "events" ? "Events" : "Tools";
+          const icon = item === "tree" ? <GitFork size={14} aria-hidden="true" /> : item === "events" ? <Activity size={14} aria-hidden="true" /> : item === "tools" ? <Wrench size={14} aria-hidden="true" /> : <SquareTerminal size={14} aria-hidden="true" />;
+          const label = item === "tree" ? "Tree" : item === "events" ? "Events" : item === "tools" ? "Tools" : "Terminals";
           return <button
             aria-controls={`inspector-panel-${item}`}
             aria-selected={tab === item}
@@ -90,6 +91,7 @@ export function Inspector({ controller, treeEntryId, onClose }: InspectorProps) 
         {tab === "tree" ? <TreePanel controller={controller} {...(treeEntryId === undefined ? {} : { treeEntryId })} /> : null}
         {tab === "events" ? <EventsPanel /> : null}
         {tab === "tools" ? <ToolsPanel /> : null}
+        {tab === "terminals" ? <TerminalPanel controller={controller} /> : null}
       </div>
     </aside>
   );

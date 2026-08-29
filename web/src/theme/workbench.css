@@ -1243,6 +1243,23 @@
   background: var(--surface-muted);
 }
 
+.tool-card .tool-output__shell {
+  min-height: 104px;
+  max-height: min(40vh, 320px);
+  overflow: auto;
+  overflow-wrap: normal;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  tab-size: 4;
+  white-space: pre;
+  word-break: normal;
+}
+
+.tool-card .tool-output__shell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .tool-output {
   display: grid;
   gap: 8px;
@@ -1933,6 +1950,17 @@
 .inspector-tools .tool-card {
   width: 100%;
 }
+
+.terminal-panel { display: grid; gap: 10px; }
+.terminal-panel__toolbar, .terminal-panel__heading { display: flex; align-items: center; gap: 8px; }
+.terminal-panel__toolbar { justify-content: space-between; color: var(--muted-foreground); font-size: 12px; }
+.terminal-panel button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: inherit; padding: 4px 7px; }
+.terminal-panel button:disabled { cursor: not-allowed; opacity: 0.5; }
+.terminal-panel__item { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); }
+.terminal-panel__heading span { margin-left: auto; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; }
+.terminal-panel__heading span[data-status="running"] { color: var(--success); }
+.terminal-panel__item code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.terminal-panel__item small { overflow-wrap: anywhere; color: var(--muted-foreground); }
 
 .capability-page {
   min-height: 0;

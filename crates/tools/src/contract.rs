@@ -9,6 +9,8 @@ use protocol::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::{TerminalService, UnavailableTerminalService};
+
 /// Receives replaceable partial snapshots from streaming tools.
 pub trait ToolUpdateSink: Send + Sync {
     /// Publishes the latest visible result for one correlated tool call.
@@ -41,6 +43,12 @@ pub struct ToolExecutionContext {
 
     /// Destination for replaceable partial tool snapshots.
     pub updates: Arc<dyn ToolUpdateSink>,
+
+    /// Session-scoped terminal process capability used by shell tool adapters.
+    #[builder(
+        default = Arc::new(UnavailableTerminalService) as Arc<dyn TerminalService>
+    )]
+    pub terminals: Arc<dyn TerminalService>,
 }
 
 impl ToolExecutionContext {

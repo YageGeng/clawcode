@@ -21,6 +21,7 @@ import type {
   SessionTree,
   SkillListResult,
   ToolCallEntity,
+  TerminalSnapshot,
   TranscriptEntry
 } from "../domain/model";
 import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
@@ -42,6 +43,9 @@ export type SessionWorkspaceState = Readonly<{
   availableCommands: readonly AvailableCommandEntity[];
   mcpSnapshot: McpSessionSnapshot;
   mcpElicitations: ReadonlyMap<string, McpElicitation>;
+  terminals: readonly TerminalSnapshot[];
+  terminalRevision: number;
+  terminalTargetRevision: number;
   running: boolean;
   contextUsage: ContextUsage | undefined;
   retry: RetryStatus | undefined;
@@ -72,6 +76,8 @@ export type SessionWorkspaceAction =
   | { readonly type: "mcp/elicitations-replaced"; readonly snapshot: McpElicitationSnapshot }
   | { readonly type: "mcp/elicitation-requested"; readonly request: McpElicitation }
   | { readonly type: "mcp/elicitation-resolved"; readonly requestId: string }
+  | { readonly type: "terminals/replaced"; readonly revision: number; readonly terminals: readonly TerminalSnapshot[] }
+  | { readonly type: "terminals/invalidated"; readonly revision: number }
   | { readonly type: "running/changed"; readonly running: boolean }
   | { readonly type: "usage/changed"; readonly usage: ContextUsage | undefined }
   | { readonly type: "retry/changed"; readonly retry: RetryStatus | undefined }
@@ -99,6 +105,9 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   availableCommands: [],
   mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
   mcpElicitations: new Map(),
+  terminals: [],
+  terminalRevision: 0,
+  terminalTargetRevision: 0,
   running: false,
   contextUsage: undefined,
   retry: undefined,
@@ -296,6 +305,18 @@ export function reduceSessionWorkspace(
       mcpElicitations.delete(action.requestId);
       return { ...state, mcpElicitations };
     }
+    case "terminals/replaced": return action.revision < state.terminalTargetRevision
+      || action.revision < state.terminalRevision
+      ? state
+      : {
+          ...state,
+          terminals: action.terminals,
+          terminalRevision: action.revision,
+          terminalTargetRevision: action.revision
+        };
+    case "terminals/invalidated": return action.revision <= state.terminalTargetRevision
+      ? state
+      : { ...state, terminalTargetRevision: action.revision };
     case "running/changed": return action.running
       ? { ...state, running: true }
       : {

@@ -37,7 +37,7 @@ impl ExtensionModule for CommandGuard {
         Self::extension_descriptor()
     }
 
-    /// Registers policy before either server-side bash execution path.
+    /// Registers policy before model terminal calls and user-authored bash.
     fn register(
         &self,
         registrar: &mut ExtensionRegistrar,
@@ -169,18 +169,21 @@ impl CommandInvocation {
 
 #[async_trait]
 impl ExtensionHandler<ToolCallPoint> for CommandPolicy {
-    /// Blocks destructive built-in bash calls before validation and execution.
+    /// Blocks destructive exec_command calls before validation and execution.
     async fn handle(
         &self,
         event: &ToolCallEvent,
         _context: &ExtensionContext,
     ) -> Result<ToolCallResult, ExtensionError> {
+        if event.call.name != "exec_command" {
+            return Ok(ToolCallResult::Continue);
+        }
         let command = event
             .call
             .arguments
-            .get("command")
+            .get("cmd")
             .and_then(serde_json::Value::as_str);
-        if event.call.name == "bash" && command.is_some_and(Self::rejects) {
+        if command.is_some_and(Self::rejects) {
             return Ok(ToolCallResult::Block(
                 ToolBlock::builder()
                     .reason(REJECTED_MESSAGE.to_string())

@@ -21,6 +21,15 @@ pub enum ScalarError {
     #[error("sequence must be between 1 and {MAX_SAFE_INTEGER}")]
     InvalidSequence,
 
+    /// A terminal identifier was outside the model-facing numeric range.
+    #[error("terminal id must be between {minimum} and {maximum}")]
+    InvalidTerminalId {
+        /// Inclusive lower bound.
+        minimum: u32,
+        /// Inclusive upper bound.
+        maximum: u32,
+    },
+
     /// A session title was empty after trimming whitespace.
     #[error("session title must not be empty")]
     EmptySessionTitle,
@@ -111,6 +120,65 @@ define_string_id!(LaneId, "lane");
 define_string_id!(RecordId, "record");
 define_string_id!(QueueId, "queue");
 define_string_id!(ExtensionId, "extension");
+
+/// Session-local numeric identifier for one retained terminal.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct TerminalId(u32);
+
+impl TerminalId {
+    /// Inclusive minimum generated identifier.
+    pub const MIN: u32 = 1_000;
+    /// Inclusive maximum generated identifier.
+    pub const MAX: u32 = 99_999;
+
+    /// Returns the validated Session-local numeric terminal identifier.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for TerminalId {
+    type Error = ScalarError;
+
+    /// Validates one model-facing terminal identifier.
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(ScalarError::InvalidTerminalId {
+                minimum: Self::MIN,
+                maximum: Self::MAX,
+            })
+        }
+    }
+}
+
+impl From<TerminalId> for u32 {
+    /// Converts a validated terminal identifier into its wire value.
+    fn from(value: TerminalId) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for TerminalId {
+    /// Writes the terminal identifier as an unsigned integer.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
 
 impl TurnId {
     /// Creates the stable synthetic Turn identity for out-of-turn session messages.

@@ -6,6 +6,7 @@ import { AcpProtocol } from "../acp/protocol";
 import type { InitializeRecovery, InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionRecoveryPlan, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
 import type { BranchEditPlan } from "../domain/messageActions";
+import { TerminalProtocol } from "../domain/model";
 import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { useWorkspaceStore } from "./store";
 import type { SessionWorkspaceAction } from "./sessionState";
@@ -34,6 +35,7 @@ export class WorkspaceController {
   private reconnectAttempt = 0;
   private sessionDeleteSupported = false;
   private readonly deletingSessionIds = new Set<SessionId>();
+  private readonly terminalRefreshes = new Map<SessionId, Promise<void>>();
   private listenersInstalled = false;
   private stopped = false;
   private readonly onlineListener = () => this.wakeConnection();
@@ -106,6 +108,24 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
     this.dispatchSession(sessionId, { type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
+    await this.refreshTerminals(sessionId);
+  }
+
+  /** Terminates one retained terminal and refreshes the authoritative snapshot. */
+  async terminateTerminal(sessionId: SessionId, terminalId: number): Promise<void> {
+    await this.requireConnection().request(this.methods.terminalTerminate, { sessionId, terminalId });
+    await this.refreshTerminals(sessionId);
+  }
+
+  /** Terminates every retained terminal for one Session. */
+  async cleanTerminals(sessionId: SessionId): Promise<void> {
+    await this.requireConnection().request(this.methods.terminalClean, { sessionId });
+    await this.refreshTerminals(sessionId);
+  }
+
+  /** Adds one Session-scoped diagnostic from an interactive host control. */
+  reportSessionDiagnostic(sessionId: SessionId, message: string): void {
+    this.dispatchSession(sessionId, { type: "diagnostic/added", message });
   }
 
   async newSession(cwd: string): Promise<SessionId> {
@@ -571,6 +591,8 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
     this.dispatchSession(sessionId, { type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
+    await this.refreshTerminals(sessionId);
+    this.assertCurrentConnection(generation, connection);
   }
 
   /** Identifies the stable ACP error that requires a one-time full replay fallback. */
@@ -602,6 +624,26 @@ export class WorkspaceController {
           ).mcpSnapshot.revision
         ) {
           void this.refreshMcpSnapshot(update.sessionId as SessionId);
+        }
+        continue;
+      }
+      if (notification.method === this.notifications.terminalUpdated) {
+        try {
+          const update = TerminalProtocol.decodeUpdate(notification.params);
+          if (!this.deletingSessionIds.has(update.sessionId)) {
+            this.dispatchSession(update.sessionId, { type: "terminals/invalidated", revision: update.revision });
+            void this.refreshTerminals(update.sessionId).catch((reason: unknown) => {
+              this.reportSessionDiagnostic(
+                update.sessionId,
+                reason instanceof Error ? reason.message : String(reason)
+              );
+            });
+          }
+        } catch (reason: unknown) {
+          this.dispatch({
+            type: "diagnostic/added",
+            message: reason instanceof Error ? reason.message : String(reason)
+          });
         }
         continue;
       }
@@ -640,6 +682,40 @@ export class WorkspaceController {
         type: "diagnostic/added",
         message: reason instanceof Error ? reason.message : String(reason)
       });
+    }
+  }
+
+  /** Reads and applies the authoritative retained-terminal snapshot. */
+  private async refreshTerminals(sessionId: SessionId): Promise<void> {
+    const existing = this.terminalRefreshes.get(sessionId);
+    if (existing !== undefined) return existing;
+    const refresh = this.refreshTerminalsUntilCurrent(sessionId);
+    this.terminalRefreshes.set(sessionId, refresh);
+    try {
+      await refresh;
+    } finally {
+      if (this.terminalRefreshes.get(sessionId) === refresh) {
+        this.terminalRefreshes.delete(sessionId);
+      }
+    }
+  }
+
+  /** Repeats list until its snapshot catches every observed invalidation revision. */
+  private async refreshTerminalsUntilCurrent(sessionId: SessionId): Promise<void> {
+    while (true) {
+      const result = TerminalProtocol.decodeList(
+        await this.requireConnection().request<unknown>(
+          this.methods.terminalList,
+          { sessionId }
+        )
+      );
+      this.dispatchSession(sessionId, {
+        type: "terminals/replaced",
+        revision: result.revision,
+        terminals: result.terminals
+      });
+      const current = sessionWorkspace(useWorkspaceStore.getState(), sessionId);
+      if (current.terminalRevision >= current.terminalTargetRevision) return;
     }
   }
 

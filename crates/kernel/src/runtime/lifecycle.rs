@@ -304,6 +304,14 @@ impl SessionExecution {
         Ok(())
     }
 
+    /// Reports whether teardown finished but retained resources still need cleanup.
+    pub(super) fn is_closed(&self) -> Result<bool, KernelError> {
+        self.lifecycle
+            .read()
+            .map(|lifecycle| matches!(*lifecycle, SessionLifecycle::Closed))
+            .map_err(|_poison_error| KernelError::Poisoned)
+    }
+
     /// Publishes a fully initialized execution as active after its startup checkpoint.
     pub(super) fn finish_starting(&self) -> Result<(), KernelError> {
         let mut lifecycle = self
@@ -392,6 +400,11 @@ impl Session {
     /// Marks a closing runtime closed before its final map removal.
     pub(super) fn finish_closing(&self) -> Result<(), KernelError> {
         self.execution.finish_closing()
+    }
+
+    /// Reports whether this runtime is retained only for cleanup retry ownership.
+    pub(super) fn is_closed(&self) -> Result<bool, KernelError> {
+        self.execution.is_closed()
     }
 
     /// Publishes this runtime for ordinary operations after startup is durable.
@@ -530,5 +543,17 @@ mod tests {
         execution
             .ensure_active()
             .expect("execution restored active");
+    }
+
+    /// A finalized lifecycle remains identifiable for resource-cleanup retries.
+    #[test]
+    fn closed_execution_is_identified_for_cleanup_retry() {
+        let execution = execution();
+        assert!(!execution.is_closed().expect("active lifecycle"));
+
+        execution.begin_closing().expect("begin closing");
+        execution.finish_closing().expect("finish closing");
+
+        assert!(execution.is_closed().expect("closed lifecycle"));
     }
 }

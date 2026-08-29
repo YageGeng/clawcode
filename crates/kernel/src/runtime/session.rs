@@ -142,7 +142,8 @@ impl Kernel {
             let store = self.store_factory.create(options)?;
             let path = store.path().to_path_buf();
             let runtime = self.build_session(store, cwd).await?;
-            self.register_session(session_id.clone(), &runtime).await?;
+            let _registration =
+                self.register_session(session_id.clone(), &runtime).await?;
             if let Err(error) = self
                 .start_extensions(&runtime, protocol::SessionStartReason::New)
                 .await
@@ -365,7 +366,8 @@ impl Kernel {
                 "session resume cancelled".to_string(),
             ));
         }
-        self.register_session(session_id.clone(), &runtime).await?;
+        let _registration =
+            self.register_session(session_id.clone(), &runtime).await?;
         if let Err(error) = self
             .start_extensions(&runtime, protocol::SessionStartReason::Resume)
             .await
@@ -398,9 +400,39 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
+        self.close_session_with_reason(
+            session_id,
+            protocol::TerminalRemovalReason::SessionClosed,
+        )
+        .await
+    }
+
+    /// Closes one Session using the terminal removal reason of its caller.
+    pub(super) async fn close_session_with_reason(
+        &self,
+        session_id: &SessionId,
+        terminal_reason: protocol::TerminalRemovalReason,
+    ) -> Result<(), KernelError> {
         tracing::info!("started Session close {}", session_id);
         let result: Result<(), KernelError> = async {
             let session = self.session(session_id)?;
+            if session.is_closed()? {
+                // A prior close finalized extension and MCP state but retained
+                // this Session because terminal cleanup failed. Retry only the
+                // owned terminal resources before removing the closed runtime.
+                session.terminals.shutdown(terminal_reason).await?;
+                let mut sessions = self
+                    .sessions
+                    .write()
+                    .map_err(|_poison_error| KernelError::Poisoned)?;
+                if sessions
+                    .get(session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+                {
+                    sessions.remove(session_id);
+                }
+                return Ok(());
+            }
             session.execution.cancel()?;
             let _run_guard = session.acquire_operation().await?;
             // Transition before invoking hooks so reentrant host operations fail
@@ -433,20 +465,41 @@ impl Kernel {
             // Once MCP teardown starts the runtime cannot safely become active
             // again, so every finalization step runs even when an earlier one fails.
             let mcp_result = session.mcp.shutdown().await;
+            let terminal_result = session
+                .terminals
+                .shutdown(terminal_reason)
+                .await
+                .map(|_count| ())
+                .map_err(KernelError::from);
+            let terminals_cleaned = terminal_result.is_ok();
             let sync_result = session.sync_store();
             let lifecycle_result = session.finish_closing();
             session.extensions.runtime_ref().invalidate();
-            let removal_result = self
-                .sessions
-                .write()
-                .map_err(|_poison_error| KernelError::Poisoned)
-                .map(|mut sessions| {
-                    sessions.remove(session_id);
-                });
+            let removal_result = if terminals_cleaned {
+                self.sessions
+                    .write()
+                    .map_err(|_poison_error| KernelError::Poisoned)
+                    .map(|mut sessions| {
+                        if sessions
+                            .get(session_id)
+                            .is_some_and(|current| Arc::ptr_eq(current, &session))
+                        {
+                            sessions.remove(session_id);
+                        }
+                    })
+            } else {
+                // Keep the closed Session as the strong retry owner whenever
+                // the terminal manager could not confirm process-tree cleanup.
+                Ok(())
+            };
             Self::preserve_primary_error(
                 Self::preserve_primary_error(
                     Self::preserve_primary_error(
-                        mcp_result,
+                        Self::preserve_primary_error(
+                            mcp_result,
+                            terminal_result,
+                            "clean terminals during Session close",
+                        ),
                         sync_result,
                         "sync Store during Session close",
                     ),
@@ -600,7 +653,8 @@ impl Kernel {
         )?;
         let path = store.path().to_path_buf();
         let runtime = self.build_session(store, cwd).await?;
-        self.register_session(new_session_id.clone(), &runtime)
+        let _registration = self
+            .register_session(new_session_id.clone(), &runtime)
             .await?;
         if let Err(error) = self
             .start_extensions(&runtime, protocol::SessionStartReason::Fork)
@@ -927,6 +981,9 @@ impl Kernel {
                     .cwd(cwd)
                     .transcript(transcript)
                     .mcp(SessionMcpRuntime::new(mcp))
+                    .terminals(Arc::new(TerminalManager::new(
+                        session_id.clone(),
+                    )))
                     .resources(OnceLock::new())
                     .extensions(extensions)
                     .tools(tools)
@@ -971,12 +1028,21 @@ impl Kernel {
         &self,
         session_id: SessionId,
         runtime: &Arc<Session>,
-    ) -> Result<(), KernelError> {
+    ) -> Result<tokio::sync::OwnedRwLockReadGuard<()>, KernelError> {
+        // Keep shutdown behind this runtime until startup hooks and the durable
+        // checkpoint finish at the caller's registration-guard boundary.
+        let startup_guard =
+            Arc::clone(&self.session_startups).read_owned().await;
         let registration = (|| {
             let mut sessions = self
                 .sessions
                 .write()
                 .map_err(|_poison_error| KernelError::Poisoned)?;
+            // Recheck while holding the map lock that shutdown snapshots. This
+            // orders cancellation against publication without a TOCTOU window.
+            if self.shutdown.is_cancelled() {
+                return Err(KernelError::ShuttingDown);
+            }
             if sessions.contains_key(&session_id) {
                 return Err(KernelError::DuplicateSession(session_id.clone()));
             }
@@ -995,7 +1061,7 @@ impl Kernel {
             }
             return Err(error);
         }
-        Ok(())
+        Ok(startup_guard)
     }
 
     /// Reserves one identifier across Store opening, runtime construction, and startup hooks.
@@ -1003,6 +1069,9 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionIdReservation, KernelError> {
+        if self.shutdown.is_cancelled() {
+            return Err(KernelError::ShuttingDown);
+        }
         // Hold the map read lock until the pending id is inserted so registration
         // and reservation cannot both observe the identifier as absent.
         let sessions = self
@@ -1054,7 +1123,18 @@ impl Kernel {
         runtime: &Arc<Session>,
     ) -> Result<(), KernelError> {
         runtime.extensions.runtime_ref().invalidate();
-        runtime.mcp.shutdown().await
+        let mcp_result = runtime.mcp.shutdown().await;
+        let terminal_result = runtime
+            .terminals
+            .shutdown(protocol::TerminalRemovalReason::SessionClosed)
+            .await
+            .map(|_count| ())
+            .map_err(KernelError::from);
+        Self::preserve_primary_error(
+            mcp_result,
+            terminal_result,
+            "clean terminals for unregistered Session",
+        )
     }
 
     /// Keeps the first lifecycle error while logging a later cleanup failure.
@@ -1091,6 +1171,12 @@ impl Kernel {
         if let Some(runtime) = runtime {
             runtime.extensions.runtime_ref().invalidate();
             let mcp_result = runtime.mcp.shutdown().await;
+            let terminal_result = runtime
+                .terminals
+                .shutdown(protocol::TerminalRemovalReason::SessionClosed)
+                .await
+                .map(|_count| ())
+                .map_err(KernelError::from);
             let delete_result = if delete_persisted {
                 self.store_factory
                     .delete(session_id)
@@ -1099,7 +1185,11 @@ impl Kernel {
                 Ok(())
             };
             return Self::preserve_primary_error(
-                mcp_result,
+                Self::preserve_primary_error(
+                    mcp_result,
+                    terminal_result,
+                    "clean terminals during registration rollback",
+                ),
                 delete_result,
                 "delete persisted Session during registration rollback",
             );

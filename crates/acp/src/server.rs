@@ -28,7 +28,62 @@ use crate::recovery::{
     AcpReplayRequest, CursorErrorData, RECOVERY_VERSION, RecoveryMode,
     RecoveryRequest, RecoveryResponse, ResumeMeta,
 };
+use crate::terminal::AcpTerminalUpdateNotification;
 use crate::trace::AcpTraceFactory;
+
+/// Per-connection terminal invalidation state with at most one queued notice.
+pub(crate) struct TerminalWatcherState {
+    latest_revision: u64,
+    outstanding_revision: Option<u64>,
+}
+
+impl TerminalWatcherState {
+    /// Creates watcher state aligned with the manager revision at subscription.
+    pub(crate) const fn new(revision: u64) -> Self {
+        Self {
+            latest_revision: revision,
+            outstanding_revision: None,
+        }
+    }
+
+    /// Records a manager change and returns a revision only when no notice is pending.
+    pub(crate) fn record_revision(&mut self, revision: u64) -> Option<u64> {
+        self.latest_revision = self.latest_revision.max(revision);
+        if self.outstanding_revision.is_some() {
+            None
+        } else {
+            self.outstanding_revision = Some(self.latest_revision);
+            Some(self.latest_revision)
+        }
+    }
+
+    /// Acknowledges one list result and emits a catch-up notice when it was stale.
+    pub(crate) fn acknowledge_snapshot(
+        &mut self,
+        revision: u64,
+    ) -> Option<u64> {
+        self.latest_revision = self.latest_revision.max(revision);
+        if self
+            .outstanding_revision
+            .is_some_and(|outstanding| revision < outstanding)
+        {
+            // A list started before the queued notification cannot acknowledge
+            // that notification or release another item into the ACP queue.
+            return None;
+        }
+        self.outstanding_revision = None;
+        if self.latest_revision > revision {
+            self.outstanding_revision = Some(self.latest_revision);
+            Some(self.latest_revision)
+        } else {
+            None
+        }
+    }
+}
+
+/// Connection-local terminal watchers keyed by their Session.
+pub(crate) type TerminalWatchers =
+    Arc<Mutex<BTreeMap<SessionId, TerminalWatcherState>>>;
 
 /// Cohesive ACP notification operations backed by one shared Kernel.
 pub(crate) struct AcpServer {
@@ -294,6 +349,68 @@ impl AcpServer {
         Ok(())
     }
 
+    /// Starts one deduplicated terminal event watcher for this connection and Session.
+    pub(crate) fn watch_terminals(
+        &self,
+        session_id: &SessionId,
+        connection: &ConnectionTo<Client>,
+        watched: TerminalWatchers,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let mut events = self
+            .kernel
+            .subscribe_terminals(session_id)
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        {
+            let mut sessions = watched.lock().map_err(|_poison_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("ACP terminal watcher lock poisoned"),
+                )
+            })?;
+            if sessions.contains_key(session_id) {
+                return Ok(());
+            }
+            sessions.insert(
+                session_id.clone(),
+                TerminalWatcherState::new(*events.borrow()),
+            );
+        }
+        let session_id = session_id.clone();
+        let task_connection = connection.clone();
+        connection.spawn(async move {
+            while events.changed().await.is_ok() {
+                let revision = *events.borrow_and_update();
+                let revision_to_send = {
+                    let Ok(mut sessions) = watched.lock() else {
+                        break;
+                    };
+                    sessions
+                        .get_mut(&session_id)
+                        .and_then(|state| state.record_revision(revision))
+                };
+                let Some(revision) = revision_to_send else {
+                    continue;
+                };
+                let notification = protocol::TerminalUpdateNotification {
+                    session_id: session_id.clone(),
+                    revision,
+                };
+                if task_connection
+                    .send_notification(AcpTerminalUpdateNotification(
+                        notification,
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            if let Ok(mut sessions) = watched.lock() {
+                sessions.remove(&session_id);
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Installs or replaces one connection-level Session projection watcher.
     pub(crate) fn watch_projection(
         &self,
@@ -460,6 +577,7 @@ struct ComponentContext {
 /// Mutable watcher collections shared by handlers on one ACP connection.
 struct ConnectionWatchers {
     mcp: Arc<Mutex<BTreeSet<SessionId>>>,
+    terminals: TerminalWatchers,
     sessions: Arc<Mutex<BTreeMap<SessionId, Arc<CancellationToken>>>>,
 }
 
@@ -500,6 +618,7 @@ impl AcpServerFactory {
                 ))
                 .watchers(ConnectionWatchers {
                     mcp: Arc::new(Mutex::new(BTreeSet::new())),
+                    terminals: Arc::new(Mutex::new(BTreeMap::new())),
                     sessions: Arc::new(Mutex::new(BTreeMap::new())),
                 })
                 .build(),
@@ -582,6 +701,9 @@ impl AcpServerFactory {
                         AcpExtensionMethod::McpElicitationRespond,
                         AcpExtensionMethod::ExtensionCommand,
                         AcpExtensionMethod::UserBash,
+                        AcpExtensionMethod::TerminalList,
+                        AcpExtensionMethod::TerminalTerminate,
+                        AcpExtensionMethod::TerminalClean,
                     ]
                     .into_iter()
                     .map(|method| serde_json::Value::String(method.to_string()))
@@ -644,6 +766,8 @@ impl AcpServerFactory {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
+                    let terminal_watchers =
+                        Arc::clone(&context.watchers.terminals);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
                     let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
@@ -669,6 +793,11 @@ impl AcpServerFactory {
                             &session_id,
                             &connection,
                             mcp_watchers,
+                        )?;
+                        server.watch_terminals(
+                            &session_id,
+                            &connection,
+                            terminal_watchers,
                         )?;
                         server.watch_projection(
                             &session_id,
@@ -740,6 +869,8 @@ impl AcpServerFactory {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
+                    let terminal_watchers =
+                        Arc::clone(&context.watchers.terminals);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
                     let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
@@ -961,6 +1092,11 @@ impl AcpServerFactory {
                             &connection,
                             mcp_watchers,
                         )?;
+                        server.watch_terminals(
+                            &session_id,
+                            &connection,
+                            terminal_watchers,
+                        )?;
                         server.watch_projection(
                             &session_id,
                             &connection,
@@ -1169,6 +1305,8 @@ impl AcpServerFactory {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
+                    let terminal_watchers =
+                        Arc::clone(&context.watchers.terminals);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
                     let operation = context.traces.request(
                         &responder,
@@ -1181,6 +1319,7 @@ impl AcpServerFactory {
                             .kernel(kernel)
                             .connection(connection)
                             .mcp_watchers(mcp_watchers)
+                            .terminal_watchers(terminal_watchers)
                             .projections(projections)
                             .session_watchers(session_watchers)
                             .build()
@@ -1209,7 +1348,25 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use protocol::{ContentBlock, RunId, RunInput, Sequence};
 
-    use super::ProjectionWatch;
+    use super::{ProjectionWatch, TerminalWatcherState};
+
+    /// One terminal notification remains outstanding until a list acknowledges it.
+    #[test]
+    fn terminal_watcher_coalesces_revisions_until_snapshot_acknowledgement() {
+        let mut state = TerminalWatcherState::new(2);
+
+        assert_eq!(state.record_revision(3), Some(3));
+        assert_eq!(state.record_revision(4), None);
+        assert_eq!(state.acknowledge_snapshot(3), Some(4));
+        assert_eq!(state.acknowledge_snapshot(4), None);
+        assert_eq!(state.record_revision(5), Some(5));
+
+        let mut racing = TerminalWatcherState::new(1);
+        assert_eq!(racing.record_revision(2), Some(2));
+        assert_eq!(racing.acknowledge_snapshot(1), None);
+        assert_eq!(racing.record_revision(3), None);
+        assert_eq!(racing.acknowledge_snapshot(2), Some(3));
+    }
 
     /// A live-only watcher adopts the first recoverable Run cursor it sends.
     #[test]

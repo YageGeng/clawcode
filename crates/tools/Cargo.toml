@@ -14,6 +14,9 @@ protocol = { workspace = true }
 # error
 thiserror = { workspace = true }
 
+# tracing & log
+tracing = { workspace = true }
+
 # async
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "process", "sync", "time"] }
@@ -32,13 +35,19 @@ tempfile = { workspace = true }
 
 # pty
 nix = { workspace = true }
+portable-pty = { workspace = true }
 
 # misc
 base64 = { workspace = true }
+fastrand = { workspace = true }
 image = { workspace = true }
 similar = { workspace = true }
 unicode-normalization = { workspace = true }
 url = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# windows process
+win32job = { workspace = true }
 
 [dev-dependencies]
 # async

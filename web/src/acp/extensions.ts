@@ -21,6 +21,9 @@ export type AcpExtensionMethods = Readonly<{
   mcpElicitationList: string;
   mcpElicitationRespond: string;
   extensionCommand: string;
+  terminalList: string;
+  terminalTerminate: string;
+  terminalClean: string;
 }>;
 
 export const AcpMethods = {
@@ -48,7 +51,10 @@ export const AcpMethods = {
       mcpOAuthContinue: `${prefix}/mcp/oauth/continue`,
       mcpElicitationList: `${prefix}/mcp/elicitation/list`,
       mcpElicitationRespond: `${prefix}/mcp/elicitation/respond`,
-      extensionCommand: `${prefix}/extension/command`
+      extensionCommand: `${prefix}/extension/command`,
+      terminalList: `${prefix}/terminal/list`,
+      terminalTerminate: `${prefix}/terminal/terminate`,
+      terminalClean: `${prefix}/terminal/clean`
     };
   },
   required(methods: AcpExtensionMethods): readonly string[] {
@@ -58,11 +64,15 @@ export const AcpMethods = {
 
 export type AcpExtensionNotifications = Readonly<{
   mcpUpdated: string;
+  terminalUpdated: string;
 }>;
 
 export const AcpNotifications = {
   /** Builds product-scoped extension notification names from one namespace. */
   forNamespace(namespace: string): AcpExtensionNotifications {
-    return { mcpUpdated: `_${namespace}/mcp/update` };
+    return {
+      mcpUpdated: `_${namespace}/mcp/update`,
+      terminalUpdated: `_${namespace}/terminal/update`
+    };
   }
 } as const;

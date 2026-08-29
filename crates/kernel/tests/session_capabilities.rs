@@ -17,7 +17,8 @@ use extension::{
 };
 use futures::{Stream, stream};
 use kernel::{
-    EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
+    EventSink, Kernel, KernelError, KernelFactory, Model, ModelError,
+    ModelFactory,
 };
 use mcp::{
     McpError, McpFactory, McpMrtrPolicy, McpSession, McpSessionRequest,
@@ -886,6 +887,108 @@ fn filesystem_skill_factory(global_root: PathBuf) -> FilesystemSkillFactory {
         .global_root(global_root)
         .user_home(user_home)
         .build()
+}
+
+/// Kernel shutdown closes live Sessions and rejects later Session creation.
+#[tokio::test]
+async fn kernel_shutdown_blocks_new_sessions_after_cleanup() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_000)));
+    let ids: Arc<dyn IdGenerator> = Arc::new(SequentialIds(AtomicU64::new(0)));
+    let kernel =
+        build_kernel(root.path().to_path_buf(), model, clock, ids, None);
+    let session_id =
+        SessionId::try_from("session-kernel-shutdown").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: cwd.clone(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create live Session");
+
+    kernel.shutdown().await.expect("kernel shutdown");
+
+    assert!(matches!(
+        kernel.terminals(&session_id),
+        Err(KernelError::SessionNotFound(_))
+    ));
+    assert!(matches!(
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: SessionId::try_from("session-after-shutdown")
+                    .expect("session id"),
+                cwd,
+                parent_session_id: None,
+            })
+            .await,
+        Err(KernelError::ShuttingDown)
+    ));
+}
+
+/// Kernel shutdown waits for a published Session startup before closing it.
+#[tokio::test]
+async fn kernel_shutdown_waits_for_registered_session_startup() {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_100)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let kernel = build_gated_start_kernel(
+        root.path(),
+        clock,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+    );
+    let session_id =
+        SessionId::try_from("session-startup-shutdown").expect("session id");
+    let create = tokio::spawn({
+        let kernel = Arc::clone(&kernel);
+        let session_id = session_id.clone();
+        async move {
+            kernel
+                .create_session(SessionCreateOptions {
+                    session_id,
+                    cwd,
+                    parent_session_id: None,
+                })
+                .await
+        }
+    });
+    entered.notified().await;
+
+    let mut shutdown = tokio::spawn({
+        let kernel = Arc::clone(&kernel);
+        async move { kernel.shutdown().await }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown must not skip a registered Session that is still starting"
+    );
+    release.notify_waiters();
+
+    create
+        .await
+        .expect("join Session creation")
+        .expect("complete Session creation");
+    shutdown
+        .await
+        .expect("join Kernel shutdown")
+        .expect("complete Kernel shutdown");
+    assert!(matches!(
+        kernel.terminals(&session_id),
+        Err(KernelError::SessionNotFound(id)) if id == session_id
+    ));
 }
 
 /// Attachment validation observes an active Run without waiting for its operation gate.

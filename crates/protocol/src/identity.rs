@@ -70,6 +70,10 @@ impl ProductIdentity {
     /// ACP v2 extension notification for an updated MCP Session snapshot revision.
     pub const ACP_MCP_UPDATE_NOTIFICATION: &str = "_clawcode/mcp/update";
 
+    /// ACP extension notification for a transient terminal change.
+    pub const ACP_TERMINAL_UPDATE_NOTIFICATION: &str =
+        "_clawcode/terminal/update";
+
     /// Prefix used by product-specific environment variables.
     pub const CONFIG_ENV_PREFIX: &str = "CLAW_";
 
@@ -135,6 +139,12 @@ pub enum AcpExtensionMethod {
     SessionRename,
     /// Reads whether one Session currently owns an active Run.
     SessionRuntime,
+    /// Lists retained terminals for one Session.
+    TerminalList,
+    /// Terminates one retained terminal.
+    TerminalTerminate,
+    /// Cleans every retained terminal for one Session.
+    TerminalClean,
     /// Invokes a discovered skill explicitly.
     InvokeSkill,
     /// Lists effective discovered skills without returning their bodies.
@@ -186,6 +196,9 @@ impl AcpExtensionMethod {
             Self::ClearQueue => "_clawcode/session/clear_queue",
             Self::SessionRename => "_clawcode/session/rename",
             Self::SessionRuntime => "_clawcode/session/runtime",
+            Self::TerminalList => "_clawcode/terminal/list",
+            Self::TerminalTerminate => "_clawcode/terminal/terminate",
+            Self::TerminalClean => "_clawcode/terminal/clean",
             Self::InvokeSkill => "_clawcode/skill/invoke",
             Self::SkillList => "_clawcode/skill/list",
             Self::McpStatus => "_clawcode/mcp/status",
@@ -215,6 +228,9 @@ impl AcpExtensionMethod {
             Self::ClearQueue,
             Self::SessionRename,
             Self::SessionRuntime,
+            Self::TerminalList,
+            Self::TerminalTerminate,
+            Self::TerminalClean,
             Self::InvokeSkill,
             Self::SkillList,
             Self::McpStatus,

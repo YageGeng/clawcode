@@ -111,6 +111,9 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::McpElicitationList.as_str()
             || method == AcpExtensionMethod::PendingMessageRemove.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
+            || method == AcpExtensionMethod::TerminalList.as_str()
+            || method == AcpExtensionMethod::TerminalTerminate.as_str()
+            || method == AcpExtensionMethod::TerminalClean.as_str()
     }
 
     /// Returns the static ACP method associated with this request.
@@ -163,6 +166,17 @@ impl JsonRpcMessage for IntegrationRequest {
                     == AcpExtensionMethod::PendingMessageRemove.as_str() =>
             {
                 AcpExtensionMethod::PendingMessageRemove.as_str()
+            }
+            method if method == AcpExtensionMethod::TerminalList.as_str() => {
+                AcpExtensionMethod::TerminalList.as_str()
+            }
+            method
+                if method == AcpExtensionMethod::TerminalTerminate.as_str() =>
+            {
+                AcpExtensionMethod::TerminalTerminate.as_str()
+            }
+            method if method == AcpExtensionMethod::TerminalClean.as_str() => {
+                AcpExtensionMethod::TerminalClean.as_str()
             }
             _ => {
                 return Err(agent_client_protocol::Error::method_not_found());
@@ -265,6 +279,60 @@ async fn mcp_elicitation_list_is_session_scoped_and_strict() {
 
 impl JsonRpcRequest for IntegrationRequest {
     type Response = IntegrationResponse;
+}
+
+/// Terminal management requests expose strict Session-scoped idempotent results.
+#[tokio::test]
+async fn terminal_management_lists_terminates_and_cleans() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let listed = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::TerminalList.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("list terminals");
+    assert_eq!(listed["terminals"], serde_json::json!([]));
+
+    let terminated = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::TerminalTerminate.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "terminalId": 7319
+            }),
+        ),
+    )
+    .await
+    .expect("terminate absent terminal");
+    assert_eq!(terminated["terminated"], false);
+
+    let cleaned = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::TerminalClean.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("clean terminals");
+    assert_eq!(cleaned["cleaned"], 0);
 }
 
 /// Opaque response that preserves the public JSON result for assertions.

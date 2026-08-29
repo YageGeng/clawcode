@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::{EntryId, QueueId, SessionId, UserBashRequest};
+use crate::{EntryId, QueueId, SessionId, TerminalId, UserBashRequest};
 
 /// Parameters shared by ACP extensions that reference one session.
 #[derive(Debug, Deserialize)]
@@ -10,6 +10,16 @@ use crate::{EntryId, QueueId, SessionId, UserBashRequest};
 pub struct AcpSessionParameters {
     /// Stable session identifier supplied by the client.
     pub session_id: SessionId,
+}
+
+/// Parameters for a host operation targeting one Session-owned terminal.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcpTerminalTargetParameters {
+    /// Session that owns the terminal manager.
+    pub session_id: SessionId,
+    /// Session-local terminal identifier.
+    pub terminal_id: TerminalId,
 }
 
 /// Model-backed compaction uses the common session-only request shape.

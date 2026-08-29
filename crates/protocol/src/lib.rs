@@ -16,6 +16,7 @@ mod scalar;
 mod session;
 mod skill;
 mod slash_command;
+mod terminal;
 mod tool;
 mod turn;
 
@@ -23,7 +24,8 @@ pub use acp::{
     AcpCommandParameters, AcpCompactParameters, AcpForkParameters,
     AcpNavigateParameters, AcpPendingMessageRemoveParameters,
     AcpSessionParameters, AcpSessionRenameParameters, AcpSkillParameters,
-    AcpUserBashParameters, AcpWorkingDirectory, AcpWorkingDirectoryError,
+    AcpTerminalTargetParameters, AcpUserBashParameters, AcpWorkingDirectory,
+    AcpWorkingDirectoryError,
 };
 pub use capability::{
     CompactionData, CompactionDetails, CompactionOperationError,
@@ -110,7 +112,8 @@ pub use prompt::{
 pub use queue::{PendingMessages, QueueKind, QueuedMessage};
 pub use scalar::{
     EntryId, ExtensionId, LaneId, MessageId, QueueId, RecordId, RunId,
-    ScalarError, Sequence, SessionId, TimestampMs, ToolCallId, TraceId, TurnId,
+    ScalarError, Sequence, SessionId, TerminalId, TimestampMs, ToolCallId,
+    TraceId, TurnId,
 };
 pub use session::{
     RunInput, RunRequest, RunResult, SessionReplayItem, SessionRuntimeSnapshot,
@@ -127,6 +130,11 @@ pub use slash_command::{
     SlashCommandExpansion, SlashCommandInvocation, SlashCommandMessage,
     SlashCommandOutcome, SlashCommandOutput, SlashCommandParseError,
     SlashCommandSource, SlashCommandStatus,
+};
+pub use terminal::{
+    TerminalCleanResult, TerminalListResult, TerminalRemovalReason,
+    TerminalSnapshot, TerminalStatus, TerminalTerminateResult,
+    TerminalUpdateNotification,
 };
 pub use tool::{
     ToolCall, ToolDefinition, ToolResult, ToolResultDetails, TruncationDetails,

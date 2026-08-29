@@ -7,6 +7,7 @@ import type {
   SessionId,
   TimestampMs,
   ToolCallId,
+  TerminalId,
   TurnId
 } from "../acp/protocol";
 import type { ImageContentBlock, ImageMimeType } from "../acp/protocol";
@@ -237,6 +238,124 @@ export type SessionRuntimeSnapshot = Readonly<{
   sessionId: SessionId;
   running: boolean;
 }>;
+
+export type TerminalStatus = "running" | "exited" | "failed";
+
+export type TerminalSnapshot = Readonly<{
+  terminalId: TerminalId;
+  command: string;
+  cwd: string;
+  tty: boolean;
+  status: TerminalStatus;
+  exitCode?: number | null;
+  startedAt: TimestampMs;
+  lastActivityAt: TimestampMs;
+}>;
+
+export type TerminalListResult = Readonly<{
+  revision: number;
+  terminals: readonly TerminalSnapshot[];
+}>;
+
+export type TerminalUpdateNotification = Readonly<{
+  sessionId: SessionId;
+  revision: number;
+}>;
+
+/** Strictly decodes terminal extension payloads at the ACP trust boundary. */
+export const TerminalProtocol = {
+  decodeList(value: unknown): TerminalListResult {
+    const record = terminalRecord(value, "terminal list");
+    terminalFields(record, ["revision", "terminals"], "terminal list");
+    const terminals = record.terminals;
+    if (!Array.isArray(terminals)) throw new Error("terminal list terminals must be an array");
+    return {
+      revision: terminalRevision(record.revision, "terminal list revision"),
+      terminals: terminals.map((terminal, index) => terminalSnapshot(terminal, index))
+    };
+  },
+
+  decodeUpdate(value: unknown): TerminalUpdateNotification {
+    const record = terminalRecord(value, "terminal update");
+    terminalFields(record, ["sessionId", "revision"], "terminal update");
+    if (typeof record.sessionId !== "string" || record.sessionId.length === 0) {
+      throw new Error("terminal update sessionId must be a non-empty string");
+    }
+    return {
+      sessionId: record.sessionId as SessionId,
+      revision: terminalRevision(record.revision, "terminal update revision")
+    };
+  }
+} as const;
+
+/** Narrows one terminal payload to a JSON object. */
+function terminalRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Rejects protocol fields that are not part of one terminal payload shape. */
+function terminalFields(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unknown = Object.keys(record).find((key) => !allowed.includes(key));
+  if (unknown !== undefined) throw new Error(`${label} contains unknown field ${unknown}`);
+}
+
+/** Decodes one non-negative JavaScript-safe terminal revision. */
+function terminalRevision(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${label} must be a non-negative safe integer`);
+  }
+  return value as number;
+}
+
+/** Decodes one complete retained-terminal snapshot without unchecked casts. */
+function terminalSnapshot(value: unknown, index: number): TerminalSnapshot {
+  const record = terminalRecord(value, `terminal snapshot ${index}`);
+  terminalFields(
+    record,
+    ["terminalId", "command", "cwd", "tty", "status", "exitCode", "startedAt", "lastActivityAt"],
+    `terminal snapshot ${index}`
+  );
+  const terminalId = record.terminalId;
+  const status = record.status;
+  const exitCode = record.exitCode;
+  if (!Number.isSafeInteger(terminalId) || (terminalId as number) < 1_000 || (terminalId as number) > 99_999) {
+    throw new Error(`terminal snapshot ${index} terminalId is outside 1000..99999`);
+  }
+  if (typeof record.command !== "string" || typeof record.cwd !== "string" || typeof record.tty !== "boolean") {
+    throw new Error(`terminal snapshot ${index} has invalid command, cwd, or tty`);
+  }
+  if (status !== "running" && status !== "exited" && status !== "failed") {
+    throw new Error(`terminal snapshot ${index} has invalid status`);
+  }
+  if (
+    exitCode !== undefined
+    && exitCode !== null
+    && (!Number.isInteger(exitCode) || (exitCode as number) < -2_147_483_648 || (exitCode as number) > 2_147_483_647)
+  ) {
+    throw new Error(`terminal snapshot ${index} exitCode must be an integer or null`);
+  }
+  if (
+    typeof record.startedAt !== "string"
+    || !/^\d+$/.test(record.startedAt)
+    || typeof record.lastActivityAt !== "string"
+    || !/^\d+$/.test(record.lastActivityAt)
+  ) {
+    throw new Error(`terminal snapshot ${index} timestamps must be strings`);
+  }
+  return {
+    terminalId: terminalId as TerminalId,
+    command: record.command,
+    cwd: record.cwd,
+    tty: record.tty,
+    status,
+    ...(exitCode === undefined ? {} : { exitCode: exitCode as number | null }),
+    startedAt: record.startedAt as TimestampMs,
+    lastActivityAt: record.lastActivityAt as TimestampMs
+  };
+}
 
 export type SessionTree = Readonly<{
   sessionId: SessionId;

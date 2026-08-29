@@ -31,7 +31,10 @@ fn builtin_factory_registers_only_pi_coding_tools() {
         .create()
         .expect("built-ins should register");
 
-    assert_eq!(registry.names(), vec!["bash", "edit", "read", "write"]);
+    assert_eq!(
+        registry.names(),
+        vec!["edit", "exec_command", "read", "write", "write_stdin"]
+    );
 }
 
 /// Built-in tools expose pi's exact System Prompt contributions.
@@ -78,12 +81,14 @@ fn builtin_tools_expose_pi_prompt_contributions() {
         })
     );
     assert_eq!(
-        contributions.get("bash"),
+        contributions.get("exec_command"),
         Some(&ToolPromptContribution {
             snippet: Some(
-                "Execute bash commands (ls, grep, find, etc.)".to_string()
+                "Run shell commands with optional PTY support".to_string()
             ),
-            guidelines: Vec::new(),
+            guidelines: vec![
+                "Use write_stdin with the returned session_id to poll or interact with background commands.".to_string()
+            ],
         })
     );
 }

@@ -16,10 +16,11 @@ import type {
   SessionTree,
   SkillListResult,
   ToolCallEntity,
+  TerminalSnapshot,
   TranscriptEntry
 } from "../domain/model";
 import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
-import { EventSequenceRanges, initialSessionWorkspaceState, MAX_RETAINED_SESSION_EVENTS } from "./sessionState";
+import { EventSequenceRanges, initialSessionWorkspaceState, MAX_RETAINED_SESSION_EVENTS, reduceSessionWorkspace } from "./sessionState";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 
 /** Retains an immutable Map until one frame action first requests a mutable view. */
@@ -71,6 +72,9 @@ export class SessionWorkspaceStager {
   private skillDiagnostics: SkillListResult["diagnostics"];
   private availableCommands: SessionWorkspaceState["availableCommands"];
   private mcpSnapshot: McpSessionSnapshot;
+  private terminals: readonly TerminalSnapshot[];
+  private terminalRevision: number;
+  private terminalTargetRevision: number;
   private running: boolean;
   private contextUsage: ContextUsage | undefined;
   private retry: RetryStatus | undefined;
@@ -96,6 +100,9 @@ export class SessionWorkspaceStager {
     this.skillDiagnostics = base.skillDiagnostics;
     this.availableCommands = base.availableCommands;
     this.mcpSnapshot = base.mcpSnapshot;
+    this.terminals = base.terminals;
+    this.terminalRevision = base.terminalRevision;
+    this.terminalTargetRevision = base.terminalTargetRevision;
     this.running = base.running;
     this.contextUsage = base.contextUsage;
     this.retry = base.retry;
@@ -130,6 +137,9 @@ export class SessionWorkspaceStager {
         this.skillDiagnostics = initialSessionWorkspaceState.skillDiagnostics;
         this.availableCommands = initialSessionWorkspaceState.availableCommands;
         this.mcpSnapshot = initialSessionWorkspaceState.mcpSnapshot;
+        this.terminals = initialSessionWorkspaceState.terminals;
+        this.terminalRevision = initialSessionWorkspaceState.terminalRevision;
+        this.terminalTargetRevision = initialSessionWorkspaceState.terminalTargetRevision;
         this.running = false;
         this.contextUsage = undefined;
         this.retry = undefined;
@@ -280,6 +290,14 @@ export class SessionWorkspaceStager {
       case "mcp/elicitation-resolved":
         this.mcpElicitations.write().delete(action.requestId);
         return;
+      case "terminals/replaced":
+      case "terminals/invalidated": {
+        const state = reduceSessionWorkspace(this.snapshot(), action);
+        this.terminals = state.terminals;
+        this.terminalRevision = state.terminalRevision;
+        this.terminalTargetRevision = state.terminalTargetRevision;
+        return;
+      }
       case "running/changed":
         if (action.running) {
           this.running = true;
@@ -318,6 +336,9 @@ export class SessionWorkspaceStager {
       availableCommands: this.availableCommands,
       mcpSnapshot: this.mcpSnapshot,
       mcpElicitations: this.mcpElicitations.read(),
+      terminals: this.terminals,
+      terminalRevision: this.terminalRevision,
+      terminalTargetRevision: this.terminalTargetRevision,
       running: this.running,
       contextUsage: this.contextUsage,
       retry: this.retry,
@@ -352,6 +373,9 @@ export class SessionWorkspaceStager {
       availableCommands: this.availableCommands,
       mcpSnapshot: this.mcpSnapshot,
       mcpElicitations: this.mcpElicitations.read(),
+      terminals: this.terminals,
+      terminalRevision: this.terminalRevision,
+      terminalTargetRevision: this.terminalTargetRevision,
       running: this.running,
       contextUsage: this.contextUsage,
       retry: this.retry,

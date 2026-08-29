@@ -1,10 +1,12 @@
-mod bash;
 mod edit;
+mod exec_command;
 mod mutation;
 pub(crate) mod output;
 mod path;
 mod read;
+mod terminal_updates;
 mod write;
+mod write_stdin;
 
 use std::sync::Arc;
 
@@ -33,7 +35,7 @@ impl BuiltinToolFactory {
         self
     }
 
-    /// Enables or disables bash registration.
+    /// Enables or disables Codex-style terminal tool registration.
     #[must_use]
     pub fn shell_enabled(mut self, enabled: bool) -> Self {
         self.shell_enabled = enabled;
@@ -59,7 +61,12 @@ impl ToolFactory for BuiltinToolFactory {
             registry.register(Arc::new(edit::EditTool) as Arc<dyn AgentTool>)?;
         }
         if self.shell_enabled {
-            registry.register(Arc::new(bash::BashTool) as Arc<dyn AgentTool>)?;
+            registry
+                .register(Arc::new(exec_command::ExecCommandTool)
+                    as Arc<dyn AgentTool>)?;
+            registry.register(
+                Arc::new(write_stdin::WriteStdinTool) as Arc<dyn AgentTool>
+            )?;
         }
         Ok(registry)
     }

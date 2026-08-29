@@ -59,40 +59,43 @@ fn context() -> ExtensionContext {
                 .pending_steer(0)
                 .pending_follow_up(0)
                 .active_tools(Vec::new())
-                .all_tools(vec!["bash".to_string()])
+                .all_tools(vec!["exec_command".to_string()])
                 .cancelled(false)
                 .build(),
         )
         .build()
 }
 
-/// Creates a bash call with the command under test.
-fn bash_call(command: &str) -> ToolCallEvent {
+/// Creates an exec_command call with the shell source under test.
+fn exec_command_call(command: &str) -> ToolCallEvent {
     ToolCallEvent {
         call: ToolCall {
             tool_call_id: ToolCallId::try_from("call-guard")
                 .expect("tool call id"),
-            name: "bash".to_string(),
-            arguments: serde_json::json!({ "command": command }),
+            name: "exec_command".to_string(),
+            arguments: serde_json::json!({ "cmd": command }),
         },
     }
 }
 
-/// Destructive model-authored bash commands never reach the built-in tool.
+/// Destructive model-authored shell commands never reach exec_command.
 #[tokio::test]
 async fn command_guard_blocks_destructive_tool_calls() {
     let result = runtime()
-        .emit_tool_call(bash_call("rm -rf /tmp/guard-target"), &context())
+        .emit_tool_call(
+            exec_command_call("rm -rf /tmp/guard-target"),
+            &context(),
+        )
         .await;
 
     assert!(matches!(result, ToolCallResult::Block(_)));
 }
 
-/// Safe model-authored bash commands continue through normal validation.
+/// Safe model-authored shell commands continue through normal validation.
 #[tokio::test]
 async fn command_guard_allows_safe_tool_calls() {
     let result = runtime()
-        .emit_tool_call(bash_call("printf safe"), &context())
+        .emit_tool_call(exec_command_call("printf safe"), &context())
         .await;
 
     assert_eq!(result, ToolCallResult::Continue);
@@ -133,7 +136,7 @@ async fn command_guard_parses_direct_remove_invocations() {
     ] {
         assert!(matches!(
             runtime()
-                .emit_tool_call(bash_call(command), &context())
+                .emit_tool_call(exec_command_call(command), &context())
                 .await,
             ToolCallResult::Block(_)
         ));
@@ -141,7 +144,7 @@ async fn command_guard_parses_direct_remove_invocations() {
     for command in ["echo 'rm -rf /tmp/value'", "rm /tmp/file", "printf safe"] {
         assert_eq!(
             runtime()
-                .emit_tool_call(bash_call(command), &context())
+                .emit_tool_call(exec_command_call(command), &context())
                 .await,
             ToolCallResult::Continue
         );

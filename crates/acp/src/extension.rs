@@ -11,7 +11,8 @@ use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExtensionMethod,
     AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpSessionParameters,
-    AcpSessionRenameParameters, AcpSkillParameters, AcpUserBashParameters,
+    AcpSessionRenameParameters, AcpSkillParameters,
+    AcpTerminalTargetParameters, AcpUserBashParameters,
     McpSessionRevisionNotification, ProductIdentity, QueueKind, SessionTitle,
 };
 use serde::Deserialize;
@@ -19,7 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::input::PromptInput;
 use crate::projection::ProjectionRegistry;
+use crate::server::TerminalWatchers;
 use crate::server::{AcpServer, ProjectionWatch};
+use crate::terminal::AcpTerminalUpdateNotification;
 
 /// Parameters for adding one multimodal follow-up to the active run.
 #[derive(Debug, Deserialize)]
@@ -157,6 +160,7 @@ pub(crate) struct AcpExtensionDispatcher {
     pub kernel: Arc<Kernel>,
     pub connection: ConnectionTo<Client>,
     pub mcp_watchers: Arc<Mutex<BTreeSet<protocol::SessionId>>>,
+    pub terminal_watchers: TerminalWatchers,
     pub projections: Arc<ProjectionRegistry>,
     pub session_watchers:
         Arc<Mutex<BTreeMap<protocol::SessionId, Arc<CancellationToken>>>>,
@@ -272,6 +276,11 @@ impl AcpExtensionDispatcher {
                     &fork_id,
                     &self.connection,
                     Arc::clone(&self.mcp_watchers),
+                )?;
+                server.watch_terminals(
+                    &fork_id,
+                    &self.connection,
+                    Arc::clone(&self.terminal_watchers),
                 )?;
                 server.watch_projection(
                     &fork_id,
@@ -523,6 +532,73 @@ impl AcpExtensionDispatcher {
                             input,
                             self.projections.sink(session_id),
                         )
+                        .await
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::TerminalList => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let snapshot =
+                    self.kernel.terminals(&input.session_id).map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?;
+                let catch_up_revision = {
+                    let mut watchers = self.terminal_watchers.lock().map_err(
+                        |_poison_error| {
+                            agent_client_protocol::Error::into_internal_error(
+                                std::io::Error::other(
+                                    "ACP terminal watcher lock poisoned",
+                                ),
+                            )
+                        },
+                    )?;
+                    watchers.get_mut(&input.session_id).and_then(|watcher| {
+                        watcher.acknowledge_snapshot(snapshot.revision)
+                    })
+                };
+                if let Some(revision) = catch_up_revision {
+                    self.connection.send_notification(
+                        AcpTerminalUpdateNotification(
+                            protocol::TerminalUpdateNotification {
+                                session_id: input.session_id,
+                                revision,
+                            },
+                        ),
+                    )?;
+                }
+                serde_json::to_value(snapshot).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::TerminalTerminate => {
+                let input: AcpTerminalTargetParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel
+                        .terminate_terminal(
+                            &input.session_id,
+                            input.terminal_id,
+                        )
+                        .await
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?,
+                )
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::TerminalClean => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                serde_json::to_value(
+                    self.kernel
+                        .clean_terminals(&input.session_id)
                         .await
                         .map_err(
                             agent_client_protocol::Error::into_internal_error,

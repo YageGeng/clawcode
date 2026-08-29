@@ -15,6 +15,9 @@ fn acp_extension_methods_use_the_product_namespace() {
         AcpExtensionMethod::ClearQueue,
         AcpExtensionMethod::SessionRename,
         AcpExtensionMethod::SessionRuntime,
+        AcpExtensionMethod::TerminalList,
+        AcpExtensionMethod::TerminalTerminate,
+        AcpExtensionMethod::TerminalClean,
         AcpExtensionMethod::InvokeSkill,
         AcpExtensionMethod::SkillList,
         AcpExtensionMethod::McpStatus,
@@ -62,5 +65,21 @@ fn webui_extension_methods_are_centralized() {
     assert_eq!(
         AcpExtensionMethod::UserBash.as_str(),
         format!("_{}/session/bash", ProductIdentity::ACP_NAMESPACE)
+    );
+    assert_eq!(
+        AcpExtensionMethod::TerminalList.as_str(),
+        format!("_{}/terminal/list", ProductIdentity::ACP_NAMESPACE)
+    );
+    assert_eq!(
+        AcpExtensionMethod::TerminalTerminate.as_str(),
+        format!("_{}/terminal/terminate", ProductIdentity::ACP_NAMESPACE)
+    );
+    assert_eq!(
+        AcpExtensionMethod::TerminalClean.as_str(),
+        format!("_{}/terminal/clean", ProductIdentity::ACP_NAMESPACE)
+    );
+    assert_eq!(
+        ProductIdentity::ACP_TERMINAL_UPDATE_NOTIFICATION,
+        format!("_{}/terminal/update", ProductIdentity::ACP_NAMESPACE)
     );
 }

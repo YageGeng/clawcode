@@ -138,6 +138,10 @@ clap = { version = "4", features = ["derive"] }
 
 # pty
 nix = { version = "0.31", features = ["signal", "process"] }
+portable-pty = "0.9.0"
+
+# windows process
+win32job = "2.0.3"
 
 # misc
 arc-swap = "1.9"

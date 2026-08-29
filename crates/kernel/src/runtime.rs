@@ -13,6 +13,7 @@ mod retry;
 mod run;
 mod session;
 mod settlement;
+mod terminal;
 mod tools;
 mod transcript;
 mod tree;
@@ -35,8 +36,8 @@ use ::extension::{
     ExtensionRuntime,
 };
 use ::tools::{
-    BashExecutionRequest, BashExecutor, ToolExecutionContext, ToolFactory,
-    ToolRegistry,
+    BashExecutionRequest, BashExecutor, TerminalManager, TerminalService,
+    ToolExecutionContext, ToolFactory, ToolRegistry,
 };
 use config::TurnLimit;
 use futures::StreamExt;
@@ -101,6 +102,9 @@ pub enum KernelError {
     /// Skill discovery or invocation failed.
     #[error("skill subsystem failed: {0}")]
     Skill(#[from] skill::SkillError),
+    /// Session terminal creation, interaction, or cleanup failed.
+    #[error("terminal subsystem failed: {0}")]
+    Terminal(#[from] ::tools::TerminalError),
     /// Prompt resource discovery or rendering failed.
     #[error("system prompt failed: {0}")]
     Prompt(#[from] ::prompt::PromptError),
@@ -119,6 +123,9 @@ pub enum KernelError {
     /// A closing session cannot accept another serialized operation.
     #[error("session is closing")]
     SessionClosing,
+    /// The Kernel has begun permanent application shutdown.
+    #[error("kernel is shutting down")]
+    ShuttingDown,
     /// A resume request supplied a different working directory for a live session.
     #[error(
         "session working directory mismatch for {session_id}: expected {expected:?}, received {received:?}"
@@ -221,6 +228,7 @@ impl KernelFactory {
             .retry_policy(self.retry_policy)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
             .pending_sessions(Arc::new(Mutex::new(HashSet::new())))
+            .session_startups(Arc::new(tokio::sync::RwLock::new(())))
             .shutdown(CancellationToken::new())
             .build())
     }
@@ -247,6 +255,7 @@ pub struct Kernel {
     retry_policy: RetryPolicy,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
     pending_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    session_startups: Arc<tokio::sync::RwLock<()>>,
     shutdown: CancellationToken,
 }
 
@@ -281,6 +290,40 @@ impl Kernel {
     /// Waits until an extension or the embedding application requests shutdown.
     pub async fn wait_for_shutdown(&self) {
         self.shutdown.cancelled().await;
+    }
+
+    /// Permanently closes every live Session and rejects future Session creation.
+    pub async fn shutdown(&self) -> Result<(), KernelError> {
+        // Cancellation closes the creation gate before the Session snapshot is
+        // captured. The exclusive startup guard then waits for every runtime
+        // already published as Starting to become fully closeable.
+        self.shutdown.cancel();
+        let _startup_guard = self.session_startups.write().await;
+        let session_ids = self
+            .sessions
+            .read()
+            .map_err(|_poison_error| KernelError::Poisoned)?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        for session_id in session_ids {
+            if let Err(error) = self
+                .close_session_with_reason(
+                    &session_id,
+                    protocol::TerminalRemovalReason::KernelShutdown,
+                )
+                .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 
     /// Invokes one discovered skill explicitly and returns its complete source.
@@ -477,6 +520,7 @@ struct Session {
     cwd: PathBuf,
     transcript: Arc<SessionTranscript>,
     mcp: SessionMcpRuntime,
+    terminals: Arc<TerminalManager>,
     resources: OnceLock<SessionResources>,
     extensions: SessionExtensions,
     tools: Arc<SessionToolState>,

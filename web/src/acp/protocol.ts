@@ -9,6 +9,7 @@ export type ToolCallId = Brand<string, "ToolCallId">;
 export type QueueId = Brand<string, "QueueId">;
 export type EntryId = Brand<string, "EntryId">;
 export type TimestampMs = Brand<string, "TimestampMs">;
+export type TerminalId = Brand<number, "TerminalId">;
 
 export type JsonRpcError = Readonly<{
   code: number;

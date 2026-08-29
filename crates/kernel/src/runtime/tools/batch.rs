@@ -186,6 +186,8 @@ impl Kernel {
                 .cwd(batch.session.cwd.clone())
                 .cancellation(batch.cancellation.clone())
                 .updates(update_channel.publisher(call.clone()))
+                .terminals(Arc::clone(&batch.session.terminals)
+                    as Arc<dyn TerminalService>)
                 .build();
             pending.push(async move {
                 let result = match immediate_result {

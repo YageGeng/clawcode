@@ -1,5 +1,5 @@
 import { Ban, Check, ChevronDown, CircleAlert, LoaderCircle, ScanSearch, Wrench } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState } from "react";
 
 import type { ToolCallEntity } from "../../domain/model";
 import { CodeBlock, JsonBlock, MarkdownContent } from "./MarkdownContent";
@@ -62,14 +62,60 @@ function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "ra
   </div>;
 }
 
+/** Renders a live shell snapshot while preserving terminal whitespace and user scroll intent. */
+function ShellToolOutput({ tool }: Readonly<{ tool: ToolCallEntity }>) {
+  const outputRef = useRef<HTMLPreElement>(null);
+  const followsOutput = useRef(true);
+  let output: string | undefined;
+  for (const item of tool.content) {
+    let text: string | undefined;
+    if (typeof item === "string") {
+      text = item;
+    } else if (typeof item === "object" && item !== null && !Array.isArray(item)) {
+      const entry = item as Readonly<Record<string, unknown>>;
+      if (entry.type === "content" && typeof entry.content === "object" && entry.content !== null && !Array.isArray(entry.content)) {
+        const block = entry.content as Readonly<Record<string, unknown>>;
+        if (block.type === "text" && typeof block.text === "string") text = block.text;
+      }
+    }
+    if (text === undefined) continue;
+    const parsed = parseJsonLike(text)?.value;
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const candidate = (parsed as Readonly<Record<string, unknown>>).output;
+      if (typeof candidate === "string") output = candidate;
+    }
+  }
+  useLayoutEffect(() => {
+    const element = outputRef.current;
+    if (element !== null && followsOutput.current) element.scrollTop = element.scrollHeight;
+  }, [output]);
+  if (output === undefined) return <ToolOutput content={tool.content} rawOutput={tool.rawOutput} />;
+
+  return <pre
+    ref={outputRef}
+    className="tool-output__shell"
+    role="log"
+    aria-label="Shell 输出"
+    aria-live="off"
+    aria-busy={tool.status === "in_progress"}
+    tabIndex={0}
+    onScroll={(event) => {
+      // Preserve manual inspection until the user explicitly returns near the bottom.
+      const element = event.currentTarget;
+      followsOutput.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 16;
+    }}
+  >{output.length === 0 ? "(no output)" : output}</pre>;
+}
+
 /** Renders one ACP tool lifecycle with product-specific blocked refinement. */
 export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = false, onInspect }: ToolCallCardProps) {
   // Bash cards first mount from the in-progress ACP update, so reveal streamed
   // output immediately while preserving the user's later expand/collapse choice.
-  const [open, setOpen] = useState(tool.title === "bash" && tool.status === "in_progress");
+  const [open, setOpen] = useState((tool.title === "exec_command" || tool.title === "write_stdin") && tool.status === "in_progress");
   const statusLabel = tool.status === "completed" ? "完成" : tool.status === "blocked" ? "已阻止" : tool.status === "failed" ? "失败" : tool.status === "in_progress" ? "执行中" : "等待中";
   const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);
+  const shellTool = tool.title === "exec_command" || tool.title === "write_stdin";
   return (
     <details className="tool-card" data-status={tool.status} open={open}>
       <summary onClick={(event) => {
@@ -90,7 +136,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = fals
           <span><i data-phase="end" data-complete={tool.endedAtMs !== undefined} />End{tool.endedAtMs === undefined ? " · 等待结果" : ` · ${tool.endedAtMs}`}</span>
         </div>
         {tool.rawInput === undefined ? null : <section><h4>输入</h4><JsonBlock value={tool.rawInput} /></section>}
-        {tool.content.length === 0 && tool.rawOutput === undefined ? null : <section><h4>输出</h4><ToolOutput content={tool.content} rawOutput={tool.rawOutput} /></section>}
+        {tool.content.length === 0 && tool.rawOutput === undefined ? null : <section><h4>输出</h4>{shellTool ? <ShellToolOutput tool={tool} /> : <ToolOutput content={tool.content} rawOutput={tool.rawOutput} />}</section>}
         <dl className="diagnostics-list">
           <dt>ToolCallId</dt><dd>{tool.toolCallId}</dd>
           {tool.meta === undefined ? null : <><dt>TurnId</dt><dd>{tool.meta.turnId}</dd><dt>TimestampMs</dt><dd>{tool.meta.timestampMs}</dd></>}

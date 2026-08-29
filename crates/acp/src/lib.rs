@@ -9,6 +9,7 @@ mod mapping;
 mod projection;
 mod recovery;
 mod server;
+mod terminal;
 mod trace;
 mod transport;
 
