@@ -33,6 +33,8 @@ pub struct McpSessionRequest {
 }
 
 /// Session-owned Server collection with one atomically published read view.
+#[derive(typed_builder::TypedBuilder)]
+#[builder(builder_method(vis = ""), builder_type(vis = ""))]
 pub struct McpSession {
     session_id: SessionId,
     cwd: PathBuf,
@@ -41,9 +43,11 @@ pub struct McpSession {
     servers: Arc<[Arc<McpServerRuntime>]>,
     snapshot: Arc<ArcSwap<McpSessionSnapshot>>,
     events: broadcast::Sender<McpSessionEvent>,
+    #[builder(default)]
     shutdown_lock: tokio::sync::Mutex<()>,
+    #[builder(default)]
     shutdown_complete: AtomicBool,
-    revision: Arc<std::sync::atomic::AtomicU64>,
+    revision: Arc<tokio::sync::Mutex<u64>>,
     watchers: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -56,8 +60,8 @@ impl McpSession {
         let (events, _receiver) = broadcast::channel(128);
         let servers = Arc::<[Arc<McpServerRuntime>]>::from(servers);
         let snapshot =
-            Arc::new(ArcSwap::from_pointee(Self::aggregate(1, &servers)));
-        let revision = Arc::new(std::sync::atomic::AtomicU64::new(1));
+            Arc::new(ArcSwap::from_pointee(Self::aggregate(1, &servers, None)));
+        let revision = Arc::new(tokio::sync::Mutex::new(1_u64));
         let watchers = servers
             .iter()
             .map(|server| {
@@ -80,14 +84,16 @@ impl McpSession {
                                 Err(broadcast::error::RecvError::Closed) => break,
                             }
                         };
-                        let next = revision
-                            .fetch_add(1, Ordering::AcqRel)
-                            .saturating_add(1);
+                        // Publish the revision, snapshot, and notification together;
+                        // an atomic counter alone lets an older aggregate win the race.
+                        let mut revision = revision.lock().await;
+                        *revision = revision.saturating_add(1);
+                        let previous = snapshot.load_full();
                         snapshot.store(Arc::new(Self::aggregate(
-                            next, &servers,
+                            *revision, &servers, Some(&previous),
                         )));
                         let _ = events.send(McpSessionEvent {
-                            revision: next,
+                            revision: *revision,
                             server_id: Some(server_id.clone()),
                             change: match change {
                                 McpServerChange::Status => {
@@ -102,19 +108,17 @@ impl McpSession {
                 })
             })
             .collect();
-        let session = Self {
-            session_id: request.session_id,
-            cwd: request.cwd,
-            host: request.host,
-            shutdown: request.shutdown,
-            servers,
-            snapshot,
-            events,
-            shutdown_lock: tokio::sync::Mutex::new(()),
-            shutdown_complete: AtomicBool::new(false),
-            revision,
-            watchers: tokio::sync::Mutex::new(watchers),
-        };
+        let session = Self::builder()
+            .session_id(request.session_id)
+            .cwd(request.cwd)
+            .host(request.host)
+            .shutdown(request.shutdown)
+            .servers(servers)
+            .snapshot(snapshot)
+            .events(events)
+            .revision(revision)
+            .watchers(tokio::sync::Mutex::new(watchers))
+            .build();
         let _ = session.events.send(McpSessionEvent {
             revision: 1,
             server_id: None,
@@ -153,8 +157,16 @@ impl McpSession {
     }
 
     /// Builds one immutable agent Tool registry from the currently published catalog.
-    pub fn tool_registry(&self) -> Result<ToolRegistry, McpError> {
+    pub fn tool_registry(self: &Arc<Self>) -> Result<ToolRegistry, McpError> {
         let snapshot = self.snapshot();
+        self.tool_registry_from_snapshot(&snapshot)
+    }
+
+    /// Builds definitions from one captured snapshot so consumers can publish that exact revision.
+    pub fn tool_registry_from_snapshot(
+        self: &Arc<Self>,
+        snapshot: &McpSessionSnapshot,
+    ) -> Result<ToolRegistry, McpError> {
         let mut registry = ToolRegistry::default();
         for server in self.servers.iter() {
             let server_id = &server.status().server_id;
@@ -169,6 +181,23 @@ impl McpSession {
                         info.clone(),
                         Arc::clone(server),
                         snapshot.revision,
+                    )))
+                    .map_err(|error| {
+                        McpError::ToolRegistration(error.to_string())
+                    })?;
+            }
+        }
+        if self.servers.iter().any(|server| server.allows_resources()) {
+            use crate::resource::{McpResourceOperation, McpResourceTool};
+            for operation in [
+                McpResourceOperation::ListResources,
+                McpResourceOperation::ListTemplates,
+                McpResourceOperation::Read,
+            ] {
+                registry
+                    .register(Arc::new(McpResourceTool::new(
+                        Arc::clone(self),
+                        operation,
                     )))
                     .map_err(|error| {
                         McpError::ToolRegistration(error.to_string())
@@ -216,9 +245,28 @@ impl McpSession {
     pub async fn read_resource(
         &self,
         request: McpResourceRequest,
+        cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
+        self.ensure_resource_access(&request.reference.server_id)?;
+        // Aggregate catalog failures are Session policy failures even while the transport stays connected.
+        if let Some(status) = self
+            .snapshot()
+            .servers
+            .iter()
+            .find(|status| status.server_id == request.reference.server_id)
+            && !matches!(
+                status.state,
+                protocol::McpServerState::Ready
+                    | protocol::McpServerState::Degraded
+            )
+        {
+            return Err(McpError::ServerUnavailable {
+                server_id: status.server_id.clone(),
+                state: status.state,
+            });
+        }
         self.server(&request.reference.server_id)?
-            .read_resource(request)
+            .read_resource(request, cancellation)
             .await
     }
 
@@ -230,6 +278,21 @@ impl McpSession {
         self.server(request.target.server_id())?
             .complete(request)
             .await
+    }
+
+    /// Validates resource policy without assuming the URI was present in the catalog.
+    pub(crate) fn ensure_resource_access(
+        &self,
+        server_id: &McpServerId,
+    ) -> Result<(), McpError> {
+        if self.server(server_id)?.allows_resources() {
+            Ok(())
+        } else {
+            Err(McpError::Service {
+                server_id: server_id.clone(),
+                message: "resource access is hidden by host policy".into(),
+            })
+        }
     }
 
     /// Resolves one configured Server without parsing a display or Tool name.
@@ -262,37 +325,179 @@ impl McpSession {
                 tracing::warn!("MCP Session watcher failed: {}", error);
             }
         }
-        let revision = self
-            .revision
-            .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1);
-        self.snapshot
-            .store(Arc::new(Self::aggregate(revision, &self.servers)));
+        // Shutdown uses the same publication boundary as the Server watchers.
+        let mut revision = self.revision.lock().await;
+        *revision = revision.saturating_add(1);
+        let previous = self.snapshot();
+        self.snapshot.store(Arc::new(Self::aggregate(
+            *revision,
+            &self.servers,
+            Some(&previous),
+        )));
         let _ = self.events.send(McpSessionEvent {
-            revision,
+            revision: *revision,
             server_id: None,
             change: McpSessionChange::Shutdown,
         });
         Ok(())
     }
 
-    /// Aggregates configuration-ordered Server views into one atomic Session Snapshot.
+    /// Rejects ambiguous aggregate names while retaining each affected Server's last valid view.
     fn aggregate(
         revision: u64,
         servers: &[Arc<McpServerRuntime>],
+        previous: Option<&McpSessionSnapshot>,
     ) -> McpSessionSnapshot {
-        let mut catalog = McpCatalog::default();
-        let statuses = servers
+        let views: Vec<_> =
+            servers.iter().map(|server| server.snapshot()).collect();
+        let changed: std::collections::HashSet<_> = views
             .iter()
-            .map(|server| {
-                let server_catalog = server.catalog();
-                catalog.tools.extend(server_catalog.tools.clone());
-                catalog.prompts.extend(server_catalog.prompts.clone());
-                catalog.resources.extend(server_catalog.resources.clone());
+            .filter(|view| {
+                previous.is_none_or(|previous| {
+                    !previous
+                        .catalog
+                        .tools
+                        .iter()
+                        .filter(|tool| {
+                            tool.reference.server_id == view.status.server_id
+                        })
+                        .eq(view.catalog.tools.iter())
+                })
+            })
+            .map(|view| &view.status.server_id)
+            .collect();
+        let mut rejected = std::collections::HashSet::new();
+        loop {
+            let mut owners = std::collections::HashMap::new();
+            let mut conflicts = std::collections::HashSet::new();
+            for view in &views {
+                let server_id = &view.status.server_id;
+                let candidate = if rejected.contains(server_id) {
+                    previous.map(|previous| &previous.catalog)
+                } else {
+                    Some(view.catalog.as_ref())
+                };
+                for tool in candidate
+                    .into_iter()
+                    .flat_map(|catalog| &catalog.tools)
+                    .filter(|tool| &tool.reference.server_id == server_id)
+                {
+                    if let Some(owner) =
+                        owners.insert(tool.public_name.as_str(), server_id)
+                    {
+                        conflicts.insert(owner);
+                        conflicts.insert(server_id);
+                    }
+                }
+            }
+            if conflicts.is_empty() {
+                break;
+            }
+            let additional: Vec<_> = conflicts
+                .into_iter()
+                .filter(|server_id| {
+                    changed.contains(server_id) && !rejected.contains(server_id)
+                })
+                .collect();
+            // Previous snapshots are valid; every new conflict must contain a changed contributor.
+            assert!(
+                !additional.is_empty(),
+                "previous MCP catalog must have unique tool names"
+            );
+            rejected.extend(additional);
+        }
+        let mut catalog = McpCatalog::default();
+        let statuses = views
+            .iter()
+            .map(|view| {
+                let server_id = &view.status.server_id;
+                let rejected = rejected.contains(server_id);
+                let mut status = view.status.as_ref().clone();
+                let partition = if rejected {
+                    // Only changed contributors are rejected, so a new catalog cannot evict a healthy peer.
+                    let prior_status = previous.and_then(|previous| {
+                        previous
+                            .servers
+                            .iter()
+                            .find(|server| &server.server_id == server_id)
+                    });
+                    status.state = if prior_status.is_some_and(|server| {
+                        matches!(
+                            server.state,
+                            protocol::McpServerState::Ready
+                                | protocol::McpServerState::Degraded
+                        )
+                    }) {
+                        protocol::McpServerState::Degraded
+                    } else {
+                        protocol::McpServerState::Failed
+                    };
+                    status.revisions = prior_status
+                        .map(|server| server.revisions)
+                        .unwrap_or_default();
+                    status.failure = Some(protocol::McpServerFailure {
+                        stage: protocol::McpFailureStage::Discovery,
+                        message: "tool public names collide across MCP servers"
+                            .into(),
+                        occurred_at_ms: protocol::TimestampMs::now(),
+                    });
+                    previous.map_or_else(McpCatalog::default, |previous| {
+                        McpCatalog::builder()
+                            .tools(
+                                previous
+                                    .catalog
+                                    .tools
+                                    .iter()
+                                    .filter(|item| {
+                                        &item.reference.server_id == server_id
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .prompts(
+                                previous
+                                    .catalog
+                                    .prompts
+                                    .iter()
+                                    .filter(|item| {
+                                        &item.reference.server_id == server_id
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .resources(
+                                previous
+                                    .catalog
+                                    .resources
+                                    .iter()
+                                    .filter(|item| {
+                                        &item.reference.server_id == server_id
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .resource_templates(
+                                previous
+                                    .catalog
+                                    .resource_templates
+                                    .iter()
+                                    .filter(|item| &item.server_id == server_id)
+                                    .cloned()
+                                    .collect(),
+                            )
+                            .build()
+                    })
+                } else {
+                    view.catalog.as_ref().clone()
+                };
+                status.counts = partition.counts();
+                catalog.tools.extend(partition.tools);
+                catalog.prompts.extend(partition.prompts);
+                catalog.resources.extend(partition.resources);
                 catalog
                     .resource_templates
-                    .extend(server_catalog.resource_templates.clone());
-                server.status().as_ref().clone()
+                    .extend(partition.resource_templates);
+                status
             })
             .collect();
         McpSessionSnapshot {

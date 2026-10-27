@@ -494,13 +494,15 @@ impl ExtensionHost for SessionExtensionHost {
                 error => Err(ExtensionHostError::Operation(error.to_string())),
             };
         }
-        self.persist_setting(
-            EntryKind::ActiveToolsChange,
-            serde_json::json!({ "activeTools": names }),
-        )?;
+        super::super::tools::ToolSelectionUpdate::new(
+            &self.session.tools,
+            &self.session.transcript,
+            self.id_generator.as_ref(),
+        )
+        .replace(&available, names)
+        .map_err(|error| ExtensionHostError::Operation(error.to_string()))?;
         self.session
-            .tools
-            .set_active(&available, names)
+            .notify_mcp_change(protocol::McpSessionChange::Selection, None)
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 

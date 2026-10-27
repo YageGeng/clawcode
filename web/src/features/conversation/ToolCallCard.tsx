@@ -90,6 +90,11 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = fals
           <span><i data-phase="end" data-complete={tool.endedAtMs !== undefined} />End{tool.endedAtMs === undefined ? " · 等待结果" : ` · ${tool.endedAtMs}`}</span>
         </div>
         {tool.rawInput === undefined ? null : <section><h4>输入</h4><JsonBlock value={tool.rawInput} /></section>}
+        {tool.output === undefined ? null : <section aria-label="输出预算信息">
+          <p>输出已限制：文本 {tool.output.visibleTextBytes.toLocaleString()} / {tool.output.originalTextBytes.toLocaleString()} 字节；省略媒体 {tool.output.omittedMedia} 块。</p>
+          {tool.output.fullOutputPath === undefined ? null : <p>完整结果临时文件：<code>{tool.output.fullOutputPath}</code></p>}
+          {tool.output.saveFailure === undefined ? null : <p>完整结果未保存：{tool.output.saveFailure === "too_large" ? "超过 64 MiB" : tool.output.saveFailure === "cancelled" ? "保存已取消" : "文件写入失败"}。</p>}
+        </section>}
         {tool.content.length === 0 && tool.rawOutput === undefined ? null : <section><h4>输出</h4><ToolOutput content={tool.content} rawOutput={tool.rawOutput} /></section>}
         <dl className="diagnostics-list">
           <dt>ToolCallId</dt><dd>{tool.toolCallId}</dd>

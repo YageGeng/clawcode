@@ -22,9 +22,13 @@ export function McpCatalog({ serverId, snapshot, controller }: McpCatalogProps) 
     <div className="mcp-catalog">
       {tools.map((tool) => (
         <details key={`tool:${tool.publicName}`}>
-          <summary><span>Tool</span>{tool.publicName}</summary>
+          <summary><span>Tool · {tool.metadata?.exposure ?? "direct"} · {tool.disabled === true ? "已禁用" : tool.loaded === true ? "已加载" : tool.loaded === false ? "未加载" : "状态未知"}</span>{tool.title ?? tool.publicName}</summary>
+          {tool.title === undefined ? null : <p><code>{tool.publicName}</code></p>}
           {tool.description === undefined ? null : <p>{tool.description}</p>}
+          {tool.metadata === undefined ? null : <p>服务器声明（提示）：{Object.entries(tool.metadata.annotations).map(([name, value]) => `${name}=${String(value)}`).join(" · ") || "未提供注解"}</p>}
+          <p>输入 Schema</p>
           <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
+          {tool.metadata?.outputSchema === undefined ? null : <><p>输出 Schema</p><pre>{JSON.stringify(tool.metadata.outputSchema, null, 2)}</pre></>}
         </details>
       ))}
       {prompts.map((prompt) => <McpPromptEntry controller={controller} key={`prompt:${prompt.reference.remoteName}`} prompt={prompt} />)}

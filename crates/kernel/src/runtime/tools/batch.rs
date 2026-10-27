@@ -125,7 +125,13 @@ impl Kernel {
                 .extensions
                 .runtime_ref()
                 .emit_tool_call(
-                    protocol::ToolCallEvent { call: call.clone() },
+                    protocol::ToolCallEvent {
+                        metadata: batch
+                            .tools
+                            .tool(&call.name)
+                            .map(|tool| tool.metadata().clone()),
+                        call: call.clone(),
+                    },
                     &extension_context,
                 )
                 .await
@@ -188,6 +194,7 @@ impl Kernel {
                 .updates(update_channel.publisher(call.clone()))
                 .build();
             pending.push(async move {
+                let executed = immediate_result.is_none();
                 let result = match immediate_result {
                     Some(result) => result,
                     None => match tools.execute(call.clone(), &context).await {
@@ -213,7 +220,7 @@ impl Kernel {
                         }
                     },
                 };
-                (index, started_at, call, result)
+                (index, started_at, call, result, executed)
             });
         }
         drop(update_channel);
@@ -248,7 +255,8 @@ impl Kernel {
                 }
                 completed = pending.next() => completed,
             };
-            let Some((index, started_at, call, mut result)) = next else {
+            let Some((index, started_at, call, mut result, executed)) = next
+            else {
                 break;
             };
             if let Some(update) = update_stream.take_for(&call.tool_call_id) {
@@ -259,26 +267,42 @@ impl Kernel {
                 Some(batch.run_id),
                 Some(batch.turn_id),
             )?;
-            let patch = batch
+            // Transfer the unbounded result through hooks, then finalize the single owned value.
+            let (transformed, _usage) = batch
                 .session
                 .extensions
                 .runtime_ref()
                 .emit_tool_result(
                     protocol::ToolResultEvent {
                         call: call.clone(),
-                        result: result.clone(),
+                        result,
                     },
                     &context,
                 )
                 .await;
-            if let Some(blocks) = patch.blocks {
-                result.blocks = blocks;
-            }
-            if let Some(details) = patch.details {
-                result.details = Some(details);
-            }
-            if let Some(is_error) = patch.is_error {
-                result.is_error = is_error;
+            result = transformed;
+            if executed && let Some(tool) = batch.tools.tool(&call.name) {
+                let policy = tool.metadata().output_policy;
+                if policy != protocol::ToolOutputPolicy::Preserve {
+                    let cancellation = batch.cancellation.clone();
+                    // Move ownership into the worker and await cleanup even when the Turn is cancelled.
+                    result = tokio::task::spawn_blocking(move || {
+                        ::tools::ToolResultProjection::new(
+                            &mut result,
+                            policy,
+                            &cancellation,
+                            &std::env::temp_dir(),
+                        )
+                        .apply()?;
+                        Ok::<_, ::tools::ToolError>(result)
+                    })
+                    .await
+                    .map_err(|error| {
+                        KernelError::Protocol(format!(
+                            "output worker failed: {error}"
+                        ))
+                    })??;
+                }
             }
             let timestamp = self.clock.now();
             tracing::info!(
@@ -325,6 +349,7 @@ impl Kernel {
                 ))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
                 content: MessageContent::ToolResult {
+                    output: result.output.clone(),
                     tool_call_id: result.tool_call_id.clone(),
                     blocks: result.blocks.clone(),
                     is_error: result.is_error,

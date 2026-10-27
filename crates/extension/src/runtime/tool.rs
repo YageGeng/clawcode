@@ -1,7 +1,7 @@
 use protocol::{
-    ToolBlock, ToolCallEvent, ToolCallResult, ToolExecutionEndEvent,
-    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
-    ToolResultPatch, UserBashEvent, UserBashResult,
+    ModelUsage, ToolBlock, ToolCallEvent, ToolCallResult,
+    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent,
+    ToolResult, ToolResultEvent, UserBashEvent, UserBashResult,
 };
 
 use crate::{
@@ -48,31 +48,28 @@ impl ExtensionRuntime {
         }
     }
 
-    /// Chains completed tool-result patches before persistence and end events.
+    /// Applies result patches in place so large remote results are never cloned for hook dispatch.
     pub async fn emit_tool_result(
         &self,
         mut event: ToolResultEvent,
         context: &ExtensionContext,
-    ) -> ToolResultPatch {
-        let mut composed = ToolResultPatch::default();
+    ) -> (ToolResult, Option<ModelUsage>) {
+        let mut usage = None;
         for registered in self.handlers::<ToolResultPoint>() {
             let handler_context = context.for_extension(registered.source());
             match registered.handler.handle(&event, &handler_context).await {
                 Ok(patch) => {
                     if let Some(blocks) = patch.blocks {
-                        event.result.blocks = blocks.clone();
-                        composed.blocks = Some(blocks);
+                        event.result.blocks = blocks;
                     }
                     if let Some(details) = patch.details {
-                        event.result.details = Some(details.clone());
-                        composed.details = Some(details);
+                        event.result.details = Some(details);
                     }
                     if let Some(is_error) = patch.is_error {
                         event.result.is_error = is_error;
-                        composed.is_error = Some(is_error);
                     }
                     if patch.usage.is_some() {
-                        composed.usage = patch.usage;
+                        usage = patch.usage;
                     }
                 }
                 Err(error) => {
@@ -80,7 +77,7 @@ impl ExtensionRuntime {
                 }
             }
         }
-        composed
+        (event.result, usage)
     }
 
     /// Returns the first complete replacement for a user-authored shell command.

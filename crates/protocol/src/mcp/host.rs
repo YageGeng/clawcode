@@ -149,12 +149,12 @@ pub struct McpElicitationResponseRequest {
     pub result: McpElicitationResult,
 }
 
-/// Turn-scoped request for filesystem roots allowed by the Kernel.
+/// Connection-scoped request for roots allowed by the Session-bound Host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRootsRequest {
-    /// Turn and trace correlation.
-    pub context: McpRequestContext,
+    /// Server requesting roots; no active Tool or fabricated Turn is required.
+    pub server_id: McpServerId,
 }
 
 /// One application-approved root exposed without ACP Client filesystem callbacks.

@@ -111,23 +111,21 @@ enable_skill = true
 [[mcp_servers]]
 enabled = true
 name = "example"
-protocol = "2026-07-28"
+protocol = "auto"
 command = "example-mcp-server"
 args = []
 startup_timeout_sec = 30
 request_timeout_sec = 120
-mrtr_max_rounds = 8
-mrtr_total_timeout_sec = 300
+request_total_timeout_sec = 300
 
 [[mcp_servers]]
 enabled = true
 name = "remote"
-protocol = "2026-07-28"
+protocol = "auto"
 url = "https://example.com/mcp"
 startup_timeout_sec = 30
 request_timeout_sec = 120
-mrtr_max_rounds = 8
-mrtr_total_timeout_sec = 300
+request_total_timeout_sec = 300
 ```
 
 省略 `[kernel]` 时，`max_turns` 默认为 `unlimited`。如需防止工具循环无限
@@ -136,6 +134,49 @@ mrtr_total_timeout_sec = 300
 模型的 `id` 是 `active_model`、Session 元数据和模型选择使用的稳定本地标识。
 如果上游 API 要求不同的 `model` 参数，可配置可选的 `upstream_id`；省略时请求继续
 使用 `id`。
+
+## MCP 发现与结果预算
+
+MCP 与 Pi 支持相同的四个版本：`2025-11-25`、`2025-06-18`、`2025-03-26`、
+`2024-11-05`。省略 `protocol` 或配置 `"auto"` 时请求最新支持版本；显式版本只作为
+协商偏好。两种方式都接受服务器选择的任一受支持版本，只进行一次 initialize 握手。
+界面显示实际协商版本，HTTP Session 过期不会偷偷重新握手。
+
+旧 `2026-07-28` 配置应改为 `auto`；删除 `mrtr_max_rounds`，将
+`mrtr_total_timeout_sec` 改为 `request_total_timeout_sec`，默认 300 秒。
+旧字段会明确报迁移错误。进度通知可重置活动超时，不能延长总时限。
+
+工具默认 `exposure = "direct"`；`"deferred"` 通过本地 `tool_search` 发现后加载，
+`"hidden"` 不向模型声明、搜索或执行。逐工具覆盖只匹配原始远端名称，不支持通配符：
+
+```toml
+[[mcp_servers]]
+name = "github"
+url = "https://example.com/mcp"
+exposure = "deferred"
+
+[mcp_servers.tool_exposure]
+get_me = "direct"
+delete_repository = "hidden"
+```
+
+搜索只加载定义，不执行远端工具；加载结果从**下一次模型请求**生效，同批调用仍使用
+原来的声明集合。单次搜索最多新增 32 KiB 的完整定义，这不是长会话累计声明上限，
+也没有自动淘汰机制。显式加载/禁用偏好随 reconnect、resume、分支导航、fork 和
+compaction 恢复。服务器注解仅作为提示展示，不能自动批准调用。
+
+模型可使用 `list_mcp_resources`、`list_mcp_resource_templates` 和
+`read_mcp_resource`。列表从已经完整发现的目录快照分页，默认 50 条、最多 200 条，
+每页同时限制为 20 KiB；这不是远端按需分页。游标绑定 Session、目录版本、种类和
+服务器过滤条件。读取将原 URI 交给指定服务器，支持未列出的模板 URI。
+Hidden 服务器即使开放个别工具，也不会开放全部资源。
+
+MCP、搜索和资源读取的结果在扩展 hook 之后统一结算：文本合计最多 20 KiB，包含
+JSON 文本投影、说明和文件位置；媒体整块保留，最多 4 块、编码数据合计 8 MiB。
+超限时尝试保存完整规范化 JSON，序列化大小最多 64 MiB。保存失败单独显示，不重跑
+远端调用。完整文件采用私有临时文件的保留方式，可能被系统清理，不提供下载服务。
+这些限制不代表传输层内存上限或模型 token/媒体计费上限。进度文本最多 1 KiB，
+不创建完整输出文件。
 
 ## Prompt 资源
 

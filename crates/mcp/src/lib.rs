@@ -7,19 +7,20 @@ mod error;
 mod event;
 mod factory;
 mod host;
+mod resource;
 mod server;
 mod session;
 mod tool;
 mod transport;
 
 pub use client::{
-    LegacyClient, McpClient, McpProgress, McpProgressSink, McpRequestControl,
-    ModernClient,
+    InitializeClient, McpClient, McpProgress, McpProgressSink,
+    McpRequestControl,
 };
 pub use config::{
-    McpAuthentication, McpHttpHeaders, McpHttpUrl, McpMrtrPolicy,
-    McpOAuthSettings, McpStdioTransport, McpStreamableHttpTransport,
-    McpTransport, RuntimeMcpServer,
+    McpAuthentication, McpHttpHeaders, McpHttpUrl, McpOAuthSettings,
+    McpStdioTransport, McpStreamableHttpTransport, McpTransport,
+    RuntimeMcpServer,
 };
 pub use error::McpError;
 pub(crate) use event::McpServerChange;

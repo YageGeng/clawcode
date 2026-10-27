@@ -20,51 +20,33 @@ const PROMPT_NAME: &str = "explain";
 const RESOURCE_URI: &str = "reference://guide";
 const RESOURCE_TEMPLATE: &str = "reference://topic/{name}";
 
-/// Exact lifecycle exposed by one reference Server instance.
-#[derive(Debug, Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "each transport example compiles only its selected exact protocol"
-)]
-enum ReferenceProtocol {
-    Legacy,
-    Modern,
-}
-
-impl ReferenceProtocol {
-    /// Returns the single protocol version accepted by this Server instance.
-    fn supported_versions(self) -> Cow<'static, [ProtocolVersion]> {
-        match self {
-            Self::Legacy => Cow::Borrowed(&[ProtocolVersion::V_2025_11_25]),
-            Self::Modern => Cow::Borrowed(&[ProtocolVersion::V_2026_07_28]),
-        }
-    }
-}
-
-/// Small standards-compliant MCP Server covering every baseline catalog family.
+/// Small MCP Server covering baseline catalogs under a selected initialize revision.
 #[derive(Debug, Clone, Copy)]
 pub struct ReferenceServer {
-    protocol: ReferenceProtocol,
+    protocol: protocol::McpProtocolVersion,
 }
 
-#[allow(
-    dead_code,
-    reason = "each transport example compiles only its selected exact protocol"
-)]
 impl ReferenceServer {
-    /// Creates a Server that only accepts the Legacy 2025-11-25 lifecycle.
-    #[must_use]
-    pub fn legacy() -> Self {
-        Self {
-            protocol: ReferenceProtocol::Legacy,
-        }
+    /// Selects the revision this reference instance offers during negotiation.
+    pub fn new(protocol: protocol::McpProtocolVersion) -> Self {
+        Self { protocol }
     }
 
-    /// Creates a Server that only accepts the Modern 2026-07-28 lifecycle.
-    #[must_use]
-    pub fn modern() -> Self {
-        Self {
-            protocol: ReferenceProtocol::Modern,
+    /// Maps the validated domain version without exposing SDK types outside this adapter.
+    fn protocol_version(&self) -> ProtocolVersion {
+        match self.protocol {
+            protocol::McpProtocolVersion::V2025_11_25 => {
+                ProtocolVersion::V_2025_11_25
+            }
+            protocol::McpProtocolVersion::V2025_06_18 => {
+                ProtocolVersion::V_2025_06_18
+            }
+            protocol::McpProtocolVersion::V2025_03_26 => {
+                ProtocolVersion::V_2025_03_26
+            }
+            protocol::McpProtocolVersion::V2024_11_05 => {
+                ProtocolVersion::V_2024_11_05
+            }
         }
     }
 }
@@ -80,13 +62,14 @@ impl ServerHandler for ReferenceServer {
                 .enable_tools()
                 .build(),
         )
+        .with_protocol_version(self.protocol_version())
         .with_server_info(Implementation::new("mcp-reference-server", "1.0.0"))
         .with_instructions("Reference server for MCP interoperability checks")
     }
 
     /// Restricts negotiation to the exact protocol selected at construction.
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        self.protocol.supported_versions()
+        Cow::Owned(vec![self.protocol_version()])
     }
 
     /// Lists the structured inspection Tool.
@@ -106,11 +89,23 @@ impl ServerHandler for ReferenceServer {
         .as_object()
         .cloned()
         .unwrap_or_default();
-        Ok(ListToolsResult::with_all_items(vec![Tool::new(
-            TOOL_NAME,
-            "Returns the supplied value as structured MCP content",
-            input_schema,
-        )]))
+        let mut report = Tool::new("large.report", "Generate a large report with text and structured records to inspect output limits", serde_json::json!({"type":"object","properties":{},"additionalProperties":false}).as_object().cloned().unwrap_or_default())
+            .with_title("Large reference report")
+            .with_annotations(rmcp::model::ToolAnnotations::new().read_only(true).destructive(false));
+        report.output_schema = Some(std::sync::Arc::new(serde_json::json!({"type":"object","properties":{"records":{"type":"array"}}}).as_object().cloned().unwrap_or_default()));
+        Ok(ListToolsResult::with_all_items(vec![
+            Tool::new(
+                TOOL_NAME,
+                "Returns the supplied value as structured MCP content",
+                input_schema,
+            ),
+            report,
+            Tool::new(
+                "hidden_probe",
+                "HIDDEN_MCP_PROBE_DO_NOT_DISCLOSE",
+                serde_json::Map::new(),
+            ),
+        ]))
     }
 
     /// Executes the inspection Tool with protocol-level argument validation.
@@ -119,6 +114,25 @@ impl ServerHandler for ReferenceServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == "large.report" {
+            // Demonstrate bounded text and structured output through the same real transport path.
+            let mut result = CallToolResult::structured(
+                serde_json::json!({"records":(0..400).map(|index| serde_json::json!({"index":index,"note":"reference data".repeat(8)})).collect::<Vec<_>>()}),
+            );
+            result.content.insert(
+                0,
+                rmcp::model::ContentBlock::text(
+                    "Reference report line: 输出预算验证\n".repeat(2000),
+                ),
+            );
+            return Ok(result.into());
+        }
+        if request.name == "hidden_probe" {
+            return Ok(CallToolResult::structured(
+                serde_json::json!({"hidden":true}),
+            )
+            .into());
+        }
         if request.name.as_ref() != TOOL_NAME {
             return Err(ErrorData::invalid_params(
                 "unknown reference Tool",
@@ -187,18 +201,26 @@ impl ServerHandler for ReferenceServer {
         .into())
     }
 
-    /// Lists one static Resource.
+    /// Lists static and template-backed resources so the model can exercise local snapshot pagination.
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(vec![
+        let mut resources = vec![
             Resource::new(RESOURCE_URI, "reference-guide")
                 .with_title("Reference Guide")
                 .with_description("MCP interoperability reference content")
                 .with_mime_type("text/plain"),
-        ]))
+        ];
+        resources.extend((0..60).map(|index| {
+            Resource::new(
+                format!("reference://topic/{index:03}"),
+                format!("topic-{index:03}"),
+            )
+            .with_mime_type("text/plain")
+        }));
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     /// Lists one RFC 6570 Resource Template.

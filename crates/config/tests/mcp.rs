@@ -24,9 +24,9 @@ max_output_tokens = 10000
     )
 }
 
-/// Every MCP Server must select one exact supported protocol revision.
+/// Omitted protocol negotiates automatically while unknown versions remain errors.
 #[test]
-fn protocol_is_required_and_exact() {
+fn protocol_defaults_to_auto_and_rejects_unknown_versions() {
     let missing: McpServerConfig = toml::from_str(
         r#"
 name = "missing"
@@ -34,9 +34,23 @@ command = "server"
 "#,
     )
     .expect("parse config with missing protocol");
+    missing.validate().expect("automatic protocol");
+    for value in [
+        "auto",
+        "2025-11-25",
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05",
+    ] {
+        let mut configured = missing.clone();
+        configured.protocol = Some(value.to_string());
+        configured.validate().expect("supported preference");
+    }
+    let mut retired = missing.clone();
+    retired.protocol = Some("2026-07-28".to_string());
     assert!(matches!(
-        missing.validate(),
-        Err(McpConfigError::MissingProtocol { server }) if server == "missing"
+        retired.validate(),
+        Err(McpConfigError::UnsupportedProtocol { .. })
     ));
 
     let unknown: McpServerConfig = toml::from_str(
@@ -66,7 +80,7 @@ command = "legacy"
 
 [[mcp_servers]]
 name = "same"
-protocol = "2026-07-28"
+protocol = "auto"
 url = "https://example.com/mcp"
 "#,
     ))
@@ -116,7 +130,7 @@ command = "  "
         (
             r#"
 name = "empty-url"
-protocol = "2026-07-28"
+protocol = "auto"
 url = ""
 "#,
             "url must not be empty",
@@ -132,19 +146,18 @@ url = ""
     }
 }
 
-/// Startup, request, and MRTR limits reject zero before runtime construction.
+/// Request deadlines reject zero before runtime construction.
 #[test]
-fn timeouts_and_mrtr_limits_must_be_positive() {
+fn request_timeouts_must_be_positive() {
     for (field, value) in [
         ("startup_timeout_sec", 0_u64),
         ("request_timeout_sec", 0_u64),
-        ("mrtr_total_timeout_sec", 0_u64),
-        ("mrtr_max_rounds", 0_u64),
+        ("request_total_timeout_sec", 0_u64),
     ] {
         let document = format!(
             r#"
 name = "limits"
-protocol = "2026-07-28"
+protocol = "auto"
 url = "https://example.com/mcp"
 {field} = {value}
 "#
@@ -183,7 +196,7 @@ client_id = "client"
     let conflicting: McpServerConfig = toml::from_str(
         r#"
 name = "conflicting-auth"
-protocol = "2026-07-28"
+protocol = "auto"
 url = "https://example.com/mcp"
 bearer_token_env = "MCP_TOKEN"
 
@@ -196,4 +209,33 @@ client_id = "client"
         conflicting.validate(),
         Err(McpConfigError::InvalidAuthentication { .. })
     ));
+}
+
+/// Removed MRTR keys fail explicitly instead of silently changing their meaning.
+#[test]
+fn retired_mrtr_fields_require_migration() {
+    for field in ["mrtr_max_rounds", "mrtr_total_timeout_sec"] {
+        let document = format!(
+            "name = \"migration\"\ncommand = \"server\"\n{field} = 8\n"
+        );
+        let config: McpServerConfig =
+            toml::from_str(&document).expect("config");
+        assert!(
+            matches!(config.validate(), Err(McpConfigError::RetiredField { field: actual, .. }) if actual == field)
+        );
+    }
+}
+/// Exact override keys remain literal and unsupported visibility policies are rejected.
+#[test]
+fn exposure_configuration_keeps_exact_remote_names() {
+    let config: McpServerConfig = toml::from_str("name = 'catalog'\ncommand = 'server'\nexposure = 'deferred'\n[tool_exposure]\n'list.issues' = 'direct'\n'*' = 'hidden'").expect("config");
+    assert_eq!(config.exposure, protocol::ToolExposure::Deferred);
+    assert_eq!(
+        config.tool_exposure.get("list.issues"),
+        Some(&protocol::ToolExposure::Direct)
+    );
+    toml::from_str::<McpServerConfig>(
+        "name = 'catalog'\ncommand = 'server'\nexposure = 'automatic'",
+    )
+    .expect_err("unsupported exposure");
 }

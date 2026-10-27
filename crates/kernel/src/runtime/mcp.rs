@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
@@ -20,6 +21,9 @@ use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 use super::{Kernel, KernelError, PendingMcpElicitation, Session};
 
+// Recreated Session runtimes must outrank snapshots retained by an attached WebUI.
+static MCP_UI_REVISION: AtomicU64 = AtomicU64::new(1);
+
 /// Represents an absent or fully initialized Session-scoped MCP capability.
 pub(super) enum SessionMcpRuntime {
     Disabled,
@@ -33,6 +37,24 @@ pub(super) struct SessionMcpState {
     #[builder(default)]
     projection: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     elicitations: Mutex<HashMap<String, PendingMcpElicitation>>,
+    #[builder(default = Mutex::new(McpProjectionNotifications::default()))]
+    notifications: Mutex<McpProjectionNotifications>,
+}
+
+/// Serializes UI invalidations without storing a second catalog or changing resource cursors.
+pub(super) struct McpProjectionNotifications {
+    revision: u64,
+    sender: broadcast::Sender<::mcp::McpSessionEvent>,
+}
+
+impl Default for McpProjectionNotifications {
+    /// Starts a connection-independent UI revision stream for this Session runtime.
+    fn default() -> Self {
+        Self {
+            revision: MCP_UI_REVISION.fetch_add(1, Ordering::Relaxed),
+            sender: broadcast::channel(128).0,
+        }
+    }
 }
 
 impl SessionMcpRuntime {
@@ -146,6 +168,69 @@ impl Kernel {
 }
 
 impl Session {
+    /// Derives the public catalog view from current server policy and host preferences.
+    pub(super) fn mcp_snapshot(
+        &self,
+    ) -> Result<protocol::McpSessionSnapshot, KernelError> {
+        let Some(state) = self.mcp.state() else {
+            return Ok(protocol::McpSessionSnapshot::default());
+        };
+        let notifications = state
+            .notifications
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let selection = self.tools.snapshot()?;
+        let mut snapshot = state.session.snapshot().as_ref().clone();
+        snapshot.revision = notifications.revision;
+        for tool in &mut snapshot.catalog.tools {
+            tool.disabled =
+                selection.selection.disabled.contains(&tool.public_name);
+            tool.loaded =
+                selection.declares(&tool.public_name, tool.metadata.exposure);
+        }
+        Ok(snapshot)
+    }
+
+    /// Subscribes to both server changes and durable selection changes through one ACP channel.
+    pub(super) fn subscribe_mcp_projection(
+        &self,
+    ) -> Result<Option<broadcast::Receiver<::mcp::McpSessionEvent>>, KernelError>
+    {
+        self.mcp
+            .state()
+            .map(|state| {
+                state
+                    .notifications
+                    .lock()
+                    .map(|notifications| notifications.sender.subscribe())
+                    .map_err(|_poison_error| KernelError::Poisoned)
+            })
+            .transpose()
+    }
+
+    /// Publishes one monotonic invalidation after the corresponding state has become visible.
+    pub(super) fn notify_mcp_change(
+        &self,
+        change: protocol::McpSessionChange,
+        server_id: Option<protocol::McpServerId>,
+    ) -> Result<(), KernelError> {
+        let Some(state) = self.mcp.state() else {
+            return Ok(());
+        };
+        let mut notifications = state
+            .notifications
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        notifications.revision =
+            MCP_UI_REVISION.fetch_add(1, Ordering::Relaxed);
+        let _ = notifications.sender.send(::mcp::McpSessionEvent {
+            revision: notifications.revision,
+            server_id,
+            change,
+        });
+        Ok(())
+    }
+
     /// Starts the Session-owned projection from MCP snapshots into the MCP Tool partition.
     pub(super) async fn start_mcp_projection(
         self: &std::sync::Arc<Self>,
@@ -155,31 +240,59 @@ impl Session {
         };
         let mcp = Arc::clone(&state.session);
         let mut events = mcp.subscribe();
+        let mut published = mcp.snapshot();
+        // Subscribe before reconciling startup: events between initial discovery and attachment must not be lost.
+        self.tools.replace_mcp_partition(
+            mcp.tool_registry_from_snapshot(&published)?,
+        )?;
         let tools = std::sync::Arc::clone(&self.tools);
+        let owner = Arc::downgrade(self);
         let task = tokio::spawn(async move {
             loop {
-                let change = match events.recv().await {
-                    Ok(event) => event.change,
+                let (change, server_id) = match events.recv().await {
+                    Ok(event) => (event.change, event.server_id),
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!(
                             "MCP Tool projection lagged by {} revisions; loading latest snapshot",
                             skipped
                         );
-                        ::mcp::McpSessionChange::Catalog
+                        (::mcp::McpSessionChange::Catalog, None)
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                match mcp.tool_registry().and_then(|registry| {
-                    tools.replace_mcp_partition(registry).map_err(|error| {
-                        ::mcp::McpError::ToolRegistration(error.to_string())
-                    })
-                }) {
-                    Ok(()) => {}
-                    Err(error) => tracing::error!(
-                        "MCP Tool projection failed for session '{}': {}",
-                        mcp.session_id(),
+                let current = mcp.snapshot();
+                // Status-only notifications do not invalidate search documents or compiled validators.
+                if current.catalog.tools != published.catalog.tools
+                    || change == ::mcp::McpSessionChange::Shutdown
+                {
+                    match mcp.tool_registry_from_snapshot(&current).and_then(
+                        |registry| {
+                            tools.replace_mcp_partition(registry).map_err(
+                                |error| {
+                                    ::mcp::McpError::ToolRegistration(
+                                        error.to_string(),
+                                    )
+                                },
+                            )
+                        },
+                    ) {
+                        Ok(()) => {}
+                        Err(error) => tracing::error!(
+                            "MCP Tool projection failed for session '{}': {}",
+                            mcp.session_id(),
+                            error
+                        ),
+                    }
+                }
+                published = current;
+                let Some(owner) = owner.upgrade() else {
+                    break;
+                };
+                if let Err(error) = owner.notify_mcp_change(change, server_id) {
+                    tracing::error!(
+                        "MCP projection notification failed: {}",
                         error
-                    ),
+                    );
                 }
                 if change == ::mcp::McpSessionChange::Shutdown {
                     break;
@@ -470,12 +583,18 @@ impl Session {
             match event
                 .map_err(|error| ::mcp::McpError::Host(error.to_string()))?
             {
-                protocol::ModelStreamEvent::TextDelta(text) => {
-                    blocks.push(ContentBlock::Text { text });
+                protocol::ModelStreamEvent::TextDelta(delta) => {
+                    // Older Sampling revisions accept one text item, not streaming fragments.
+                    match blocks.last_mut() {
+                        Some(ContentBlock::Text { text }) => {
+                            text.push_str(&delta)
+                        }
+                        _ => blocks.push(ContentBlock::Text { text: delta }),
+                    }
                 }
-                protocol::ModelStreamEvent::ReasoningDelta(text) => {
-                    blocks.push(ContentBlock::Reasoning { text });
-                }
+                // Reasoning has no MCP Sampling wire representation and must not
+                // make an otherwise valid visible answer fail serialization.
+                protocol::ModelStreamEvent::ReasoningDelta(_) => {}
                 protocol::ModelStreamEvent::ToolCall(call) => {
                     blocks.push(ContentBlock::ToolCall {
                         tool_call_id: call.tool_call_id,
@@ -509,7 +628,7 @@ impl Session {
 
 #[async_trait]
 impl ::mcp::McpHost for SessionMcpHost {
-    /// Serves safe local roots and rejects Host capabilities not yet attached to a Turn.
+    /// Serves Session roots independently of Turn state and dispatches Turn-scoped callbacks.
     async fn handle(
         &self,
         request: McpHostRequest,

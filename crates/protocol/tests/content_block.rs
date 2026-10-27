@@ -30,6 +30,7 @@ fn mcp_content_blocks_round_trip_without_loss() {
             },
         },
         ContentBlock::ResourceLink {
+            server_id: None,
             uri: "file:///workspace/report.pdf".to_string(),
             name: "report".to_string(),
             title: Some("Report".to_string()),

@@ -12,11 +12,12 @@ export type McpServerCardProps = Readonly<{
   controller: WorkspaceController;
 }>;
 
-/** Renders one exact-protocol Server status, actions, and catalog projection. */
+/** Renders one negotiated Server status, actions, and catalog projection. */
 export function McpServerCard({ server, snapshot, controller }: McpServerCardProps) {
   const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState<string>();
-  const healthy = server.state === "ready";
+  // A Ready label without a negotiated revision is not evidence of a completed handshake.
+  const healthy = server.state === "ready" && server.negotiatedProtocol != null;
   const unhealthy = server.state === "failed" || server.state === "degraded";
 
   /** Runs one explicit reconnect without hiding a failed result. */
@@ -38,7 +39,7 @@ export function McpServerCard({ server, snapshot, controller }: McpServerCardPro
         <div>
           <h3>{server.serverId}</h3>
           <p className="mcp-card__protocol">
-            {server.protocol === "2025-11-25" ? "Legacy" : "Modern"} · {server.protocol} · {server.transport}
+            {server.configuredPolicy === "auto" ? "自动协商" : `偏好 ${server.configuredPolicy}`} · {server.negotiatedProtocol ?? "尚未协商"} · {server.transport}
           </p>
         </div>
         <span>

@@ -86,3 +86,23 @@ fn tool_result_roundtrips_typed_read_details() {
     assert_eq!(encoded["details"]["truncation"]["truncated_by"], "lines");
     assert_eq!(decoded, result);
 }
+/// Server hints retain the distinction between undeclared and explicitly false.
+#[test]
+fn tool_metadata_preserves_optional_hints() {
+    let metadata = protocol::ToolMetadata::builder()
+        .annotations(
+            protocol::ToolAnnotations::builder()
+                .destructive_hint(Some(false))
+                .build(),
+        )
+        .output_schema(Some(serde_json::json!({"type":"object"})))
+        .build();
+    let value = serde_json::to_value(&metadata).expect("metadata");
+    assert_eq!(value["annotations"]["destructiveHint"], false);
+    assert!(value["annotations"].get("readOnlyHint").is_none());
+    assert_eq!(
+        serde_json::from_value::<protocol::ToolMetadata>(value)
+            .expect("round trip"),
+        metadata
+    );
+}

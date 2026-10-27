@@ -278,6 +278,7 @@ async fn runtime_applies_typed_composition_rules() {
     let tool_result = runtime
         .emit_tool_call(
             ToolCallEvent {
+                metadata: None,
                 call: ToolCall {
                     tool_call_id: ToolCallId::try_from("tool-call-1")
                         .expect("tool call id"),

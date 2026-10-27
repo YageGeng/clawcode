@@ -1,4 +1,3 @@
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mcp::{
-    McpClient, McpConnector, McpError, McpHost, McpMrtrPolicy,
-    McpSessionRequest, McpStdioTransport, McpTransport, RuntimeMcpServer,
+    McpClient, McpConnector, McpError, McpHost, McpSessionRequest,
+    McpStdioTransport, McpTransport, RuntimeMcpServer,
 };
 use protocol::{
     McpCatalog, McpCompletionRequest, McpCompletionResult, McpHostRequest,
@@ -82,7 +81,7 @@ impl McpConnector for ScenarioConnector {
             }),
             "protocol-mismatch" => Err(McpError::ProtocolMismatch {
                 server_id: server.server_id.clone(),
-                expected: server.protocol,
+                expected: server.protocol_policy.requested_version(),
                 actual: "2099-01-01".to_string(),
             }),
             name => Ok(Arc::new(ScenarioClient {
@@ -166,6 +165,7 @@ impl McpClient for ScenarioClient {
     async fn read_resource(
         &self,
         _request: McpResourceRequest,
+        _cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
         Err(McpError::Host("unexpected Resource request".to_string()))
     }
@@ -189,13 +189,10 @@ pub fn runtime_server(name: &str, enabled: bool) -> RuntimeMcpServer {
     RuntimeMcpServer::builder()
         .server_id(McpServerId::try_from(name).expect("valid Server id"))
         .enabled(enabled)
-        .protocol(McpProtocolVersion::V2025_11_25)
+        .protocol_policy(protocol::McpProtocolPolicy::Auto)
         .startup_timeout(Duration::from_secs(5))
         .request_timeout(Duration::from_secs(5))
-        .mrtr(McpMrtrPolicy {
-            max_rounds: NonZeroU32::new(8).expect("non-zero rounds"),
-            total_timeout: Duration::from_secs(30),
-        })
+        .request_total_timeout(Duration::from_secs(30))
         .transport(McpTransport::Stdio(Box::new(McpStdioTransport {
             command: "unused".to_string(),
             args: Vec::new(),

@@ -2,14 +2,11 @@
 
 use std::collections::HashMap;
 
-use protocol::{McpProtocolVersion, McpServerId};
+use protocol::{McpProtocolPolicy, McpServerId};
 use serde::{Deserialize, Serialize};
 
 /// Maximum individual MCP timeout accepted from immutable configuration.
 pub const MAX_MCP_TIMEOUT_SEC: u64 = 86_400;
-
-/// Maximum number of nested Modern MRTR model rounds accepted per request.
-pub const MAX_MCP_MRTR_ROUNDS: u32 = 64;
 
 /// Flat TOML struct for one `[[mcp_servers]]` entry.
 #[derive(
@@ -25,7 +22,7 @@ pub struct McpServerConfig {
     /// Unique Server identifier used in public Tool namespaces.
     pub name: String,
 
-    /// Exact MCP revision; absence is retained so validation can report the owning Server.
+    /// Initialization preference; omission selects automatic negotiation.
     #[serde(default)]
     #[builder(default, setter(strip_option))]
     pub protocol: Option<String>,
@@ -34,6 +31,16 @@ pub struct McpServerConfig {
     #[serde(default = "default_true")]
     #[builder(default = default_true())]
     pub enabled: bool,
+
+    /// Default exposure for this Server's tools and resource access.
+    #[serde(default)]
+    #[builder(default)]
+    pub exposure: protocol::ToolExposure,
+
+    /// Exact remote-name overrides; keys are never interpreted as patterns.
+    #[serde(default)]
+    #[builder(default)]
+    pub tool_exposure: HashMap<String, protocol::ToolExposure>,
 
     /// Maximum transport initialization time.
     #[serde(default = "default_startup_timeout")]
@@ -45,15 +52,20 @@ pub struct McpServerConfig {
     #[builder(default = default_request_timeout())]
     pub request_timeout_sec: u64,
 
-    /// Maximum nested model rounds for one Modern MRTR request.
-    #[serde(default = "default_mrtr_max_rounds")]
-    #[builder(default = default_mrtr_max_rounds())]
-    pub mrtr_max_rounds: u32,
+    /// Absolute request deadline that progress cannot extend.
+    #[serde(default = "default_total_timeout")]
+    #[builder(default = default_total_timeout())]
+    pub request_total_timeout_sec: u64,
 
-    /// Total wall-clock budget for one Modern MRTR request.
-    #[serde(default = "default_mrtr_total_timeout")]
-    #[builder(default = default_mrtr_total_timeout())]
-    pub mrtr_total_timeout_sec: u64,
+    /// Retired key retained solely for a directed migration diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub mrtr_max_rounds: Option<u32>,
+
+    /// Retired key retained solely for a directed migration diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub mrtr_total_timeout_sec: Option<u64>,
 
     /// Executable name or path for stdio transport.
     #[serde(default)]
@@ -134,12 +146,11 @@ pub struct McpOAuthConfig {
 /// Errors returned when MCP TOML cannot become an unambiguous runtime policy.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum McpConfigError {
-    /// Every Server must declare an exact protocol revision.
-    #[error("mcp server '{server}' must configure protocol")]
-    MissingProtocol {
-        /// Server whose protocol field was absent.
-        server: String,
-    },
+    /// A removed setting must be migrated explicitly before startup.
+    #[error(
+        "mcp server '{server}' uses retired field '{field}'; remove mrtr_max_rounds and use request_total_timeout_sec for the total deadline"
+    )]
+    RetiredField { server: String, field: &'static str },
 
     /// The configured exact protocol revision is unsupported.
     #[error("mcp server '{server}' uses unsupported protocol '{protocol}'")]
@@ -225,13 +236,8 @@ fn default_request_timeout() -> u64 {
     120
 }
 
-/// Returns the default bounded Modern MRTR round count.
-fn default_mrtr_max_rounds() -> u32 {
-    8
-}
-
-/// Returns the default total Modern MRTR timeout in seconds.
-fn default_mrtr_total_timeout() -> u64 {
+/// Returns the absolute request timeout in seconds.
+fn default_total_timeout() -> u64 {
     300
 }
 
@@ -245,22 +251,32 @@ impl McpServerConfig {
             }
         })?;
 
-        let protocol = self.protocol.as_deref().ok_or_else(|| {
-            McpConfigError::MissingProtocol {
-                server: self.name.clone(),
-            }
-        })?;
-        protocol.parse::<McpProtocolVersion>().map_err(|_error| {
+        let protocol = self.protocol.as_deref().unwrap_or("auto");
+        protocol.parse::<McpProtocolPolicy>().map_err(|_error| {
             McpConfigError::UnsupportedProtocol {
                 server: self.name.clone(),
                 protocol: protocol.to_string(),
             }
         })?;
+        for (field, present) in [
+            ("mrtr_max_rounds", self.mrtr_max_rounds.is_some()),
+            (
+                "mrtr_total_timeout_sec",
+                self.mrtr_total_timeout_sec.is_some(),
+            ),
+        ] {
+            if present {
+                return Err(McpConfigError::RetiredField {
+                    server: self.name.clone(),
+                    field,
+                });
+            }
+        }
 
         for (field, value) in [
             ("startup_timeout_sec", self.startup_timeout_sec),
             ("request_timeout_sec", self.request_timeout_sec),
-            ("mrtr_total_timeout_sec", self.mrtr_total_timeout_sec),
+            ("request_total_timeout_sec", self.request_total_timeout_sec),
         ] {
             if value == 0 || value > MAX_MCP_TIMEOUT_SEC {
                 return Err(McpConfigError::InvalidLimit {
@@ -270,16 +286,6 @@ impl McpServerConfig {
                 });
             }
         }
-        if self.mrtr_max_rounds == 0
-            || self.mrtr_max_rounds > MAX_MCP_MRTR_ROUNDS
-        {
-            return Err(McpConfigError::InvalidLimit {
-                server: self.name.clone(),
-                field: "mrtr_max_rounds",
-                value: u64::from(self.mrtr_max_rounds),
-            });
-        }
-
         let command = self.command.as_deref();
         let url = self.url.as_deref();
         if command.is_some_and(|value| value.trim().is_empty()) {

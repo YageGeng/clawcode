@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,19 +19,18 @@ use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
 };
 use mcp::{
-    McpError, McpFactory, McpMrtrPolicy, McpSession, McpSessionRequest,
-    McpStdioTransport, McpTransport, RmcpConnector, RuntimeMcpServer,
-    SessionMcpFactory,
+    McpError, McpFactory, McpSession, McpSessionRequest, McpStdioTransport,
+    McpTransport, RmcpConnector, RuntimeMcpServer, SessionMcpFactory,
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, ContentBlock, ExtensionDescriptor,
-    ExtensionId, IdGenerator, IdKind, McpProtocolVersion, McpServerId,
-    McpServerState, MessageContent, ModelFailure, ModelFinal,
-    ModelInputModalities, ModelInputModality, ModelProfile, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind, RunInput,
-    RunRequest, SessionId, SessionTitle, SkillDiagnosticCode,
-    SlashCommandSource, StopReason, TimestampMs,
+    ExtensionId, IdGenerator, IdKind, McpServerId, McpServerState,
+    MessageContent, ModelFailure, ModelFinal, ModelInputModalities,
+    ModelInputModality, ModelProfile, ModelRequest, ModelRetryDisposition,
+    ModelStreamEvent, ModelUsage, QueueKind, RunInput, RunRequest, SessionId,
+    SessionTitle, SkillDiagnosticCode, SlashCommandSource, StopReason,
+    TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -258,14 +256,10 @@ impl mcp::McpFactory for StaticMcpFactory {
                         McpServerId::try_from("docs").expect("Server id"),
                     )
                     .enabled(false)
-                    .protocol(McpProtocolVersion::V2025_11_25)
+                    .protocol_policy(protocol::McpProtocolPolicy::Auto)
                     .startup_timeout(Duration::from_secs(1))
                     .request_timeout(Duration::from_secs(1))
-                    .mrtr(McpMrtrPolicy {
-                        max_rounds: NonZeroU32::new(1)
-                            .expect("non-zero rounds"),
-                        total_timeout: Duration::from_secs(1),
-                    })
+                    .request_total_timeout(Duration::from_secs(1))
                     .transport(McpTransport::Stdio(Box::new(
                         McpStdioTransport {
                             command: "unused".to_string(),

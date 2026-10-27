@@ -13,7 +13,8 @@ import type {
   SlashCommandAliasKind,
   SlashCommandMessageMeta,
   SlashCommandSource,
-  ToolCallEntity
+  ToolCallEntity,
+  ToolOutputInfo
 } from "../domain/model";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 import type { WorkspaceAction } from "./state";
@@ -29,6 +30,18 @@ export class SessionUpdateDecoder {
   /** Creates a decoder for one product extension namespace. */
   constructor(namespace: string) {
     this.namespace = namespace;
+  }
+
+  /** Validates optional diagnostics from both live results and persisted message replay. */
+  private outputInfo(value: unknown): ToolOutputInfo | undefined {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const info = value as Record<string, unknown>;
+    const { originalTextBytes, visibleTextBytes, omittedMedia } = info;
+    if (typeof originalTextBytes !== "number" || typeof visibleTextBytes !== "number" || typeof omittedMedia !== "number"
+      || ![originalTextBytes, visibleTextBytes, omittedMedia].every((value) => Number.isSafeInteger(value) && value >= 0)) return undefined;
+    return { originalTextBytes, visibleTextBytes, omittedMedia,
+      ...(typeof info.fullOutputPath === "string" ? { fullOutputPath: info.fullOutputPath } : {}),
+      ...(info.saveFailure === "io" || info.saveFailure === "too_large" || info.saveFailure === "cancelled" ? { saveFailure: info.saveFailure } : {}) };
   }
 
   /** Decodes one ACP notification while preserving omitted-field upsert semantics. */
@@ -133,6 +146,7 @@ export class SessionUpdateDecoder {
       const rawOutput = update.rawOutput ?? previous?.rawOutput;
       const outputRecord = typeof rawOutput === "object" && rawOutput !== null && !Array.isArray(rawOutput) ? rawOutput as Record<string, unknown> : undefined;
       const messageContent = typeof outputRecord?.content === "object" && outputRecord.content !== null && !Array.isArray(outputRecord.content) ? outputRecord.content as Record<string, unknown> : undefined;
+      const output = this.outputInfo(outputRecord?.output ?? messageContent?.output);
       const details = typeof outputRecord?.details === "object" && outputRecord.details !== null && !Array.isArray(outputRecord.details)
         ? outputRecord.details as Record<string, unknown>
         : typeof messageContent?.details === "object" && messageContent.details !== null && !Array.isArray(messageContent.details)
@@ -151,6 +165,7 @@ export class SessionUpdateDecoder {
         status,
         ...(update.rawInput === undefined ? (previous?.rawInput === undefined ? {} : { rawInput: previous.rawInput }) : { rawInput: update.rawInput }),
         ...(rawOutput === undefined ? {} : { rawOutput }),
+        ...(output === undefined ? {} : { output }),
         // ACP v2 tool content follows the same omitted/clear/replace upsert contract as messages.
         content: !("content" in update) ? previous?.content ?? [] : Array.isArray(update.content) ? update.content : [],
         ...(previous?.startedAtMs === undefined && meta !== undefined ? { startedAtMs: meta.timestampMs } : previous?.startedAtMs === undefined ? {} : { startedAtMs: previous.startedAtMs }),

@@ -3,14 +3,13 @@
     reason = "Legacy 2025-11-25 Host callbacks remain an explicitly supported protocol"
 )]
 
-use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mcp::{
-    LegacyClient, McpClient, McpError, McpHost, McpProgress, McpProgressSink,
-    McpRequestControl,
+    InitializeClient, McpClient, McpError, McpHost, McpProgress,
+    McpProgressSink, McpRequestControl,
 };
 use protocol::{
     ContentBlock, McpElicitationAction, McpElicitationMode,
@@ -19,12 +18,12 @@ use protocol::{
     McpToolRequest, Role, SessionId, StopReason, TimestampMs, TraceId, TurnId,
 };
 use rmcp::model::{
-    CallToolResult, ClientCapabilities, ClientJsonRpcMessage, ClientRequest,
-    ClientResult, CreateMessageRequest, CreateMessageRequestParams,
-    ElicitRequest, ElicitRequestParams, ElicitationAction, Implementation,
-    InitializeResult, ListRootsRequest, ListToolsResult, ProtocolVersion,
-    RequestId, SamplingMessage, ServerCapabilities, ServerJsonRpcMessage,
-    ServerRequest, ServerResult, Tool,
+    CallToolResult, ClientJsonRpcMessage, ClientRequest, ClientResult,
+    CreateMessageRequest, CreateMessageRequestParams, ElicitRequest,
+    ElicitRequestParams, ElicitationAction, Implementation, InitializeResult,
+    ListRootsRequest, ListToolsResult, ProtocolVersion, RequestId,
+    SamplingMessage, ServerCapabilities, ServerJsonRpcMessage, ServerRequest,
+    ServerResult, Tool,
 };
 use rmcp::transport::{IntoTransport, Transport};
 use tokio_util::sync::CancellationToken;
@@ -83,9 +82,114 @@ impl McpProgressSink for NoProgress {
     fn publish(&self, _progress: McpProgress) {}
 }
 
-/// A Legacy Tool-scoped Roots request inherits its exact Turn and Trace context.
+/// Idle Roots retain their Server route without allowing unassociated Turn callbacks.
 #[tokio::test]
-async fn legacy_roots_callback_inherits_tool_request_context() {
+async fn roots_are_available_without_an_active_turn() {
+    let (server_transport, client_transport) = tokio::io::duplex(8_192);
+    let mut server = IntoTransport::<rmcp::RoleServer, _, _>::into_transport(
+        server_transport,
+    );
+    let server_task = tokio::spawn(async move {
+        let ClientJsonRpcMessage::Request(initialize) =
+            server.receive().await.expect("initialize request")
+        else {
+            panic!("expected initialize request");
+        };
+        server
+            .send(ServerJsonRpcMessage::response(
+                ServerResult::InitializeResult(
+                    InitializeResult::new(ServerCapabilities::default())
+                        .with_protocol_version(ProtocolVersion::V_2025_11_25)
+                        .with_server_info(Implementation::new(
+                            "idle-roots",
+                            "1",
+                        )),
+                ),
+                initialize.id,
+            ))
+            .await
+            .expect("initialize response");
+        assert!(matches!(
+            server.receive().await,
+            Some(ClientJsonRpcMessage::Notification(_))
+        ));
+        server
+            .send(ServerJsonRpcMessage::request(
+                ServerRequest::ListRootsRequest(ListRootsRequest::default()),
+                RequestId::Number(90),
+            ))
+            .await
+            .expect("Roots request");
+        let roots = server.receive().await.expect("Roots response");
+        server
+            .send(ServerJsonRpcMessage::request(
+                ServerRequest::CreateMessageRequest(CreateMessageRequest::new(
+                    CreateMessageRequestParams::new(
+                        vec![SamplingMessage::user_text("unassociated")],
+                        64,
+                    ),
+                )),
+                RequestId::Number(91),
+            ))
+            .await
+            .expect("Sampling request");
+        let sampling = server.receive().await.expect("Sampling response");
+        server
+            .send(ServerJsonRpcMessage::request(
+                ServerRequest::ElicitRequest(ElicitRequest::new(
+                    ElicitRequestParams::UrlElicitationParams {
+                        meta: None,
+                        message: "Unassociated prompt".to_string(),
+                        url: "https://example.test/approve".to_string(),
+                        elicitation_id: "idle-elicit".to_string(),
+                    },
+                )),
+                RequestId::Number(92),
+            ))
+            .await
+            .expect("Elicitation request");
+        let elicitation = server.receive().await.expect("Elicitation response");
+        (roots, sampling, elicitation)
+    });
+    let host = Arc::new(CapturingHost(Mutex::new(Vec::new())));
+    let client = InitializeClient::connect_with_host(
+        McpServerId::try_from("idle-roots").expect("Server id"),
+        client_transport,
+        Arc::clone(&host) as Arc<dyn McpHost>,
+        protocol::McpProtocolPolicy::Auto,
+    )
+    .await
+    .expect("Legacy client");
+    let responses = tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .expect("Host callbacks must settle")
+        .expect("reference Server");
+    client.shutdown().await.expect("Legacy shutdown");
+    let ClientJsonRpcMessage::Response(response) = responses.0 else {
+        panic!("idle Roots request failed: {:?}", responses.0);
+    };
+    let ClientResult::ListRootsResult(roots) = response.result else {
+        panic!("expected Roots result");
+    };
+    assert_eq!(roots.roots[0].uri, "file:///workspace");
+    assert!(
+        matches!(responses.1, ClientJsonRpcMessage::Error(_)),
+        "Sampling still requires a Turn"
+    );
+    assert!(
+        matches!(responses.2, ClientJsonRpcMessage::Error(_)),
+        "Elicitation still requires a Turn"
+    );
+    let requests = host.0.lock().expect("Host lock");
+    assert!(
+        matches!(requests.as_slice(), [McpHostRequest::Roots(request)]
+        if request.server_id.as_str() == "idle-roots")
+    );
+}
+
+/// Roots retain Server identity while Sampling and Elicitation retain their Tool context.
+#[tokio::test]
+async fn legacy_host_callbacks_preserve_server_and_turn_context() {
     let (server_transport, client_transport) = tokio::io::duplex(8_192);
     let mut server = IntoTransport::<rmcp::RoleServer, _, _>::into_transport(
         server_transport,
@@ -102,16 +206,16 @@ async fn legacy_roots_callback_inherits_tool_request_context() {
         };
         assert_eq!(
             request.params.protocol_version,
-            ProtocolVersion::V_2025_11_25
+            ProtocolVersion::V_2024_11_05
         );
-        assert_eq!(
-            request.params.capabilities,
-            ClientCapabilities::builder()
-                .enable_roots()
-                .enable_sampling()
-                .enable_elicitation()
-                .build()
-        );
+        assert!(request.params.capabilities.roots.is_some());
+        assert!(request.params.capabilities.sampling.is_some());
+        let elicitation = request
+            .params
+            .capabilities
+            .elicitation
+            .expect("elicitation advertised");
+        assert!(elicitation.form.is_some() && elicitation.url.is_some());
         server
             .send(ServerJsonRpcMessage::response(
                 ServerResult::InitializeResult(
@@ -238,10 +342,13 @@ async fn legacy_roots_callback_inherits_tool_request_context() {
     });
     let host = Arc::new(CapturingHost(Mutex::new(Vec::new())));
     let server_id = McpServerId::try_from("host-server").expect("Server id");
-    let client = LegacyClient::connect_with_host(
+    let client = InitializeClient::connect_with_host(
         server_id.clone(),
         client_transport,
         Arc::clone(&host) as Arc<dyn McpHost>,
+        protocol::McpProtocolPolicy::Preferred(
+            protocol::McpProtocolVersion::V2024_11_05,
+        ),
     )
     .await
     .expect("Legacy client");
@@ -268,7 +375,6 @@ async fn legacy_roots_callback_inherits_tool_request_context() {
                 .lifecycle(CancellationToken::new())
                 .idle_timeout(Duration::from_secs(1))
                 .total_timeout(Duration::from_secs(2))
-                .max_rounds(NonZeroU32::new(2).expect("non-zero rounds"))
                 .progress(Arc::new(NoProgress))
                 .build(),
         )
@@ -286,7 +392,8 @@ async fn legacy_roots_callback_inherits_tool_request_context() {
                 && actual.requested_at_ms >= context.requested_at_ms
         };
         assert!(requests.iter().all(|request| match request {
-            McpHostRequest::Roots(request) => correlated(&request.context),
+            McpHostRequest::Roots(request) =>
+                request.server_id == context.server_id,
             McpHostRequest::Sampling(request) => {
                 correlated(&request.context)
                     && request.max_tokens == 64

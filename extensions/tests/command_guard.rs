@@ -69,6 +69,7 @@ fn context() -> ExtensionContext {
 /// Creates a bash call with the command under test.
 fn bash_call(command: &str) -> ToolCallEvent {
     ToolCallEvent {
+        metadata: None,
         call: ToolCall {
             tool_call_id: ToolCallId::try_from("call-guard")
                 .expect("tool call id"),

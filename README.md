@@ -117,23 +117,21 @@ enable_skill = true
 [[mcp_servers]]
 enabled = true
 name = "example"
-protocol = "2026-07-28"
+protocol = "auto"
 command = "example-mcp-server"
 args = []
 startup_timeout_sec = 30
 request_timeout_sec = 120
-mrtr_max_rounds = 8
-mrtr_total_timeout_sec = 300
+request_total_timeout_sec = 300
 
 [[mcp_servers]]
 enabled = true
 name = "remote"
-protocol = "2026-07-28"
+protocol = "auto"
 url = "https://example.com/mcp"
 startup_timeout_sec = 30
 request_timeout_sec = 120
-mrtr_max_rounds = 8
-mrtr_total_timeout_sec = 300
+request_total_timeout_sec = 300
 ```
 
 Omitting `[kernel]` defaults `max_turns` to `unlimited`. Use the `limited`
@@ -143,6 +141,57 @@ Model `id` is the stable local identifier used by `active_model`, Session
 metadata, and model selection. When an upstream API expects a different
 `model` value, set the optional `upstream_id`; when omitted, requests use
 `id`.
+
+## MCP discovery and output
+
+MCP supports the same four revisions as Pi: `2025-11-25`, `2025-06-18`,
+`2025-03-26`, and `2024-11-05`. Omitted `protocol` or `"auto"` requests
+`2025-11-25`; an explicit supported version is a preference. Either policy accepts
+any supported server selection in one initialize handshake. The UI shows the
+actual negotiated version. HTTP session expiry does not silently reinitialize.
+
+Migrate `2026-07-28` configurations to `auto`. Remove `mrtr_max_rounds` and rename
+`mrtr_total_timeout_sec` to `request_total_timeout_sec` (default 300 seconds).
+The removed keys are rejected explicitly. Normal request progress resets the
+idle timeout but never extends the total deadline.
+
+Tools default to `exposure = "direct"`. Use `"deferred"` for local `tool_search`
+discovery or `"hidden"` to exclude tools from model access. Exact remote names
+can override the server default:
+
+```toml
+[[mcp_servers]]
+name = "github"
+url = "https://example.com/mcp"
+exposure = "deferred"
+
+[mcp_servers.tool_exposure]
+get_me = "direct"
+delete_repository = "hidden"
+```
+
+Search loads tools for the **next** model request. It never executes them, and a
+call in the same batch remains subject to the original declaration set. Each
+search can add at most 32 KiB of complete tool definitions; this is not a lifetime
+cap and there is no automatic eviction. Explicit load/disable preferences survive
+reconnect, resume, branch navigation, fork, and compaction. Server annotations are
+displayed as hints and do not grant approval.
+
+`list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource` expose
+MCP resources to the model. Lists page through the already discovered snapshot
+(default 50, maximum 200 records and 20 KiB per page), not remote lazy pagination.
+Cursors are bound to the Session, catalog revision, kind and server filter. Reads
+send the original URI to the chosen server, including unlisted template URIs.
+A Hidden server does not expose resources even if individual tools are Direct.
+
+After result hooks, MCP/search/read outputs share a 20 KiB text budget, including
+JSON projection and file references. Media is kept whole, up to four blocks and
+8 MiB encoded data. Larger results retain a private temporary JSON file when its
+complete serialized size fits 64 MiB. Files follow temporary-file retention and
+may later disappear; no download service is created. Save failure is shown
+separately and never retries the remote operation. These limits do not bound
+transport buffering or guarantee model token/media cost. Progress text is limited
+to 1 KiB and never spooled.
 
 ## Prompt resources
 

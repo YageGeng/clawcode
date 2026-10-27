@@ -279,6 +279,9 @@ pub enum ContentBlock {
 
     /// Link to a Resource that remains available from its owning MCP Server.
     ResourceLink {
+        /// Host-approved MCP route for model resource-reading guidance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_id: Option<crate::McpServerId>,
         /// Original Resource URI.
         uri: String,
 
@@ -489,6 +492,9 @@ pub enum MessageContent {
         /// Optional typed diagnostics retained for replay and ACP rendering.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<ToolResultDetails>,
+        /// Output-budget measurements retained independently from tool-specific details.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<crate::ToolOutputInfo>,
     },
 
     /// User-authored server-side shell execution retained with Pi `!`/`!!` semantics.

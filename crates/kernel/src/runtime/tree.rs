@@ -110,7 +110,15 @@ impl Kernel {
             None => {
                 let session = self.session(session_id)?;
                 let _run_guard = session.acquire_operation().await?;
-                let old_leaf_id = session.transcript.clear_navigation()?;
+                let old_leaf_id = session.tools.update(|next| {
+                    let old = session.transcript.clear_navigation()?;
+                    next.selection = protocol::ToolSelection::default();
+                    Ok(old)
+                })?;
+                session.notify_mcp_change(
+                    protocol::McpSessionChange::Selection,
+                    None,
+                )?;
                 let context = self.extension_context(&session, None, None)?;
                 session
                     .extensions
@@ -248,14 +256,25 @@ impl Kernel {
             .transpose()?;
         // Apply the lane move, optional summary, label, history rebuild, and
         // durability checkpoint under one transcript lock after all awaits.
-        let committed = session.transcript.commit_navigation(
-            TranscriptNavigationCommit::builder()
-                .new_leaf_id(plan.new_leaf_id.clone())
-                .target_id(plan.target_id.clone())
-                .summary(summary)
-                .label(decision.label)
-                .build(),
-        )?;
+        let committed = session.tools.update(|next| {
+            // Validate the target selection before moving the lane, under the same lock order as loads.
+            let entries =
+                session.transcript.branch_at(plan.new_leaf_id.as_ref())?;
+            let selection =
+                tools::ToolSelectionUpdate::restore(&entries, next)?;
+            let committed = session.transcript.commit_navigation(
+                TranscriptNavigationCommit::builder()
+                    .new_leaf_id(plan.new_leaf_id.clone())
+                    .target_id(plan.target_id.clone())
+                    .summary(summary)
+                    .label(decision.label)
+                    .build(),
+            )?;
+            next.selection = selection;
+            Ok(committed)
+        })?;
+        session
+            .notify_mcp_change(protocol::McpSessionChange::Selection, None)?;
         let summary_entry = committed.summary_entry.map(|entry| {
             SessionTreeEntry::builder()
                 .entry_id(entry.id)

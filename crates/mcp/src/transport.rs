@@ -5,9 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use protocol::{
-    McpAuthorizationResult, McpProtocolVersion, McpServerId, SessionId,
-};
+use protocol::{McpAuthorizationResult, McpServerId, SessionId};
 use rmcp::service::RoleClient;
 use rmcp::transport::auth::AuthClient;
 use rmcp::transport::{
@@ -17,8 +15,8 @@ use store::SecretStore;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::{
-    LegacyClient, McpAuthentication, McpClient, McpError, McpHost,
-    McpStreamableHttpTransport, McpTransport, ModernClient, RuntimeMcpServer,
+    InitializeClient, McpAuthentication, McpClient, McpError, McpHost,
+    McpStreamableHttpTransport, McpTransport, RuntimeMcpServer,
     auth::{McpOAuthGrant, McpOAuthRuntime},
 };
 
@@ -99,26 +97,15 @@ impl RmcpConnector {
         T: IntoTransport<RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
     {
-        match server.protocol {
-            McpProtocolVersion::V2025_11_25 => Ok(Arc::new(
-                LegacyClient::connect_with_host(
-                    server.server_id.clone(),
-                    transport,
-                    host,
-                )
-                .await?,
+        Ok(Arc::new(
+            InitializeClient::connect_with_host(
+                server.server_id.clone(),
+                transport,
+                host,
+                server.protocol_policy,
             )
-                as Arc<dyn McpClient>),
-            McpProtocolVersion::V2026_07_28 => Ok(Arc::new(
-                ModernClient::connect_with_host(
-                    server.server_id.clone(),
-                    transport,
-                    host,
-                )
-                .await?,
-            )
-                as Arc<dyn McpClient>),
-        }
+            .await?,
+        ) as Arc<dyn McpClient>)
     }
 
     /// Builds the authenticated Streamable HTTP transport shared by restore and continuation.
@@ -134,7 +121,8 @@ impl RmcpConnector {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect::<HashMap<_, _>>();
         let transport_config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(config.url.clone())
-            .custom_headers(custom_headers);
+            .custom_headers(custom_headers)
+            .reinit_on_expired_session(false);
         let http_client = reqwest::Client::builder()
             .pool_max_idle_per_host(0)
             .redirect(reqwest::redirect::Policy::none())
@@ -211,7 +199,8 @@ impl McpConnector for RmcpConnector {
                         .map(|(name, value)| (name.clone(), value.clone()))
                         .collect::<HashMap<_, _>>();
                     let mut transport_config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(config.url.clone())
-                        .custom_headers(custom_headers);
+                        .custom_headers(custom_headers)
+            .reinit_on_expired_session(false);
                     match &config.authentication {
                         McpAuthentication::None => {
                             let transport =

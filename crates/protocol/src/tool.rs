@@ -1,6 +1,134 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ContentBlock, ToolCallId};
+use crate::{ContentBlock, McpToolRef, ToolCallId};
+
+/// Persisted preferences, independent from the current connection catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSelection {
+    pub version: u8,
+    pub loaded: std::collections::BTreeSet<String>,
+    pub disabled: std::collections::BTreeSet<String>,
+}
+
+impl Default for ToolSelection {
+    /// Starts with current exposure defaults and no explicit overrides.
+    fn default() -> Self {
+        Self {
+            version: 1,
+            loaded: Default::default(),
+            disabled: Default::default(),
+        }
+    }
+}
+
+impl From<Vec<String>> for ToolSelection {
+    /// Converts explicit loaded names without implicitly disabling future catalog entries.
+    fn from(names: Vec<String>) -> Self {
+        Self {
+            loaded: names.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Host policy controlling model discovery independently from remote hints.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExposure {
+    #[default]
+    Direct,
+    Deferred,
+    Hidden,
+}
+
+/// Host output policy applied after result hooks.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputPolicy {
+    #[default]
+    Preserve,
+    Bounded,
+    /// Complete local snapshot pages must remain valid after extension hooks.
+    ResourcePage(McpResourcePageKind),
+}
+
+/// Resource envelope family used for snapshot pagination and post-hook validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum McpResourcePageKind {
+    Resources,
+    Templates,
+}
+
+impl McpResourcePageKind {
+    /// Returns the canonical array key for this resource page family.
+    pub const fn array_key(self) -> &'static str {
+        match self {
+            Self::Resources => "resources",
+            Self::Templates => "resourceTemplates",
+        }
+    }
+}
+
+/// Untrusted server hints; absence is deliberately distinct from false.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub idempotent_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub open_world_hint: Option<bool>,
+}
+
+/// Host metadata kept outside the Provider's three-field tool definition.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolMetadata {
+    #[serde(default)]
+    #[builder(default)]
+    pub exposure: ToolExposure,
+    #[serde(default)]
+    #[builder(default)]
+    pub annotations: ToolAnnotations,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    #[builder(default)]
+    pub output_policy: ToolOutputPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub mcp_ref: Option<McpToolRef>,
+}
 
 /// Limit that caused a pi-compatible tool output to be truncated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,4 +260,41 @@ pub struct ToolResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub details: Option<ToolResultDetails>,
+
+    /// Independent output-budget diagnostics, compatible with existing tool details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub output: Option<ToolOutputInfo>,
+}
+
+/// Bounded reasons why a complete temporary output could not be retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputSaveFailure {
+    Io,
+    TooLarge,
+    Cancelled,
+}
+
+/// Measurements and temporary-file provenance without retaining the full result twice.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputInfo {
+    pub original_text_bytes: usize,
+    pub visible_text_bytes: usize,
+    pub omitted_media: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub full_output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub save_failure: Option<ToolOutputSaveFailure>,
 }

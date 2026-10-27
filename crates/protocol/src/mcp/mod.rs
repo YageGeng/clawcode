@@ -25,7 +25,7 @@ pub use host::{
     McpSamplingResult,
 };
 pub use identity::{
-    McpIdentityError, McpPromptRef, McpProtocolVersion,
+    McpIdentityError, McpPromptRef, McpProtocolPolicy, McpProtocolVersion,
     McpProtocolVersionError, McpResourceRef, McpServerId, McpToolRef,
     McpTransportKind,
 };

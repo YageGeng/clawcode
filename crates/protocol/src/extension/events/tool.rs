@@ -30,6 +30,9 @@ pub struct ToolExecutionEndEvent {
 /// A parsed tool call may be transformed or blocked before validation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallEvent {
+    /// Metadata of the selected frozen tool; server hints never authorize execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<crate::ToolMetadata>,
     /// Current parsed call observed by this handler.
     pub call: ToolCall,
 }

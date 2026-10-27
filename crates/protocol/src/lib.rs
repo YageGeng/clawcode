@@ -79,10 +79,10 @@ pub use mcp::{
     McpElicitationSnapshot, McpFailureStage, McpHostRequest, McpHostResponse,
     McpIdentityError, McpOAuthState, McpOAuthStatus, McpPromptInfo,
     McpPromptMessage, McpPromptRef, McpPromptRequest, McpPromptResult,
-    McpProtocolVersion, McpProtocolVersionError, McpReconnectRequest,
-    McpRequestContext, McpResourceInfo, McpResourceRef, McpResourceRequest,
-    McpResourceResult, McpResourceTemplateInfo, McpRoot, McpRootsRequest,
-    McpRootsResult, McpSamplingRequest, McpSamplingResult,
+    McpProtocolPolicy, McpProtocolVersion, McpProtocolVersionError,
+    McpReconnectRequest, McpRequestContext, McpResourceInfo, McpResourceRef,
+    McpResourceRequest, McpResourceResult, McpResourceTemplateInfo, McpRoot,
+    McpRootsRequest, McpRootsResult, McpSamplingRequest, McpSamplingResult,
     McpServerCapabilities, McpServerFailure, McpServerId,
     McpServerImplementation, McpServerState, McpServerStatus, McpSessionChange,
     McpSessionCompletionRequest, McpSessionPromptRequest,
@@ -129,8 +129,10 @@ pub use slash_command::{
     SlashCommandSource, SlashCommandStatus,
 };
 pub use tool::{
-    ToolCall, ToolDefinition, ToolResult, ToolResultDetails, TruncationDetails,
-    TruncationLimit,
+    McpResourcePageKind, ToolAnnotations, ToolCall, ToolDefinition,
+    ToolExposure, ToolMetadata, ToolOutputInfo, ToolOutputPolicy,
+    ToolOutputSaveFailure, ToolResult, ToolResultDetails, ToolSelection,
+    TruncationDetails, TruncationLimit,
 };
 pub use turn::{
     StopReason, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,

@@ -2,7 +2,7 @@ mod support;
 
 use std::time::Duration;
 
-use mcp::{LegacyClient, McpClient, McpError};
+use mcp::{InitializeClient, McpClient, McpError};
 use protocol::McpProtocolVersion;
 use rmcp::model::{
     ClientJsonRpcMessage, ClientRequest, Implementation, InitializeResult,
@@ -111,9 +111,10 @@ async fn legacy_lifecycle_is_exact_and_ordered() {
             .expect("second tools/list response");
     });
 
-    let client = LegacyClient::connect(support::server_id(), client_transport)
-        .await
-        .expect("legacy connection");
+    let client =
+        InitializeClient::connect(support::server_id(), client_transport)
+            .await
+            .expect("legacy connection");
     assert_eq!(client.protocol(), McpProtocolVersion::V2025_11_25);
     let catalog = client.discover().await.expect("legacy catalog");
     assert_eq!(catalog.tools.len(), 2);
@@ -161,9 +162,10 @@ async fn legacy_protocol_mismatch_does_not_fallback() {
         }
     });
 
-    let error = LegacyClient::connect(support::server_id(), client_transport)
-        .await
-        .expect_err("protocol mismatch");
+    let error =
+        InitializeClient::connect(support::server_id(), client_transport)
+            .await
+            .expect_err("protocol mismatch");
     assert!(matches!(
         error,
         McpError::ProtocolMismatch {

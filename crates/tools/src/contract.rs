@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -99,6 +99,13 @@ pub trait AgentTool: Send + Sync {
     /// Returns the model-facing name, description, and argument schema.
     fn definition(&self) -> ToolDefinition;
 
+    /// Borrows shared defaults so ordinary tools do not allocate metadata per query.
+    fn metadata(&self) -> &protocol::ToolMetadata {
+        static DEFAULT: std::sync::OnceLock<protocol::ToolMetadata> =
+            std::sync::OnceLock::new();
+        DEFAULT.get_or_init(|| protocol::ToolMetadata::builder().build())
+    }
+
     /// Returns optional text contributed to the dynamic System Prompt.
     fn prompt_contribution(&self) -> ToolPromptContribution {
         ToolPromptContribution::default()
@@ -155,17 +162,29 @@ impl ToolRegistry {
 
     /// Merges another registry while preserving duplicate-name validation.
     pub fn merge(&mut self, other: ToolRegistry) -> Result<(), ToolError> {
-        for tool in other.tools.into_values() {
-            self.register(tool)?;
+        // Both registries already validated these keys; avoid reconstructing complete definitions.
+        for (name, tool) in other.tools {
+            match self.tools.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(tool);
+                }
+                Entry::Occupied(entry) => {
+                    return Err(ToolError::Duplicate(entry.key().clone()));
+                }
+            }
         }
         Ok(())
     }
 
     /// Overlays another registry so the later semantic partition wins by name.
     pub fn overlay(&mut self, other: &ToolRegistry) {
-        for tool in other.tools.values() {
-            self.upsert(Arc::clone(tool));
-        }
+        // Reuse stored names while retaining the later partition's override precedence.
+        self.tools.extend(
+            other
+                .tools
+                .iter()
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool))),
+        );
     }
 
     /// Returns registered tool names in deterministic lexical order.
@@ -202,7 +221,10 @@ impl ToolRegistry {
             let tool = self
                 .tool(name)
                 .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
-            subset.register(tool)?;
+            // Selecting a registered Tool needs its key and Arc, not another schema copy.
+            if subset.tools.insert(name.to_string(), tool).is_some() {
+                return Err(ToolError::Duplicate(name.to_string()));
+            }
         }
         Ok(subset)
     }

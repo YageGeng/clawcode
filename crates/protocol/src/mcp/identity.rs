@@ -3,15 +3,21 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-/// Exact MCP protocol lifecycle selected by configuration.
+/// MCP revisions accepted by the Pi-compatible initialize lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum McpProtocolVersion {
     /// Legacy initialize lifecycle published on 2025-11-25.
     #[serde(rename = "2025-11-25")]
     V2025_11_25,
-    /// Modern server discovery lifecycle published on 2026-07-28.
-    #[serde(rename = "2026-07-28")]
-    V2026_07_28,
+    /// Initialize revision published on 2025-06-18.
+    #[serde(rename = "2025-06-18")]
+    V2025_06_18,
+    /// Initialize revision published on 2025-03-26.
+    #[serde(rename = "2025-03-26")]
+    V2025_03_26,
+    /// Initialize revision published on 2024-11-05.
+    #[serde(rename = "2024-11-05")]
+    V2024_11_05,
 }
 
 /// Reports an unsupported exact MCP protocol revision.
@@ -29,7 +35,9 @@ impl FromStr for McpProtocolVersion {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "2025-11-25" => Ok(Self::V2025_11_25),
-            "2026-07-28" => Ok(Self::V2026_07_28),
+            "2025-06-18" => Ok(Self::V2025_06_18),
+            "2025-03-26" => Ok(Self::V2025_03_26),
+            "2024-11-05" => Ok(Self::V2024_11_05),
             _ => Err(McpProtocolVersionError {
                 value: value.to_string(),
             }),
@@ -42,8 +50,85 @@ impl fmt::Display for McpProtocolVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::V2025_11_25 => formatter.write_str("2025-11-25"),
-            Self::V2026_07_28 => formatter.write_str("2026-07-28"),
+            Self::V2025_06_18 => formatter.write_str("2025-06-18"),
+            Self::V2025_03_26 => formatter.write_str("2025-03-26"),
+            Self::V2024_11_05 => formatter.write_str("2024-11-05"),
         }
+    }
+}
+
+impl McpProtocolVersion {
+    /// Returns the accepted revisions in preferred order without a second registry.
+    pub const fn supported() -> &'static [Self] {
+        &[
+            Self::V2025_11_25,
+            Self::V2025_06_18,
+            Self::V2025_03_26,
+            Self::V2024_11_05,
+        ]
+    }
+
+    /// Reports whether this revision supports form elicitation.
+    pub const fn supports_elicitation(self) -> bool {
+        matches!(self, Self::V2025_11_25 | Self::V2025_06_18)
+    }
+}
+
+/// Requested initialization preference; every supported server selection remains acceptable.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub enum McpProtocolPolicy {
+    #[default]
+    Auto,
+    Preferred(McpProtocolVersion),
+}
+
+impl McpProtocolPolicy {
+    /// Selects the initial request revision without prescribing a retry sequence.
+    pub const fn requested_version(self) -> McpProtocolVersion {
+        match self {
+            Self::Auto => McpProtocolVersion::V2025_11_25,
+            Self::Preferred(version) => version,
+        }
+    }
+}
+
+impl FromStr for McpProtocolPolicy {
+    type Err = McpProtocolVersionError;
+    /// Parses automatic negotiation or a supported request preference.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "auto" {
+            Ok(Self::Auto)
+        } else {
+            value.parse().map(Self::Preferred)
+        }
+    }
+}
+
+impl TryFrom<String> for McpProtocolPolicy {
+    type Error = McpProtocolVersionError;
+    /// Validates a serialized protocol preference at the boundary.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl fmt::Display for McpProtocolPolicy {
+    /// Formats the same scalar accepted by TOML configuration.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => formatter.write_str("auto"),
+            Self::Preferred(version) => version.fmt(formatter),
+        }
+    }
+}
+
+impl From<McpProtocolPolicy> for String {
+    /// Serializes a preference without confusing it with the negotiated version.
+    fn from(value: McpProtocolPolicy) -> Self {
+        value.to_string()
     }
 }
 
@@ -152,7 +237,43 @@ impl McpToolRef {
     /// Generates the stable model-facing Tool name without losing the routing reference.
     #[must_use]
     pub fn public_name(&self) -> String {
-        format!("mcp__{}__{}", self.server_id, self.remote_name)
+        use sha2::{Digest, Sha256};
+
+        let base = format!("mcp__{}__{}", self.server_id, self.remote_name);
+        if base.len() <= 64
+            && base.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+            })
+        {
+            return base;
+        }
+        // Length framing keeps distinct routing identities distinct before hashing.
+        let mut digest = Sha256::new();
+        digest.update(b"clawcode-mcp-tool-v1\0");
+        for part in [self.server_id.as_str(), self.remote_name.as_str()] {
+            digest.update((part.len() as u64).to_be_bytes());
+            digest.update(part.as_bytes());
+        }
+        let prefix: String = base
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '-')
+                {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .take(47)
+            .collect();
+        let hash = digest.finalize();
+        let suffix: String = hash
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("{prefix}_{suffix}")
     }
 }
 

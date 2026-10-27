@@ -2,12 +2,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::num::NonZeroU32;
 use std::time::Duration;
 
 use config::{McpConfigError, McpOAuthConfig, McpServerConfig};
 use http::{HeaderMap, HeaderName, HeaderValue};
-use protocol::{McpProtocolVersion, McpServerId, McpTransportKind};
+use protocol::{McpProtocolPolicy, McpServerId, McpTransportKind};
 use url::Url;
 
 /// Validated HTTP(S) URL used by MCP transports and OAuth endpoints.
@@ -220,15 +219,6 @@ pub enum McpTransport {
     StreamableHttp(Box<McpStreamableHttpTransport>),
 }
 
-/// Bounded policy for one Modern multi-round tool request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct McpMrtrPolicy {
-    /// Maximum nested model rounds.
-    pub max_rounds: NonZeroU32,
-    /// Total wall-clock budget across all nested rounds.
-    pub total_timeout: Duration,
-}
-
 /// Runtime-ready MCP Server definition owned by a Session factory.
 #[derive(Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
 pub struct RuntimeMcpServer {
@@ -236,19 +226,60 @@ pub struct RuntimeMcpServer {
     pub server_id: McpServerId,
     /// Whether the Server should connect for a Session.
     pub enabled: bool,
-    /// Exact MCP lifecycle used without probing or fallback.
-    pub protocol: McpProtocolVersion,
+    /// Requested initialize revision and accepted negotiation policy.
+    pub protocol_policy: McpProtocolPolicy,
+    /// Server-level host visibility policy.
+    #[builder(default)]
+    pub exposure: protocol::ToolExposure,
+    /// Exact remote-name policy overrides.
+    #[builder(default)]
+    pub tool_exposure: HashMap<String, protocol::ToolExposure>,
     /// Maximum transport initialization time.
     pub startup_timeout: Duration,
     /// Maximum time for one MCP request.
     pub request_timeout: Duration,
-    /// Bounded Modern MRTR policy.
-    pub mrtr: McpMrtrPolicy,
+    /// Absolute request deadline independent from progress.
+    pub request_total_timeout: Duration,
     /// Validated stdio or Streamable HTTP transport.
     pub transport: McpTransport,
 }
 
 impl RuntimeMcpServer {
+    /// Resolves exact remote-name overrides without trusting remote annotations.
+    pub fn tool_exposure(&self, remote_name: &str) -> protocol::ToolExposure {
+        self.tool_exposure
+            .get(remote_name)
+            .copied()
+            .unwrap_or(self.exposure)
+    }
+
+    /// Validates a complete catalog before publishing any part of it.
+    pub(crate) fn prepare_catalog(
+        &self,
+        mut catalog: protocol::McpCatalog,
+    ) -> Result<protocol::McpCatalog, crate::McpError> {
+        let mut identities = std::collections::HashSet::new();
+        let mut names = std::collections::HashSet::new();
+        for tool in &mut catalog.tools {
+            if tool.reference.server_id != self.server_id
+                || !identities.insert(tool.reference.clone())
+                || !names.insert(tool.reference.public_name())
+            {
+                return Err(crate::McpError::Service {
+                    server_id: self.server_id.clone(),
+                    message: "catalog has duplicate tool identities, public-name collisions, or a foreign route".to_string(),
+                });
+            }
+            // Normalize all clients at this boundary, including alternate connector implementations.
+            tool.public_name = tool.reference.public_name();
+            tool.metadata.exposure =
+                self.tool_exposure(&tool.reference.remote_name);
+            tool.metadata.output_policy = protocol::ToolOutputPolicy::Bounded;
+            tool.metadata.mcp_ref = Some(tool.reference.clone());
+        }
+        Ok(catalog)
+    }
+
     /// Returns the public transport category without exposing transport credentials.
     #[must_use]
     pub fn transport_kind(&self) -> McpTransportKind {
@@ -266,10 +297,10 @@ impl fmt::Debug for RuntimeMcpServer {
             .debug_struct("RuntimeMcpServer")
             .field("server_id", &self.server_id)
             .field("enabled", &self.enabled)
-            .field("protocol", &self.protocol)
+            .field("protocol_policy", &self.protocol_policy)
             .field("startup_timeout", &self.startup_timeout)
             .field("request_timeout", &self.request_timeout)
-            .field("mrtr", &self.mrtr)
+            .field("request_total_timeout", &self.request_total_timeout)
             .field("transport", &self.transport)
             .finish()
     }
@@ -289,25 +320,13 @@ impl TryFrom<McpServerConfig> for RuntimeMcpServer {
                     reason: error.to_string(),
                 }
             })?;
-        let protocol_value =
-            config
-                .protocol
-                .ok_or_else(|| McpConfigError::MissingProtocol {
-                    server: server_name.clone(),
-                })?;
-        let protocol = protocol_value.parse().map_err(|_error| {
+        let protocol_value = config.protocol.as_deref().unwrap_or("auto");
+        let protocol_policy = protocol_value.parse().map_err(|_error| {
             McpConfigError::UnsupportedProtocol {
                 server: server_name.clone(),
-                protocol: protocol_value,
+                protocol: protocol_value.to_string(),
             }
         })?;
-        let mrtr_max_rounds = NonZeroU32::new(config.mrtr_max_rounds).ok_or(
-            McpConfigError::InvalidLimit {
-                server: server_name.clone(),
-                field: "mrtr_max_rounds",
-                value: 0,
-            },
-        )?;
 
         let transport = match (config.command, config.url) {
             (Some(command), None) => {
@@ -374,15 +393,14 @@ impl TryFrom<McpServerConfig> for RuntimeMcpServer {
         Ok(Self::builder()
             .server_id(server_id)
             .enabled(config.enabled)
-            .protocol(protocol)
+            .protocol_policy(protocol_policy)
+            .exposure(config.exposure)
+            .tool_exposure(config.tool_exposure)
             .startup_timeout(Duration::from_secs(config.startup_timeout_sec))
             .request_timeout(Duration::from_secs(config.request_timeout_sec))
-            .mrtr(McpMrtrPolicy {
-                max_rounds: mrtr_max_rounds,
-                total_timeout: Duration::from_secs(
-                    config.mrtr_total_timeout_sec,
-                ),
-            })
+            .request_total_timeout(Duration::from_secs(
+                config.request_total_timeout_sec,
+            ))
             .transport(transport)
             .build())
     }

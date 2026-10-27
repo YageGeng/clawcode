@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use protocol::{
@@ -107,4 +108,103 @@ async fn registry_clones_preserve_immutable_turn_snapshots() {
         .expect("new execution");
     assert_eq!(old.blocks[0].text(), Some("old"));
     assert_eq!(new.blocks[0].text(), Some("new"));
+}
+
+/// Records expensive definition construction at the public Tool boundary.
+struct CountedTool {
+    name: &'static str,
+    definitions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AgentTool for CountedTool {
+    /// Materializes a schema to expose accidental definition work during composition.
+    fn definition(&self) -> ToolDefinition {
+        self.definitions.fetch_add(1, Ordering::Relaxed);
+        ToolDefinition {
+            name: self.name.to_string(),
+            description: "Count definition materialization".to_string(),
+            parameters: serde_json::json!({ "type": "object", "description": "x".repeat(4096) }),
+        }
+    }
+
+    /// Registry composition must never execute the Tool.
+    async fn execute(
+        &self,
+        _call: ToolCall,
+        _context: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        unreachable!("composition does not execute Tools")
+    }
+}
+
+/// Existing registry keys must survive overlay, subset, and merge without new schemas.
+#[test]
+fn registry_composition_reuses_registered_names() {
+    let definitions = Arc::new(AtomicUsize::new(0));
+    let mut source = ToolRegistry::default();
+    for name in ["first", "second"] {
+        source
+            .register(Arc::new(CountedTool {
+                name,
+                definitions: Arc::clone(&definitions),
+            }))
+            .expect("register Tool");
+    }
+    definitions.store(0, Ordering::Relaxed);
+    let mut available = ToolRegistry::default();
+    available.overlay(&source);
+    let selected = available.subset(["first", "second"]).expect("subset");
+    let mut merged = ToolRegistry::default();
+    merged.merge(selected).expect("merge");
+    assert_eq!(merged.names(), vec!["first", "second"]);
+    assert_eq!(
+        definitions.load(Ordering::Relaxed),
+        0,
+        "composition must reuse known keys"
+    );
+}
+
+/// Reusing keys preserves override order and never overwrites a rejected duplicate.
+#[tokio::test]
+async fn registry_composition_preserves_duplicate_and_override_semantics() {
+    let mut target = ToolRegistry::default();
+    target
+        .register(Arc::new(TaggedTool("old")))
+        .expect("old Tool");
+    let mut incoming = ToolRegistry::default();
+    incoming
+        .register(Arc::new(TaggedTool("new")))
+        .expect("new Tool");
+    assert!(
+        matches!(target.merge(incoming.clone()), Err(ToolError::Duplicate(name)) if name == "tagged")
+    );
+    let context = execution_context();
+    let call = tool_call("tagged", serde_json::json!({}));
+    assert_eq!(
+        target
+            .execute(call.clone(), &context)
+            .await
+            .expect("retained Tool")
+            .blocks[0]
+            .text(),
+        Some("old")
+    );
+    target.overlay(&incoming);
+    let selected = target.subset(["tagged"]).expect("selected Tool");
+    assert_eq!(
+        selected
+            .execute(call, &context)
+            .await
+            .expect("overridden Tool")
+            .blocks[0]
+            .text(),
+        Some("new")
+    );
+    assert!(
+        matches!(target.subset(["tagged", "tagged"]), Err(ToolError::Duplicate(name)) if name == "tagged")
+    );
+    assert!(
+        matches!(target.subset(["missing"]), Err(ToolError::NotFound(name)) if name == "missing")
+    );
 }

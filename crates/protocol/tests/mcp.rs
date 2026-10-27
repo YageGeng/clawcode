@@ -18,32 +18,29 @@ use protocol::{
     TurnId,
 };
 
-/// Exact MCP protocol versions remain explicit strings at every wire boundary.
+/// Pi-compatible revisions and configuration policies retain their scalar wire values.
 #[test]
 fn protocol_versions_use_exact_wire_values() {
-    let legacy = serde_json::to_value(McpProtocolVersion::V2025_11_25)
-        .expect("serialize legacy protocol");
-    let modern = serde_json::to_value(McpProtocolVersion::V2026_07_28)
-        .expect("serialize modern protocol");
-
-    assert_eq!(legacy, "2025-11-25");
-    assert_eq!(modern, "2026-07-28");
-    assert_eq!(McpProtocolVersion::V2025_11_25.to_string(), "2025-11-25");
-    assert_eq!(McpProtocolVersion::V2026_07_28.to_string(), "2026-07-28");
-    assert_eq!(
-        serde_json::from_value::<McpProtocolVersion>(legacy)
-            .expect("deserialize legacy protocol"),
-        McpProtocolVersion::V2025_11_25
-    );
-    assert_eq!(
-        serde_json::from_value::<McpProtocolVersion>(modern)
-            .expect("deserialize modern protocol"),
-        McpProtocolVersion::V2026_07_28
-    );
-    serde_json::from_value::<McpProtocolVersion>(serde_json::json!(
-        "2024-11-05"
-    ))
-    .expect_err("unknown MCP protocol must be rejected");
+    let expected = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+    assert_eq!(McpProtocolVersion::supported().len(), expected.len());
+    for (version, text) in McpProtocolVersion::supported().iter().zip(expected)
+    {
+        assert_eq!(version.to_string(), text);
+        assert_eq!(serde_json::to_value(version).expect("serialize"), text);
+        assert_eq!(
+            text.parse::<McpProtocolVersion>().expect("parse"),
+            *version
+        );
+    }
+    "2026-07-28"
+        .parse::<McpProtocolVersion>()
+        .expect_err("retired protocol");
+    "unknown"
+        .parse::<McpProtocolVersion>()
+        .expect_err("unknown protocol");
+    let auto = protocol::McpProtocolPolicy::default();
+    assert_eq!(auto.requested_version(), McpProtocolVersion::V2025_11_25);
+    assert_eq!(serde_json::to_value(auto).expect("serialize"), "auto");
 }
 
 /// Current timestamps are created by the public scalar type and remain millisecond values.
@@ -166,7 +163,8 @@ fn catalog_round_trips_structured_references() {
 fn session_snapshot_preserves_complete_status() {
     let status = McpServerStatus::builder()
         .server_id(McpServerId::try_from("remote").expect("server id"))
-        .protocol(McpProtocolVersion::V2026_07_28)
+        .configured_policy(protocol::McpProtocolPolicy::Auto)
+        .negotiated_protocol(Some(McpProtocolVersion::V2025_06_18))
         .transport(McpTransportKind::StreamableHttp)
         .state(McpServerState::Degraded)
         .implementation(Some(McpServerImplementation {
@@ -207,7 +205,8 @@ fn session_snapshot_preserves_complete_status() {
     };
 
     let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
-    assert_eq!(encoded["servers"][0]["protocol"], "2026-07-28");
+    assert_eq!(encoded["servers"][0]["configuredPolicy"], "auto");
+    assert_eq!(encoded["servers"][0]["negotiatedProtocol"], "2025-06-18");
     assert_eq!(encoded["servers"][0]["transport"], "streamableHttp");
     assert_eq!(encoded["servers"][0]["state"], "degraded");
     assert_eq!(
@@ -349,7 +348,7 @@ fn lifecycle_enums_have_complete_wire_values() {
     }
 }
 
-/// Host requests retain Turn, Trace, timestamp, and typed interaction payloads.
+/// Host requests retain connection routing or Turn correlation according to their scope.
 #[test]
 fn host_requests_round_trip_typed_context() {
     let context = McpRequestContext::builder()
@@ -380,7 +379,7 @@ fn host_requests_round_trip_typed_context() {
         },
     });
     let roots = McpHostRequest::Roots(McpRootsRequest {
-        context: context.clone(),
+        server_id: context.server_id.clone(),
     });
 
     let sampling_json =
@@ -405,11 +404,13 @@ fn host_requests_round_trip_typed_context() {
         .expect("deserialize elicitation request"),
         elicitation
     );
+    let roots_json =
+        serde_json::to_value(&roots).expect("serialize roots request");
+    assert_eq!(roots_json["request"]["serverId"], "host");
+    assert!(roots_json["request"].get("context").is_none());
     assert_eq!(
-        serde_json::from_value::<McpHostRequest>(
-            serde_json::to_value(&roots).expect("serialize roots request")
-        )
-        .expect("deserialize roots request"),
+        serde_json::from_value::<McpHostRequest>(roots_json)
+            .expect("deserialize roots request"),
         roots
     );
 }
@@ -456,4 +457,37 @@ fn host_responses_are_typed_by_interaction() {
             .to_string(),
     };
     assert!(!format!("{authorization:?}").contains("must-not-leak"));
+}
+/// Rewritten names use a stable, versioned digest while valid names retain compatibility.
+#[test]
+fn stable_tool_names_are_bounded_and_deterministic() {
+    let server_id = protocol::McpServerId::try_from("github").expect("id");
+    let reference = protocol::McpToolRef {
+        server_id: server_id.clone(),
+        remote_name: "list.issues".into(),
+    };
+    assert_eq!(
+        reference.public_name(),
+        "mcp__github__list_issues_8b50abf9f3d3f1b5"
+    );
+    for remote in ["列表.issues".to_string(), "x".repeat(100), "ok".into()] {
+        let reference = protocol::McpToolRef {
+            server_id: server_id.clone(),
+            remote_name: remote,
+        };
+        let name = reference.public_name();
+        assert!(name.len() <= 64);
+        assert!(
+            name.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'-'))
+        );
+        assert_eq!(name, reference.public_name());
+    }
+    for len in [51, 52] {
+        let reference = protocol::McpToolRef {
+            server_id: server_id.clone(),
+            remote_name: "x".repeat(len),
+        };
+        assert_eq!(reference.public_name().len(), 64);
+    }
 }

@@ -24,20 +24,30 @@ use crate::{
     RuntimeMcpServer,
 };
 
-/// Runtime resources and atomic read views owned by one Session Server.
+/// One coherent Server publication shared by status readers and Session aggregation.
+pub(crate) struct McpServerSnapshot {
+    pub(crate) status: Arc<McpServerStatus>,
+    pub(crate) catalog: Arc<McpCatalog>,
+}
+
+/// Runtime resources and one atomic read view owned by a Session Server.
+#[derive(typed_builder::TypedBuilder)]
+#[builder(builder_method(vis = ""), builder_type(vis = ""))]
 pub struct McpServerRuntime {
     config: RuntimeMcpServer,
     connector: Arc<dyn McpConnector>,
     session_id: protocol::SessionId,
     host: Arc<dyn McpHost>,
+    #[builder(default)]
     client: tokio::sync::RwLock<Option<Arc<dyn McpClient>>>,
-    catalog: ArcSwap<McpCatalog>,
-    status: ArcSwap<McpServerStatus>,
+    snapshot: ArcSwap<McpServerSnapshot>,
     state: tokio::sync::Mutex<McpServerStateMachine>,
     session_shutdown: CancellationToken,
     lifecycle: tokio::sync::RwLock<CancellationToken>,
     changes: broadcast::Sender<McpServerChange>,
+    #[builder(default)]
     watcher: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[builder(default)]
     lifecycle_operation: tokio::sync::Mutex<()>,
 }
 
@@ -70,7 +80,8 @@ impl McpServerRuntime {
         };
         let initial_status = McpServerStatus::builder()
             .server_id(config.server_id.clone())
-            .protocol(config.protocol)
+            .configured_policy(config.protocol_policy)
+            .exposure(config.exposure)
             .transport(config.transport_kind())
             .state(initial_state)
             .revisions(McpCatalogRevisions::default())
@@ -79,23 +90,24 @@ impl McpServerRuntime {
             .updated_at_ms(TimestampMs::now())
             .build();
         let (changes, _receiver) = broadcast::channel(64);
-        let runtime = Arc::new(Self {
-            config,
-            connector,
-            session_id,
-            host,
-            client: tokio::sync::RwLock::new(None),
-            catalog: ArcSwap::from_pointee(McpCatalog::default()),
-            status: ArcSwap::from_pointee(initial_status.clone()),
-            state: tokio::sync::Mutex::new(McpServerStateMachine::new(
-                initial_status,
-            )),
-            lifecycle: tokio::sync::RwLock::new(shutdown.child_token()),
-            session_shutdown: shutdown,
-            changes,
-            watcher: tokio::sync::Mutex::new(None),
-            lifecycle_operation: tokio::sync::Mutex::new(()),
-        });
+        let runtime = Arc::new(
+            Self::builder()
+                .config(config)
+                .connector(connector)
+                .session_id(session_id)
+                .host(host)
+                .snapshot(ArcSwap::from_pointee(McpServerSnapshot {
+                    status: Arc::new(initial_status.clone()),
+                    catalog: Arc::new(McpCatalog::default()),
+                }))
+                .state(tokio::sync::Mutex::new(McpServerStateMachine::new(
+                    initial_status,
+                )))
+                .lifecycle(tokio::sync::RwLock::new(shutdown.child_token()))
+                .session_shutdown(shutdown)
+                .changes(changes)
+                .build(),
+        );
         if !runtime.config.enabled {
             return runtime;
         }
@@ -114,7 +126,7 @@ impl McpServerRuntime {
             {
                 return;
             }
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, None);
             let _ = self.changes.send(McpServerChange::Status);
         }
         {
@@ -125,7 +137,7 @@ impl McpServerRuntime {
             {
                 return;
             }
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, None);
         }
         let client = match self
             .connector
@@ -152,10 +164,11 @@ impl McpServerRuntime {
                             .state(McpOAuthState::Failed)
                             .build(),
                     );
-                    self.status.store(Arc::new(state.status().clone()));
+                    self.publish_snapshot(&state, None);
                 }
                 let stage = match error {
-                    McpError::ProtocolMismatch { .. } => {
+                    McpError::ProtocolMismatch { .. }
+                    | McpError::Negotiation { .. } => {
                         McpFailureStage::Negotiation
                     }
                     McpError::OAuthNotInitialized
@@ -181,7 +194,7 @@ impl McpServerRuntime {
                 .authorization_url(Some(request.authorization_url))
                 .build(),
         );
-        self.status.store(Arc::new(state.status().clone()));
+        self.publish_snapshot(&state, None);
         let _ = self.changes.send(McpServerChange::Status);
     }
 
@@ -202,13 +215,13 @@ impl McpServerRuntime {
                 );
             }
             if state
-                .transition(McpServerState::Discovering, TimestampMs::now())
+                .negotiated(client.protocol(), TimestampMs::now())
                 .is_err()
             {
                 let _ = client.shutdown().await;
                 return;
             }
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, None);
         }
         let catalog = match self.discover(&client).await {
             Ok(catalog) => catalog,
@@ -232,9 +245,8 @@ impl McpServerRuntime {
                 let _ = client.shutdown().await;
                 return;
             }
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, Some(Arc::new(catalog)));
         }
-        self.catalog.store(Arc::new(catalog));
         let receiver = client.subscribe_changes();
         *self.client.write().await = Some(client);
         let _ = self.changes.send(McpServerChange::Catalog);
@@ -246,13 +258,33 @@ impl McpServerRuntime {
     /// Returns the latest immutable status snapshot.
     #[must_use]
     pub fn status(&self) -> Arc<McpServerStatus> {
-        self.status.load_full()
+        Arc::clone(&self.snapshot.load().status)
     }
 
     /// Returns the latest immutable complete Server catalog.
     #[must_use]
     pub fn catalog(&self) -> Arc<McpCatalog> {
-        self.catalog.load_full()
+        Arc::clone(&self.snapshot.load().catalog)
+    }
+
+    /// Loads status and catalog together so readers cannot combine different publications.
+    pub(crate) fn snapshot(&self) -> Arc<McpServerSnapshot> {
+        self.snapshot.load_full()
+    }
+
+    /// Publishes under the owning state lock, retaining the catalog on status-only changes.
+    fn publish_snapshot(
+        &self,
+        state: &McpServerStateMachine,
+        catalog: Option<Arc<McpCatalog>>,
+    ) {
+        // Keep both parts behind one atomic swap; status changes only clone the catalog Arc.
+        let catalog = catalog
+            .unwrap_or_else(|| Arc::clone(&self.snapshot.load().catalog));
+        self.snapshot.store(Arc::new(McpServerSnapshot {
+            status: Arc::new(state.status().clone()),
+            catalog,
+        }));
     }
 
     /// Subscribes the owning Session to status and catalog publications.
@@ -260,10 +292,14 @@ impl McpServerRuntime {
         self.changes.subscribe()
     }
 
-    /// Returns a client only while this Server is ready for new operations.
-    async fn ready_client(&self) -> Result<Arc<dyn McpClient>, McpError> {
+    /// Returns a client while its last successful catalog remains usable.
+    async fn available_client(&self) -> Result<Arc<dyn McpClient>, McpError> {
         let status = self.status();
-        if status.state != McpServerState::Ready {
+        // A directory refresh failure does not invalidate the connected client.
+        if !matches!(
+            status.state,
+            McpServerState::Ready | McpServerState::Degraded
+        ) {
             return Err(McpError::ServerUnavailable {
                 server_id: self.config.server_id.clone(),
                 state: status.state,
@@ -280,7 +316,7 @@ impl McpServerRuntime {
             })
     }
 
-    /// Invokes one Tool only while this Server remains ready for new work.
+    /// Invokes one Tool while this Server retains a usable connection and catalog.
     pub async fn call_tool(
         &self,
         request: McpToolRequest,
@@ -288,7 +324,16 @@ impl McpServerRuntime {
         cancellation: &CancellationToken,
         progress: Arc<dyn McpProgressSink>,
     ) -> Result<McpToolResult, McpError> {
-        let client = self.ready_client().await?;
+        // Enforce local policy at the routing boundary as well as at model discovery.
+        if self.config.tool_exposure(&request.reference.remote_name)
+            == protocol::ToolExposure::Hidden
+        {
+            return Err(McpError::Service {
+                server_id: self.config.server_id.clone(),
+                message: "tool access is hidden by host policy".into(),
+            });
+        }
+        let client = self.available_client().await?;
         let lifecycle = self.lifecycle.read().await.clone();
         client
             .call_tool(
@@ -298,8 +343,7 @@ impl McpServerRuntime {
                     .cancellation(cancellation.clone())
                     .lifecycle(lifecycle)
                     .idle_timeout(self.config.request_timeout)
-                    .total_timeout(self.config.mrtr.total_timeout)
-                    .max_rounds(self.config.mrtr.max_rounds)
+                    .total_timeout(self.config.request_total_timeout)
                     .progress(progress)
                     .build(),
             )
@@ -311,7 +355,7 @@ impl McpServerRuntime {
         &self,
         request: McpPromptRequest,
     ) -> Result<McpPromptResult, McpError> {
-        let client = self.ready_client().await?;
+        let client = self.available_client().await?;
         let lifecycle = self.lifecycle.read().await.clone();
         tokio::select! {
             _ = lifecycle.cancelled() => {
@@ -330,20 +374,37 @@ impl McpServerRuntime {
     pub async fn read_resource(
         &self,
         request: McpResourceRequest,
+        cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
-        let client = self.ready_client().await?;
-        let lifecycle = self.lifecycle.read().await.clone();
-        tokio::select! {
-            _ = lifecycle.cancelled() => {
-                Err(McpError::RequestCancelled(self.config.server_id.clone()))
-            }
-            result = tokio::time::timeout(
-                self.config.request_timeout,
-                client.read_resource(request),
-            ) => result.map_err(|_elapsed| {
-                McpError::RequestTimeout(self.config.server_id.clone())
-            })?,
+        if !self.allows_resources() {
+            return Err(McpError::Service {
+                server_id: self.config.server_id.clone(),
+                message: "resource access is hidden by host policy".into(),
+            });
         }
+        let client = self.available_client().await?;
+        let lifecycle = self.lifecycle.read().await.clone();
+        let operation = cancellation.child_token();
+        let read = client.read_resource(request, &operation);
+        tokio::pin!(read);
+        let failure = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => McpError::RequestCancelled(self.config.server_id.clone()),
+            () = lifecycle.cancelled() => McpError::RequestCancelled(self.config.server_id.clone()),
+            result = &mut read => return result,
+            () = tokio::time::sleep(self.config.request_timeout.min(self.config.request_total_timeout)) => McpError::RequestTimeout(self.config.server_id.clone()),
+        };
+        operation.cancel();
+        // Let the client deliver its cancellation notification before abandoning a broken transport.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut read)
+                .await;
+        Err(failure)
+    }
+
+    /// Resource access follows server policy even when individual hidden-server tools are opened.
+    pub(crate) fn allows_resources(&self) -> bool {
+        self.config.exposure != protocol::ToolExposure::Hidden
     }
 
     /// Completes one argument while enforcing lifecycle cancellation and request timeout.
@@ -351,7 +412,7 @@ impl McpServerRuntime {
         &self,
         request: McpCompletionRequest,
     ) -> Result<McpCompletionResult, McpError> {
-        let client = self.ready_client().await?;
+        let client = self.available_client().await?;
         let lifecycle = self.lifecycle.read().await.clone();
         tokio::select! {
             _ = lifecycle.cancelled() => {
@@ -415,7 +476,7 @@ impl McpServerRuntime {
                     .scopes(scopes)
                     .build(),
             );
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, None);
             let _ = self.changes.send(McpServerChange::Status);
         }
         let client = match self
@@ -436,7 +497,7 @@ impl McpServerRuntime {
                         .state(McpOAuthState::Failed)
                         .build(),
                 );
-                self.status.store(Arc::new(state.status().clone()));
+                self.publish_snapshot(&state, None);
                 drop(state);
                 self.fail(McpFailureStage::Authentication, error.to_string())
                     .await;
@@ -457,7 +518,7 @@ impl McpServerRuntime {
     /// Stops one active lifecycle and publishes an empty catalog before reconnect or teardown.
     async fn stop(&self) {
         if matches!(
-            self.status.load().state,
+            self.status().state,
             McpServerState::Disabled | McpServerState::Stopped
         ) {
             return;
@@ -468,10 +529,12 @@ impl McpServerRuntime {
                 .transition(McpServerState::Stopping, TimestampMs::now())
                 .is_ok()
             {
-                self.status.store(Arc::new(state.status().clone()));
+                self.publish_snapshot(
+                    &state,
+                    Some(Arc::new(McpCatalog::default())),
+                );
             }
         }
-        self.catalog.store(Arc::new(McpCatalog::default()));
         let _ = self.changes.send(McpServerChange::Catalog);
         self.lifecycle.read().await.cancel();
         self.connector
@@ -500,7 +563,7 @@ impl McpServerRuntime {
             .transition(McpServerState::Stopped, TimestampMs::now())
             .is_ok()
         {
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, None);
             let _ = self.changes.send(McpServerChange::Status);
         }
     }
@@ -509,7 +572,7 @@ impl McpServerRuntime {
     async fn fail(&self, stage: McpFailureStage, message: String) {
         let mut state = self.state.lock().await;
         if state.fail(stage, message, TimestampMs::now()).is_ok() {
-            self.status.store(Arc::new(state.status().clone()));
+            self.publish_snapshot(&state, None);
             let _ = self.changes.send(McpServerChange::Status);
         }
     }
@@ -562,15 +625,14 @@ impl McpServerRuntime {
                     );
                     return;
                 }
-                self.catalog.store(Arc::new(catalog));
-                self.status.store(Arc::new(state.status().clone()));
+                self.publish_snapshot(&state, Some(Arc::new(catalog)));
                 let _ = self.changes.send(McpServerChange::Catalog);
             }
             Err(error) => {
                 let mut state = self.state.lock().await;
                 if state.degrade(error.to_string(), TimestampMs::now()).is_ok()
                 {
-                    self.status.store(Arc::new(state.status().clone()));
+                    self.publish_snapshot(&state, None);
                     let _ = self.changes.send(McpServerChange::Status);
                 }
             }
@@ -583,7 +645,7 @@ impl McpServerRuntime {
         client: &Arc<dyn McpClient>,
     ) -> Result<McpCatalog, McpError> {
         let lifecycle = self.lifecycle.read().await.clone();
-        tokio::select! {
+        let catalog = tokio::select! {
             _ = lifecycle.cancelled() => {
                 Err(McpError::RequestCancelled(self.config.server_id.clone()))
             }
@@ -593,6 +655,7 @@ impl McpServerRuntime {
             ) => result.map_err(|_elapsed| {
                 McpError::RequestTimeout(self.config.server_id.clone())
             })?,
-        }
+        }?;
+        self.config.prepare_catalog(catalog)
     }
 }

@@ -2148,6 +2148,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "config",
  "futures",
  "http",
@@ -2155,6 +2156,7 @@ dependencies = [
  "protocol",
  "reqwest",
  "rmcp",
+ "serde",
  "serde_json",
  "store",
  "tempfile",
@@ -2687,6 +2689,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "typed-builder",
 ]

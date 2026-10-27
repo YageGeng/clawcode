@@ -35,6 +35,7 @@ fn assistant_mcp_content_uses_native_and_extension_blocks() {
                             mime_type: "audio/wav".to_string(),
                         },
                         ContentBlock::ResourceLink {
+                            server_id: None,
                             uri: "file:///workspace/report.pdf".to_string(),
                             name: "report".to_string(),
                             title: Some("Report".to_string()),
@@ -128,11 +129,20 @@ fn tool_mcp_content_uses_native_blocks_and_raw_output() {
                     },
                 ])
                 .is_error(false)
+                .output(Some(
+                    protocol::ToolOutputInfo::builder()
+                        .original_text_bytes(30_000)
+                        .visible_text_bytes(20_000)
+                        .omitted_media(1)
+                        .full_output_path(Some("/tmp/output.json".into()))
+                        .build(),
+                ))
                 .build(),
         },
     };
 
-    let updates = AcpEventMapper::map(event).expect("map MCP tool content");
+    let updates =
+        AcpEventMapper::map(event.clone()).expect("map MCP tool content");
     let value = serde_json::to_value(&updates[0]).expect("serialize update");
 
     assert_eq!(value["sessionUpdate"], "tool_call_update");
@@ -144,4 +154,41 @@ fn tool_mcp_content_uses_native_blocks_and_raw_output() {
         ProductIdentity::ACP_STRUCTURED_CONTENT_BLOCK
     );
     assert_eq!(value["rawOutput"]["blocks"][1]["value"]["ok"], true);
+    assert_eq!(value["rawOutput"]["output"]["visibleTextBytes"], 20_000);
+    let AgentEventPayload::ToolExecutionEnd { result, .. } = event.payload
+    else {
+        unreachable!("tool result")
+    };
+    let replay = AgentEvent {
+        metadata: event.metadata,
+        payload: AgentEventPayload::MessageEnd {
+            message: AgentMessage {
+                identity: MessageIdentity {
+                    message_id: MessageId::try_from("replay-output")
+                        .expect("id"),
+                    turn_id: TurnId::try_from("turn-mcp-tool").expect("id"),
+                },
+                timing: MessageTiming::try_from((
+                    TimestampMs::from(1),
+                    TimestampMs::from(1),
+                    TimestampMs::from(1),
+                ))
+                .expect("timing"),
+                content: MessageContent::ToolResult {
+                    tool_call_id: result.tool_call_id,
+                    blocks: result.blocks,
+                    is_error: result.is_error,
+                    details: result.details,
+                    output: result.output,
+                },
+            },
+        },
+    };
+    let replay = AcpEventMapper::map(replay).expect("replay");
+    let replay =
+        serde_json::to_value(replay.first().expect("update")).expect("wire");
+    assert_eq!(
+        replay["rawOutput"]["content"]["output"],
+        value["rawOutput"]["output"]
+    );
 }

@@ -4,22 +4,20 @@ mod catalog;
 mod content;
 mod core;
 mod handler;
+mod initialize;
 mod invocation;
-mod legacy;
-mod modern;
-mod mrtr;
-mod task;
+mod negotiation;
+mod request;
 
 use async_trait::async_trait;
 use protocol::{
     McpCatalog, McpCompletionRequest, McpCompletionResult, McpPromptRequest,
     McpPromptResult, McpProtocolVersion, McpRequestContext, McpResourceRequest,
     McpResourceResult, McpServerCapabilities, McpServerId,
-    McpServerImplementation, McpTaskStatus, McpToolRequest, McpToolResult,
+    McpServerImplementation, McpToolRequest, McpToolResult,
 };
 
-pub use legacy::LegacyClient;
-pub use modern::ModernClient;
+pub use initialize::InitializeClient;
 
 use crate::McpClientEvent;
 use crate::McpError;
@@ -39,9 +37,6 @@ pub struct McpProgress {
 pub trait McpProgressSink: Send + Sync {
     /// Publishes one latest progress notification.
     fn publish(&self, progress: McpProgress);
-
-    /// Publishes one normalized Modern Task lifecycle snapshot.
-    fn publish_task(&self, _status: McpTaskStatus) {}
 }
 
 /// Complete cancellation and deadline policy for one remote Tool request.
@@ -57,8 +52,6 @@ pub struct McpRequestControl {
     pub idle_timeout: std::time::Duration,
     /// Absolute deadline that progress cannot extend.
     pub total_timeout: std::time::Duration,
-    /// Maximum number of Modern multi-round request attempts.
-    pub max_rounds: std::num::NonZeroU32,
     /// Destination for normalized progress.
     pub progress: std::sync::Arc<dyn McpProgressSink>,
 }
@@ -105,6 +98,7 @@ pub trait McpClient: Send + Sync {
     async fn read_resource(
         &self,
         request: McpResourceRequest,
+        cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError>;
 
     /// Completes one Prompt or Resource Template argument.

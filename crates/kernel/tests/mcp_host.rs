@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -10,9 +9,8 @@ use extension::StaticExtensionFactory;
 use futures::{Stream, stream};
 use kernel::{EventSink, KernelFactory, Model, ModelError, ModelFactory};
 use mcp::{
-    McpClient, McpConnector, McpError, McpHost, McpMrtrPolicy,
-    McpRequestControl, McpStdioTransport, McpTransport, RuntimeMcpServer,
-    SessionMcpFactory,
+    McpClient, McpConnector, McpError, McpHost, McpRequestControl,
+    McpStdioTransport, McpTransport, RuntimeMcpServer, SessionMcpFactory,
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
@@ -354,6 +352,7 @@ impl McpClient for SamplingClient {
     async fn read_resource(
         &self,
         _request: McpResourceRequest,
+        _cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
         unreachable!("Resource reading is not exercised")
     }
@@ -383,13 +382,22 @@ impl EventSink for DiscardSink {
     }
 }
 
-/// Kernel Sampling uses the current model and forwards request-local generation limits.
+/// Sampling keeps the visible answer while excluding reasoning from the MCP wire content.
 #[tokio::test]
 async fn mcp_sampling_runs_through_current_session_model() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_000)));
     let model = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
+            vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("discover-sampling")
+                        .expect("id"),
+                    name: "tool_search".into(),
+                    arguments: serde_json::json!({"query":"sample"}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ],
             vec![
                 ModelStreamEvent::ToolCall(ToolCall {
                     tool_call_id: ToolCallId::try_from("mcp-call")
@@ -400,7 +408,11 @@ async fn mcp_sampling_runs_through_current_session_model() {
                 ScriptedModel::finished(StopReason::ToolUse),
             ],
             vec![
-                ModelStreamEvent::TextDelta("nested sample".to_string()),
+                ModelStreamEvent::ReasoningDelta(
+                    "private reasoning".to_string(),
+                ),
+                ModelStreamEvent::TextDelta("nested ".to_string()),
+                ModelStreamEvent::TextDelta("sample".to_string()),
                 ScriptedModel::finished(StopReason::EndTurn),
             ],
             vec![
@@ -413,13 +425,11 @@ async fn mcp_sampling_runs_through_current_session_model() {
     let server = RuntimeMcpServer::builder()
         .server_id(McpServerId::try_from("sampling").expect("Server id"))
         .enabled(true)
-        .protocol(McpProtocolVersion::V2025_11_25)
+        .exposure(protocol::ToolExposure::Deferred)
+        .protocol_policy(protocol::McpProtocolPolicy::Auto)
         .startup_timeout(Duration::from_secs(1))
         .request_timeout(Duration::from_secs(1))
-        .mrtr(McpMrtrPolicy {
-            max_rounds: NonZeroU32::new(2).expect("non-zero rounds"),
-            total_timeout: Duration::from_secs(2),
-        })
+        .request_total_timeout(Duration::from_secs(2))
         .transport(McpTransport::Stdio(Box::new(McpStdioTransport {
             command: "unused".to_string(),
             args: Vec::new(),
@@ -460,10 +470,16 @@ async fn mcp_sampling_runs_through_current_session_model() {
         .await
         .expect("create Session");
 
+    let before = kernel.mcp_status(&session_id).expect("before");
+    assert!(before.catalog.tools.iter().all(|tool| !tool.loaded));
+    let mut changes = kernel
+        .subscribe_mcp(&session_id)
+        .expect("subscribe")
+        .expect("MCP enabled");
     let result = kernel
         .run_traced(
             RunRequest {
-                session_id,
+                session_id: session_id.clone(),
                 input: "use sampling".into(),
             },
             Arc::new(DiscardSink),
@@ -479,12 +495,24 @@ async fn mcp_sampling_runs_through_current_session_model() {
                 if blocks.iter().any(|block| block.text() == Some("nested sample"))
         )
     }));
+    assert!(result.messages.iter().all(|message| {
+        !matches!(
+            &message.content,
+            MessageContent::ToolResult { blocks, .. }
+                if blocks.iter().any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+        )
+    }), "Sampling must not return reasoning blocks rejected by the MCP encoder");
+    let after = kernel.mcp_status(&session_id).expect("after");
+    assert!(after.catalog.tools.iter().all(|tool| tool.loaded));
+    assert!(after.revision > before.revision);
+    let change = changes.try_recv().expect("selection notification");
+    assert_eq!(change.change, protocol::McpSessionChange::Selection);
     let requests = model.requests.lock().expect("request lock");
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[1].options.max_tokens, Some(64));
-    assert_eq!(requests[1].options.temperature, Some(0.25));
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[2].options.max_tokens, Some(64));
+    assert_eq!(requests[2].options.temperature, Some(0.25));
     assert!(matches!(
-        requests[1].messages.first().map(|message| &message.content),
+        requests[2].messages.first().map(|message| &message.content),
         Some(MessageContent::System { .. })
     ));
 }
@@ -515,13 +543,10 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
     let server = RuntimeMcpServer::builder()
         .server_id(McpServerId::try_from("sampling").expect("Server id"))
         .enabled(true)
-        .protocol(McpProtocolVersion::V2025_11_25)
+        .protocol_policy(protocol::McpProtocolPolicy::Auto)
         .startup_timeout(Duration::from_secs(1))
         .request_timeout(Duration::from_secs(1))
-        .mrtr(McpMrtrPolicy {
-            max_rounds: NonZeroU32::new(2).expect("non-zero rounds"),
-            total_timeout: Duration::from_secs(2),
-        })
+        .request_total_timeout(Duration::from_secs(2))
         .transport(McpTransport::Stdio(Box::new(McpStdioTransport {
             command: "unused".to_string(),
             args: Vec::new(),

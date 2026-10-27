@@ -1,7 +1,6 @@
 use protocol::{
-    McpCapabilityCounts, McpCatalogRevisions, McpOAuthStatus,
-    McpProtocolVersion, McpServerId, McpServerState, McpServerStatus,
-    McpTransportKind, TimestampMs,
+    McpCapabilityCounts, McpCatalogRevisions, McpOAuthStatus, McpServerId,
+    McpServerState, McpServerStatus, McpTransportKind, TimestampMs,
 };
 
 use mcp::McpServerStateMachine;
@@ -11,7 +10,7 @@ use mcp::McpServerStateMachine;
 fn server_state_machine_rejects_illegal_transition() {
     let status = McpServerStatus::builder()
         .server_id(McpServerId::try_from("state-machine").expect("Server id"))
-        .protocol(McpProtocolVersion::V2025_11_25)
+        .configured_policy(protocol::McpProtocolPolicy::Auto)
         .transport(McpTransportKind::Stdio)
         .state(McpServerState::Starting)
         .revisions(McpCatalogRevisions::default())

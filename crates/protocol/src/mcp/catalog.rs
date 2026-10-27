@@ -74,6 +74,22 @@ pub struct McpToolInfo {
     pub description: Option<String>,
     /// JSON Schema accepted by the remote Tool.
     pub input_schema: serde_json::Value,
+    /// Optional server display title, separate from the stable public name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub title: Option<String>,
+    /// Effective host policy and untrusted server hints.
+    #[serde(default)]
+    #[builder(default)]
+    pub metadata: crate::ToolMetadata,
+    /// Whether the current host selection declares this tool to the model.
+    #[serde(default)]
+    #[builder(default)]
+    pub loaded: bool,
+    /// Explicit user or extension disablement, separate from exposure policy.
+    #[serde(default)]
+    #[builder(default)]
+    pub disabled: bool,
 }
 
 /// Public description of one remotely discovered MCP Prompt.

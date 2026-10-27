@@ -21,7 +21,6 @@ impl Drop for SessionIdReservation {
 struct RestoredSessionSettings {
     model: Arc<dyn Model>,
     thinking_level: ThinkingLevel,
-    active_tools: Vec<String>,
 }
 
 impl RestoredSessionSettings {
@@ -30,16 +29,10 @@ impl RestoredSessionSettings {
         store: &dyn SessionStore,
         lane: &LaneId,
         models: &ModelCatalog,
-        tools: &ToolRegistry,
     ) -> Result<Self, KernelError> {
         let mut settings = Self {
             model: models.active(),
             thinking_level: ThinkingLevel::Off,
-            active_tools: tools
-                .names()
-                .into_iter()
-                .map(ToOwned::to_owned)
-                .collect(),
         };
         let Some(leaf) = store.lane(lane) else {
             return Ok(settings);
@@ -89,19 +82,8 @@ impl RestoredSessionSettings {
                             })?,
                     )?;
                 }
-                EntryKind::ActiveToolsChange => {
-                    settings.active_tools = serde_json::from_value(
-                        entry.payload.get("activeTools").cloned().ok_or_else(
-                            || {
-                                KernelError::Protocol(format!(
-                                    "active-tools change {} has no activeTools",
-                                    entry.id
-                                ))
-                            },
-                        )?,
-                    )?;
-                }
-                EntryKind::Message
+                EntryKind::ActiveToolsChange
+                | EntryKind::Message
                 | EntryKind::Compaction
                 | EntryKind::BranchSummary
                 | EntryKind::Custom => {}
@@ -852,16 +834,12 @@ impl Kernel {
         };
         let cleanup_mcp = mcp.as_ref().map(Arc::clone);
         let result: Result<Arc<Session>, KernelError> = async {
-            let mut tools = builtins.clone();
-            tools.overlay(&extension_tools);
-            tools.overlay(&mcp_tools);
             let lane = LaneId::try_from("main")
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
             let settings = RestoredSessionSettings::load(
                 store.as_ref(),
                 &lane,
                 &self.models,
-                &tools,
             )?;
             let history = Self::history_from_store(store.as_ref(), &lane)?;
             // Resume starts above both shared Store mutations and the extra
@@ -888,8 +866,19 @@ impl Kernel {
                 builtins,
                 extension_tools,
                 mcp_tools,
-                settings.active_tools,
+                protocol::ToolSelection::default(),
             )?);
+            // Restore from the full branch rather than compaction's model-context window.
+            let entries = store
+                .lane(&lane)
+                .map(|leaf| store.branch(leaf))
+                .transpose()?
+                .unwrap_or_default();
+            tools.update(|next| {
+                next.selection =
+                    tools::ToolSelectionUpdate::restore(&entries, next)?;
+                Ok(())
+            })?;
             let execution = Arc::new(
                 SessionExecution::builder()
                     .lifecycle(RwLock::new(SessionLifecycle::Starting))
@@ -938,6 +927,10 @@ impl Kernel {
                     .execution(execution)
                     .build(),
             );
+            runtime.tools.register(Arc::new(tools::ToolSearchTool::new(
+                Arc::downgrade(&runtime),
+                Arc::clone(&self.id_generator),
+            )))?;
             if let Some(host) = mcp_host
                 && let Err(error) = host.attach(&runtime)
             {

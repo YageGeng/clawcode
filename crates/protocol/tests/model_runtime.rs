@@ -6,6 +6,7 @@ use protocol::{
     TimestampMs, ToolCallId, TurnId,
 };
 
+/// Model modality declarations reject malformed values at the serialization boundary.
 #[test]
 fn model_input_modalities_reject_invalid_deserialization() {
     let error =
@@ -180,6 +181,7 @@ fn text_only_model_request_replaces_unsupported_images() {
                 identity: sample_identity("tool-image", "turn-image"),
                 timing: sample_timing("201", "201", "201"),
                 content: MessageContent::ToolResult {
+                    output: None,
                     tool_call_id: ToolCallId::try_from("tool-call")
                         .expect("tool call id"),
                     blocks: vec![ContentBlock::Image {

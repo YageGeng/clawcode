@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mcp::{
     McpAuthentication, McpClient, McpError, McpHost, McpHttpHeaders,
-    McpHttpUrl, McpMrtrPolicy, McpProgress, McpProgressSink, McpRequestControl,
+    McpHttpUrl, McpProgress, McpProgressSink, McpRequestControl,
     McpStdioTransport, McpStreamableHttpTransport, McpTransport,
     RuntimeMcpServer,
 };
@@ -52,13 +51,13 @@ pub struct InteropConfig;
 )]
 impl InteropConfig {
     /// Builds the Legacy stdio configuration for a child test process.
-    pub fn legacy(
+    pub fn stdio(
         command: String,
         args: Vec<String>,
         env: std::collections::HashMap<String, String>,
     ) -> RuntimeMcpServer {
         Self::runtime(
-            "legacy-reference",
+            "stdio-reference",
             McpProtocolVersion::V2025_11_25,
             McpTransport::Stdio(Box::new(McpStdioTransport {
                 command,
@@ -69,10 +68,10 @@ impl InteropConfig {
     }
 
     /// Builds the Modern Streamable HTTP configuration for a live listener.
-    pub fn modern(url: String) -> RuntimeMcpServer {
+    pub fn http(url: String) -> RuntimeMcpServer {
         Self::runtime(
-            "modern-reference",
-            McpProtocolVersion::V2026_07_28,
+            "http-reference",
+            McpProtocolVersion::V2025_11_25,
             McpTransport::StreamableHttp(Box::new(
                 McpStreamableHttpTransport {
                     url: McpHttpUrl::try_from(url).expect("valid HTTP URL"),
@@ -92,13 +91,10 @@ impl InteropConfig {
         RuntimeMcpServer::builder()
             .server_id(McpServerId::try_from(server_id).expect("Server id"))
             .enabled(true)
-            .protocol(protocol)
+            .protocol_policy(protocol::McpProtocolPolicy::Preferred(protocol))
             .startup_timeout(Duration::from_secs(10))
             .request_timeout(Duration::from_secs(10))
-            .mrtr(McpMrtrPolicy {
-                max_rounds: NonZeroU32::new(4).expect("non-zero rounds"),
-                total_timeout: Duration::from_secs(30),
-            })
+            .request_total_timeout(Duration::from_secs(30))
             .transport(transport)
             .build()
     }
@@ -113,9 +109,9 @@ pub async fn verify_client(
     assert_eq!(client.protocol(), protocol);
     assert_eq!(client.server_id(), server_id);
     let catalog = client.discover().await?;
-    assert_eq!(catalog.tools.len(), 1);
+    assert_eq!(catalog.tools.len(), 3);
     assert_eq!(catalog.prompts.len(), 1);
-    assert_eq!(catalog.resources.len(), 1);
+    assert_eq!(catalog.resources.len(), 61);
     assert_eq!(catalog.resource_templates.len(), 1);
 
     let tool = catalog
@@ -155,7 +151,6 @@ pub async fn verify_client(
                 .lifecycle(CancellationToken::new())
                 .idle_timeout(Duration::from_secs(10))
                 .total_timeout(Duration::from_secs(30))
-                .max_rounds(NonZeroU32::new(4).expect("non-zero rounds"))
                 .progress(Arc::new(DiscardProgress) as Arc<dyn McpProgressSink>)
                 .build(),
         )
@@ -184,14 +179,17 @@ pub async fn verify_client(
     assert_eq!(prompt_result.messages.len(), 1);
 
     let resource_result = client
-        .read_resource(McpResourceRequest {
-            reference: catalog
-                .resources
-                .first()
-                .expect("reference Resource")
-                .reference
-                .clone(),
-        })
+        .read_resource(
+            McpResourceRequest {
+                reference: catalog
+                    .resources
+                    .first()
+                    .expect("reference Resource")
+                    .reference
+                    .clone(),
+            },
+            &tokio_util::sync::CancellationToken::new(),
+        )
         .await?;
     assert_eq!(resource_result.contents.len(), 1);
 

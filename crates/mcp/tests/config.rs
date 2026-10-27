@@ -26,11 +26,13 @@ fn converts_stdio_server_config() {
                 && config.args == vec!["server.js"]
                 && config.env.get("TOKEN") == Some(&"value".to_string())
     ));
-    assert_eq!(runtime.protocol, McpProtocolVersion::V2025_11_25);
+    assert_eq!(
+        runtime.protocol_policy,
+        protocol::McpProtocolPolicy::Preferred(McpProtocolVersion::V2025_11_25)
+    );
     assert_eq!(runtime.startup_timeout, Duration::from_secs(30));
     assert_eq!(runtime.request_timeout, Duration::from_secs(120));
-    assert_eq!(runtime.mrtr.max_rounds.get(), 8);
-    assert_eq!(runtime.mrtr.total_timeout, Duration::from_secs(300));
+    assert_eq!(runtime.request_total_timeout, Duration::from_secs(300));
 }
 
 /// Streamable HTTP TOML fields preserve URL and custom headers.
@@ -38,7 +40,7 @@ fn converts_stdio_server_config() {
 fn converts_streamable_http_server_config() {
     let config = McpServerConfig::builder()
         .name("remote".to_string())
-        .protocol("2026-07-28".to_string())
+        .protocol("auto".to_string())
         .url("https://example.com/mcp".to_string())
         .http_headers(HashMap::from([(
             "X-Tenant".to_string(),
@@ -57,7 +59,7 @@ fn converts_streamable_http_server_config() {
                     == Some("one")
                 && config.authentication == McpAuthentication::None
     ));
-    assert_eq!(runtime.protocol, McpProtocolVersion::V2026_07_28);
+    assert_eq!(runtime.protocol_policy, protocol::McpProtocolPolicy::Auto);
 }
 
 /// Runtime conversion rejects malformed URLs and HTTP headers before connecting.
@@ -65,14 +67,14 @@ fn converts_streamable_http_server_config() {
 fn rejects_invalid_http_endpoint_and_headers() {
     let invalid_url = McpServerConfig::builder()
         .name("invalid-url".to_string())
-        .protocol("2026-07-28".to_string())
+        .protocol("auto".to_string())
         .url("not a URL".to_string())
         .build();
     RuntimeMcpServer::try_from(invalid_url).expect_err("invalid URL");
 
     let invalid_header = McpServerConfig::builder()
         .name("invalid-header".to_string())
-        .protocol("2026-07-28".to_string())
+        .protocol("auto".to_string())
         .url("https://example.com/mcp".to_string())
         .http_headers(HashMap::from([(
             "bad header".to_string(),

@@ -1,4 +1,3 @@
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -7,8 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mcp::{
     McpClient, McpClientEvent, McpConnector, McpError, McpFactory, McpHost,
-    McpMrtrPolicy, McpServerRuntime, McpSessionRequest, McpStdioTransport,
-    McpTransport, RuntimeMcpServer, SessionMcpFactory,
+    McpServerRuntime, McpSessionRequest, McpStdioTransport, McpTransport,
+    RuntimeMcpServer, SessionMcpFactory,
 };
 use protocol::{
     McpCatalog, McpCompletionRequest, McpCompletionResult, McpHostRequest,
@@ -154,13 +153,19 @@ impl McpClient for DynamicClient {
         Some(self.events.subscribe())
     }
 
-    /// Tool invocation is outside catalog synchronization coverage.
+    /// Keeps the remote Tool healthy even when catalog discovery is failing.
     async fn call_tool(
         &self,
         _request: McpToolRequest,
         _control: mcp::McpRequestControl,
     ) -> Result<McpToolResult, McpError> {
-        unreachable!("Tool invocation is not exercised")
+        Ok(McpToolResult {
+            content: vec![protocol::ContentBlock::Text {
+                text: "available".to_string(),
+            }],
+            structured_content: None,
+            is_error: false,
+        })
     }
 
     /// Prompt retrieval is outside catalog synchronization coverage.
@@ -175,6 +180,7 @@ impl McpClient for DynamicClient {
     async fn read_resource(
         &self,
         _request: McpResourceRequest,
+        _cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
         unreachable!("Resource reading is not exercised")
     }
@@ -211,13 +217,10 @@ fn runtime_server() -> RuntimeMcpServer {
     RuntimeMcpServer::builder()
         .server_id(McpServerId::try_from("dynamic").expect("Server id"))
         .enabled(true)
-        .protocol(McpProtocolVersion::V2025_11_25)
+        .protocol_policy(protocol::McpProtocolPolicy::Auto)
         .startup_timeout(Duration::from_secs(1))
         .request_timeout(Duration::from_secs(1))
-        .mrtr(McpMrtrPolicy {
-            max_rounds: NonZeroU32::new(2).expect("non-zero rounds"),
-            total_timeout: Duration::from_secs(2),
-        })
+        .request_total_timeout(Duration::from_secs(2))
         .transport(McpTransport::Stdio(Box::new(McpStdioTransport {
             command: "unused".to_string(),
             args: Vec::new(),
@@ -236,6 +239,7 @@ fn session_request() -> McpSessionRequest {
         .build()
 }
 
+/// Catalog failures retain the last complete revision while successful refreshes advance it.
 #[tokio::test]
 async fn publishes_atomic_catalog_revisions_and_keeps_last_good_on_failure() {
     let server_id = McpServerId::try_from("dynamic").expect("Server id");
@@ -270,6 +274,7 @@ async fn publishes_atomic_catalog_revisions_and_keeps_last_good_on_failure() {
     assert_eq!(degraded.catalog.tools[0].reference.remote_name, "new");
 }
 
+/// Reconnect withdraws only its owning server before publishing the new negotiated catalog.
 #[tokio::test]
 async fn explicit_reconnect_withdraws_then_republishes_the_exact_server() {
     let server_id = McpServerId::try_from("dynamic").expect("Server id");
@@ -366,4 +371,393 @@ async fn shutdown_serializes_with_reconnect() {
         .expect("reconnect must finish before shutdown");
     shutdown.await.expect("shutdown task");
     assert_eq!(server.status().state, McpServerState::Stopped);
+}
+
+/// Ignores progress from the deterministic healthy remote Tool.
+struct NoProgress;
+
+impl mcp::McpProgressSink for NoProgress {
+    /// Final results are sufficient for this callability regression.
+    fn publish(&self, _progress: mcp::McpProgress) {}
+}
+
+/// Catalog degradation retains usable Tools, while shutdown still rejects new calls.
+#[tokio::test]
+async fn degraded_catalog_keeps_existing_tools_callable() {
+    let server_id = McpServerId::try_from("dynamic").expect("Server id");
+    let client = Arc::new(DynamicClient::new(server_id.clone()));
+    let server = McpServerRuntime::bootstrap(
+        runtime_server(),
+        Arc::new(DynamicConnector {
+            client: Arc::clone(&client),
+        }),
+        SessionId::try_from("degraded-session").expect("Session id"),
+        Arc::new(RejectingHost),
+        CancellationToken::new(),
+    )
+    .await;
+    let context = protocol::McpRequestContext::builder()
+        .server_id(server_id.clone())
+        .session_id(
+            SessionId::try_from("degraded-session").expect("Session id"),
+        )
+        .turn_id(protocol::TurnId::try_from("turn").expect("Turn id"))
+        .trace_id(protocol::TraceId::try_from("trace").expect("Trace id"))
+        .requested_at_ms(protocol::TimestampMs::now())
+        .build();
+    let request = McpToolRequest {
+        reference: tool(&server_id, "old").reference,
+        arguments: Default::default(),
+    };
+    let cancellation = CancellationToken::new();
+    server
+        .call_tool(
+            request.clone(),
+            context.clone(),
+            &cancellation,
+            Arc::new(NoProgress),
+        )
+        .await
+        .expect("initial Tool call");
+    client.fail_discovery.store(true, Ordering::SeqCst);
+    client.notify_tools_changed();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while server.status().state != McpServerState::Degraded {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Server becomes degraded");
+    assert_eq!(server.catalog().tools.len(), 1);
+    let result = server
+        .call_tool(
+            request.clone(),
+            context.clone(),
+            &cancellation,
+            Arc::new(NoProgress),
+        )
+        .await;
+    server.shutdown().await;
+    assert!(matches!(
+        server
+            .call_tool(request, context, &cancellation, Arc::new(NoProgress))
+            .await,
+        Err(McpError::ServerUnavailable {
+            state: McpServerState::Stopped,
+            ..
+        })
+    ));
+    let result =
+        result.expect("catalog failure must not disable the healthy client");
+    assert_eq!(
+        result.content,
+        vec![protocol::ContentBlock::Text {
+            text: "available".to_string()
+        }]
+    );
+}
+
+/// Resolves independently changing Servers without sharing their identities.
+struct MultiConnector(Vec<Arc<DynamicClient>>);
+
+/// Namespace separators can collide across valid server ids; no ambiguous aggregate is published.
+#[tokio::test]
+async fn cross_server_name_collision_rejects_ambiguous_catalogs() {
+    let mut clients = Vec::new();
+    let mut configs = Vec::new();
+    for (name, remote) in [("a", "_x"), ("a_", "x")] {
+        let server_id = McpServerId::try_from(name).expect("id");
+        let client = Arc::new(DynamicClient::new(server_id.clone()));
+        client.replace_tool(remote);
+        let mut config = runtime_server();
+        config.server_id = server_id;
+        configs.push(config);
+        clients.push(client);
+    }
+    let factory =
+        SessionMcpFactory::new(configs, Arc::new(MultiConnector(clients)));
+    let session =
+        Arc::new(factory.create(session_request()).await.expect("session"));
+    assert!(
+        session.snapshot().catalog.tools.is_empty(),
+        "ambiguous public names must not enter the aggregate catalog"
+    );
+    assert!(
+        session
+            .snapshot()
+            .servers
+            .iter()
+            .all(|server| server.state == McpServerState::Failed)
+    );
+    session.tool_registry().expect("unambiguous registry");
+    session
+        .read_resource(
+            McpResourceRequest {
+                reference: protocol::McpResourceRef {
+                    server_id: McpServerId::try_from("a").expect("id"),
+                    remote_uri: "opaque://resource".into(),
+                },
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("failed aggregate must not start a resource read");
+    session.shutdown().await.expect("shutdown");
+}
+
+/// A conflicting refresh preserves its previous catalog and recovers after the peer frees the name.
+#[tokio::test]
+async fn cross_server_refresh_preserves_last_good_catalog() {
+    let first =
+        Arc::new(DynamicClient::new(McpServerId::try_from("a").expect("id")));
+    let second =
+        Arc::new(DynamicClient::new(McpServerId::try_from("a_").expect("id")));
+    first.replace_tool("safe");
+    second.replace_tool("x");
+    let configs = [&first, &second]
+        .into_iter()
+        .map(|client| {
+            let mut config = runtime_server();
+            config.server_id = client.server_id.clone();
+            config
+        })
+        .collect();
+    let factory = SessionMcpFactory::new(
+        configs,
+        Arc::new(MultiConnector(vec![
+            Arc::clone(&first),
+            Arc::clone(&second),
+        ])),
+    );
+    let session =
+        Arc::new(factory.create(session_request()).await.expect("session"));
+    let original = session.snapshot().catalog.clone();
+    first.replace_tool("_x");
+    first.notify_tools_changed();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !session
+            .snapshot()
+            .servers
+            .iter()
+            .any(|status| status.state == McpServerState::Degraded)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("reject conflict");
+    assert_eq!(session.snapshot().catalog, original);
+    session
+        .tool_registry()
+        .expect("previous catalog remains usable");
+    second.replace_tool("new-safe");
+    second.notify_tools_changed();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let view = session.snapshot();
+            if view
+                .servers
+                .iter()
+                .all(|status| status.state == McpServerState::Ready)
+                && view
+                    .catalog
+                    .tools
+                    .iter()
+                    .any(|tool| tool.reference.remote_name == "_x")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recover conflict");
+    session.shutdown().await.expect("shutdown");
+}
+
+#[async_trait]
+impl McpConnector for MultiConnector {
+    /// Selects the configured remote test Server while retaining the real lifecycle runtime.
+    async fn connect(
+        &self,
+        server: &RuntimeMcpServer,
+        _session_id: &SessionId,
+        _host: Arc<dyn McpHost>,
+    ) -> Result<Arc<dyn McpClient>, McpError> {
+        let client = self
+            .0
+            .iter()
+            .find(|client| client.server_id == server.server_id)
+            .expect("configured Server");
+        Ok(Arc::clone(client) as Arc<dyn McpClient>)
+    }
+}
+
+/// Concurrent changes publish coherent catalog counts as well as monotonic revisions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_catalog_publication_preserves_revision_order() {
+    let mut clients = Vec::new();
+    let mut configs = Vec::new();
+    for index in 0..6 {
+        let server_id = McpServerId::try_from(format!("server-{index}"))
+            .expect("Server id");
+        let client = Arc::new(DynamicClient::new(server_id.clone()));
+        // A non-trivial catalog exposes interleavings between aggregation and publication.
+        let tools = (0..64)
+            .map(|index| {
+                let mut info = tool(&server_id, &format!("tool-{index}"));
+                info.description = Some("description ".repeat(350));
+                info
+            })
+            .collect();
+        *client.catalog.write().expect("catalog lock") =
+            McpCatalog::builder().tools(tools).build();
+        let mut config = runtime_server();
+        config.server_id = server_id;
+        configs.push(config);
+        clients.push(client);
+    }
+    let factory = SessionMcpFactory::new(
+        configs,
+        Arc::new(MultiConnector(clients.iter().map(Arc::clone).collect())),
+    );
+    let session =
+        Arc::new(factory.create(session_request()).await.expect("Session"));
+    let mut events = session.subscribe();
+    let observed_session = Arc::clone(&session);
+    let observer = tokio::spawn(async move {
+        let mut last_event = 1;
+        let mut last_snapshot = 1;
+        let mut regression = None;
+        let mut inconsistent = None;
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => Some(event),
+                Err(broadcast::error::RecvError::Lagged(_)) => None,
+                Err(broadcast::error::RecvError::Closed) => {
+                    panic!("missing shutdown event")
+                }
+            };
+            let snapshot = observed_session.snapshot();
+            if snapshot.revision < last_snapshot {
+                regression.get_or_insert((last_snapshot, snapshot.revision));
+            }
+            last_snapshot = snapshot.revision;
+            for server in &snapshot.servers {
+                let tools = snapshot
+                    .catalog
+                    .tools
+                    .iter()
+                    .filter(|tool| tool.reference.server_id == server.server_id)
+                    .count();
+                if server.counts.tools != tools {
+                    inconsistent.get_or_insert((
+                        snapshot.revision,
+                        server.counts.tools,
+                        tools,
+                    ));
+                }
+            }
+            if let Some(event) = event {
+                if event.revision <= last_event {
+                    regression.get_or_insert((last_event, event.revision));
+                }
+                last_event = event.revision;
+                if event.change == mcp::McpSessionChange::Shutdown {
+                    break;
+                }
+            }
+        }
+        (regression, inconsistent, last_event)
+    });
+    let writers = clients.into_iter().map(|client| {
+        tokio::spawn(async move {
+            let full_catalog =
+                client.catalog.read().expect("catalog lock").clone();
+            for index in 0..60 {
+                // Change actual contents so a status/catalog split cannot hide behind equal counts.
+                *client.catalog.write().expect("catalog lock") =
+                    if index % 2 == 0 {
+                        full_catalog.clone()
+                    } else {
+                        McpCatalog::builder()
+                            .tools(vec![tool(&client.server_id, "small")])
+                            .build()
+                    };
+                client.notify_tools_changed();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+    });
+    for writer in futures::future::join_all(writers).await {
+        writer.expect("notification producer");
+    }
+    session.shutdown().await.expect("Session shutdown");
+    let (regression, inconsistent, last_event) =
+        tokio::time::timeout(Duration::from_secs(5), observer)
+            .await
+            .expect("publication observer must stop")
+            .expect("observer task");
+    assert!(regression.is_none(), "revision regressed: {regression:?}");
+    assert!(
+        inconsistent.is_none(),
+        "snapshot mixed catalog and status: {inconsistent:?}"
+    );
+    assert!(last_event > 2, "must observe updates before shutdown");
+    assert_eq!(session.snapshot().revision, last_event);
+}
+/// Collisions reject the whole refresh and preserve the last usable catalog.
+#[tokio::test]
+async fn conflicting_catalog_preserves_previous_revision() {
+    let server_id = McpServerId::try_from("dynamic").expect("id");
+    let client = Arc::new(DynamicClient::new(server_id.clone()));
+    let mut config = runtime_server();
+    config.exposure = protocol::ToolExposure::Deferred;
+    config
+        .tool_exposure
+        .insert("old".into(), protocol::ToolExposure::Direct);
+    let server = McpServerRuntime::bootstrap(
+        config,
+        Arc::new(DynamicConnector {
+            client: Arc::clone(&client),
+        }),
+        SessionId::try_from("collision").expect("session"),
+        Arc::new(RejectingHost),
+        CancellationToken::new(),
+    )
+    .await;
+    let original = server.catalog();
+    assert_eq!(
+        original.tools[0].metadata.exposure,
+        protocol::ToolExposure::Direct
+    );
+    let generated = tool(&server_id, "a.b");
+    let literal = tool(
+        &server_id,
+        generated
+            .public_name
+            .strip_prefix("mcp__dynamic__")
+            .expect("prefix"),
+    );
+    assert_eq!(generated.public_name, literal.public_name);
+    for tools in [
+        vec![generated.clone(), generated.clone()],
+        vec![generated, literal],
+    ] {
+        *client.catalog.write().expect("lock") =
+            McpCatalog::builder().tools(tools).build();
+        client.notify_tools_changed();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if server.status().state == McpServerState::Degraded {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rejected refresh");
+        assert_eq!(server.catalog().as_ref(), original.as_ref());
+    }
+    server.shutdown().await;
 }

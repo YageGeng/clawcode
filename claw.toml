@@ -80,21 +80,20 @@ reasoning_effort = "high"
 
 [[mcp_servers]]
 enabled = false
-name = "legacy-reference"
-protocol = "2025-11-25"
+name = "stdio-reference"
+protocol = "auto"
 command = "cargo"
-args = ["run", "--quiet", "-p", "mcp", "--example", "legacy_stdio"]
+args = ["run", "--quiet", "-p", "mcp", "--example", "reference_stdio", "--", "2024-11-05"]
+exposure = "deferred"
 startup_timeout_sec = 30
 request_timeout_sec = 120
-mrtr_max_rounds = 8
-mrtr_total_timeout_sec = 300
+request_total_timeout_sec = 300
 
 [[mcp_servers]]
 enabled = false
-name = "modern-reference"
-protocol = "2026-07-28"
+name = "http-reference"
+protocol = "auto"
 url = "http://127.0.0.1:39128/mcp"
 startup_timeout_sec = 30
 request_timeout_sec = 120
-mrtr_max_rounds = 8
-mrtr_total_timeout_sec = 300
+request_total_timeout_sec = 300

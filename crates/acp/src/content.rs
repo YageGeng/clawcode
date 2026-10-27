@@ -69,6 +69,7 @@ impl AcpContentMapper {
                 description,
                 mime_type,
                 size,
+                ..
             } => Some(wire::ContentBlock::ResourceLink(
                 wire::ResourceLink::new(name, uri)
                     .title(title.clone())

@@ -4,7 +4,6 @@
 )]
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -17,15 +16,15 @@ use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use mcp::{
     McpAuthentication, McpConnector, McpError, McpHost, McpHttpHeaders,
-    McpHttpUrl, McpMrtrPolicy, McpOAuthSettings, McpStreamableHttpTransport,
-    McpTransport, RmcpConnector, RuntimeMcpServer,
+    McpHttpUrl, McpOAuthSettings, McpStreamableHttpTransport, McpTransport,
+    RmcpConnector, RuntimeMcpServer,
 };
 use protocol::{
     McpAuthorizationRequest, McpAuthorizationResult, McpHostRequest,
-    McpHostResponse, McpProtocolVersion, McpServerId, SessionId,
+    McpHostResponse, McpServerId, SessionId,
 };
 use rmcp::model::{
-    ClientJsonRpcMessage, ClientRequest, DiscoverResult, Implementation,
+    ClientJsonRpcMessage, ClientRequest, Implementation, InitializeResult,
     ProtocolVersion, ServerJsonRpcMessage, ServerResult,
 };
 use store::FileSecretStore;
@@ -147,7 +146,7 @@ async fn token(
     }))
 }
 
-/// Challenges unauthenticated discovery and serves exact Modern MCP responses after OAuth.
+/// Challenges unauthenticated initialization and serves negotiated MCP responses after OAuth.
 async fn mcp_endpoint(
     State(state): State<OAuthServerState>,
     headers: HeaderMap,
@@ -173,13 +172,13 @@ async fn mcp_endpoint(
         return StatusCode::ACCEPTED.into_response();
     };
     let result = match request.request {
-        ClientRequest::DiscoverRequest(_) => ServerResult::DiscoverResult(
-            DiscoverResult::new(
-                vec![ProtocolVersion::V_2026_07_28],
+        ClientRequest::InitializeRequest(_) => ServerResult::InitializeResult(
+            InitializeResult::new(
                 rmcp::model::ServerCapabilities::builder()
                     .enable_tools()
                     .build(),
             )
+            .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .with_server_info(Implementation::new("oauth-server", "1.0.0")),
         ),
         ClientRequest::ListToolsRequest(_) => {
@@ -204,18 +203,15 @@ async fn mcp_challenge(State(state): State<OAuthServerState>) -> Response {
     response
 }
 
-/// Builds one exact Modern OAuth Server config for the reference endpoint.
+/// Builds one OAuth Server config for the reference endpoint.
 fn runtime_server(base_url: &str) -> RuntimeMcpServer {
     RuntimeMcpServer::builder()
         .server_id(McpServerId::try_from("oauth-server").expect("Server id"))
         .enabled(true)
-        .protocol(McpProtocolVersion::V2026_07_28)
+        .protocol_policy(protocol::McpProtocolPolicy::Auto)
         .startup_timeout(Duration::from_secs(3))
         .request_timeout(Duration::from_secs(1))
-        .mrtr(McpMrtrPolicy {
-            max_rounds: NonZeroU32::new(2).expect("non-zero rounds"),
-            total_timeout: Duration::from_secs(2),
-        })
+        .request_total_timeout(Duration::from_secs(2))
         .transport(McpTransport::StreamableHttp(Box::new(
             McpStreamableHttpTransport {
                 url: McpHttpUrl::try_from(format!("{base_url}/mcp"))

@@ -517,6 +517,7 @@ async fn tool_result_image_is_preserved_in_provider_request() {
             timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
                 .expect("message timing"),
             content: MessageContent::ToolResult {
+                output: None,
                 tool_call_id: protocol::ToolCallId::try_from("tool-image")
                     .expect("tool id"),
                 blocks: vec![ContentBlock::Image {
@@ -576,6 +577,7 @@ async fn mcp_tool_result_content_has_stable_provider_projection() {
             timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
                 .expect("message timing"),
             content: MessageContent::ToolResult {
+                output: None,
                 tool_call_id: protocol::ToolCallId::try_from("tool-mcp")
                     .expect("tool id"),
                 blocks: vec![
@@ -599,6 +601,7 @@ async fn mcp_tool_result_content_has_stable_provider_projection() {
                         },
                     },
                     ContentBlock::ResourceLink {
+                        server_id: None,
                         uri: "file:///workspace/report.pdf".to_string(),
                         name: "report".to_string(),
                         title: Some("Report".to_string()),
@@ -762,4 +765,110 @@ async fn provider_stream_lifecycle_is_logged_without_message_content() {
         assert!(line.contains("fixture/fixture-model"));
     }
     assert!(!output.contains("hello"));
+}
+
+/// A successful remote operation may validly return no content and still need a follow-up model turn.
+#[tokio::test]
+async fn empty_mcp_result_reaches_provider() {
+    for is_error in [false, true] {
+        let llm =
+            Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
+        let model = ProviderModel::new(
+            sample_profile(),
+            Arc::clone(&llm) as Arc<dyn Llm>,
+            config::ProviderRetryConfig::default(),
+        );
+        let mut request = sample_request();
+        let mut result = protocol::ToolResult::builder()
+            .tool_call_id(protocol::ToolCallId::try_from("empty").expect("id"))
+            .blocks(Vec::new())
+            .is_error(is_error)
+            .build();
+        let directory = tempfile::tempdir().expect("dir");
+        tools::ToolResultProjection::new(
+            &mut result,
+            protocol::ToolOutputPolicy::Bounded,
+            &CancellationToken::new(),
+            directory.path(),
+        )
+        .apply()
+        .expect("project");
+        let mut message = request.messages[0].clone();
+        message.identity.message_id =
+            MessageId::try_from("empty-result").expect("id");
+        message.content = MessageContent::ToolResult {
+            tool_call_id: result.tool_call_id,
+            blocks: result.blocks,
+            is_error,
+            details: None,
+            output: result.output,
+        };
+        request.messages.push(message);
+        let stream = model.stream(request, CancellationToken::new()).await;
+        let _stream =
+            stream.expect("empty MCP content must not abort the next turn");
+        let value =
+            serde_json::to_value(llm.last_request().expect("provider request"))
+                .expect("JSON");
+        assert_eq!(
+            value["chat_history"][1]["content"][0]["content"][0]["text"],
+            if is_error {
+                "Tool failed without returning content."
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+/// Counts the actual provider wire text after the production result projector.
+#[test]
+fn bounded_output_includes_provider_separators() {
+    let directory = tempfile::tempdir().expect("dir");
+    for (text, count) in [("x", 20_480), ("", 35_000)] {
+        let mut result = protocol::ToolResult::builder()
+            .tool_call_id(protocol::ToolCallId::try_from("blocks").expect("id"))
+            .blocks(
+                (0..count)
+                    .map(|_| ContentBlock::Text { text: text.into() })
+                    .collect(),
+            )
+            .is_error(false)
+            .build();
+        tools::ToolResultProjection::new(
+            &mut result,
+            protocol::ToolOutputPolicy::Bounded,
+            &CancellationToken::new(),
+            directory.path(),
+        )
+        .apply()
+        .expect("projection");
+        let content =
+            provider::OneOrMany::many(result.blocks.into_iter().map(|block| {
+                let ContentBlock::Text { text } = block else {
+                    panic!("text")
+                };
+                provider::message::ToolResultContent::text(text)
+            }))
+            .expect("content");
+        let wire = provider::providers::openai::completion::Message::try_from(
+            provider::message::ToolResult {
+                id: "blocks".into(),
+                call_id: None,
+                content,
+            },
+        )
+        .expect("wire");
+        let json = serde_json::to_value(wire).expect("json");
+        let bytes = json["content"].as_str().expect("text").len();
+        assert!(bytes <= 20480);
+        assert_eq!(
+            result
+                .output
+                .as_ref()
+                .expect("budget diagnostics")
+                .visible_text_bytes,
+            bytes
+        );
+    }
 }

@@ -44,6 +44,7 @@ fn mcp_content_round_trips_through_session_store() {
         timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
             .expect("message timing"),
         content: MessageContent::ToolResult {
+            output: None,
             tool_call_id: ToolCallId::try_from("call-mcp-content")
                 .expect("tool call id"),
             blocks: vec![
@@ -59,6 +60,7 @@ fn mcp_content_round_trips_through_session_store() {
                     },
                 },
                 ContentBlock::ResourceLink {
+                    server_id: None,
                     uri: "file:///workspace/report.pdf".to_string(),
                     name: "report".to_string(),
                     title: Some("Report".to_string()),

@@ -140,6 +140,7 @@ impl AcpEventMapper {
                         blocks,
                         is_error,
                         details,
+                        ..
                     } => {
                         let content = Self::tool_result_content(
                             blocks,

@@ -13,8 +13,6 @@ pub enum McpClientEvent {
     ResourcesChanged,
     /// One subscribed Resource changed at its original URI.
     ResourceUpdated(String),
-    /// A Modern subscription stream ended and requires explicit reconnect or revalidation.
-    SubscriptionEnded,
 }
 
 /// Kind of one Server-local publication consumed by its owning Session.

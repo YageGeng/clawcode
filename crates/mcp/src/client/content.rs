@@ -43,6 +43,7 @@ impl IntoProtocolContent for wire::ContentBlock {
                 content.resource.into_protocol(server_id)
             }
             Self::ResourceLink(resource) => Ok(ContentBlock::ResourceLink {
+                server_id: None,
                 uri: resource.uri,
                 name: resource.name,
                 title: resource.title,

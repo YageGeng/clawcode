@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use protocol::{
     AgentMessage, EntryId, ExtensionEntryData, LaneId, SessionId,
@@ -21,6 +21,8 @@ pub(super) struct SessionTranscript {
 struct SessionTranscriptState {
     store: Box<dyn SessionStore>,
     history: Vec<AgentMessage>,
+    // Failed setting durability requires reopening before another mutation may proceed.
+    write_failed: bool,
 }
 
 /// Owned Store topology used to plan tree navigation without retaining a lock.
@@ -52,6 +54,55 @@ pub(super) struct TranscriptNavigationResult {
 }
 
 impl SessionTranscript {
+    /// Stops mutations after uncertain setting durability while leaving reads and shutdown flushing available.
+    fn writable(
+        &self,
+    ) -> Result<MutexGuard<'_, SessionTranscriptState>, KernelError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        if state.write_failed {
+            return Err(KernelError::SessionPersistenceUncertain);
+        }
+        Ok(state)
+    }
+
+    /// Reads a complete target branch, treating an empty root as default Session settings.
+    pub(super) fn branch_at(
+        &self,
+        leaf: Option<&EntryId>,
+    ) -> Result<Vec<SessionEntry>, KernelError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        Ok(leaf
+            .map(|leaf| state.store.branch(leaf))
+            .transpose()?
+            .unwrap_or_default())
+    }
+    /// Keeps a setting append and its durability checkpoint under the same transcript lock.
+    pub(super) fn commit_setting(
+        &self,
+        entry: NewEntry,
+    ) -> Result<(), KernelError> {
+        let mut state = self.writable()?;
+        let outcome = state
+            .store
+            .append_entry(&self.lane, entry)
+            .and_then(|_entry| state.store.sync());
+        if let Err(error) = outcome {
+            state.write_failed = true;
+            tracing::error!(
+                "failed durable setting for session {}; writes are disabled until reopen: {}",
+                state.store.session_id(),
+                error
+            );
+            return Err(error.into());
+        }
+        Ok(())
+    }
     /// Creates a transcript from one opened Store and its reconstructed context.
     pub(super) fn new(
         store: Box<dyn SessionStore>,
@@ -60,7 +111,11 @@ impl SessionTranscript {
     ) -> Self {
         Self {
             lane,
-            state: Mutex::new(SessionTranscriptState { store, history }),
+            state: Mutex::new(SessionTranscriptState {
+                store,
+                history,
+                write_failed: false,
+            }),
         }
     }
 
@@ -179,10 +234,7 @@ impl SessionTranscript {
         entry_id: EntryId,
         message: &AgentMessage,
     ) -> Result<(), KernelError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut state = self.writable()?;
         state.store.append_entry(
             &self.lane,
             NewEntry {
@@ -200,12 +252,7 @@ impl SessionTranscript {
         &self,
         entry: NewEntry,
     ) -> Result<SessionEntry, KernelError> {
-        Ok(self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .store
-            .append_entry(&self.lane, entry)?)
+        Ok(self.writable()?.store.append_entry(&self.lane, entry)?)
     }
 
     /// Appends one durable operation record without changing history.
@@ -213,12 +260,7 @@ impl SessionTranscript {
         &self,
         record: NewRecord,
     ) -> Result<SessionRecord, KernelError> {
-        Ok(self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .store
-            .append_record(record)?)
+        Ok(self.writable()?.store.append_record(record)?)
     }
 
     /// Appends a compaction boundary and replaces context under one lock.
@@ -227,10 +269,7 @@ impl SessionTranscript {
         entry: NewEntry,
         context: Vec<AgentMessage>,
     ) -> Result<(), KernelError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut state = self.writable()?;
         state.store.append_entry(&self.lane, entry)?;
         state.history = context;
         Ok(())
@@ -258,11 +297,7 @@ impl SessionTranscript {
         &self,
         name: Option<String>,
     ) -> Result<(), KernelError> {
-        self.state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .store
-            .set_name(name)?;
+        self.writable()?.store.set_name(name)?;
         Ok(())
     }
 
@@ -271,10 +306,7 @@ impl SessionTranscript {
         &self,
         name: String,
     ) -> Result<Option<String>, KernelError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut state = self.writable()?;
         if state.store.name().is_some() {
             return Ok(None);
         }
@@ -288,11 +320,7 @@ impl SessionTranscript {
         entry_id: EntryId,
         label: Option<String>,
     ) -> Result<(), KernelError> {
-        self.state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .store
-            .set_label(entry_id, label)?;
+        self.writable()?.store.set_label(entry_id, label)?;
         Ok(())
     }
 
@@ -303,9 +331,7 @@ impl SessionTranscript {
         entry: ExtensionEntryData,
     ) -> Result<SessionEntry, KernelError> {
         Ok(self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
+            .writable()?
             .store
             .append_extension_entry(&self.lane, entry_id, entry)?)
     }
@@ -342,10 +368,7 @@ impl SessionTranscript {
     pub(super) fn clear_navigation(
         &self,
     ) -> Result<Option<EntryId>, KernelError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut state = self.writable()?;
         let old_leaf_id = state.store.lane(&self.lane).cloned();
         state.store.move_lane(&self.lane, None)?;
         let old_history = std::mem::take(&mut state.history);
@@ -391,10 +414,7 @@ impl SessionTranscript {
         &self,
         commit: TranscriptNavigationCommit,
     ) -> Result<TranscriptNavigationResult, KernelError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut state = self.writable()?;
         let old_leaf_id = state.store.lane(&self.lane).cloned();
         let TranscriptNavigationCommit {
             new_leaf_id,
@@ -932,5 +952,91 @@ mod tests {
             Some(second_entry_id)
         );
         assert_eq!(transcript.history().expect("history"), vec![first, second]);
+    }
+
+    /// Failed durability leaves the published selection unchanged and reports the Store error.
+    #[test]
+    fn failed_selection_sync_does_not_publish() {
+        use ::tools::ToolFactory;
+        let root = tempfile::tempdir().expect("directory");
+        let factory = store::JsonlStoreFactory::new(
+            root.path(),
+            std::sync::Arc::new(store::SystemClock),
+        );
+        let store = store::StoreFactory::create(
+            &factory,
+            store::SessionCreateOptions {
+                session_id: protocol::SessionId::try_from("selection-sync")
+                    .expect("id"),
+                cwd: root.path().into(),
+                parent_session_id: None,
+            },
+        )
+        .expect("store");
+        let transcript = super::SessionTranscript::new(
+            Box::new(FailingSyncStore {
+                inner: store,
+                fail_sync: true,
+                arm_after_summary: false,
+            }),
+            protocol::LaneId::try_from("main").expect("lane"),
+            Vec::new(),
+        );
+        let tools = crate::runtime::tools::SessionToolState::new(
+            ::tools::BuiltinToolFactory::new().create().expect("tools"),
+            ::tools::ToolRegistry::default(),
+            ::tools::ToolRegistry::default(),
+            protocol::ToolSelection::default(),
+        )
+        .expect("state");
+        let observed = tools.snapshot().expect("snapshot");
+        let error = crate::runtime::tools::ToolSelectionUpdate::new(
+            &tools,
+            &transcript,
+            &crate::NanoidIdGenerator,
+        )
+        .replace(&observed, Vec::new())
+        .expect_err("sync failure");
+        assert!(matches!(error, crate::KernelError::Store(_)));
+        assert_eq!(
+            tools.snapshot().expect("snapshot").selection,
+            observed.selection
+        );
+        crate::runtime::tools::ToolSelectionUpdate::new(
+            &tools,
+            &transcript,
+            &crate::NanoidIdGenerator,
+        )
+        .replace(&observed, Vec::new())
+        .expect_err(
+            "a failed durable setting requires reopening before further writes",
+        );
+        transcript
+            .append_store_only_entry(store::NewEntry {
+                id: protocol::EntryId::try_from("must-not-append").expect("id"),
+                kind: store::EntryKind::Custom,
+                payload: serde_json::json!({}),
+            })
+            .expect_err("ordinary writes must also stop");
+        transcript
+            .tree_snapshot()
+            .expect("read-only recovery inspection remains available");
+        transcript
+            .sync()
+            .expect("shutdown may retry flushing without reopening writes");
+        transcript
+            .set_name(Some("blocked".into()))
+            .expect_err("flushing does not clear uncertain state");
+        let path = transcript.path().expect("path");
+        drop(transcript);
+        let reopened = super::SessionTranscript::new(
+            store::StoreFactory::open(&factory, &path)
+                .expect("reopen durable log"),
+            protocol::LaneId::try_from("main").expect("lane"),
+            Vec::new(),
+        );
+        reopened
+            .set_name(Some("recovered".into()))
+            .expect("a newly opened runtime can write again");
     }
 }

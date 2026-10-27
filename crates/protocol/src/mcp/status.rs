@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    McpCapabilityCounts, McpCatalog, McpOAuthStatus, McpProtocolVersion,
-    McpServerId, McpTransportKind, SessionId, TimestampMs,
+    McpCapabilityCounts, McpCatalog, McpOAuthStatus, McpProtocolPolicy,
+    McpProtocolVersion, McpServerId, McpTransportKind, SessionId, TimestampMs,
 };
 
 /// Kind of immutable Session MCP view change published outside the transcript.
@@ -15,6 +15,8 @@ pub enum McpSessionChange {
     ServerStatus,
     /// One or more capability catalogs changed atomically.
     Catalog,
+    /// Host selection changed without modifying the remote catalog.
+    Selection,
     /// Explicit Session shutdown removed active catalogs and stopped Servers.
     Shutdown,
 }
@@ -141,8 +143,16 @@ pub struct McpServerFailure {
 pub struct McpServerStatus {
     /// Stable configuration and routing identity.
     pub server_id: McpServerId,
-    /// Exact configured protocol version.
-    pub protocol: McpProtocolVersion,
+    /// Initialization preference configured for this Server.
+    pub configured_policy: McpProtocolPolicy,
+    /// Server-level exposure also controls access to its resources.
+    #[serde(default)]
+    #[builder(default)]
+    pub exposure: crate::ToolExposure,
+    /// Actual server selection, present only after successful negotiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub negotiated_protocol: Option<McpProtocolVersion>,
     /// Configured transport kind.
     pub transport: McpTransportKind,
     /// Current lifecycle state.

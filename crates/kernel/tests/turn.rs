@@ -292,10 +292,22 @@ impl ToolFactory for DelayedToolFactory {
     }
 }
 
-struct StreamingTool;
+struct StreamingTool {
+    calls: Option<Arc<AtomicUsize>>,
+}
 
 #[async_trait]
 impl AgentTool for StreamingTool {
+    /// Exercises the bounded host policy while ordinary small updates remain unchanged.
+    fn metadata(&self) -> &protocol::ToolMetadata {
+        static METADATA: LazyLock<protocol::ToolMetadata> =
+            LazyLock::new(|| {
+                protocol::ToolMetadata::builder()
+                    .output_policy(protocol::ToolOutputPolicy::Bounded)
+                    .build()
+            });
+        &METADATA
+    }
     /// Describes the deterministic partial-output tool used by kernel event tests.
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -312,6 +324,9 @@ impl AgentTool for StreamingTool {
         call: ToolCall,
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
+        if let Some(calls) = &self.calls {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
         context.publish(
             ToolResult::builder()
                 .tool_call_id(call.tool_call_id.clone())
@@ -332,13 +347,447 @@ impl AgentTool for StreamingTool {
     }
 }
 
-struct StreamingToolFactory;
+/// Expands a small result after execution to exercise the final output boundary.
+#[derive(Clone)]
+struct ExpandingResult;
+
+#[async_trait]
+impl extension::ExtensionHandler<extension::ToolResultPoint>
+    for ExpandingResult
+{
+    /// Deliberately exceeds the budget in both text and structured content.
+    async fn handle(
+        &self,
+        _event: &protocol::ToolResultEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::ToolResultPatch, ExtensionError> {
+        Ok(protocol::ToolResultPatch::builder()
+            .blocks(Some(vec![
+                ContentBlock::Text {
+                    text: "正文".repeat(6000),
+                },
+                ContentBlock::Structured {
+                    value: serde_json::json!({"tail":"preserved"}),
+                },
+            ]))
+            .build())
+    }
+}
+
+impl ExtensionModule for ExpandingResult {
+    /// Declares the test extension without changing unrelated module registrations.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("expand-output").expect("id"),
+            name: "Output expansion".into(),
+            version: "1".into(),
+        }
+    }
+
+    /// Registers expansion at the real result hook boundary.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<extension::ToolResultPoint, _>(self.clone())
+    }
+}
+
+/// Hook-expanded content is bounded identically in events, history, and the next request.
+#[tokio::test]
+async fn bounds_hook_expanded_result() {
+    // The child injects a broken spool directory without changing the Store's writable test root.
+    let real_tmp = std::env::var_os("CLAWCODE_TEST_REAL_TMP")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = tempfile::tempdir_in(real_tmp).expect("directory");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(0)));
+    let model = Arc::new(SystemPromptCaptureModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("bounded").expect("id"),
+                    name: "streaming".into(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![ScriptedModel::finished(
+                StopReason::EndTurn,
+            )]),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(StreamingToolFactory {
+            calls: Some(Arc::clone(&calls)),
+        }))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::new(
+            Default::default(),
+            vec![Arc::new(|| Ok(Arc::new(ExpandingResult)))],
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("kernel");
+    let session_id = SessionId::try_from("output-budget").expect("session");
+    let path = kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().into(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("session");
+    let sink = Arc::new(RecordingSink::default());
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "use the tool".into(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("run");
+    let events = sink.0.lock().expect("events");
+    let result = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            AgentEventPayload::ToolExecutionEnd { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("tool end");
+    assert!(result.output.is_some(), "projection must follow hooks");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!result.is_error);
+    if std::env::var_os("CLAWCODE_TEST_REAL_TMP").is_some() {
+        assert_eq!(
+            result.output.as_ref().expect("output").save_failure,
+            Some(protocol::ToolOutputSaveFailure::Io)
+        );
+        assert!(
+            result
+                .output
+                .as_ref()
+                .expect("output")
+                .full_output_path
+                .is_none()
+        );
+    }
+    let visible = result
+        .blocks
+        .iter()
+        .filter_map(|block| tools::ToolContentText::try_from(block).ok())
+        .map(|view| {
+            let mut bytes = Vec::new();
+            view.write_to(&mut bytes).expect("view");
+            bytes.len()
+        })
+        .sum::<usize>();
+    assert!(visible <= 20 * 1024);
+    let requests = model.requests.lock().expect("requests");
+    let next = requests.get(1).expect("next request");
+    assert!(next.messages.iter().any(|message| matches!(&message.content, MessageContent::ToolResult { blocks, .. } if blocks == &result.blocks)));
+    let transcript = std::fs::read_to_string(path).expect("transcript");
+    assert!(transcript.contains("visibleTextBytes"));
+}
+
+#[derive(Default)]
+struct StreamingToolFactory {
+    calls: Option<Arc<AtomicUsize>>,
+}
+
+/// A broken spool directory preserves success and never repeats the completed tool invocation.
+#[test]
+fn spool_failure_does_not_repeat_tool_call() {
+    let temporary = tempfile::tempdir().expect("directory");
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("test executable"),
+    )
+    .args(["--exact", "bounds_hook_expanded_result", "--nocapture"])
+    .env("CLAWCODE_TEST_REAL_TMP", temporary.path())
+    .env("TMPDIR", temporary.path().join("missing"))
+    .env("TMP", temporary.path().join("missing"))
+    .env("TEMP", temporary.path().join("missing"))
+    .output()
+    .expect("isolated spool failure test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Deferred tool whose invocation counter distinguishes discovery from execution.
+struct DeferredEcho(Arc<AtomicUsize>);
+
+#[async_trait]
+impl AgentTool for DeferredEcho {
+    /// Supplies an exact-match name and searchable Chinese description.
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "deferred_echo".into(),
+            description: "查询工单并返回内容".into(),
+            parameters: serde_json::json!({"type":"object"}),
+        }
+    }
+    /// Requires explicit loading before the Kernel declares this tool.
+    fn metadata(&self) -> &protocol::ToolMetadata {
+        static METADATA: LazyLock<protocol::ToolMetadata> =
+            LazyLock::new(|| {
+                protocol::ToolMetadata::builder()
+                    .exposure(protocol::ToolExposure::Deferred)
+                    .build()
+            });
+        &METADATA
+    }
+    /// Records actual invocation; searching must never increment this counter.
+    async fn execute(
+        &self,
+        call: ToolCall,
+        _context: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(vec![ContentBlock::Text {
+                text: "loaded result".into(),
+            }])
+            .is_error(false)
+            .build())
+    }
+}
+
+struct DeferredFactory(Arc<AtomicUsize>);
+
+impl ToolFactory for DeferredFactory {
+    /// Registers one Deferred catalog entry without activating it.
+    fn create(&self) -> Result<ToolRegistry, ToolError> {
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(DeferredEcho(Arc::clone(&self.0))))?;
+        Ok(registry)
+    }
+}
+
+/// Search activates the next request only; a sibling call in the frozen batch stays invalid.
+#[tokio::test]
+async fn deferred_search_loads_only_the_next_request() {
+    let temporary = tempfile::tempdir().expect("directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(0)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let model = Arc::new(SystemPromptCaptureModel {
+        scripts: Mutex::new(VecDeque::from([
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("search").expect("id"),
+                    name: "tool_search".into(),
+                    arguments: serde_json::json!({"query":"deferred_echo"}),
+                }),
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("sibling").expect("id"),
+                    name: "deferred_echo".into(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![
+                ModelStreamEvent::ToolCall(ToolCall {
+                    tool_call_id: ToolCallId::try_from("loaded").expect("id"),
+                    name: "deferred_echo".into(),
+                    arguments: serde_json::json!({}),
+                }),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            ScriptedResponse::events(vec![ScriptedModel::finished(
+                StopReason::EndTurn,
+            )]),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(DeferredFactory(Arc::clone(&calls))))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("kernel");
+    let session_id = SessionId::try_from("deferred-search").expect("session");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().into(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("session");
+    let sink = Arc::new(RecordingSink::default());
+    kernel
+        .run(
+            RunRequest {
+                session_id,
+                input: "find and use deferred tool".into(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("run");
+    {
+        let requests = model.requests.lock().expect("requests");
+        assert!(
+            !requests
+                .first()
+                .expect("first")
+                .tools
+                .iter()
+                .any(|tool| tool.name == "deferred_echo")
+        );
+        assert!(
+            requests
+                .get(1)
+                .expect("second")
+                .tools
+                .iter()
+                .any(|tool| tool.name == "deferred_echo")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(sink.0.lock().expect("events").iter().any(|event| matches!(&event.payload, AgentEventPayload::ToolExecutionEnd { result, .. } if result.tool_call_id.as_str() == "sibling" && result.is_error)));
+    }
+    let session_id = SessionId::try_from("deferred-search").expect("session");
+    let tree = kernel.session_tree(&session_id).expect("tree");
+    let load_entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "active_tools_change")
+        .expect("selection entry")
+        .entry_id
+        .clone();
+    model
+        .scripts
+        .lock()
+        .expect("scripts")
+        .extend((0..4).map(|_| {
+            ScriptedResponse::events(vec![ScriptedModel::finished(
+                StopReason::EndTurn,
+            )])
+        }));
+    kernel
+        .navigate_session(&session_id, None)
+        .await
+        .expect("empty root");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "root defaults".into(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("root run");
+    let fork_id = SessionId::try_from("deferred-fork").expect("fork");
+    kernel
+        .fork_session(
+            &session_id,
+            load_entry.clone(),
+            fork_id.clone(),
+            temporary.path().into(),
+        )
+        .await
+        .expect("fork from loaded branch");
+    kernel
+        .run(
+            RunRequest {
+                session_id: fork_id.clone(),
+                input: "fork selection".into(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("fork run");
+    kernel
+        .navigate_session(&session_id, Some(load_entry))
+        .await
+        .expect("loaded branch");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "restored selection".into(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("restored run");
+    kernel.close_session(&session_id).await.expect("close");
+    kernel
+        .resume_session(session_id.clone(), temporary.path().into())
+        .await
+        .expect("resume");
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "resumed selection".into(),
+            },
+            Arc::clone(&sink) as Arc<dyn EventSink>,
+        )
+        .await
+        .expect("resumed run");
+    {
+        let requests = model.requests.lock().expect("requests");
+        let actual: Vec<_> = requests
+            .iter()
+            .skip(3)
+            .map(|request| {
+                request
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == "deferred_echo")
+            })
+            .collect();
+        assert_eq!(actual, vec![false, true, true, true]);
+    }
+    kernel
+        .close_session(&session_id)
+        .await
+        .expect("close resumed");
+    kernel.close_session(&fork_id).await.expect("close fork");
+}
 
 impl ToolFactory for StreamingToolFactory {
     /// Registers the deterministic streaming tool for event ordering tests.
     fn create(&self) -> Result<ToolRegistry, ToolError> {
         let mut registry = ToolRegistry::default();
-        registry.register(Arc::new(StreamingTool))?;
+        registry.register(Arc::new(StreamingTool {
+            calls: self.calls.as_ref().map(Arc::clone),
+        }))?;
         Ok(registry)
     }
 }
@@ -1503,7 +1952,7 @@ async fn tool_partial_update_precedes_final_result() {
     let extension_events = Arc::new(Mutex::new(Vec::new()));
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(StaticModelFactory(model)))
-        .tool_factory(Arc::new(StreamingToolFactory))
+        .tool_factory(Arc::new(StreamingToolFactory::default()))
         .store_factory(Arc::new(JsonlStoreFactory::new(
             temporary.path(),
             Arc::clone(&clock),

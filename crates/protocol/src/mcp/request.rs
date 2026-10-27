@@ -7,7 +7,7 @@ use crate::{
     SessionId,
 };
 
-/// Session-scoped request for one explicit exact-protocol Server reconnect.
+/// Session-scoped request for one explicit Server reconnect with negotiation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpReconnectRequest {

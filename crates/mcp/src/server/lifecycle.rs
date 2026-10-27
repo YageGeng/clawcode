@@ -1,7 +1,7 @@
 use protocol::{
     McpCatalog, McpCatalogRevisions, McpFailureStage, McpOAuthStatus,
-    McpServerFailure, McpServerImplementation, McpServerState, McpServerStatus,
-    TimestampMs,
+    McpProtocolVersion, McpServerFailure, McpServerImplementation,
+    McpServerState, McpServerStatus, TimestampMs,
 };
 
 use crate::McpError;
@@ -67,8 +67,31 @@ impl McpServerStateMachine {
                 to: next,
             });
         }
+        if matches!(
+            next,
+            McpServerState::Starting
+                | McpServerState::Stopping
+                | McpServerState::Stopped
+        ) {
+            self.status.negotiated_protocol = None;
+        }
         self.status.state = next;
+        // Stopping withdraws the catalog in the same Server publication.
+        if matches!(next, McpServerState::Stopping | McpServerState::Stopped) {
+            self.status.counts = Default::default();
+        }
         self.status.updated_at_ms = updated_at_ms;
+        Ok(&self.status)
+    }
+
+    /// Records a validated selection before capability discovery begins.
+    pub(crate) fn negotiated(
+        &mut self,
+        version: McpProtocolVersion,
+        updated_at_ms: TimestampMs,
+    ) -> Result<&McpServerStatus, McpError> {
+        self.transition(McpServerState::Discovering, updated_at_ms)?;
+        self.status.negotiated_protocol = Some(version);
         Ok(&self.status)
     }
 

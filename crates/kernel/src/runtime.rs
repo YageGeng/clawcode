@@ -92,6 +92,11 @@ pub enum KernelError {
     /// Session persistence failed.
     #[error("store subsystem failed: {0}")]
     Store(#[from] store::StoreError),
+    /// A failed durable setting left the current Store outcome uncertain.
+    #[error(
+        "session persistence is uncertain after a failed setting write; close and resume the session before continuing"
+    )]
+    SessionPersistenceUncertain,
     /// Extension construction or dispatch failed.
     #[error("extension subsystem failed: {0}")]
     Extension(#[from] ::extension::ExtensionError),
@@ -315,13 +320,7 @@ impl Kernel {
         &self,
         session_id: &SessionId,
     ) -> Result<McpSessionSnapshot, KernelError> {
-        Ok(self
-            .session(session_id)?
-            .mcp
-            .as_ref()
-            .map_or_else(McpSessionSnapshot::default, |session| {
-                session.snapshot().as_ref().clone()
-            }))
+        self.session(session_id)?.mcp_snapshot()
     }
 
     /// Subscribes ACP to lightweight MCP snapshot revision notifications.
@@ -330,14 +329,10 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<Option<broadcast::Receiver<::mcp::McpSessionEvent>>, KernelError>
     {
-        Ok(self
-            .session(session_id)?
-            .mcp
-            .as_ref()
-            .map(|session| session.subscribe()))
+        self.session(session_id)?.subscribe_mcp_projection()
     }
 
-    /// Explicitly reconnects one Session Server through its configured exact protocol.
+    /// Explicitly reconnects one Session Server through its configured negotiation policy.
     pub async fn mcp_reconnect(
         &self,
         request: protocol::McpReconnectRequest,
@@ -347,7 +342,7 @@ impl Kernel {
             ::mcp::McpError::ServerNotFound(request.server_id.clone())
         })?;
         mcp.reconnect(&request.server_id).await?;
-        Ok(mcp.snapshot().as_ref().clone())
+        session.mcp_snapshot()
     }
 
     /// Completes one pending MCP OAuth browser round and returns the latest snapshot.
@@ -362,7 +357,7 @@ impl Kernel {
             .as_ref()
             .ok_or(::mcp::McpError::ServerNotFound(server_id))?;
         mcp.continue_authorization(request).await?;
-        Ok(mcp.snapshot().as_ref().clone())
+        session.mcp_snapshot()
     }
 
     /// Resolves one pending Turn-scoped MCP elicitation for its owning Session.
@@ -392,6 +387,7 @@ impl Kernel {
     pub async fn mcp_read_resource(
         &self,
         request: protocol::McpSessionResourceRequest,
+        cancellation: &CancellationToken,
     ) -> Result<protocol::McpResourceResult, KernelError> {
         let session = self.session(&request.session_id)?;
         let mcp = session.mcp.as_ref().ok_or_else(|| {
@@ -399,7 +395,7 @@ impl Kernel {
                 request.request.reference.server_id.clone(),
             )
         })?;
-        Ok(mcp.read_resource(request.request).await?)
+        Ok(mcp.read_resource(request.request, cancellation).await?)
     }
 
     /// Completes one MCP Prompt or Resource Template argument through its Session.

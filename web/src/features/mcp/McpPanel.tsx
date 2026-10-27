@@ -17,7 +17,7 @@ export function McpPanel({ snapshot, controller }: McpPanelProps) {
         <PlugZap size={22} />
         <div>
           <h2>MCP</h2>
-          <p>Session snapshot revision {snapshot.revision}；协议与传输显式配置，不自动回退。</p>
+          <p>Session snapshot revision {snapshot.revision}；各 Server 独立协商协议，目录由当前 Session 提供。</p>
         </div>
       </header>
       <div className="capability-grid">

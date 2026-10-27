@@ -1,7 +1,5 @@
 //! Typed MCP configuration, lifecycle, discovery, invocation, and shutdown failures.
 
-use std::num::NonZeroU32;
-
 use protocol::{
     McpAuthorizationRequest, McpProtocolVersion, McpServerId, SessionId,
 };
@@ -9,6 +7,13 @@ use protocol::{
 /// Failures surfaced by MCP clients and Session factories.
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
+    /// The initialize response could not establish a valid protocol session.
+    #[error("MCP negotiation failed for server '{server_id}': {message}")]
+    Negotiation {
+        server_id: McpServerId,
+        message: String,
+    },
+
     /// A Host callback could not be completed.
     #[error("MCP Host request failed: {0}")]
     Host(String),
@@ -33,7 +38,7 @@ pub enum McpError {
 
     /// The Server selected or advertised a revision other than the configured exact revision.
     #[error(
-        "MCP protocol mismatch for server '{server_id}': expected {expected}, received {actual}"
+        "MCP server '{server_id}' selected unsupported protocol {actual} (requested {expected})"
     )]
     ProtocolMismatch {
         /// Server whose lifecycle negotiation failed.
@@ -84,35 +89,6 @@ pub enum McpError {
     /// A Server request exceeded its configured idle deadline.
     #[error("MCP request timed out for server '{0}'")]
     RequestTimeout(McpServerId),
-
-    /// A Modern request kept requiring input beyond its configured attempt cap.
-    #[error("MCP MRTR exceeded {max_rounds} rounds for server '{server_id}'")]
-    MrtrRoundsExceeded {
-        /// Server that did not complete within the bounded rounds.
-        server_id: McpServerId,
-        /// Configured maximum number of request attempts.
-        max_rounds: NonZeroU32,
-    },
-
-    /// A Modern Task reached a failed state or returned an invalid terminal payload.
-    #[error("MCP Task '{task_id}' failed for server '{server_id}': {message}")]
-    TaskFailed {
-        /// Server that owns the Task.
-        server_id: McpServerId,
-        /// Server-assigned opaque Task identifier.
-        task_id: String,
-        /// Safe failure detail returned by the Server or local decoder.
-        message: String,
-    },
-
-    /// A Modern Task reached the Server-side cancelled terminal state.
-    #[error("MCP Task '{task_id}' was cancelled for server '{server_id}'")]
-    TaskCancelled {
-        /// Server that owns the Task.
-        server_id: McpServerId,
-        /// Server-assigned opaque Task identifier.
-        task_id: String,
-    },
 
     /// A structured reference was routed to a different connected Server.
     #[error("MCP request for server '{actual}' was routed to '{expected}'")]

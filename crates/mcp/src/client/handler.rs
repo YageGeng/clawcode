@@ -9,7 +9,7 @@ use std::sync::Arc;
 use protocol::{
     McpElicitationAction, McpElicitationMode, McpElicitationRequest,
     McpHostRequest, McpHostResponse, McpRootsRequest, McpSamplingRequest,
-    MessageId, Role, StopReason, TimestampMs,
+    McpServerId, MessageId, Role, StopReason, TimestampMs,
 };
 use rmcp::ClientHandler;
 use rmcp::handler::client::progress::ProgressDispatcher;
@@ -28,8 +28,9 @@ use super::invocation::InvocationRegistry;
 use crate::{McpClientEvent, McpHost};
 
 /// Lifecycle handler retaining client identity and normalized notification channels.
-#[derive(Clone)]
+#[derive(Clone, typed_builder::TypedBuilder)]
 pub(super) struct McpLifecycleHandler {
+    server_id: McpServerId,
     info: ClientInfo,
     changes: broadcast::Sender<McpClientEvent>,
     progress: ProgressDispatcher,
@@ -38,37 +39,39 @@ pub(super) struct McpLifecycleHandler {
 }
 
 /// Shared channels created with one lifecycle handler and retained by the client core.
+#[derive(typed_builder::TypedBuilder)]
 pub(super) struct McpClientChannels {
     pub(super) changes: broadcast::Sender<McpClientEvent>,
     pub(super) progress: ProgressDispatcher,
     pub(super) invocations: InvocationRegistry,
-    pub(super) handler: McpLifecycleHandler,
 }
 
 impl McpLifecycleHandler {
     /// Creates one handler and its shared notification sender.
     pub(super) fn new(
+        server_id: McpServerId,
         info: ClientInfo,
         host: Arc<dyn McpHost>,
     ) -> (Self, McpClientChannels) {
         let (changes, _receiver) = broadcast::channel(128);
         let progress = ProgressDispatcher::new();
         let invocations = InvocationRegistry::new();
-        let handler = Self {
-            info,
-            changes: changes.clone(),
-            progress: progress.clone(),
-            host,
-            invocations: invocations.clone(),
-        };
+        // Bind Roots to the connection so idle and concurrent calls need no Turn lookup.
+        let handler = Self::builder()
+            .server_id(server_id)
+            .info(info)
+            .changes(changes.clone())
+            .progress(progress.clone())
+            .host(host)
+            .invocations(invocations.clone())
+            .build();
         (
-            handler.clone(),
-            McpClientChannels {
-                changes,
-                progress,
-                invocations,
-                handler,
-            },
+            handler,
+            McpClientChannels::builder()
+                .changes(changes)
+                .progress(progress)
+                .invocations(invocations)
+                .build(),
         )
     }
 }
@@ -79,23 +82,15 @@ impl ClientHandler for McpLifecycleHandler {
         self.info.clone()
     }
 
-    /// Returns only roots authorized by the owning Kernel Host for this Turn.
+    /// Returns the Session-bound Host's roots even when no Tool call is active.
     async fn list_roots(
         &self,
-        context: RequestContext<RoleClient>,
+        _context: RequestContext<RoleClient>,
     ) -> Result<ListRootsResult, RmcpError> {
-        let mut request_context =
-            self.invocations.resolve(&context).ok_or_else(|| {
-                RmcpError::invalid_params(
-                    "MCP Roots request is not associated with one active Turn",
-                    None,
-                )
-            })?;
-        request_context.requested_at_ms = TimestampMs::now();
         let response = self
             .host
             .handle(McpHostRequest::Roots(McpRootsRequest {
-                context: request_context,
+                server_id: self.server_id.clone(),
             }))
             .await
             .map_err(|error| {
@@ -227,6 +222,31 @@ impl ClientHandler for McpLifecycleHandler {
         request: ElicitRequestParams,
         context: RequestContext<RoleClient>,
     ) -> Result<ElicitResult, RmcpError> {
+        // A server selecting an older revision cannot use newer elicitation modes.
+        let version = context
+            .peer
+            .peer_info()
+            .map(|info| info.protocol_version.clone())
+            .and_then(|version| {
+                version
+                    .as_str()
+                    .parse::<protocol::McpProtocolVersion>()
+                    .ok()
+            });
+        if self.info.capabilities.elicitation.is_none()
+            || !version
+                .is_some_and(protocol::McpProtocolVersion::supports_elicitation)
+            || (matches!(
+                &request,
+                ElicitRequestParams::UrlElicitationParams { .. }
+            ) && version != Some(protocol::McpProtocolVersion::V2025_11_25))
+        {
+            return Err(RmcpError::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "elicitation mode is not supported by the negotiated connection",
+                None,
+            ));
+        }
         let mut request_context =
             self.invocations.resolve(&context).ok_or_else(|| {
                 RmcpError::invalid_params(

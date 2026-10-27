@@ -593,8 +593,11 @@ impl ProviderMessage {
             MessageContent::ToolResult {
                 tool_call_id,
                 blocks,
+                is_error,
                 ..
-            } => Some(Self::try_from_tool_result(tool_call_id, blocks)),
+            } => {
+                Some(Self::try_from_tool_result(tool_call_id, blocks, is_error))
+            }
             MessageContent::BashExecution { bash }
                 if !bash.exclude_from_context =>
             {
@@ -740,6 +743,7 @@ impl ProviderMessage {
     fn try_from_tool_result(
         tool_call_id: ToolCallId,
         blocks: Vec<ContentBlock>,
+        is_error: bool,
     ) -> Result<Self, ModelError> {
         let content = blocks
             .into_iter()
@@ -778,9 +782,18 @@ impl ProviderMessage {
                 ProviderToolResult {
                     id: tool_call_id.to_string(),
                     call_id: None,
-                    content: OneOrMany::many(content).map_err(|error| {
-                        ModelError::Protocol(error.to_string())
-                    })?,
+                    // Empty successes still need a block; empty failures must remain visible to text-only providers.
+                    content: OneOrMany::many(content).unwrap_or_else(
+                        |_empty| {
+                            OneOrMany::one(ToolResultContent::text(
+                                if is_error {
+                                    "Tool failed without returning content."
+                                } else {
+                                    ""
+                                },
+                            ))
+                        },
+                    ),
                 },
             )),
         }))

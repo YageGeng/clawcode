@@ -1,12 +1,11 @@
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use mcp::{
-    McpAgentTool, McpClient, McpConnector, McpError, McpHost, McpMrtrPolicy,
-    McpServerRuntime, McpStdioTransport, McpTransport, RuntimeMcpServer,
+    McpAgentTool, McpClient, McpConnector, McpError, McpHost, McpServerRuntime,
+    McpStdioTransport, McpTransport, RuntimeMcpServer,
 };
 use protocol::{
     ContentBlock, McpCatalog, McpCompletionRequest, McpCompletionResult,
@@ -127,6 +126,7 @@ impl McpClient for ToolClient {
     async fn read_resource(
         &self,
         _request: McpResourceRequest,
+        _cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
         unreachable!("Resource reads are not exercised")
     }
@@ -173,13 +173,10 @@ async fn adapter(
     let server = RuntimeMcpServer::builder()
         .server_id(McpServerId::try_from("tool-server").expect("Server id"))
         .enabled(true)
-        .protocol(McpProtocolVersion::V2025_11_25)
+        .protocol_policy(protocol::McpProtocolPolicy::Auto)
         .startup_timeout(Duration::from_secs(1))
         .request_timeout(request_timeout)
-        .mrtr(McpMrtrPolicy {
-            max_rounds: NonZeroU32::new(2).expect("non-zero"),
-            total_timeout: Duration::from_secs(1),
-        })
+        .request_total_timeout(Duration::from_secs(1))
         .transport(McpTransport::Stdio(Box::new(McpStdioTransport {
             command: "unused".to_string(),
             args: Vec::new(),
@@ -217,6 +214,7 @@ fn invocation(
     (call, context)
 }
 
+/// Normalized results preserve both rich blocks and independent structured content.
 #[tokio::test]
 async fn preserves_rich_content_and_structured_content() {
     let adapter = adapter(
@@ -249,6 +247,7 @@ async fn preserves_rich_content_and_structured_content() {
     ));
 }
 
+/// Argument validation prevents invalid calls from reaching the remote server.
 #[tokio::test]
 async fn rejects_non_object_and_schema_invalid_arguments_before_remote_call() {
     let adapter = adapter(
@@ -273,6 +272,7 @@ async fn rejects_non_object_and_schema_invalid_arguments_before_remote_call() {
     }
 }
 
+/// The adapter preserves cancellation and timeout failures from the owning request.
 #[tokio::test]
 async fn observes_turn_cancellation_and_request_timeout() {
     let result = McpToolResult {

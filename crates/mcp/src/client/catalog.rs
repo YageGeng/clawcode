@@ -5,13 +5,13 @@ use protocol::{
 };
 
 /// Converts fully paginated rmcp entities into one shared immutable catalog.
-pub(super) struct CatalogMapper {
-    server_id: McpServerId,
+pub(super) struct CatalogMapper<'a> {
+    server_id: &'a McpServerId,
 }
 
-impl CatalogMapper {
+impl<'a> CatalogMapper<'a> {
     /// Creates a mapper that stamps structured references with one owning Server.
-    pub(super) fn new(server_id: McpServerId) -> Self {
+    pub(super) fn new(server_id: &'a McpServerId) -> Self {
         Self { server_id }
     }
 
@@ -35,12 +35,51 @@ impl CatalogMapper {
                         McpToolInfo::builder()
                             .public_name(reference.public_name())
                             .reference(reference)
+                            .title(tool.title.or_else(|| {
+                                tool.annotations.as_ref().and_then(
+                                    |annotations| annotations.title.clone(),
+                                )
+                            }))
+                            .metadata(
+                                protocol::ToolMetadata::builder()
+                                    .annotations(tool.annotations.map_or_else(
+                                        protocol::ToolAnnotations::default,
+                                        |hints| {
+                                            protocol::ToolAnnotations::builder()
+                                                .read_only_hint(
+                                                    hints.read_only_hint,
+                                                )
+                                                .destructive_hint(
+                                                    hints.destructive_hint,
+                                                )
+                                                .idempotent_hint(
+                                                    hints.idempotent_hint,
+                                                )
+                                                .open_world_hint(
+                                                    hints.open_world_hint,
+                                                )
+                                                .build()
+                                        },
+                                    ))
+                                    .output_schema(tool.output_schema.map(
+                                        |schema| {
+                                            serde_json::Value::Object(
+                                                std::sync::Arc::unwrap_or_clone(
+                                                    schema,
+                                                ),
+                                            )
+                                        },
+                                    ))
+                                    .build(),
+                            )
                             .description(
                                 tool.description
                                     .map(|value| value.into_owned()),
                             )
                             .input_schema(serde_json::Value::Object(
-                                (*tool.input_schema).clone(),
+                                std::sync::Arc::unwrap_or_clone(
+                                    tool.input_schema,
+                                ),
                             ))
                             .build()
                     })

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use protocol::{
     McpCatalog, McpCompletionRequest, McpCompletionResult, McpCompletionTarget,
@@ -10,31 +9,25 @@ use protocol::{
 use rmcp::handler::client::progress::ProgressDispatcher;
 use rmcp::model::{
     ArgumentInfo, CallToolRequestParams, CompleteRequestParams,
-    CompletionContext, GetPromptRequestParams, ProtocolVersion,
-    ReadResourceRequestParams, Reference, ServerCapabilities,
-    ServerNotification, SubscriptionFilter,
+    CompletionContext, GetPromptRequestParams, ReadResourceRequestParams,
+    Reference, ServerCapabilities,
 };
 use rmcp::service::{Peer, RoleClient, RunningService};
 use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
 
 use super::catalog::CatalogMapper;
 use super::content::{IntoProtocolContent, IntoProtocolRole};
 use super::handler::{McpClientChannels, McpLifecycleHandler};
 use super::invocation::InvocationRegistry;
-use super::mrtr::ToolCallDriver;
+use super::request::ToolRequest;
 use crate::{McpClientEvent, McpError, McpRequestControl};
 
-/// Generation-tagged Modern subscription task owned by one connected client.
-struct SubscriptionTaskState {
-    generation: u64,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-/// Shared post-lifecycle client state; lifecycle selection remains in distinct wrappers.
+/// Immutable negotiated metadata and owned rmcp request service.
+#[derive(typed_builder::TypedBuilder)]
 pub(super) struct ClientCore {
     server_id: McpServerId,
     protocol: McpProtocolVersion,
+    #[builder(default)]
     server_info: Option<McpServerImplementation>,
     capabilities: McpServerCapabilities,
     peer: Peer<RoleClient>,
@@ -44,18 +37,14 @@ pub(super) struct ClientCore {
     changes: broadcast::Sender<McpClientEvent>,
     progress: ProgressDispatcher,
     invocations: InvocationRegistry,
-    handler: McpLifecycleHandler,
-    subscription: Arc<tokio::sync::Mutex<SubscriptionTaskState>>,
-    shutdown: CancellationToken,
 }
 
 impl ClientCore {
-    /// Validates exact negotiation and captures immutable peer metadata after startup.
+    /// Captures metadata only after the guarded initialize lifecycle accepts the version.
     pub(super) async fn from_running(
         server_id: McpServerId,
-        expected: McpProtocolVersion,
-        wire_expected: ProtocolVersion,
-        mut running: RunningService<RoleClient, McpLifecycleHandler>,
+        protocol: McpProtocolVersion,
+        running: RunningService<RoleClient, McpLifecycleHandler>,
         channels: McpClientChannels,
     ) -> Result<Self, McpError> {
         let peer_info =
@@ -64,19 +53,6 @@ impl ClientCore {
                 message: "lifecycle completed without Server metadata"
                     .to_string(),
             })?;
-        if peer_info.protocol_version != wire_expected {
-            let actual = peer_info.protocol_version.to_string();
-            running.close().await.map_err(|error| McpError::Shutdown {
-                server_id: server_id.clone(),
-                message: error.to_string(),
-            })?;
-            return Err(McpError::ProtocolMismatch {
-                server_id,
-                expected,
-                actual,
-            });
-        }
-
         let server_info =
             peer_info.server_info.as_ref().map(|implementation| {
                 McpServerImplementation {
@@ -86,25 +62,17 @@ impl ClientCore {
             });
         let capabilities = Self::capabilities(&peer_info.capabilities);
         let peer = running.peer().clone();
-        Ok(Self {
-            server_id,
-            protocol: expected,
-            server_info,
-            capabilities,
-            peer,
-            running: tokio::sync::Mutex::new(Some(running)),
-            changes: channels.changes,
-            progress: channels.progress,
-            invocations: channels.invocations,
-            handler: channels.handler,
-            subscription: Arc::new(tokio::sync::Mutex::new(
-                SubscriptionTaskState {
-                    generation: 0,
-                    task: None,
-                },
-            )),
-            shutdown: CancellationToken::new(),
-        })
+        Ok(Self::builder()
+            .server_id(server_id)
+            .protocol(protocol)
+            .server_info(server_info)
+            .capabilities(capabilities)
+            .peer(peer)
+            .running(tokio::sync::Mutex::new(Some(running)))
+            .changes(channels.changes)
+            .progress(channels.progress)
+            .invocations(channels.invocations)
+            .build())
     }
 
     /// Returns the connected Server identifier.
@@ -132,98 +100,6 @@ impl ClientCore {
         &self,
     ) -> broadcast::Receiver<McpClientEvent> {
         self.changes.subscribe()
-    }
-
-    /// Opens the Modern unified subscription stream exactly once after discovery.
-    pub(super) async fn start_modern_subscription(
-        &self,
-        catalog: &McpCatalog,
-    ) -> Result<(), McpError> {
-        if !self.capabilities.tools_list_changed
-            && !self.capabilities.prompts_list_changed
-            && !self.capabilities.resources_list_changed
-            && !self.capabilities.resource_subscribe
-        {
-            return Ok(());
-        }
-        let mut slot = self.subscription.lock().await;
-        if slot.task.as_ref().is_some_and(|task| !task.is_finished()) {
-            return Ok(());
-        }
-        // A completed JoinHandle no longer represents a live subscription and
-        // must not suppress the replacement stream established below.
-        slot.task.take();
-        let filter = SubscriptionFilter::builder()
-            .tools_list_changed()
-            .prompts_list_changed()
-            .resources_list_changed()
-            .resource_subscriptions(
-                catalog
-                    .resources
-                    .iter()
-                    .map(|resource| resource.reference.remote_uri.clone()),
-            )
-            .build();
-        let mut subscription = self
-            .peer
-            .listen(filter)
-            .await
-            .map_err(|error| self.service_error(error))?;
-        let changes = self.changes.clone();
-        let shutdown = self.shutdown.clone();
-        slot.generation = slot.generation.saturating_add(1);
-        let generation = slot.generation;
-        let subscription_state = Arc::clone(&self.subscription);
-        slot.task = Some(tokio::spawn(async move {
-            let ended = loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => {
-                        if let Err(error) = subscription.cancel().await {
-                            tracing::debug!(
-                                "MCP Modern subscription cancellation failed: {}",
-                                error
-                            );
-                        }
-                        break false;
-                    }
-                    notification = subscription.next() => match notification {
-                        Ok(Some(ServerNotification::ToolListChangedNotification(_))) => {
-                            let _ = changes.send(McpClientEvent::ToolsChanged);
-                        }
-                        Ok(Some(ServerNotification::PromptListChangedNotification(_))) => {
-                            let _ = changes.send(McpClientEvent::PromptsChanged);
-                        }
-                        Ok(Some(ServerNotification::ResourceListChangedNotification(_))) => {
-                            let _ = changes.send(McpClientEvent::ResourcesChanged);
-                        }
-                        Ok(Some(ServerNotification::ResourceUpdatedNotification(notification))) => {
-                            let _ = changes.send(McpClientEvent::ResourceUpdated(
-                                notification.params.uri,
-                            ));
-                        }
-                        Ok(Some(_notification)) => {}
-                        Err(error) => {
-                            tracing::warn!("MCP Modern subscription failed: {}", error);
-                            break true;
-                        }
-                        Ok(None) => {
-                            break true;
-                        }
-                    }
-                }
-            };
-            // Clear the exact generation before publishing SubscriptionEnded so
-            // the resulting catalog refresh can establish a replacement stream.
-            let mut state = subscription_state.lock().await;
-            if state.generation == generation {
-                state.task.take();
-            }
-            drop(state);
-            if ended {
-                let _ = changes.send(McpClientEvent::SubscriptionEnded);
-            }
-        }));
-        Ok(())
     }
 
     /// Fetches complete paginated catalogs only for capability families the Server declares.
@@ -261,7 +137,7 @@ impl ClientCore {
             Vec::new()
         };
 
-        Ok(CatalogMapper::new(self.server_id.clone())
+        Ok(CatalogMapper::new(&self.server_id)
             .map(tools, prompts, resources, templates))
     }
 
@@ -273,13 +149,11 @@ impl ClientCore {
     ) -> Result<McpToolResult, McpError> {
         self.ensure_route(&request.reference.server_id)?;
         self.ensure_capability(self.capabilities.tools, "tools")?;
-        let result = ToolCallDriver::builder()
+        let result = ToolRequest::builder()
             .server_id(&self.server_id)
             .peer(&self.peer)
-            .handler(&self.handler)
             .progress(&self.progress)
             .invocations(&self.invocations)
-            .supports_tasks(self.capabilities.tasks)
             .control(control)
             .build()
             .call(
@@ -344,16 +218,39 @@ impl ClientCore {
     pub(super) async fn read_resource(
         &self,
         request: McpResourceRequest,
+        cancellation: &tokio_util::sync::CancellationToken,
     ) -> Result<McpResourceResult, McpError> {
         self.ensure_route(&request.reference.server_id)?;
         self.ensure_capability(self.capabilities.resources, "resources")?;
-        let result = self
-            .peer
-            .read_resource(ReadResourceRequestParams::new(
-                request.reference.remote_uri,
-            ))
-            .await
-            .map_err(|error| self.service_error(error))?;
+        if cancellation.is_cancelled() {
+            return Err(McpError::RequestCancelled(self.server_id.clone()));
+        }
+        let request = rmcp::model::ClientRequest::ReadResourceRequest(
+            rmcp::model::ReadResourceRequest::new(
+                ReadResourceRequestParams::new(request.reference.remote_uri),
+            ),
+        );
+        let mut handle = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(McpError::RequestCancelled(self.server_id.clone())),
+            handle = self.peer.send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options()) => handle.map_err(|error| self.service_error(error))?,
+        };
+        let response = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                // Send the protocol cancellation rather than only dropping the response future.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle.cancel(Some("resource read cancelled".into()))).await;
+                return Err(McpError::RequestCancelled(self.server_id.clone()));
+            }
+            response = &mut handle.rx => response.map_err(|error| McpError::Service { server_id: self.server_id.clone(), message: error.to_string() })?.map_err(|error| self.service_error(error))?,
+        };
+        let rmcp::model::ServerResult::ReadResourceResult(result) = response
+        else {
+            return Err(McpError::Service {
+                server_id: self.server_id.clone(),
+                message: "unexpected response to resources/read".into(),
+            });
+        };
         let contents = result
             .contents
             .into_iter()
@@ -405,14 +302,6 @@ impl ClientCore {
 
     /// Closes the background rmcp service exactly once.
     pub(super) async fn shutdown(&self) -> Result<(), McpError> {
-        self.shutdown.cancel();
-        let subscription = self.subscription.lock().await.task.take();
-        if let Some(subscription) = subscription
-            && let Err(error) = subscription.await
-            && !error.is_cancelled()
-        {
-            tracing::warn!("MCP subscription task failed: {}", error);
-        }
         let mut running = self.running.lock().await;
         if let Some(service) = running.as_mut() {
             service.close().await.map_err(|error| McpError::Shutdown {
@@ -461,7 +350,7 @@ impl ClientCore {
                     .and_then(|resources| resources.list_changed)
                     .unwrap_or(false),
             )
-            .tasks(capabilities.supports_tasks())
+            .tasks(false)
             .build()
     }
 

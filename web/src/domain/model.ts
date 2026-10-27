@@ -168,11 +168,20 @@ export type ToolCallEntity = Readonly<{
   status: "pending" | "in_progress" | "completed" | "failed" | "blocked";
   rawInput?: unknown;
   rawOutput?: unknown;
+  output?: ToolOutputInfo;
   content: readonly unknown[];
   startedAtMs?: TimestampMs;
   endedAtMs?: TimestampMs;
   sequenceRange?: EventSequenceRange;
   meta?: EventMeta;
+}>;
+
+export type ToolOutputInfo = Readonly<{
+  originalTextBytes: number;
+  visibleTextBytes: number;
+  omittedMedia: number;
+  fullOutputPath?: string;
+  saveFailure?: "io" | "too_large" | "cancelled";
 }>;
 
 export type BashExecutionEntity = Readonly<{
@@ -314,6 +323,14 @@ export type McpToolInfo = Readonly<{
   publicName: string;
   description?: string;
   inputSchema: unknown;
+  title?: string;
+  loaded?: boolean;
+  disabled?: boolean;
+  metadata?: Readonly<{
+    exposure: "direct" | "deferred" | "hidden";
+    annotations: Readonly<{ readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean }>;
+    outputSchema?: unknown;
+  }>;
 }>;
 
 export type McpArgumentInfo = Readonly<{
@@ -385,7 +402,8 @@ export type McpElicitationSnapshot = Readonly<{
 
 export type McpServerStatus = Readonly<{
   serverId: string;
-  protocol: "2025-11-25" | "2026-07-28";
+  configuredPolicy: "auto" | "2025-11-25" | "2025-06-18" | "2025-03-26" | "2024-11-05";
+  negotiatedProtocol?: "2025-11-25" | "2025-06-18" | "2025-03-26" | "2024-11-05";
   transport: "stdio" | "streamableHttp";
   state: "disabled" | "starting" | "negotiating" | "discovering" | "ready" | "degraded" | "failed" | "stopping" | "stopped";
   implementation?: Readonly<{ name: string; version: string }>;

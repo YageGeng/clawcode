@@ -18,5 +18,8 @@ async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
+# crypto
+sha2 = { workspace = true }
+
 # builder
 typed-builder = { workspace = true }

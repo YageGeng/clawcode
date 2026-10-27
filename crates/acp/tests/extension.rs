@@ -1088,6 +1088,7 @@ async fn assistant_usage_replays_at_run_end() {
                     ))
                     .expect("message timing"),
                     content: MessageContent::ToolResult {
+                        output: None,
                         tool_call_id: ToolCallId::try_from("tool-call-replay")
                             .expect("tool call id"),
                         blocks: vec![ContentBlock::Text {

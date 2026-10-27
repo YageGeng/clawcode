@@ -445,8 +445,22 @@ impl AcpExtensionDispatcher {
                 let input: protocol::McpSessionResourceRequest =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
+                let cancellation = self
+                    .session_watchers
+                    .lock()
+                    .map_err(|_poison_error| {
+                        agent_client_protocol::Error::internal_error()
+                    })?
+                    .get(&input.session_id)
+                    .map_or_else(CancellationToken::new, |token| {
+                        token.child_token()
+                    });
+                let _cancel_on_drop = cancellation.clone().drop_guard();
                 serde_json::to_value(
-                    self.kernel.mcp_read_resource(input).await.map_err(
+                    self.kernel
+                        .mcp_read_resource(input, &cancellation)
+                        .await
+                        .map_err(
                         agent_client_protocol::Error::into_internal_error,
                     )?,
                 )
