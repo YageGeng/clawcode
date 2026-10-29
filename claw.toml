@@ -1,4 +1,4 @@
-active_model = "deepseek/deepseek-v4-flash-vision-exp"
+active_model = "deepseek/deepseek-flash"
 
 [app.recovery]
 # Caps source Session updates consumed into one outbound ACP frame.
@@ -48,29 +48,8 @@ base_url = "https://api.deepseek.com"
 env = "DEEPSEEK_API_KEY"
 
 [[providers.models]]
-id = "deepseek-v4-flash"
+id = "deepseek-flash"
 display_name = "DeepSeek V4 Flash"
-context_tokens = 1000000
-max_output_tokens = 384000
-
-[providers.models.extra_param]
-thinking = { type = "enabled" }
-reasoning_effort = "high"
-
-[[providers.models]]
-id = "deepseek-v4-pro"
-display_name = "DeepSeek V4 Pro"
-context_tokens = 1000000
-max_output_tokens = 384000
-
-[providers.models.extra_param]
-thinking = { type = "enabled" }
-reasoning_effort = "high"
-
-[[providers.models]]
-id = "deepseek-v4-flash-vision-exp"
-display_name = "DeepSeek V4 Flash Vision Exp"
-input = ["text", "image"]
 context_tokens = 1000000
 max_output_tokens = 384000
 
