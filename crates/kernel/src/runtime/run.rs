@@ -9,13 +9,14 @@ impl Kernel {
         sink: Arc<dyn EventSink>,
         input_source: protocol::InputSource,
         trace_id: TraceId,
-    ) -> Result<RunResult, KernelError> {
+        cancellation_parent: Option<CancellationToken>,
+    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
         // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
         if let Some(result) = self
             .try_execute_user_bash_request(&request, Arc::clone(&sink))
             .await?
         {
-            return Ok(result);
+            return Ok((result, None));
         }
 
         // Resolve the Session and stable correlation identifiers before any
@@ -49,13 +50,15 @@ impl Kernel {
                 )
                 .await?
         {
-            return Ok(result);
+            return Ok((result, None));
         }
 
         // Install serialized Run state only after every immediate command path
         // has declined the request.
         let _run_guard = session.acquire_operation().await?;
-        let cancellation = session.execution.install_cancellation()?;
+        let cancellation = session
+            .execution
+            .install_cancellation(cancellation_parent.as_ref())?;
         tracing::info!(
             "started Kernel Run {} for session {} with trace {}",
             run_id,
@@ -107,11 +110,14 @@ impl Kernel {
                             request.session_id,
                             trace_id
                         );
-                        return Ok(RunResult {
-                            run_id,
-                            messages: Vec::new(),
-                            turns: Vec::new(),
-                        });
+                        return Ok((
+                            RunResult {
+                                run_id,
+                                messages: Vec::new(),
+                                turns: Vec::new(),
+                            },
+                            None,
+                        ));
                     }
                 };
                 protocol::RunInput::Text(run_input)
@@ -1012,7 +1018,7 @@ impl Kernel {
         // returns either a terminal completion or an operational error.
         match execution {
             Ok(completion) => {
-                RunSettlement::builder()
+                let answer = RunSettlement::builder()
                     .kernel(self)
                     .session_id(&request.session_id)
                     .session(&session)
@@ -1034,7 +1040,7 @@ impl Kernel {
                     completion.outcome,
                     completion.result.turns.len()
                 );
-                Ok(completion.result)
+                Ok((completion.result, Some(answer)))
             }
             Err(error) => {
                 let outcome = AgentOutcome::Failed {

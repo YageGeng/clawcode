@@ -35,10 +35,23 @@ export function SessionSidebar(props: SessionSidebarProps) {
   const [preview, setPreview] = useState<SessionPreview>();
   const groups = useMemo<readonly SessionGroup[]>(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    const visible = props.sessions.filter((session) => normalized.length === 0 ||
+    const matched = props.sessions.filter((session) => normalized.length === 0 ||
       session.title.toLocaleLowerCase().includes(normalized) ||
       session.cwd.toLocaleLowerCase().includes(normalized) ||
       session.sessionId.toLocaleLowerCase().includes(normalized));
+    const included = new Set(matched.map((session) => session.sessionId));
+    const byId = new Map(props.sessions.map((session) => [session.sessionId, session]));
+    for (const session of matched) {
+      let owner = session.ownership?.sessionId;
+      const visited = new Set<SessionId>();
+      while (owner !== undefined && !visited.has(owner)) {
+        visited.add(owner);
+        included.add(owner);
+        owner = byId.get(owner)?.ownership?.sessionId;
+      }
+    }
+    const visible = props.sessions.filter((session) => included.has(session.sessionId) &&
+      (session.ownership === undefined || !byId.has(session.ownership.sessionId)));
     const current = new Date();
     const today = new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime();
     const yesterday = today - 86_400_000;
@@ -80,32 +93,12 @@ export function SessionSidebar(props: SessionSidebarProps) {
     });
   };
 
-  return (
-    <aside className="session-sidebar" aria-label="会话">
-      <div className="panel-heading">
-        <h2>会话</h2>
-        <button className="icon-button" type="button" title="收起会话栏" onClick={props.onCollapse}>
-          <PanelLeftClose size={17} aria-hidden="true" />
-        </button>
-      </div>
-      <div className="session-sidebar__actions">
-        <button className="primary-button" type="button" onClick={props.onCreate}>
-          <Plus size={15} aria-hidden="true" /> 新建
-        </button>
-      </div>
-      <label className="search-field">
-        <span className="visually-hidden">搜索会话</span>
-        <Search size={14} aria-hidden="true" />
-        <input className="search-input" placeholder="搜索标题或目录" value={query} onChange={(event) => setQuery(event.target.value)} />
-      </label>
-      {operationError === undefined ? null : <div className="form-error" role="alert">{operationError}</div>}
-      <div className="session-list" onScroll={() => setPreview(undefined)}>
-        {groups.length === 0 ? <div className="empty-list">没有匹配的会话</div> : groups.map((group) => (
-          <section className="session-group" key={group.label}>
-            <h3>{group.label}</h3>
-            {group.sessions.map((session) => {
+  /** Renders the ownership tree while guarding malformed cyclic metadata. */
+  const renderSession = (session: SessionSummary, ancestors = new Set<SessionId>()): React.ReactNode => {
               const running = props.runningSessionIds.has(session.sessionId);
-              return <div
+              const children = props.sessions.filter((child) => child.ownership?.sessionId === session.sessionId && !ancestors.has(child.sessionId));
+              const visited = new Set(ancestors).add(session.sessionId);
+              return <div className="session-branch" key={session.sessionId}><div
                 className="session-item"
                 data-active={session.sessionId === props.activeSessionId}
                 data-running={running}
@@ -149,15 +142,43 @@ export function SessionSidebar(props: SessionSidebarProps) {
                     </span>
                   </div>
                 )}
-                {deletingSessionId === session.sessionId ? <div className="session-item__confirm"><span>永久删除会话？此操作不可撤销。</span><button type="button" onClick={() => setDeletingSessionId(undefined)}>取消</button><button type="button" onClick={() => void run(async () => {
+                {deletingSessionId === session.sessionId ? <div className="session-item__confirm"><span>{children.length > 0 ? "永久删除会话及其所有子会话？此操作不可撤销。" : "永久删除会话？此操作不可撤销。"}</span><button type="button" onClick={() => setDeletingSessionId(undefined)}>取消</button><button type="button" onClick={() => void run(async () => {
                   // A successful delete unmounts the hovered row before it can
                   // emit mouseleave, so close its body-level Portal explicitly.
                   setPreview(undefined);
                   await props.onDelete(session.sessionId);
                   setDeletingSessionId(undefined);
                 })}>确认删除</button></div> : null}
-              </div>;
-            })}
+              </div>{children.length === 0 ? null : <details className="session-children" open={children.some((child) => child.sessionId === props.activeSessionId) || undefined}>
+                <summary>子会话 · {children.length}</summary>
+                {children.map((child) => renderSession(child, visited))}
+              </details>}</div>;
+  };
+
+  return (
+    <aside className="session-sidebar" aria-label="会话">
+      <div className="panel-heading">
+        <h2>会话</h2>
+        <button className="icon-button" type="button" title="收起会话栏" onClick={props.onCollapse}>
+          <PanelLeftClose size={17} aria-hidden="true" />
+        </button>
+      </div>
+      <div className="session-sidebar__actions">
+        <button className="primary-button" type="button" onClick={props.onCreate}>
+          <Plus size={15} aria-hidden="true" /> 新建
+        </button>
+      </div>
+      <label className="search-field">
+        <span className="visually-hidden">搜索会话</span>
+        <Search size={14} aria-hidden="true" />
+        <input className="search-input" placeholder="搜索标题或目录" value={query} onChange={(event) => setQuery(event.target.value)} />
+      </label>
+      {operationError === undefined ? null : <div className="form-error" role="alert">{operationError}</div>}
+      <div className="session-list" onScroll={() => setPreview(undefined)}>
+        {groups.length === 0 ? <div className="empty-list">没有匹配的会话</div> : groups.map((group) => (
+          <section className="session-group" key={group.label}>
+            <h3>{group.label}</h3>
+            {group.sessions.map((session) => renderSession(session))}
           </section>
         ))}
       </div>

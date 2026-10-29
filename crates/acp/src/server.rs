@@ -473,6 +473,14 @@ impl AcpServerFactory {
     ) -> Self {
         let projections =
             Arc::new(ProjectionRegistry::new(Arc::clone(&kernel)));
+        if let Err(error) = kernel.install_event_sinks(Arc::new(
+            crate::projection::ProjectionSinks(Arc::downgrade(&projections)),
+        )) {
+            tracing::warn!(
+                "failed to install ACP Session event sinks: {}",
+                error
+            );
+        }
         Self {
             kernel,
             id_generator,
@@ -721,6 +729,7 @@ impl AcpServerFactory {
                                         "modifiedAtMs": session.modified_at_ms.to_string(),
                                         "parentSessionId": session.parent_session_id
                                             .map(|id| id.to_string()),
+                                        "ownership": session.ownership,
                                     }),
                                 )]))
                             })

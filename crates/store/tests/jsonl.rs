@@ -11,11 +11,233 @@ use store::{
 /// Deterministic clock used to assert exact persisted timestamp strings.
 struct FixedClock;
 
+/// Header queries return ownership and paths without decoding message bodies in either cwd.
+#[test]
+fn header_queries_ignore_bodies_and_respect_cwd() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let cwd = root.path().join("project");
+    let child = SessionId::try_from("child").expect("id");
+    let ownership = protocol::SessionOwnership::Background {
+        session_id: SessionId::try_from("owner").expect("owner"),
+        name: "reader".into(),
+    };
+    let store = factory
+        .create_owned(store::OwnedSessionCreateOptions {
+            create: SessionCreateOptions {
+                session_id: child.clone(),
+                cwd: cwd.clone(),
+                parent_session_id: None,
+            },
+            ownership: ownership.clone(),
+        })
+        .expect("child");
+    let child_path = store.path().to_path_buf();
+    drop(store);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&child_path)
+        .expect("append")
+        .write_all(&[0xff])
+        .expect("opaque body");
+    let other = factory
+        .create(SessionCreateOptions {
+            session_id: SessionId::try_from("other").expect("id"),
+            cwd: root.path().join("other-project"),
+            parent_session_id: None,
+        })
+        .expect("other");
+    let other_path = other.path().to_path_buf();
+    drop(other);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(other_path)
+        .expect("append")
+        .write_all(&[0xff])
+        .expect("opaque body");
+    let headers = factory.headers(Some(&cwd)).expect("headers");
+    assert_eq!(headers.len(), 1);
+    let header = factory.header(&child).expect("lookup").expect("child");
+    assert_eq!(header.path, child_path);
+    assert_eq!(header.cwd, cwd);
+    assert_eq!(header.ownership, Some(ownership));
+    assert!(
+        factory
+            .header(&SessionId::try_from("absent").expect("id"))
+            .expect("missing")
+            .is_none()
+    );
+}
+
+/// Deletion identifies files by header without reading unrelated or target transcript bodies.
+#[test]
+fn deleting_session_ignores_opaque_history_in_other_workspaces() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let target = SessionId::try_from("target").expect("id");
+    let other = SessionId::try_from("other").expect("id");
+    for (id, cwd) in [
+        (target.clone(), root.path().join("one")),
+        (other.clone(), root.path().join("two")),
+    ] {
+        let store = factory
+            .create(SessionCreateOptions {
+                session_id: id,
+                cwd,
+                parent_session_id: None,
+            })
+            .expect("store");
+        let path = store.path().to_path_buf();
+        drop(store);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("append")
+            .write_all(&[0xff])
+            .expect("opaque body");
+    }
+    factory.delete(&target).expect("delete target");
+    assert!(!factory.exists(&target).expect("target absent"));
+    assert!(factory.exists(&other).expect("other preserved"));
+}
+
+/// Header identity remains authoritative for imported filenames and duplicate stored copies.
+#[test]
+fn deleting_session_finds_renamed_copies_by_header() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let id = SessionId::try_from("imported").expect("id");
+    let first = factory
+        .create(SessionCreateOptions {
+            session_id: id.clone(),
+            cwd: root.path().join("one"),
+            parent_session_id: None,
+        })
+        .expect("first");
+    let original = first.path().to_path_buf();
+    drop(first);
+    let renamed = original.with_file_name("imported-transcript.jsonl");
+    fs::rename(original, &renamed).expect("rename");
+    assert_eq!(
+        factory.header(&id).expect("lookup").expect("header").path,
+        renamed
+    );
+    let second = factory
+        .create(SessionCreateOptions {
+            session_id: id.clone(),
+            cwd: root.path().join("two"),
+            parent_session_id: None,
+        })
+        .expect("copy");
+    let generated = second.path().to_path_buf();
+    drop(second);
+    factory.delete(&id).expect("delete copies");
+    assert!(!renamed.exists());
+    assert!(!generated.exists());
+}
+
+/// Existence checks inspect only identity headers, never the transcript body.
+#[test]
+fn existence_lookup_does_not_read_transcript_body() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let id = SessionId::try_from("header-only").expect("id");
+    let store = factory
+        .create(SessionCreateOptions {
+            session_id: id.clone(),
+            cwd: root.path().into(),
+            parent_session_id: None,
+        })
+        .expect("create");
+    let path = store.path().to_path_buf();
+    drop(store);
+    // Invalid body bytes make a full-file UTF-8 read fail even though the header is valid.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("append")
+        .write_all(&[0xff])
+        .expect("body");
+    assert!(factory.exists(&id).expect("header lookup"));
+    assert!(
+        !factory
+            .exists(&SessionId::try_from("absent").expect("id"))
+            .expect("missing")
+    );
+}
+
+/// A matching filename cannot substitute for a valid header with the requested identity.
+#[test]
+fn existence_lookup_validates_candidate_header() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let id = SessionId::try_from("candidate").expect("id");
+    let store = factory
+        .create(SessionCreateOptions {
+            session_id: id.clone(),
+            cwd: root.path().into(),
+            parent_session_id: None,
+        })
+        .expect("create");
+    let path = store.path().to_path_buf();
+    drop(store);
+    for header in [
+        serde_json::json!({"kind":"header","version":4,"id":"another","createdAt":"1","cwd":root.path()}),
+        serde_json::json!({"kind":"header","version":3,"id":"candidate","createdAt":"1","cwd":root.path()}),
+        serde_json::json!({}),
+    ] {
+        fs::write(&path, format!("{header}\n")).expect("header");
+        assert!(!factory.exists(&id).expect("invalid header"));
+    }
+}
+
 impl Clock for FixedClock {
     /// Returns a timestamp beyond JavaScript's safe integer limit.
     fn now(&self) -> TimestampMs {
         TimestampMs::from(9_007_199_254_740_993_u64)
     }
+}
+
+/// Owned headers preserve their edge through listing and remain readable after reopening.
+#[test]
+fn owned_header_round_trips_through_list() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let ownership = protocol::SessionOwnership::Tool {
+        session_id: SessionId::try_from("owner").expect("owner id"),
+        tool_call_id: protocol::ToolCallId::try_from("call-1")
+            .expect("call id"),
+    };
+    let store = factory
+        .create_owned(store::OwnedSessionCreateOptions {
+            create: SessionCreateOptions {
+                session_id: SessionId::try_from("child").expect("child id"),
+                cwd: root.path().into(),
+                parent_session_id: None,
+            },
+            ownership: ownership.clone(),
+        })
+        .expect("owned store");
+    let content = fs::read_to_string(store.path()).expect("read header");
+    let header: serde_json::Value =
+        serde_json::from_str(content.trim()).expect("header JSON");
+    assert_eq!(
+        header["ownership"],
+        serde_json::json!({"kind":"tool", "sessionId":"owner", "toolCallId":"call-1"})
+    );
+    assert_eq!(
+        factory
+            .list(Some(root.path()))
+            .expect("list")
+            .first()
+            .expect("child")
+            .ownership,
+        Some(ownership)
+    );
+    assert_eq!(
+        factory.open(store.path()).expect("reopen").session_id(),
+        store.session_id()
+    );
 }
 
 /// Creating a session writes only a v4 header inside its cwd-encoded directory.
@@ -41,6 +263,16 @@ fn create_session_writes_v4_header_without_global_index() {
     assert_eq!(header["id"], "session-1");
     assert_eq!(header["createdAt"], "9007199254740993");
     assert_eq!(header["cwd"], "/home/user/project");
+    assert!(header.get("ownership").is_none());
+    assert_eq!(
+        factory
+            .list(None)
+            .expect("list")
+            .first()
+            .expect("plain session")
+            .ownership,
+        None
+    );
     assert!(
         store
             .path()

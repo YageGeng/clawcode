@@ -20,7 +20,18 @@ impl Kernel {
         kind: QueueKind,
         input: impl Into<protocol::RunInput>,
     ) -> Result<QueuedMessage, KernelError> {
-        let input = input.into();
+        self.queue_message_with_receipt(session_id, kind, input.into(), None)
+            .await
+    }
+
+    /// Attaches delegated input's receipt before publishing its durable queue item.
+    pub(super) async fn queue_message_with_receipt(
+        &self,
+        session_id: &SessionId,
+        kind: QueueKind,
+        input: protocol::RunInput,
+        receipt: Option<Arc<super::submit::SubmissionReceipt>>,
+    ) -> Result<QueuedMessage, KernelError> {
         tracing::debug!(
             "started Queue enqueue {:?} for session {}",
             kind,
@@ -122,13 +133,14 @@ impl Kernel {
                         content,
                     })
                     .build();
-                let item = PendingQueueItem::new(
+                let mut item = PendingQueueItem::new(
                     queued.clone(),
                     EntryId::try_from(self.id_generator.next(IdKind::Entry))
                         .map_err(|error| {
                             KernelError::Protocol(error.to_string())
                         })?,
                 );
+                item.receipt = receipt;
                 let record_id =
                     RecordId::try_from(self.id_generator.next(IdKind::Record))
                         .map_err(|error| {
@@ -279,7 +291,7 @@ impl Session {
     }
 
     /// Persists and syncs one removal before deleting its in-memory item.
-    fn remove_pending(
+    pub(super) fn remove_pending(
         &self,
         record: NewRecord,
         queue_id: &QueueId,
@@ -312,21 +324,26 @@ impl Session {
     ) -> Result<(), KernelError> {
         self.transcript.append_context_message(entry_id, message)?;
         self.transcript.append_record(record)?;
-        self.execution.remove_pending(queue_id)
+        self.execution.consume_pending(queue_id)
     }
 }
 
 /// One queued message plus the entry identifier reserved before persistence.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(super) struct PendingQueueItem {
     pub(super) queued: QueuedMessage,
     pub(super) entry_id: EntryId,
+    pub(super) receipt: Option<Arc<super::submit::SubmissionReceipt>>,
 }
 
 impl PendingQueueItem {
     /// Creates an in-memory queue item after all public identifiers are validated.
     pub(super) fn new(queued: QueuedMessage, entry_id: EntryId) -> Self {
-        Self { queued, entry_id }
+        Self {
+            queued,
+            entry_id,
+            receipt: None,
+        }
     }
 
     /// Encodes the redundant pi queue fields used for recovery validation.

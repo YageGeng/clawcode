@@ -10,10 +10,11 @@ export type McpServerCardProps = Readonly<{
   server: McpServerStatus;
   snapshot: McpSessionSnapshot;
   controller: WorkspaceController;
+  readOnly?: boolean;
 }>;
 
 /** Renders one negotiated Server status, actions, and catalog projection. */
-export function McpServerCard({ server, snapshot, controller }: McpServerCardProps) {
+export function McpServerCard({ server, snapshot, controller, readOnly = false }: McpServerCardProps) {
   const [reconnecting, setReconnecting] = useState(false);
   const [error, setError] = useState<string>();
   // A Ready label without a negotiated revision is not evidence of a completed handshake.
@@ -52,8 +53,8 @@ export function McpServerCard({ server, snapshot, controller }: McpServerCardPro
       <p className="mcp-card__revision">Catalog revisions: {server.revisions.tools}/{server.revisions.prompts}/{server.revisions.resources}/{server.revisions.resourceTemplates}</p>
       {server.failure === undefined ? null : <div className="mcp-card__error">{server.failure.stage}: {server.failure.message}</div>}
       {error === undefined ? null : <div className="mcp-card__error">{error}</div>}
-      <McpOAuthAction controller={controller} server={server} />
-      {server.state === "disabled" ? null : (
+      {readOnly ? null : <McpOAuthAction controller={controller} server={server} />}
+      {readOnly || server.state === "disabled" ? null : (
         <button disabled={reconnecting} type="button" onClick={() => void reconnect()}>
           <RotateCw size={13} /> {reconnecting ? "Reconnecting…" : "Reconnect"}
         </button>

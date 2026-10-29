@@ -2889,3 +2889,17 @@
     animation: none !important;
   }
 }
+
+/* Keep attached child history bounded without changing the primary transcript layout. */
+.subagent-panel { border: 1px solid var(--border-subtle); border-radius: 8px; margin-block: 8px; overflow: hidden; }
+.subagent-panel > header, .background-subagents > div { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+.subagent-panel > header { justify-content: space-between; }
+.conversation-workspace--compact { display: block; height: auto; min-height: 0; }
+.conversation-workspace--compact > .transcript { max-height: 420px; padding: 12px; overflow: auto; }
+.conversation-workspace--compact .message { font-size: 0.9em; }
+.background-subagents { border-bottom: 1px solid var(--border-subtle); padding: 8px 12px; }
+.background-subagents > div > span:first-child { flex: 1; }
+.background-subagents > div > span:nth-child(2) { color: var(--text-secondary); }
+.message--subagent-report { border-left: 3px solid var(--accent); padding-left: 12px; }
+.session-children { padding-left: 14px; border-left: 1px solid var(--border-subtle); margin-left: 10px; }
+.session-children > summary { cursor: pointer; padding: 6px; font-size: 12px; color: var(--text-secondary); }

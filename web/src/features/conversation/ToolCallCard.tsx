@@ -1,8 +1,10 @@
 import { Ban, Check, ChevronDown, CircleAlert, LoaderCircle, ScanSearch, Wrench } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 
 import type { ToolCallEntity } from "../../domain/model";
 import { CodeBlock, JsonBlock, MarkdownContent } from "./MarkdownContent";
+import type { WorkspaceController } from "../../workspace/controller";
+import { SubagentPanel } from "./SubagentPanel";
 
 /** Parses one JSON object or array string once while tolerating arbitrary text. */
 function parseJsonLike(text: string): Readonly<{ value: unknown }> | undefined {
@@ -19,6 +21,7 @@ export type ToolCallCardProps = Readonly<{
   tool: ToolCallEntity;
   inspecting?: boolean;
   onInspect?: (tool: ToolCallEntity) => void;
+  controller?: WorkspaceController;
 }>;
 
 /** Renders ACP text as Markdown while preserving image, diff, and structured JSON output. */
@@ -63,10 +66,17 @@ function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "ra
 }
 
 /** Renders one ACP tool lifecycle with product-specific blocked refinement. */
-export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = false, onInspect }: ToolCallCardProps) {
+export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = false, onInspect, controller }: ToolCallCardProps) {
   // Bash cards first mount from the in-progress ACP update, so reveal streamed
   // output immediately while preserving the user's later expand/collapse choice.
-  const [open, setOpen] = useState(tool.title === "bash" && tool.status === "in_progress");
+  const childId = tool.subagentSessionId;
+  const phase = childId === undefined ? "ordinary" : `${childId}:${tool.status}`;
+  const [manual, setManual] = useState<Readonly<{ phase: string; open: boolean }>>();
+  const open = manual?.phase === phase ? manual.open : (childId !== undefined || tool.title === "bash") && tool.status === "in_progress";
+  useEffect(() => {
+    if (childId === undefined || controller === undefined) return;
+    void controller.ensureSessionListed(childId).catch(() => {});
+  }, [childId, controller]);
   const statusLabel = tool.status === "completed" ? "完成" : tool.status === "blocked" ? "已阻止" : tool.status === "failed" ? "失败" : tool.status === "in_progress" ? "执行中" : "等待中";
   const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);
@@ -76,7 +86,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = fals
         // Mount large tool payloads only on demand; collapsed tool cards are
         // common during replay and must not parse hidden Markdown or JSON.
         event.preventDefault();
-        setOpen((current) => !current);
+        setManual({ phase, open: !open });
       }}>
         <span className="tool-card__icon">{icon}</span>
         <span className="tool-card__title">{tool.title}</span>
@@ -84,6 +94,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = fals
         <ChevronDown className="tool-card__chevron" size={14} aria-hidden="true" />
       </summary>
       {open ? <div className="tool-card__details">
+        {childId === undefined || controller === undefined ? null : <SubagentPanel sessionId={childId} controller={controller} />}
         {onInspect === undefined ? null : <button className="tool-card__inspect" type="button" aria-label="在 Context Lens 中检查工具调用" aria-pressed={inspecting} onClick={() => onInspect(tool)}><ScanSearch size={13} aria-hidden="true" />Context Lens</button>}
         <div className="tool-card__lifecycle" aria-label="工具生命周期">
           <span><i data-phase="start" />Start{tool.startedAtMs === undefined ? " · 等待事件" : ` · ${tool.startedAtMs}`}</span>

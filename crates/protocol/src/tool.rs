@@ -181,6 +181,11 @@ pub struct TruncationDetails {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultDetails {
+    /// Session delegated by a foreground or background subagent call.
+    Subagent {
+        /// Stable child Session used for live projection and replay navigation.
+        session_id: crate::SessionId,
+    },
     /// Diagnostics produced by a truncated file read.
     Read {
         /// Applied truncation and continuation measurements.

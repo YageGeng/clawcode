@@ -11,6 +11,7 @@ pub use model::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
 pub use protocol::{PendingMessages, QueueKind, QueuedMessage};
 pub use provider::{ProviderModel, ProviderModelFactory};
 pub use runtime::{
-    ContextUsageEstimate, Kernel, KernelError, KernelFactory, RetryClassifier,
+    AnswerOutcome, ContextUsageEstimate, Kernel, KernelError, KernelFactory,
+    RetryClassifier, SubmissionAnswer, SubmitRequest, WhenBusy,
 };
-pub use sink::{ChannelEventSink, EventSink, SinkError};
+pub use sink::{ChannelEventSink, EventSink, SessionEventSinks, SinkError};

@@ -272,6 +272,7 @@ impl ExtensionHost for SessionExtensionHost {
                     .map_err(|error| {
                         ExtensionHostError::Operation(error.to_string())
                     })?,
+                    None,
                 )
                 .await
                 .map_err(|error| {
@@ -603,13 +604,12 @@ impl ExtensionHost for SessionExtensionHost {
         if previous_model == *model.profile() {
             return Ok(previous_model);
         }
-        self.persist_setting(
-            EntryKind::ModelChange,
-            serde_json::json!({
-                "provider": provider_id,
-                "modelId": model_id,
-            }),
-        )?;
+        let (kind, payload) = (&super::super::settings::SettingChange::Model {
+            provider: provider_id.to_string(),
+            model_id: model_id.to_string(),
+        })
+            .into();
+        self.persist_setting(kind, payload)?;
         self.session
             .model
             .replace_model(Arc::clone(&model))
@@ -665,10 +665,10 @@ impl ExtensionHost for SessionExtensionHost {
         if previous_level == level {
             return Ok(level);
         }
-        self.persist_setting(
-            EntryKind::ThinkingLevelChange,
-            serde_json::json!({ "thinkingLevel": level }),
-        )?;
+        let (kind, payload) =
+            (&super::super::settings::SettingChange::ThinkingLevel(level))
+                .into();
+        self.persist_setting(kind, payload)?;
         self.session
             .model
             .replace_thinking_level(level)

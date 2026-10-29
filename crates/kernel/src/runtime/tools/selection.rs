@@ -64,6 +64,17 @@ pub(in crate::runtime) struct ToolSelectionUpdate<'a> {
 }
 
 impl<'a> ToolSelectionUpdate<'a> {
+    /// Persists an inherited policy including disabled tools not yet registered.
+    pub(in crate::runtime) fn adopt(
+        &self,
+        selection: ToolSelection,
+    ) -> Result<(), KernelError> {
+        self.tools.update(|next| {
+            next.selection = selection;
+            self.persist(next)
+        })
+    }
+
     /// Binds a synchronous selection operation without acquiring the Session Run gate.
     pub(in crate::runtime) fn new(
         tools: &'a SessionToolState,

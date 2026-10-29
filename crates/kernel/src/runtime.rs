@@ -6,13 +6,17 @@ mod input;
 mod lifecycle;
 mod mcp;
 mod model_state;
+mod ownership;
 mod prompt;
 mod queue;
 mod resources;
 mod retry;
 mod run;
 mod session;
+mod settings;
 mod settlement;
+mod subagent;
+mod submit;
 mod tools;
 mod transcript;
 mod tree;
@@ -75,6 +79,7 @@ use queue::{PendingQueue, PendingQueueItem, QueueCancellationReason};
 pub use retry::RetryClassifier;
 use retry::RetryState;
 use settlement::{RunCompletion, RunSettlement};
+pub use submit::{AnswerOutcome, SubmissionAnswer, SubmitRequest, WhenBusy};
 use tools::{SessionToolState, ToolBatch, ToolBatchResult};
 use transcript::{
     SessionTranscript, TranscriptNavigationCommit, TranscriptNavigationSnapshot,
@@ -83,6 +88,15 @@ use transcript::{
 /// Errors surfaced by kernel construction, persistence, extensions, and Turns.
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
+    /// Shared MCP connections can only be managed from their owner Session.
+    #[error("MCP connections for session {0} are managed by its owner session")]
+    SharedMcpManagement(SessionId),
+    /// Owned creation requires its owner to be an initialized live Session.
+    #[error("owner session is unavailable: {0}")]
+    OwnerUnavailable(SessionId),
+    /// Event routing is installed once so concurrent runs share one projection.
+    #[error("session event sinks are already installed")]
+    EventSinksInstalled,
     /// Model construction or streaming failed.
     #[error(transparent)]
     Model(#[from] ModelError),
@@ -225,7 +239,7 @@ impl KernelFactory {
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
-            .pending_sessions(Arc::new(Mutex::new(HashSet::new())))
+            .pending_sessions(Arc::new(Mutex::new(HashMap::new())))
             .shutdown(CancellationToken::new())
             .build())
     }
@@ -234,6 +248,8 @@ impl KernelFactory {
 /// Session-owning agent runtime that serializes runs per session.
 #[derive(Clone, typed_builder::TypedBuilder)]
 pub struct Kernel {
+    #[builder(default)]
+    event_sinks: Arc<OnceLock<Arc<dyn crate::SessionEventSinks>>>,
     models: Arc<ModelCatalog>,
     static_extensions: Arc<protocol::StaticExtensionRegistration>,
     tools: Arc<ToolRegistry>,
@@ -251,7 +267,8 @@ pub struct Kernel {
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
-    pending_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    pending_sessions:
+        Arc<Mutex<HashMap<SessionId, tokio::sync::watch::Sender<()>>>>,
     shutdown: CancellationToken,
 }
 
@@ -279,8 +296,10 @@ impl Kernel {
             sink,
             protocol::InputSource::Rpc,
             trace_id,
+            None,
         )
         .await
+        .map(|(result, _answer)| result)
     }
 
     /// Waits until an extension or the embedding application requests shutdown.
@@ -338,6 +357,7 @@ impl Kernel {
         request: protocol::McpReconnectRequest,
     ) -> Result<McpSessionSnapshot, KernelError> {
         let session = self.session(&request.session_id)?;
+        session.mcp.ensure_owned(&request.session_id)?;
         let mcp = session.mcp.as_ref().ok_or_else(|| {
             ::mcp::McpError::ServerNotFound(request.server_id.clone())
         })?;
@@ -351,6 +371,7 @@ impl Kernel {
         request: protocol::McpAuthorizationContinueRequest,
     ) -> Result<McpSessionSnapshot, KernelError> {
         let session = self.session(&request.session_id)?;
+        session.mcp.ensure_owned(&request.session_id)?;
         let server_id = request.server_id.clone();
         let mcp = session
             .mcp
@@ -470,6 +491,12 @@ impl From<serde_json::Error> for KernelError {
 
 #[derive(typed_builder::TypedBuilder)]
 struct Session {
+    #[builder(default)]
+    owned_creation: tokio::sync::RwLock<()>,
+    #[builder(default)]
+    background: Arc<subagent::SessionBackgroundWork>,
+    #[builder(default)]
+    ownership: Option<protocol::SessionOwnership>,
     cwd: PathBuf,
     transcript: Arc<SessionTranscript>,
     mcp: SessionMcpRuntime,

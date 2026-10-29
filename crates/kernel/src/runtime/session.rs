@@ -3,9 +3,10 @@ use super::*;
 mod replay;
 
 /// Releases one exclusively reserved Session identifier when its operation exits.
-struct SessionIdReservation {
+pub(super) struct SessionIdReservation {
     session_id: SessionId,
-    pending_sessions: Arc<Mutex<HashSet<SessionId>>>,
+    pending_sessions:
+        Arc<Mutex<HashMap<SessionId, tokio::sync::watch::Sender<()>>>>,
 }
 
 impl Drop for SessionIdReservation {
@@ -38,55 +39,24 @@ impl RestoredSessionSettings {
             return Ok(settings);
         };
         for entry in store.branch(leaf)? {
-            match entry.kind {
-                EntryKind::ModelChange => {
-                    let provider_id = entry
-                        .payload
-                        .get("provider")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            KernelError::Protocol(format!(
-                                "model change {} has no provider",
-                                entry.id
-                            ))
-                        })?;
-                    let model_id = entry
-                        .payload
-                        .get("modelId")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            KernelError::Protocol(format!(
-                                "model change {} has no modelId",
-                                entry.id
-                            ))
-                        })?;
-                    settings.model = models
-                        .resolve(provider_id, model_id)
-                        .ok_or_else(|| {
-                            ModelError::Unavailable(format!(
-                                "persisted model is not configured: {provider_id}/{model_id}"
-                            ))
-                        })?;
+            if !matches!(
+                entry.kind,
+                EntryKind::ModelChange | EntryKind::ThinkingLevelChange
+            ) {
+                continue;
+            }
+            match super::settings::SettingChange::try_from(&entry)? {
+                super::settings::SettingChange::Model {
+                    provider,
+                    model_id,
+                } => {
+                    settings.model = models.resolve(&provider, &model_id).ok_or_else(|| {
+                        ModelError::Unavailable(format!("persisted model is not configured: {provider}/{model_id}"))
+                    })?;
                 }
-                EntryKind::ThinkingLevelChange => {
-                    settings.thinking_level = serde_json::from_value(
-                        entry
-                            .payload
-                            .get("thinkingLevel")
-                            .cloned()
-                            .ok_or_else(|| {
-                                KernelError::Protocol(format!(
-                                    "thinking change {} has no thinkingLevel",
-                                    entry.id
-                                ))
-                            })?,
-                    )?;
+                super::settings::SettingChange::ThinkingLevel(level) => {
+                    settings.thinking_level = level
                 }
-                EntryKind::ActiveToolsChange
-                | EntryKind::Message
-                | EntryKind::Compaction
-                | EntryKind::BranchSummary
-                | EntryKind::Custom => {}
             }
         }
         Ok(settings)
@@ -123,7 +93,9 @@ impl Kernel {
             let _reservation = self.reserve_session_build(&session_id)?;
             let store = self.store_factory.create(options)?;
             let path = store.path().to_path_buf();
-            let runtime = self.build_session(store, cwd).await?;
+            let runtime = self
+                .build_session(store, cwd, mcp::SessionMcpSource::Connect, None)
+                .await?;
             self.register_session(session_id.clone(), &runtime).await?;
             if let Err(error) = self
                 .start_extensions(&runtime, protocol::SessionStartReason::New)
@@ -177,6 +149,7 @@ impl Kernel {
                     .created_at_ms(metadata.created_at_ms)
                     .modified_at_ms(metadata.modified_at_ms)
                     .parent_session_id(metadata.parent_session_id)
+                    .ownership(metadata.ownership)
                     .name(metadata.name)
                     .build()
             })
@@ -193,12 +166,14 @@ impl Kernel {
             Err(KernelError::SessionNotFound(_)) => {
                 // Persisted Sessions are idle before their first Resume in this
                 // process, so runtime discovery must not require loading them.
-                if self
-                    .store_factory
-                    .list(None)?
-                    .iter()
-                    .any(|metadata| &metadata.id == session_id)
-                {
+                if self.store_factory.exists(session_id).map_err(|error| {
+                    tracing::warn!(
+                        "failed persisted Session lookup {}: {}",
+                        session_id,
+                        error
+                    );
+                    error
+                })? {
                     false
                 } else {
                     return Err(KernelError::SessionNotFound(
@@ -305,7 +280,14 @@ impl Kernel {
             // The hook stays outside the operation gate so Extension Host calls
             // can reenter safely. Acquiring afterward rejects a Resume when
             // Close won the lifecycle race while the hook was suspended.
-            let _operation_guard = existing.acquire_operation().await?;
+            // A live Run already owns the gate. Attaching its projection must not
+            // wait for the answer, especially when that answer needs an elicitation.
+            let _operation_guard = if existing.execution.active_run()?.is_some() {
+                existing.ensure_active()?;
+                None
+            } else {
+                Some(existing.acquire_operation().await?)
+            };
             existing.sync_store()?;
             tracing::info!("completed Session Resume {} using live runtime", session_id);
             return Ok(path);
@@ -313,13 +295,26 @@ impl Kernel {
         let _reservation = self.reserve_session_build(&session_id)?;
         let metadata = self
             .store_factory
-            .list(Some(&cwd))?
+            .headers(Some(&cwd))?
             .into_iter()
             .find(|metadata| metadata.id == session_id)
             .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
         let store = self.store_factory.open(&metadata.path)?;
         let path = store.path().to_path_buf();
-        let runtime = self.build_session(store, cwd).await?;
+        let owner = match &metadata.ownership {
+            Some(edge) => self.resume_owner(&session_id, edge.owner(), &cwd).await?,
+            None => None,
+        };
+        let _owner_creation = match &owner {
+            Some(owner) => {
+                let guard = owner.owned_creation.read().await;
+                owner.ensure_active()?;
+                Some(guard)
+            }
+            None => None,
+        };
+        let source = owner.as_ref().map_or(mcp::SessionMcpSource::Connect, |runtime| mcp::SessionMcpSource::Share(&runtime.mcp));
+        let runtime = self.build_session(store, cwd, source, metadata.ownership).await?;
         let context = self.extension_context(&runtime, None, None)?;
         let before = runtime
             .extensions
@@ -383,11 +378,23 @@ impl Kernel {
         tracing::info!("started Session close {}", session_id);
         let result: Result<(), KernelError> = async {
             let session = self.session(session_id)?;
-            session.execution.cancel()?;
-            let _run_guard = session.acquire_operation().await?;
+            session.background.shutdown.cancel();
+            tracing::info!("abandoned subagent reports for closing session {}", session_id);
+            let _run_guard = session.execution.acquire_close().await?;
+            let _creation_guard = session.owned_creation.write().await;
             // Transition before invoking hooks so reentrant host operations fail
             // immediately instead of waiting on the gate held by this shutdown.
             session.begin_closing()?;
+            let mut children_result = Ok(());
+            for child in self.live_children(session_id)? {
+                tracing::info!("started cascading close of session {} owned by {}", child, session_id);
+                let result = match Box::pin(self.close_session(&child)).await {
+                    Err(KernelError::SessionNotFound(_)) => Ok(()),
+                    result => result,
+                };
+                children_result = Self::preserve_primary_error(children_result, result, "close owned child");
+            }
+            children_result = Self::preserve_primary_error(children_result, session.background.join().await, "join owned reporters");
             let context = match self.extension_context(&session, None, None) {
                 Ok(context) => context,
                 Err(error) => {
@@ -414,7 +421,7 @@ impl Kernel {
                 .await;
             // Once MCP teardown starts the runtime cannot safely become active
             // again, so every finalization step runs even when an earlier one fails.
-            let mcp_result = session.mcp.shutdown().await;
+            let mcp_result = Self::preserve_primary_error(children_result, session.mcp.shutdown().await, "shut down owner MCP");
             let sync_result = session.sync_store();
             let lifecycle_result = session.finish_closing();
             session.extensions.runtime_ref().invalidate();
@@ -466,9 +473,21 @@ impl Kernel {
             // Reserve before closing so construction cannot claim the identifier
             // between runtime removal and persisted Store deletion.
             let _reservation = self.reserve_session_deletion(session_id)?;
+            let cwd = match self.session(session_id) {
+                Ok(session) => Some(session.cwd.clone()),
+                Err(KernelError::SessionNotFound(_)) => self.store_factory.header(session_id)?.map(|header| header.cwd),
+                Err(error) => return Err(error),
+            };
             match self.close_session(session_id).await {
                 Ok(()) | Err(KernelError::SessionNotFound(_)) => {}
                 Err(error) => return Err(error),
+            }
+            if let Some(cwd) = cwd {
+                for child in self.store_factory.headers(Some(&cwd))?.into_iter().filter(|item| item.ownership.as_ref().is_some_and(|edge| edge.owner() == session_id)) {
+                    tracing::info!("started cascading deletion of session {} owned by {}", child.id, session_id);
+                    Box::pin(self.delete_session(&child.id)).await?;
+                    tracing::info!("completed cascading deletion of session {} owned by {}", child.id, session_id);
+                }
             }
             self.store_factory.delete(session_id)?;
             Ok(())
@@ -581,7 +600,9 @@ impl Kernel {
             },
         )?;
         let path = store.path().to_path_buf();
-        let runtime = self.build_session(store, cwd).await?;
+        let runtime = self
+            .build_session(store, cwd, mcp::SessionMcpSource::Connect, None)
+            .await?;
         self.register_session(new_session_id.clone(), &runtime)
             .await?;
         if let Err(error) = self
@@ -626,7 +647,7 @@ impl Kernel {
     }
 
     /// Runs typed startup, resource, session, model, and thinking points for one runtime.
-    async fn start_extensions(
+    pub(super) async fn start_extensions(
         &self,
         session: &Arc<Session>,
         reason: protocol::SessionStartReason,
@@ -757,10 +778,12 @@ impl Kernel {
     }
 
     /// Builds session-scoped tools and reconstructs model history from the active main branch.
-    async fn build_session(
+    pub(super) async fn build_session(
         &self,
         store: Box<dyn SessionStore>,
         cwd: PathBuf,
+        mcp_source: mcp::SessionMcpSource<'_>,
+        ownership: Option<protocol::SessionOwnership>,
     ) -> Result<Arc<Session>, KernelError> {
         let modules = self.extension_factory.create_modules()?;
         let mut registrar = ExtensionRegistrar::new();
@@ -779,9 +802,23 @@ impl Kernel {
             }
         }
         let session_id = store.session_id().clone();
-        let (mcp, mcp_tools, mcp_host) = if let Some(factory) =
-            &self.mcp_factory
+        let lease = match mcp_source {
+            mcp::SessionMcpSource::Connect => mcp::McpLease::Owned,
+            mcp::SessionMcpSource::Share(_) => mcp::McpLease::Shared,
+        };
+        let (mcp, mcp_tools, mcp_host) = if let mcp::SessionMcpSource::Share(
+            owner,
+        ) = mcp_source
         {
+            match owner.state() {
+                Some(state) => (
+                    Some(Arc::clone(&state.session)),
+                    state.session.tool_registry()?,
+                    Some(Arc::clone(&state.host)),
+                ),
+                None => (None, ToolRegistry::default(), None),
+            }
+        } else if let Some(factory) = &self.mcp_factory {
             let host = Arc::new(mcp::SessionMcpHost::new(cwd.clone()));
             tracing::info!(
                 "started MCP Session creation for session {}",
@@ -832,7 +869,10 @@ impl Kernel {
         } else {
             (None, ToolRegistry::default(), None)
         };
-        let cleanup_mcp = mcp.as_ref().map(Arc::clone);
+        let cleanup_mcp = mcp
+            .as_ref()
+            .filter(|_| lease == mcp::McpLease::Owned)
+            .map(Arc::clone);
         let result: Result<Arc<Session>, KernelError> = async {
             let lane = LaneId::try_from("main")
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
@@ -913,9 +953,14 @@ impl Kernel {
                 .build();
             let runtime = Arc::new(
                 Session::builder()
+                    .ownership(ownership)
                     .cwd(cwd)
                     .transcript(transcript)
-                    .mcp(SessionMcpRuntime::new(mcp))
+                    .mcp(SessionMcpRuntime::new(
+                        mcp.zip(mcp_host.as_ref().map(Arc::clone)),
+                        session_id.clone(),
+                        lease,
+                    ))
                     .resources(OnceLock::new())
                     .extensions(extensions)
                     .tools(tools)
@@ -931,6 +976,7 @@ impl Kernel {
                 Arc::downgrade(&runtime),
                 Arc::clone(&self.id_generator),
             )))?;
+            super::subagent::register(&runtime, self)?;
             if let Some(host) = mcp_host
                 && let Err(error) = host.attach(&runtime)
             {
@@ -960,7 +1006,7 @@ impl Kernel {
     }
 
     /// Registers a constructed runtime or releases its unregistered resources on failure.
-    async fn register_session(
+    pub(super) async fn register_session(
         &self,
         session_id: SessionId,
         runtime: &Arc<Session>,
@@ -992,7 +1038,7 @@ impl Kernel {
     }
 
     /// Reserves one identifier across Store opening, runtime construction, and startup hooks.
-    fn reserve_session_build(
+    pub(super) fn reserve_session_build(
         &self,
         session_id: &SessionId,
     ) -> Result<SessionIdReservation, KernelError> {
@@ -1009,9 +1055,11 @@ impl Kernel {
             .pending_sessions
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?;
-        if !pending_sessions.insert(session_id.clone()) {
+        if pending_sessions.contains_key(session_id) {
             return Err(KernelError::DuplicateSession(session_id.clone()));
         }
+        pending_sessions
+            .insert(session_id.clone(), tokio::sync::watch::channel(()).0);
         Ok(SessionIdReservation {
             session_id: session_id.clone(),
             pending_sessions: Arc::clone(&self.pending_sessions),
@@ -1033,9 +1081,11 @@ impl Kernel {
             .pending_sessions
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?;
-        if !pending_sessions.insert(session_id.clone()) {
+        if pending_sessions.contains_key(session_id) {
             return Err(KernelError::DuplicateSession(session_id.clone()));
         }
+        pending_sessions
+            .insert(session_id.clone(), tokio::sync::watch::channel(()).0);
         Ok(SessionIdReservation {
             session_id: session_id.clone(),
             pending_sessions: Arc::clone(&self.pending_sessions),
@@ -1043,7 +1093,7 @@ impl Kernel {
     }
 
     /// Invalidates and shuts down a runtime that never entered the Session map.
-    async fn release_unregistered_session(
+    pub(super) async fn release_unregistered_session(
         runtime: &Arc<Session>,
     ) -> Result<(), KernelError> {
         runtime.extensions.runtime_ref().invalidate();
@@ -1071,7 +1121,7 @@ impl Kernel {
     }
 
     /// Removes a partially started runtime and optionally its new durable log.
-    async fn rollback_session_registration(
+    pub(super) async fn rollback_session_registration(
         &self,
         session_id: &SessionId,
         delete_persisted: bool,
@@ -1104,7 +1154,7 @@ impl Kernel {
     }
 
     /// Syncs startup writes or removes the partially started runtime on failure.
-    async fn checkpoint_started_session(
+    pub(super) async fn checkpoint_started_session(
         &self,
         session_id: &SessionId,
         runtime: &Arc<Session>,

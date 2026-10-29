@@ -144,7 +144,7 @@ impl Kernel {
     ) -> Result<CompactionResult, KernelError> {
         let session = self.session(session_id)?;
         let _run_guard = session.acquire_operation().await?;
-        let cancellation = session.execution.install_cancellation()?;
+        let cancellation = session.execution.install_cancellation(None)?;
         self.perform_compaction(
             CompactionExecution::builder()
                 .session_id(session_id)

@@ -11,6 +11,11 @@ import type {
 } from "../acp/protocol";
 import type { ImageContentBlock, ImageMimeType } from "../acp/protocol";
 
+export type SessionOwnership = Readonly<
+  { kind: "tool"; sessionId: SessionId; toolCallId: string }
+  | { kind: "background"; sessionId: SessionId; name: string }
+>;
+
 export type SessionSummary = Readonly<{
   sessionId: SessionId;
   cwd: string;
@@ -18,6 +23,7 @@ export type SessionSummary = Readonly<{
   createdAtMs?: TimestampMs;
   modifiedAtMs?: TimestampMs;
   parentSessionId?: SessionId;
+  ownership?: SessionOwnership;
 }>;
 
 export type EventOrder = Readonly<{
@@ -168,6 +174,7 @@ export type ToolCallEntity = Readonly<{
   status: "pending" | "in_progress" | "completed" | "failed" | "blocked";
   rawInput?: unknown;
   rawOutput?: unknown;
+  subagentSessionId?: SessionId;
   output?: ToolOutputInfo;
   content: readonly unknown[];
   startedAtMs?: TimestampMs;

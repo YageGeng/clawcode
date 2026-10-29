@@ -33,6 +33,45 @@ const SESSION_NEW_METHOD: &str = "session/new";
 const SESSION_LIST_METHOD: &str = "session/list";
 const SESSION_DELETE_METHOD: &str = "session/delete";
 
+/// Session listings expose ownership independently from fork ancestry.
+#[tokio::test]
+async fn session_list_reports_ownership() {
+    let state = tempfile::tempdir().expect("state");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let kernel = integration_kernel(state.path());
+    let owner = kernel
+        .create_generated_session(workspace.path().into())
+        .await
+        .expect("owner");
+    let child = kernel
+        .create_owned_session(
+            protocol::SessionOwnership::Tool {
+                session_id: owner.clone(),
+                tool_call_id: ToolCallId::try_from("call-1").expect("call"),
+            },
+            protocol::SessionTitle::try_from("child").expect("title"),
+        )
+        .await
+        .expect("child");
+    let listed = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(SESSION_LIST_METHOD, serde_json::json!({})),
+    )
+    .await
+    .expect("list");
+    let item = listed["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|s| s["sessionId"] == child.as_str())
+        .expect("child listed");
+    assert_eq!(
+        item["_meta"]["clawcode"]["ownership"],
+        serde_json::json!({"kind":"tool", "sessionId": owner.as_str(), "toolCallId":"call-1"})
+    );
+    kernel.close_session(&owner).await.expect("close");
+}
+
 /// Model factory that proves extension validation does not require inference.
 struct UnusedModelFactory;
 

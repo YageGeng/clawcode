@@ -200,6 +200,318 @@ impl ModelFactory for StaticModelFactory {
 /// Creates a Tool-only client that invokes Sampling through the supplied Host.
 struct SamplingConnector;
 
+/// Counts real factory connections while reusing the existing callback-capable client.
+#[derive(Default)]
+struct CountingConnector(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl McpConnector for CountingConnector {
+    /// Records connection ownership before delegating to the remote boundary fixture.
+    async fn connect(
+        &self,
+        server: &RuntimeMcpServer,
+        session_id: &SessionId,
+        host: Arc<dyn McpHost>,
+    ) -> Result<Arc<dyn McpClient>, McpError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        SamplingConnector.connect(server, session_id, host).await
+    }
+}
+
+/// Owns persistent storage and callback-capable MCP state for lifecycle tests.
+#[derive(typed_builder::TypedBuilder)]
+struct OwnedMcpFixture {
+    root: tempfile::TempDir,
+    kernel: kernel::Kernel,
+    connector: Arc<CountingConnector>,
+    owner: SessionId,
+}
+
+impl OwnedMcpFixture {
+    /// Builds a real Kernel and one MCP connection whose tool can elicit or sample.
+    async fn new(scripts: Vec<Vec<ModelStreamEvent>>) -> Self {
+        let root = tempfile::tempdir().expect("root");
+        let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(0)));
+        let model = Arc::new(ScriptedModel {
+            scripts: Mutex::new(scripts.into()),
+            requests: Mutex::new(Vec::new()),
+        });
+        let connector = Arc::new(CountingConnector::default());
+        let server = RuntimeMcpServer::builder()
+            .server_id(McpServerId::try_from("sampling").expect("id"))
+            .enabled(true)
+            .exposure(protocol::ToolExposure::Direct)
+            .protocol_policy(protocol::McpProtocolPolicy::Auto)
+            .startup_timeout(Duration::from_secs(2))
+            .request_timeout(Duration::from_secs(5))
+            .request_total_timeout(Duration::from_secs(10))
+            .transport(McpTransport::Stdio(Box::new(McpStdioTransport {
+                command: "unused".into(),
+                args: Vec::new(),
+                env: Default::default(),
+            })))
+            .build();
+        let kernel = KernelFactory::builder()
+            .model_factory(Arc::new(StaticModelFactory(model)))
+            .tool_factory(Arc::new(BuiltinToolFactory::new()))
+            .store_factory(Arc::new(JsonlStoreFactory::new(
+                root.path(),
+                Arc::clone(&clock),
+            )))
+            .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                root.path().join("config"),
+                Default::default(),
+            )))
+            .extension_factory(Arc::new(StaticExtensionFactory::default()))
+            .mcp_factory(Some(Arc::new(SessionMcpFactory::new(
+                vec![server],
+                Arc::clone(&connector) as Arc<dyn McpConnector>,
+            ))))
+            .clock(clock)
+            .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+            .build()
+            .build()
+            .expect("kernel");
+        let owner = SessionId::try_from("owner").expect("id");
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: owner.clone(),
+                cwd: root.path().into(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("owner");
+        Self::builder()
+            .root(root)
+            .kernel(kernel)
+            .connector(connector)
+            .owner(owner)
+            .build()
+    }
+
+    /// Creates a foreground child through the public ownership primitive.
+    async fn child(&self) -> SessionId {
+        self.kernel
+            .create_owned_session(
+                protocol::SessionOwnership::Tool {
+                    session_id: self.owner.clone(),
+                    tool_call_id: ToolCallId::try_from("call-1").expect("call"),
+                },
+                protocol::SessionTitle::try_from("child").expect("title"),
+            )
+            .await
+            .expect("child")
+    }
+
+    /// Reads the actual number of transport connections made by the factory.
+    fn connects(&self) -> usize {
+        self.connector.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Children reuse the owner's transport and cannot reconnect it independently.
+#[tokio::test]
+async fn owned_session_reuses_owner_mcp_connection() {
+    let test = OwnedMcpFixture::new(Vec::new()).await;
+    let child = test.child().await;
+    assert_eq!(test.connects(), 1);
+    assert!(
+        !test
+            .kernel
+            .mcp_status(&child)
+            .expect("catalog")
+            .catalog
+            .tools
+            .is_empty()
+    );
+    assert!(matches!(
+        test.kernel
+            .mcp_reconnect(protocol::McpReconnectRequest {
+                session_id: child,
+                server_id: McpServerId::try_from("sampling").expect("id")
+            })
+            .await,
+        Err(kernel::KernelError::SharedMcpManagement(_))
+    ));
+    test.kernel.close_session(&test.owner).await.expect("close");
+}
+
+/// A child callback must enter the child's pending table and its active event sink.
+#[tokio::test]
+async fn child_elicitation_routes_to_child_session() {
+    let test = OwnedMcpFixture::new(vec![
+        vec![
+            ModelStreamEvent::ToolCall(ToolCall {
+                tool_call_id: ToolCallId::try_from("elicit").expect("call"),
+                name: "mcp__sampling__sample".into(),
+                arguments: serde_json::json!({"elicit":true}),
+            }),
+            ScriptedModel::finished(StopReason::ToolUse),
+        ],
+        vec![ScriptedModel::finished(StopReason::EndTurn)],
+    ])
+    .await;
+    let child = test.child().await;
+    let kernel = test.kernel.clone();
+    let id = child.clone();
+    let run = tokio::spawn(async move {
+        kernel
+            .run(
+                RunRequest {
+                    session_id: id,
+                    input: "elicit".into(),
+                },
+                Arc::new(DiscardSink),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while test
+            .kernel
+            .mcp_elicitations(&child)
+            .expect("child")
+            .requests
+            .is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("child elicitation");
+    assert!(
+        test.kernel
+            .mcp_elicitations(&test.owner)
+            .expect("owner")
+            .requests
+            .is_empty()
+    );
+    test.kernel
+        .mcp_respond_elicitation(McpElicitationResponseRequest {
+            session_id: child,
+            request_id: "pending-elicit".into(),
+            result: McpElicitationResult {
+                action: McpElicitationAction::Accept,
+                content: Some(serde_json::json!({"value":"accepted"})),
+            },
+        })
+        .await
+        .expect("respond");
+    run.await.expect("join").expect("run");
+    test.kernel.close_session(&test.owner).await.expect("close");
+}
+
+/// Closing a shared child cannot close its owner's transport.
+#[tokio::test]
+async fn closing_child_keeps_owner_mcp_alive() {
+    let test = OwnedMcpFixture::new(vec![
+        vec![
+            ModelStreamEvent::ToolCall(ToolCall {
+                tool_call_id: ToolCallId::try_from("sample").expect("call"),
+                name: "mcp__sampling__sample".into(),
+                arguments: serde_json::json!({}),
+            }),
+            ScriptedModel::finished(StopReason::ToolUse),
+        ],
+        vec![
+            ModelStreamEvent::TextDelta("sampled".into()),
+            ScriptedModel::finished(StopReason::EndTurn),
+        ],
+        vec![ScriptedModel::finished(StopReason::EndTurn)],
+    ])
+    .await;
+    let child = test.child().await;
+    test.kernel
+        .close_session(&child)
+        .await
+        .expect("child close");
+    let result = test
+        .kernel
+        .run(
+            RunRequest {
+                session_id: test.owner.clone(),
+                input: "sample".into(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("owner run");
+    assert!(result.messages.iter().any(|m| matches!(
+        &m.content,
+        MessageContent::ToolResult {
+            is_error: false,
+            ..
+        }
+    )
+        && m.content.text_content().as_deref() == Some("sampled")));
+    test.kernel.close_session(&test.owner).await.expect("close");
+}
+
+/// Resuming a closed child first recreates its owner and then shares the new connection.
+#[tokio::test]
+async fn resuming_child_resumes_owner_first() {
+    let test = OwnedMcpFixture::new(Vec::new()).await;
+    let child = test.child().await;
+    test.kernel.close_session(&test.owner).await.expect("close");
+    assert!(matches!(
+        test.kernel.session_transcript(&child),
+        Err(kernel::KernelError::SessionNotFound(_))
+    ));
+    test.kernel
+        .resume_session(child.clone(), test.root.path().into())
+        .await
+        .expect("resume");
+    test.kernel
+        .session_transcript(&test.owner)
+        .expect("owner live");
+    assert_eq!(test.connects(), 2);
+    test.kernel.close_session(&test.owner).await.expect("close");
+}
+
+/// Missing owner files permit orphan recovery with a separately owned MCP lease.
+#[tokio::test]
+async fn resuming_orphan_child_connects_its_own_mcp() {
+    let test = OwnedMcpFixture::new(Vec::new()).await;
+    let child = test.child().await;
+    test.kernel.close_session(&test.owner).await.expect("close");
+    let factory = JsonlStoreFactory::new(
+        test.root.path(),
+        Arc::new(StepClock(Mutex::new(0))),
+    );
+    store::StoreFactory::delete(&factory, &test.owner)
+        .expect("remove only owner file");
+    let before = test.connects();
+    test.kernel
+        .resume_session(child.clone(), test.root.path().into())
+        .await
+        .expect("orphan resume");
+    assert_eq!(test.connects(), before + 1);
+    test.kernel
+        .close_session(&child)
+        .await
+        .expect("close orphan");
+}
+
+/// Deleting an owner removes both live and previously closed children's logs.
+#[tokio::test]
+async fn deleting_owner_deletes_child_store() {
+    let test = OwnedMcpFixture::new(Vec::new()).await;
+    let child = test.child().await;
+    test.kernel
+        .close_session(&child)
+        .await
+        .expect("close child");
+    test.kernel
+        .delete_session(&test.owner)
+        .await
+        .expect("delete");
+    assert!(
+        test.kernel
+            .list_sessions(Some(test.root.path()))
+            .expect("list")
+            .is_empty()
+    );
+}
+
 #[async_trait]
 impl McpConnector for SamplingConnector {
     /// Retains the production Session Host in one fake remote client.

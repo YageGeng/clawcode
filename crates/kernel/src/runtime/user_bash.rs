@@ -63,7 +63,7 @@ impl Kernel {
         sink: Arc<dyn EventSink>,
     ) -> Result<UserBashExecution, KernelError> {
         let _run_guard = session.acquire_operation().await?;
-        let cancellation = session.execution.install_cancellation()?;
+        let cancellation = session.execution.install_cancellation(None)?;
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let turn_id = TurnId::try_from(self.id_generator.next(IdKind::Turn))

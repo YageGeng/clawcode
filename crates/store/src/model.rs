@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use protocol::{
     EntryId, ExtensionEntryData, LaneId, RecordId, RunId, Sequence, SessionId,
-    TimestampMs,
+    SessionOwnership, TimestampMs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,15 @@ pub struct SessionCreateOptions {
     pub parent_session_id: Option<SessionId>,
 }
 
+/// Creation options for a Session owned by another Session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedSessionCreateOptions {
+    /// Ordinary new-session identity and working directory.
+    pub create: SessionCreateOptions,
+    /// Owner edge independent of the fork parent.
+    pub ownership: SessionOwnership,
+}
+
 /// Options for copying one selected branch into a new session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionForkOptions {
@@ -51,6 +60,32 @@ pub struct SessionForkOptions {
 
     /// Initial lane name created in the forked session.
     pub lane: LaneId,
+}
+
+/// Immutable identity and ownership read without scanning transcript or name facts.
+#[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
+pub struct SessionHeader {
+    /// Stable identifier recorded in the JSONL header.
+    pub id: SessionId,
+    /// Working directory recorded at creation.
+    pub cwd: PathBuf,
+    /// Owner edge independent of fork ancestry.
+    #[builder(default)]
+    pub ownership: Option<SessionOwnership>,
+    /// Backing JSONL path used to open or delete this Session.
+    pub path: PathBuf,
+}
+
+impl From<SessionMetadata> for SessionHeader {
+    /// Supports stores whose default header query delegates to existing metadata listing.
+    fn from(metadata: SessionMetadata) -> Self {
+        Self::builder()
+            .id(metadata.id)
+            .cwd(metadata.cwd)
+            .ownership(metadata.ownership)
+            .path(metadata.path)
+            .build()
+    }
 }
 
 /// Header and filesystem metadata returned without opening a session writer.
@@ -78,6 +113,9 @@ pub struct SessionMetadata {
     /// Latest global session name fact, when one remains set.
     #[builder(default)]
     pub name: Option<String>,
+    /// Owner edge recorded in the header, when this Session was delegated.
+    #[builder(default)]
+    pub ownership: Option<SessionOwnership>,
 }
 
 /// Pi v4 entry discriminants persisted in session JSONL.
@@ -239,6 +277,9 @@ pub struct SessionRecord {
 /// Persistence errors surfaced by store factories and session logs.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// The selected store does not implement an optional operation.
+    #[error("store operation is unsupported: {0}")]
+    Unsupported(&'static str),
     /// Filesystem operation failed.
     #[error("store I/O failed: {0}")]
     Io(#[from] std::io::Error),
@@ -274,6 +315,42 @@ pub enum StoreError {
 
 /// Factory interface used by kernel construction to acquire session stores.
 pub trait StoreFactory: Send + Sync {
+    /// Lists immutable identity and ownership without requiring transcript-derived names.
+    fn headers(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<SessionHeader>, StoreError> {
+        Ok(self
+            .list(cwd)?
+            .into_iter()
+            .map(SessionHeader::from)
+            .collect())
+    }
+
+    /// Locates one Session's immutable header and backing path.
+    fn header(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionHeader>, StoreError> {
+        Ok(self
+            .headers(None)?
+            .into_iter()
+            .find(|header| &header.id == session_id))
+    }
+
+    /// Checks Session identity without opening its transcript when the backend supports it.
+    fn exists(&self, session_id: &SessionId) -> Result<bool, StoreError> {
+        Ok(self.header(session_id)?.is_some())
+    }
+
+    /// Creates an owned Session when this store supports ownership headers.
+    fn create_owned(
+        &self,
+        _options: OwnedSessionCreateOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        Err(StoreError::Unsupported("create_owned"))
+    }
+
     /// Creates a new persisted session and its initial v4 header.
     fn create(
         &self,

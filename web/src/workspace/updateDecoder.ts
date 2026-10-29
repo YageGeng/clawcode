@@ -1,5 +1,5 @@
 import { AcpProtocol } from "../acp/protocol";
-import type { EntryId, ImageContentBlock, MessageId, RunId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
+import type { EntryId, ImageContentBlock, MessageId, RunId, SessionId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   AssistantDiagnostics,
@@ -165,6 +165,11 @@ export class SessionUpdateDecoder {
         status,
         ...(update.rawInput === undefined ? (previous?.rawInput === undefined ? {} : { rawInput: previous.rawInput }) : { rawInput: update.rawInput }),
         ...(rawOutput === undefined ? {} : { rawOutput }),
+        // Live results and persisted message replay wrap details differently;
+        // retain a discovered child even when a terminal cancellation has no details.
+        ...(details?.type === "subagent" && typeof details.session_id === "string"
+          ? { subagentSessionId: details.session_id as SessionId }
+          : previous?.subagentSessionId === undefined ? {} : { subagentSessionId: previous.subagentSessionId }),
         ...(output === undefined ? {} : { output }),
         // ACP v2 tool content follows the same omitted/clear/replace upsert contract as messages.
         content: !("content" in update) ? previous?.content ?? [] : Array.isArray(update.content) ? update.content : [],

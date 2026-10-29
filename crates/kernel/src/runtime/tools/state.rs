@@ -20,6 +20,11 @@ pub(in crate::runtime) struct SessionToolSnapshot {
 }
 
 impl SessionToolSnapshot {
+    /// Checks only the extension partition before installing an overridable Kernel tool.
+    pub(in crate::runtime) fn has_extension(&self, name: &str) -> bool {
+        self.extensions.tool(name).is_some()
+    }
+
     /// Applies the single visibility formula shared by model declarations and UI projections.
     pub(in crate::runtime) fn declares(
         &self,

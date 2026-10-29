@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use agent_client_protocol::schema::v2 as wire;
 use async_trait::async_trait;
@@ -454,6 +454,19 @@ pub(crate) struct ProjectionRegistry {
     sessions: Mutex<BTreeMap<SessionId, Arc<SessionProjection>>>,
 }
 
+/// Routes delegated and reporter runs into the same ACP recovery projection.
+pub(crate) struct ProjectionSinks(pub(crate) Weak<ProjectionRegistry>);
+
+impl kernel::SessionEventSinks for ProjectionSinks {
+    /// Resolves a connection-independent event sink for the target Session.
+    fn sink(&self, session_id: &SessionId) -> Arc<dyn EventSink> {
+        Arc::new(ProjectionSink {
+            session_id: session_id.clone(),
+            registry: self.0.clone(),
+        })
+    }
+}
+
 impl ProjectionRegistry {
     /// Creates an empty projection registry for one shared Kernel.
     pub(crate) fn new(kernel: Arc<Kernel>) -> Self {
@@ -470,7 +483,7 @@ impl ProjectionRegistry {
     ) -> Arc<dyn EventSink> {
         Arc::new(ProjectionSink {
             session_id,
-            registry: Arc::clone(self),
+            registry: Arc::downgrade(self),
         })
     }
 
@@ -608,24 +621,26 @@ impl ProjectionRegistry {
 /// Kernel event sink that journals and broadcasts ACP updates independently of transports.
 struct ProjectionSink {
     session_id: SessionId,
-    registry: Arc<ProjectionRegistry>,
+    registry: Weak<ProjectionRegistry>,
 }
 
 #[async_trait]
 impl EventSink for ProjectionSink {
     /// Maps one Kernel event once before retaining and broadcasting its ACP group.
     async fn emit(&self, event: AgentEvent) -> Result<(), SinkError> {
+        // The protocol host may disappear while the Kernel remains usable headlessly.
+        let Some(registry) = self.registry.upgrade() else {
+            return Ok(());
+        };
         let projection =
-            self.registry
-                .projection(&self.session_id)
-                .map_err(|error| {
-                    tracing::error!(
-                        "failed to resolve ACP projection for Session {}: {}",
-                        self.session_id,
-                        error
-                    );
-                    SinkError::Consumer(error.to_string())
-                })?;
+            registry.projection(&self.session_id).map_err(|error| {
+                tracing::error!(
+                    "failed to resolve ACP projection for Session {}: {}",
+                    self.session_id,
+                    error
+                );
+                SinkError::Consumer(error.to_string())
+            })?;
         let active_operation =
             projection.active_operation().map_err(|error| {
                 tracing::error!(
@@ -702,7 +717,7 @@ impl EventSink for ProjectionSink {
             _ => (active_operation.map(|(run_id, _kind)| run_id), None, None),
         };
         let baseline = if operation_phase == Some(OperationPhase::Start) {
-            self.registry
+            registry
                 .kernel
                 .session_replay(&self.session_id)
                 .map_err(|error| {
@@ -882,7 +897,7 @@ mod tests {
                 .provider_id("fixture".to_string())
                 .model_id("projection".to_string())
                 .display_name("Projection fixture".to_string())
-                .context_tokens(8_192)
+                .context_tokens(128_000)
                 .max_output_tokens(1_024)
                 .build(),
         });
@@ -1179,6 +1194,68 @@ mod tests {
         assert_eq!(group.run_id.as_ref().map(RunId::as_str), Some("run-1"));
         assert_eq!(group.operation_phase, Some(OperationPhase::Start));
         assert!(!group.updates.is_empty());
+    }
+
+    /// Kernel-initiated runs use the same live projection and recovery journal as ACP prompts.
+    #[tokio::test]
+    async fn kernel_initiated_runs_are_projected() {
+        let state = tempfile::tempdir().expect("state");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let kernel = projection_kernel(state.path());
+        let session = SessionId::try_from("internal-submit").expect("id");
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: session.clone(),
+                cwd: workspace.path().into(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("session");
+        let registry = Arc::new(ProjectionRegistry::new(Arc::clone(&kernel)));
+        kernel
+            .install_event_sinks(Arc::new(super::ProjectionSinks(
+                Arc::downgrade(&registry),
+            )))
+            .expect("install");
+        let mut receiver = registry.subscribe_live(&session).expect("live");
+        kernel
+            .submit(
+                kernel::SubmitRequest::builder()
+                    .session_id(session.clone())
+                    .content(vec![protocol::ContentBlock::Text {
+                        text: "internal input".into(),
+                    }])
+                    .when_busy(kernel::WhenBusy::FollowUp)
+                    .build(),
+            )
+            .await
+            .expect("submit");
+        let group = receiver.try_recv().expect("RunStart");
+        assert_eq!(group.operation_phase, Some(OperationPhase::Start));
+        assert!(
+            registry
+                .subscribe_from_start(&session)
+                .expect("retained journal")
+                .backlog
+                .len()
+                > 1
+        );
+    }
+
+    /// Installing event routing must not retain a registry through a Kernel reference cycle.
+    #[test]
+    fn event_sink_installation_does_not_retain_projection_registry() {
+        let state = tempfile::tempdir().expect("state");
+        let kernel = projection_kernel(state.path());
+        let registry = Arc::new(ProjectionRegistry::new(Arc::clone(&kernel)));
+        let weak = Arc::downgrade(&registry);
+        kernel
+            .install_event_sinks(Arc::new(super::ProjectionSinks(
+                Arc::downgrade(&registry),
+            )))
+            .expect("install");
+        drop(registry);
+        assert!(weak.upgrade().is_none());
     }
 
     /// Nested compaction events stay inside the active Agent Run recovery journal.

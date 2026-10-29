@@ -58,7 +58,13 @@ pub(super) struct RunSettlement<'a> {
 
 impl RunSettlement<'_> {
     /// Persists and publishes the complete terminal lifecycle in protocol order.
-    pub(super) async fn settle(self) -> Result<(), KernelError> {
+    pub(super) async fn settle(
+        self,
+    ) -> Result<Arc<super::SubmissionAnswer>, KernelError> {
+        let answer = Arc::new(super::SubmissionAnswer::from((
+            self.outcome,
+            self.messages.as_slice(),
+        )));
         self.kernel.record_operation(
             self.session,
             self.run_id,
@@ -129,6 +135,9 @@ impl RunSettlement<'_> {
         // Close the run with a final durability checkpoint so the terminal
         // hook's own writes survive a crash before the next operation.
         self.session.sync_store()?;
-        Ok(())
+        self.session
+            .execution
+            .settle_submissions(Arc::clone(&answer))?;
+        Ok(answer)
     }
 }

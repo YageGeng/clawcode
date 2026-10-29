@@ -127,7 +127,7 @@ impl Kernel {
             }
         };
         let cancellation =
-            execution.session.execution.install_cancellation()?;
+            execution.session.execution.install_cancellation(None)?;
         tracing::info!(
             "started Slash Command /{} for session {}, Run {}, Turn {}, trace {}",
             execution.invocation.name,

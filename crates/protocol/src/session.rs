@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentMessage, AgentOutcome, CompactionReason, CompactionResult,
-    ContentBlock, EntryId, LaneId, RunId, SessionId, TimestampMs, TurnId,
-    TurnRecord,
+    ContentBlock, EntryId, LaneId, RunId, SessionId, TimestampMs, ToolCallId,
+    TurnId, TurnRecord,
 };
 
 /// Ordered prompt input plus whether text-only command dispatch is safe.
@@ -145,6 +145,41 @@ pub enum SessionReplayItem {
     },
 }
 
+/// Owner edge of a delegated Session, independent of its fork history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SessionOwnership {
+    /// Foreground child whose work is held by one parent tool invocation.
+    Tool {
+        /// Session that owns the child.
+        session_id: SessionId,
+        /// Invocation that created the child.
+        tool_call_id: ToolCallId,
+    },
+    /// Persistent named child with an independent cancellation boundary.
+    Background {
+        /// Session that owns the child.
+        session_id: SessionId,
+        /// Name unique among this owner's background children.
+        name: String,
+    },
+}
+
+impl SessionOwnership {
+    /// Returns the owning Session for either ownership edge.
+    #[must_use]
+    pub const fn owner(&self) -> &SessionId {
+        match self {
+            Self::Tool { session_id, .. }
+            | Self::Background { session_id, .. } => session_id,
+        }
+    }
+}
+
 /// Persisted session metadata exposed without leaking a storage implementation.
 #[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
 pub struct SessionSummary {
@@ -162,6 +197,9 @@ pub struct SessionSummary {
     /// Latest persisted session name fact.
     #[builder(default)]
     pub name: Option<String>,
+    /// Owner edge recorded at creation, independent of fork ancestry.
+    #[builder(default)]
+    pub ownership: Option<SessionOwnership>,
 }
 
 /// One persisted entry exposed for tree rendering and navigation.

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use protocol::AgentEvent;
+use protocol::{AgentEvent, SessionId};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Failures returned by a live protocol event consumer.
@@ -18,6 +19,23 @@ pub enum SinkError {
 pub trait EventSink: Send + Sync {
     /// Publishes one fully correlated event without changing kernel state.
     async fn emit(&self, event: AgentEvent) -> Result<(), SinkError>;
+}
+
+/// Routes Kernel-initiated runs to their Session's live projection.
+pub trait SessionEventSinks: Send + Sync {
+    /// Returns the event destination for one Session.
+    fn sink(&self, session_id: &SessionId) -> Arc<dyn EventSink>;
+}
+
+/// Accepts internal events when no protocol adapter is installed.
+pub(crate) struct DiscardEvents;
+
+#[async_trait]
+impl EventSink for DiscardEvents {
+    /// Keeps headless Kernel runs independent of an external subscriber.
+    async fn emit(&self, _event: AgentEvent) -> Result<(), SinkError> {
+        Ok(())
+    }
 }
 
 /// Event sink backed by a bounded Tokio channel.

@@ -31,8 +31,12 @@ pub(super) struct ActiveRunContext {
 /// Owns serialized operation, cancellation, queue, and event sequencing state.
 #[derive(typed_builder::TypedBuilder)]
 pub(super) struct SessionExecution {
+    #[builder(default)]
+    submissions: Mutex<Vec<Arc<super::submit::SubmissionReceipt>>>,
     lifecycle: RwLock<SessionLifecycle>,
     gate: AsyncMutex<()>,
+    #[builder(default)]
+    close_requested: Mutex<CancellationToken>,
     #[builder(default)]
     active_run: Mutex<Option<ActiveRunContext>>,
     idle_notify: Notify,
@@ -47,7 +51,16 @@ impl SessionExecution {
         &self,
     ) -> Result<MutexGuard<'_, ()>, KernelError> {
         self.ensure_active()?;
-        let guard = self.gate.lock().await;
+        let closing = self
+            .close_requested
+            .lock()
+            .map_err(|_lock_error| KernelError::Poisoned)?
+            .clone();
+        let guard = tokio::select! {
+            biased;
+            () = closing.cancelled() => return Err(KernelError::SessionClosing),
+            guard = self.gate.lock() => guard,
+        };
         // Recheck after waiting because shutdown may have started while the
         // caller was queued behind an operation that already held the gate.
         self.ensure_active()?;
@@ -59,6 +72,14 @@ impl SessionExecution {
         &self,
     ) -> Result<Option<MutexGuard<'_, ()>>, KernelError> {
         self.ensure_active()?;
+        if self
+            .close_requested
+            .lock()
+            .map_err(|_lock_error| KernelError::Poisoned)?
+            .is_cancelled()
+        {
+            return Err(KernelError::SessionClosing);
+        }
         let Ok(guard) = self.gate.try_lock() else {
             return Ok(None);
         };
@@ -66,11 +87,42 @@ impl SessionExecution {
         Ok(Some(guard))
     }
 
+    /// Stops admission before cancelling the active run, including a racing token install.
+    pub(super) fn request_close(&self) -> Result<(), KernelError> {
+        self.close_requested
+            .lock()
+            .map_err(|_lock_error| KernelError::Poisoned)?
+            .cancel();
+        self.cancel()
+    }
+
+    /// Acquires shutdown's gate without queueing behind work rejected by the close signal.
+    pub(super) async fn acquire_close(
+        &self,
+    ) -> Result<MutexGuard<'_, ()>, KernelError> {
+        self.request_close()?;
+        let guard = self.gate.lock().await;
+        self.ensure_active()?;
+        Ok(guard)
+    }
+
     /// Installs a fresh cancellation token for one serialized operation.
     pub(super) fn install_cancellation(
         &self,
+        parent: Option<&CancellationToken>,
     ) -> Result<CancellationToken, KernelError> {
-        let cancellation = CancellationToken::new();
+        let cancellation = parent.map_or_else(
+            CancellationToken::new,
+            CancellationToken::child_token,
+        );
+        if self
+            .close_requested
+            .lock()
+            .map_err(|_lock_error| KernelError::Poisoned)?
+            .is_cancelled()
+        {
+            cancellation.cancel();
+        }
         *self
             .cancellation
             .lock()
@@ -143,10 +195,50 @@ impl SessionExecution {
         &self,
         queue_id: &QueueId,
     ) -> Result<(), KernelError> {
-        self.queue
+        let item = self
+            .queue
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?
             .remove(queue_id);
+        if let Some(receipt) = item.and_then(|item| item.receipt) {
+            receipt.resolve(Arc::new(super::SubmissionAnswer::cancelled()));
+        }
+        Ok(())
+    }
+
+    /// Transfers a consumed receipt to the Run holding this Session's execution gate.
+    pub(super) fn consume_pending(
+        &self,
+        queue_id: &QueueId,
+    ) -> Result<(), KernelError> {
+        let mut queue =
+            self.queue.lock().map_err(|_error| KernelError::Poisoned)?;
+        let mut submissions = self
+            .submissions
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        if let Some(receipt) =
+            queue.remove(queue_id).and_then(|item| item.receipt)
+        {
+            submissions.push(receipt);
+        }
+        Ok(())
+    }
+
+    /// Publishes one authoritative answer to every input consumed by the current Run.
+    pub(super) fn settle_submissions(
+        &self,
+        answer: Arc<super::SubmissionAnswer>,
+    ) -> Result<(), KernelError> {
+        let submissions = std::mem::take(
+            &mut *self
+                .submissions
+                .lock()
+                .map_err(|_error| KernelError::Poisoned)?,
+        );
+        for receipt in submissions {
+            receipt.resolve(Arc::clone(&answer));
+        }
         Ok(())
     }
 
@@ -160,7 +252,11 @@ impl SessionExecution {
             .lock()
             .map_err(|_poison_error| KernelError::Poisoned)?;
         for queue_id in queue_ids {
-            queue.remove(queue_id);
+            if let Some(receipt) =
+                queue.remove(queue_id).and_then(|item| item.receipt)
+            {
+                receipt.resolve(Arc::new(super::SubmissionAnswer::cancelled()));
+            }
         }
         Ok(())
     }
@@ -284,6 +380,11 @@ impl SessionExecution {
         match *lifecycle {
             SessionLifecycle::Closing => {
                 *lifecycle = SessionLifecycle::Active;
+                *self
+                    .close_requested
+                    .lock()
+                    .map_err(|_lock_error| KernelError::Poisoned)? =
+                    CancellationToken::new();
                 Ok(())
             }
             SessionLifecycle::Starting
@@ -348,6 +449,22 @@ pub(super) struct ActiveRunLease {
 impl Drop for ActiveRunLease {
     /// Clears only the active Run identity installed by this lease.
     fn drop(&mut self) {
+        // Fail only receipts left unresolved by an operational error or a dropped Run future.
+        if let Err(error) = self.execution.settle_submissions(Arc::new(
+            super::SubmissionAnswer {
+                message_id: None,
+                text: String::new(),
+                outcome: super::AnswerOutcome::Failed(
+                    "run ended before settlement".into(),
+                ),
+            },
+        )) {
+            tracing::warn!(
+                "failed to release submission waiters for run {}: {}",
+                self.run_id,
+                error
+            );
+        }
         if let Ok(mut active_run) = self.execution.active_run.lock()
             && active_run
                 .as_ref()
@@ -517,6 +634,26 @@ mod tests {
             waiter.await.expect("queued operation"),
             Err(KernelError::SessionClosing)
         ));
+    }
+
+    /// Close must wake queued operations before it waits for reporters holding those futures.
+    #[tokio::test]
+    async fn closing_rejects_waiters_without_releasing_gate() {
+        let execution = execution();
+        let guard = execution.acquire_operation().await.expect("gate");
+        let queued = Arc::clone(&execution);
+        let waiter = tokio::spawn(async move {
+            queued.acquire_operation().await.map(|_| ())
+        });
+        tokio::task::yield_now().await;
+        execution.request_close().expect("request close");
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("waiter unblocked")
+                .expect("join");
+        assert!(matches!(result, Err(KernelError::SessionClosing)));
+        drop(guard);
     }
 
     /// Restores an active lifecycle when shutdown fails before resource teardown.

@@ -518,3 +518,65 @@ async fn cancellation_during_backoff_settles_and_preserves_follow_up() {
         1
     );
 }
+
+struct SubmissionSinks(Arc<RecordingSink>);
+impl kernel::SessionEventSinks for SubmissionSinks {
+    /// Reuses the retry suite's event recorder for delegated input.
+    fn sink(&self, _id: &SessionId) -> Arc<dyn EventSink> {
+        Arc::clone(&self.0) as Arc<dyn EventSink>
+    }
+}
+
+/// Stopping during backoff must report the Run cancellation, not its earlier failed Turn.
+#[tokio::test(start_paused = true)]
+async fn submit_cancellation_during_backoff() {
+    let fixture = RetryFixture::new(
+        vec![ScriptedResponse::Failure(ModelFailure {
+            summary: "service unavailable".into(),
+            status: Some(503),
+            retry_disposition: ModelRetryDisposition::Retryable,
+        })],
+        RetryPolicy::builder()
+            .enabled(true)
+            .max_retries(3)
+            .base_delay_ms(2_000)
+            .max_retry_delay_ms(60_000)
+            .build(),
+    )
+    .await;
+    fixture
+        .kernel
+        .install_event_sinks(Arc::new(SubmissionSinks(Arc::clone(
+            &fixture.sink,
+        ))))
+        .expect("install");
+    let kernel = Arc::clone(&fixture.kernel);
+    let id = fixture.session_id.clone();
+    let run = tokio::spawn(async move {
+        kernel
+            .submit(
+                kernel::SubmitRequest::builder()
+                    .session_id(id)
+                    .content(vec![protocol::ContentBlock::Text {
+                        text: "work".into(),
+                    }])
+                    .when_busy(kernel::WhenBusy::FollowUp)
+                    .build(),
+            )
+            .await
+    });
+    fixture.sink.retry_delay(1).await;
+    fixture
+        .kernel
+        .cancel_session(&fixture.session_id)
+        .expect("cancel");
+    let answer = run.await.expect("join").expect("answer");
+    assert!(fixture.sink.snapshot().iter().any(|e| matches!(
+        e.payload,
+        AgentEventPayload::RunEnd {
+            outcome: protocol::AgentOutcome::Cancelled,
+            ..
+        }
+    )));
+    assert_eq!(answer.outcome, kernel::AnswerOutcome::Cancelled);
+}

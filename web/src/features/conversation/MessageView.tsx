@@ -15,9 +15,11 @@ export type MessageViewProps = Readonly<{
   inspecting: boolean;
   onInspect: (message: MessageEntity) => void;
   controller: WorkspaceController;
+  readOnly?: boolean;
 }>;
 
-export const MessageView = memo(function MessageView({ message, entry, cwd, running, inspecting, onInspect, controller }: MessageViewProps) {
+/** Presents one message and hides parent-targeted actions in embedded child transcripts. */
+export const MessageView = memo(function MessageView({ message, entry, cwd, running, inspecting, onInspect, controller, readOnly = false }: MessageViewProps) {
   const assistant = message.assistant;
   // ACP projects Tool Calls into dedicated transcript cards, which leaves a
   // settled tool-only assistant message with no independently visible content.
@@ -33,7 +35,9 @@ export const MessageView = memo(function MessageView({ message, entry, cwd, runn
     && assistant?.error === undefined
   ) return null;
 
-  const actions = (
+  const report = message.role === "user" ? /^\[subagent (\S+) ([^\]]*)\] ?([\s\S]*)$/.exec(message.text) : null;
+  const body = report === null ? message.text : report[3] || report[2] || "";
+  const actions = readOnly ? null : (
     <MessageActions
       message={message}
       {...(entry === undefined ? {} : { entry })}
@@ -48,13 +52,13 @@ export const MessageView = memo(function MessageView({ message, entry, cwd, runn
     return <CommandMessageCard message={message} actions={actions} />;
   }
   return (
-    <article className="message" data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming}>
-      <div className="message__label">{message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System"}</div>
+    <article className={`message${report === null ? "" : " message--subagent-report"}`} data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming}>
+      <div className="message__label">{report === null ? message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System" : `Subagent · ${report[1]}`}</div>
       <ReasoningBlock message={message} />
       {assistant?.error === undefined ? null : <div className="message-error" role="alert"><strong>模型调用失败</strong><span>{assistant.error}</span></div>}
       {message.text.length === 0 ? null : (
         <div className="message__body">
-          <MarkdownContent text={message.text} highlight={!message.streaming} />
+          <MarkdownContent text={body} highlight={!message.streaming} />
           {message.streaming ? <span className="streaming-cursor" aria-label="正在生成" /> : null}
         </div>
       )}

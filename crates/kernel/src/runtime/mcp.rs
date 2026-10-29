@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -30,10 +30,26 @@ pub(super) enum SessionMcpRuntime {
     Enabled(SessionMcpState),
 }
 
+/// Determines whether construction opens transports or borrows its owner's connection.
+pub(super) enum SessionMcpSource<'a> {
+    Connect,
+    Share(&'a SessionMcpRuntime),
+}
+
+/// Only the transport owner may reconnect or shut down the shared MCP session.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum McpLease {
+    Owned,
+    Shared,
+}
+
 /// Groups the MCP session, projection task, and pending elicitations.
 #[derive(typed_builder::TypedBuilder)]
 pub(super) struct SessionMcpState {
-    session: Arc<::mcp::McpSession>,
+    pub(super) session: Arc<::mcp::McpSession>,
+    pub(super) host: Arc<SessionMcpHost>,
+    session_id: SessionId,
+    lease: McpLease,
     #[builder(default)]
     projection: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     elicitations: Mutex<HashMap<String, PendingMcpElicitation>>,
@@ -59,11 +75,18 @@ impl Default for McpProjectionNotifications {
 
 impl SessionMcpRuntime {
     /// Converts an optional MCP Session into the explicit capability state.
-    pub(super) fn new(session: Option<Arc<::mcp::McpSession>>) -> Self {
-        session.map_or(Self::Disabled, |session| {
+    pub(super) fn new(
+        session: Option<(Arc<::mcp::McpSession>, Arc<SessionMcpHost>)>,
+        session_id: SessionId,
+        lease: McpLease,
+    ) -> Self {
+        session.map_or(Self::Disabled, |(session, host)| {
             Self::Enabled(
                 SessionMcpState::builder()
                     .session(session)
+                    .host(host)
+                    .session_id(session_id)
+                    .lease(lease)
                     .projection(AsyncMutex::new(None))
                     .elicitations(Mutex::new(HashMap::new()))
                     .build(),
@@ -80,11 +103,29 @@ impl SessionMcpRuntime {
     }
 
     /// Returns enabled MCP state for projection and elicitation operations.
-    fn state(&self) -> Option<&SessionMcpState> {
+    pub(super) fn state(&self) -> Option<&SessionMcpState> {
         match self {
             Self::Disabled => None,
             Self::Enabled(state) => Some(state),
         }
+    }
+
+    /// Rejects transport management from a shared child's view of the connection.
+    pub(super) fn ensure_owned(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), KernelError> {
+        if self
+            .state()
+            .is_some_and(|state| state.lease == McpLease::Shared)
+        {
+            tracing::warn!(
+                "refused MCP management from shared session {}",
+                session_id
+            );
+            return Err(KernelError::SharedMcpManagement(session_id.clone()));
+        }
+        Ok(())
     }
 
     /// Shuts down the MCP Session and always joins its projection task.
@@ -92,18 +133,29 @@ impl SessionMcpRuntime {
         let Some(state) = self.state() else {
             return Ok(());
         };
-        tracing::info!(
-            "started MCP shutdown for session {}",
-            state.session.session_id()
-        );
-        let shutdown_result = state.session.shutdown().await;
+        tracing::info!("started MCP shutdown for session {}", state.session_id);
+        state.host.detach(&state.session_id);
+        let shutdown_result = match state.lease {
+            McpLease::Owned => state.session.shutdown().await,
+            McpLease::Shared => Ok(()),
+        };
         let projection_result =
             if let Some(task) = state.projection.lock().await.take() {
-                task.await.map_err(|error| {
-                    KernelError::Protocol(format!(
+                if state.lease == McpLease::Shared {
+                    task.abort();
+                }
+                match task.await {
+                    Ok(()) => Ok(()),
+                    Err(error)
+                        if state.lease == McpLease::Shared
+                            && error.is_cancelled() =>
+                    {
+                        Ok(())
+                    }
+                    Err(error) => Err(KernelError::Protocol(format!(
                         "MCP Tool projection task failed: {error}"
-                    ))
-                })
+                    ))),
+                }
             } else {
                 Ok(())
             };
@@ -127,11 +179,11 @@ impl SessionMcpRuntime {
         match &result {
             Ok(()) => tracing::info!(
                 "completed MCP shutdown for session {}",
-                state.session.session_id()
+                state.session_id
             ),
             Err(error) => tracing::error!(
                 "failed MCP shutdown for session {}: {}",
-                state.session.session_id(),
+                state.session_id,
                 error
             ),
         }
@@ -463,7 +515,7 @@ impl Session {
 /// Session-local Host boundary exposing only roots the Kernel already owns.
 pub(super) struct SessionMcpHost {
     cwd: PathBuf,
-    runtime: OnceLock<Weak<Session>>,
+    routes: RwLock<HashMap<SessionId, Weak<Session>>>,
 }
 
 impl SessionMcpHost {
@@ -471,7 +523,7 @@ impl SessionMcpHost {
     pub(super) fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
-            runtime: OnceLock::new(),
+            routes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -480,22 +532,58 @@ impl SessionMcpHost {
         &self,
         runtime: &Arc<Session>,
     ) -> Result<(), KernelError> {
-        self.runtime
-            .set(Arc::downgrade(runtime))
-            .map_err(|_runtime| {
-                KernelError::Protocol(
-                    "MCP Host runtime was attached more than once".to_string(),
-                )
-            })
+        let id = runtime.transcript.session_id()?;
+        self.routes
+            .write()
+            .map_err(|_lock_error| KernelError::Poisoned)?
+            .insert(id.clone(), Arc::downgrade(runtime));
+        tracing::info!(
+            "attached MCP route for session {} to owner {}",
+            id,
+            runtime
+                .ownership
+                .as_ref()
+                .map_or(&id, protocol::SessionOwnership::owner)
+        );
+        Ok(())
+    }
+
+    /// Removes a closed Session without disturbing routes for other shared leases.
+    pub(super) fn detach(&self, session_id: &SessionId) {
+        match self.routes.write() {
+            Ok(mut routes) => {
+                routes.remove(session_id);
+                tracing::info!("detached MCP route for session {}", session_id);
+            }
+            Err(error) => tracing::warn!(
+                "failed to detach MCP route for session {}: {}",
+                session_id,
+                error
+            ),
+        }
     }
 
     /// Resolves the live Session runtime for one Turn-scoped Host callback.
-    fn runtime(&self) -> Result<Arc<Session>, ::mcp::McpError> {
-        self.runtime.get().and_then(Weak::upgrade).ok_or_else(|| {
-            ::mcp::McpError::Host(
-                "owning Kernel Session is no longer available".to_string(),
-            )
-        })
+    fn runtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<Session>, ::mcp::McpError> {
+        self.routes
+            .read()
+            .map_err(|_lock_error| {
+                ::mcp::McpError::Host("MCP route lock poisoned".into())
+            })?
+            .get(session_id)
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "MCP Host route is unavailable for session {}",
+                    session_id
+                );
+                ::mcp::McpError::Host(format!(
+                    "MCP Host route is unavailable for session {session_id}"
+                ))
+            })
     }
 }
 
@@ -654,12 +742,12 @@ impl ::mcp::McpHost for SessionMcpHost {
                 }))
             }
             McpHostRequest::Elicitation(request) => self
-                .runtime()?
+                .runtime(&request.context.session_id)?
                 .elicit_mcp(request)
                 .await
                 .map(McpHostResponse::Elicitation),
             McpHostRequest::Sampling(request) => self
-                .runtime()?
+                .runtime(&request.context.session_id)?
                 .sample_mcp(request)
                 .await
                 .map(McpHostResponse::Sampling),
@@ -683,7 +771,7 @@ mod tests {
     use tokio::sync::Mutex as AsyncMutex;
     use tokio_util::sync::CancellationToken;
 
-    use super::{SessionMcpRuntime, SessionMcpState};
+    use super::{McpLease, SessionMcpHost, SessionMcpRuntime, SessionMcpState};
 
     /// Process-wide MCP test capture buffer written by the global subscriber.
     static BUFFER: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
@@ -813,6 +901,13 @@ mod tests {
         let runtime = SessionMcpRuntime::Enabled(
             SessionMcpState::builder()
                 .session(session)
+                .host(Arc::new(SessionMcpHost::new(PathBuf::from(
+                    "/workspace",
+                ))))
+                .session_id(
+                    SessionId::try_from("session-mcp-cleanup").expect("id"),
+                )
+                .lease(McpLease::Owned)
                 .projection(AsyncMutex::new(Some(failed_projection)))
                 .elicitations(Mutex::new(std::collections::HashMap::new()))
                 .build(),
@@ -842,6 +937,13 @@ mod tests {
         let runtime = SessionMcpRuntime::Enabled(
             SessionMcpState::builder()
                 .session(session)
+                .host(Arc::new(SessionMcpHost::new(PathBuf::from(
+                    "/workspace",
+                ))))
+                .session_id(
+                    SessionId::try_from("session-mcp-cleanup").expect("id"),
+                )
+                .lease(McpLease::Owned)
                 .projection(AsyncMutex::new(None))
                 .elicitations(Mutex::new(std::collections::HashMap::new()))
                 .build(),

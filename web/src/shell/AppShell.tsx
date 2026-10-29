@@ -43,7 +43,17 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   const skills = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.skills ?? initialSessionWorkspaceState.skills);
   const skillDiagnostics = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.skillDiagnostics ?? initialSessionWorkspaceState.skillDiagnostics);
   const mcpSnapshot = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.mcpSnapshot ?? initialSessionWorkspaceState.mcpSnapshot);
-  const mcpElicitations = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.mcpElicitations ?? initialSessionWorkspaceState.mcpElicitations);
+  // One dialog at a time also serves foreground children attached inside tool cards.
+  const pendingElicitation = useWorkspaceStore((state) => {
+    const own = sessionWorkspaceOf(state)?.mcpElicitations.values().next().value;
+    if (own !== undefined) return own;
+    for (const child of state.sessions) {
+      if (child.ownership?.kind !== "tool" || child.ownership.sessionId !== state.activeSessionId) continue;
+      const pending = state.sessionWorkspaces.get(child.sessionId)?.mcpElicitations.values().next().value;
+      if (pending !== undefined) return pending;
+    }
+    return undefined;
+  });
   const runningSessionIds = useWorkspaceStore((state) => state.runningSessionIds);
   const [section, setSection] = useState<PrimarySection>("sessions");
   const [sessionsOpen, setSessionsOpen] = useState(() => window.innerWidth >= 768);
@@ -117,9 +127,6 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
     if (activeSessionId === undefined || contextSelection?.type !== "tool") return undefined;
     return state.sessionWorkspaces.get(activeSessionId)?.tools.get(contextSelection.toolCallId);
   });
-  const pendingElicitation = activeSessionId === undefined
-    ? undefined
-    : mcpElicitations.values().next().value;
   const connectionLabel = connection.type === "ready" ? "已连接" :
     connection.type === "connecting" ? `正在连接 · 第 ${connection.attempt} 次` :
     connection.type === "initializing" ? "正在初始化 ACP" :

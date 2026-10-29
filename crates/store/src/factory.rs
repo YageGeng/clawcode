@@ -1,17 +1,18 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use protocol::{SessionId, TimestampMs};
+use protocol::{SessionId, SessionOwnership, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 use crate::session::JsonlSessionStore;
 use crate::state::SessionState;
 use crate::{
-    Clock, NewEntry, SessionCreateOptions, SessionForkOptions, SessionMetadata,
-    SessionStore, StoreError, StoreFactory,
+    Clock, NewEntry, OwnedSessionCreateOptions, SessionCreateOptions,
+    SessionForkOptions, SessionHeader, SessionMetadata, SessionStore,
+    StoreError, StoreFactory,
 };
 
 /// Filesystem-backed store factory using pi's cwd-encoded directory layout.
@@ -29,13 +30,11 @@ impl JsonlStoreFactory {
             clock,
         }
     }
-}
-
-impl StoreFactory for JsonlStoreFactory {
-    /// Creates one v4 session log without any global index file.
-    fn create(
+    /// Writes a new v4 header with an optional owner edge and no global index.
+    fn create_with(
         &self,
         options: SessionCreateOptions,
+        ownership: Option<SessionOwnership>,
     ) -> Result<Box<dyn SessionStore>, StoreError> {
         let created_at = self.clock.now();
         let directory = self
@@ -51,6 +50,7 @@ impl StoreFactory for JsonlStoreFactory {
             .created_at(created_at)
             .cwd(options.cwd)
             .parent_session_id(options.parent_session_id)
+            .ownership(ownership)
             .build();
         let file = OpenOptions::new()
             .write(true)
@@ -72,6 +72,55 @@ impl StoreFactory for JsonlStoreFactory {
                 .state(SessionState::new()?)
                 .build(),
         ))
+    }
+}
+
+impl StoreFactory for JsonlStoreFactory {
+    /// Looks up identity using the common header-only path.
+    fn exists(&self, session_id: &SessionId) -> Result<bool, StoreError> {
+        Ok(self.header(session_id)?.is_some())
+    }
+
+    /// Lists only immutable metadata in the requested workspace.
+    fn headers(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<SessionHeader>, StoreError> {
+        self.scan_headers(cwd, None)
+    }
+
+    /// Uses generated filenames first, then supports imported files by their header identity.
+    fn header(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionHeader>, StoreError> {
+        if let Some(header) = self
+            .scan_headers(None, Some(session_id))?
+            .into_iter()
+            .next()
+        {
+            return Ok(Some(header));
+        }
+        Ok(self
+            .headers(None)?
+            .into_iter()
+            .find(|header| &header.id == session_id))
+    }
+
+    /// Creates a plain Session without an owner edge.
+    fn create(
+        &self,
+        options: SessionCreateOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        self.create_with(options, None)
+    }
+
+    /// Creates a delegated Session with its immutable owner edge.
+    fn create_owned(
+        &self,
+        options: OwnedSessionCreateOptions,
+    ) -> Result<Box<dyn SessionStore>, StoreError> {
+        self.create_with(options.create, Some(options.ownership))
     }
 
     /// Opens a v4 session, applying valid mutations and repairing a torn final line.
@@ -262,6 +311,7 @@ impl StoreFactory for JsonlStoreFactory {
                         .created_at_ms(header.created_at)
                         .cwd(header.cwd)
                         .parent_session_id(header.parent_session_id)
+                        .ownership(header.ownership)
                         .path(path)
                         .modified_at_ms(TimestampMs::from(
                             u64::try_from(modified).unwrap_or(u64::MAX),
@@ -279,10 +329,11 @@ impl StoreFactory for JsonlStoreFactory {
 
     /// Deletes matching v4 logs without introducing a global session index.
     fn delete(&self, session_id: &SessionId) -> Result<(), StoreError> {
+        // All matching header identities are removed, including renamed/imported copies.
         for session in self
-            .list(None)?
+            .headers(None)?
             .into_iter()
-            .filter(|session| &session.id == session_id)
+            .filter(|header| &header.id == session_id)
         {
             match fs::remove_file(session.path) {
                 Ok(()) => {}
@@ -295,6 +346,79 @@ impl StoreFactory for JsonlStoreFactory {
 }
 
 impl JsonlStoreFactory {
+    /// Shares header-only traversal across identity checks, ownership scans, and deletion.
+    fn scan_headers(
+        &self,
+        cwd: Option<&Path>,
+        session_id: Option<&SessionId>,
+    ) -> Result<Vec<SessionHeader>, StoreError> {
+        let mut directories = Vec::new();
+        if let Some(cwd) = cwd {
+            let directory = self
+                .sessions_root
+                .join(CwdSessionDirectory::from(cwd).as_str());
+            if directory.exists() {
+                directories.push(directory);
+            }
+        } else if self.sessions_root.exists() {
+            for entry in fs::read_dir(&self.sessions_root)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    directories.push(entry.path());
+                }
+            }
+        }
+        let suffix = session_id.map(|id| format!("_{id}.jsonl"));
+        let mut headers = Vec::new();
+        for directory in directories {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str())
+                    != Some("jsonl")
+                    || suffix.as_ref().is_some_and(|suffix| {
+                        !entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.ends_with(suffix))
+                    })
+                    || !entry.file_type()?.is_file()
+                {
+                    continue;
+                }
+                let file = match fs::File::open(&path) {
+                    Ok(file) => file,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let mut line = String::new();
+                BufReader::new(file).read_line(&mut line)?;
+                let Ok(header) = serde_json::from_str::<V4Header>(&line) else {
+                    continue;
+                };
+                if header.kind != HeaderKind::Header
+                    || header.version != 4
+                    || session_id.is_some_and(|id| id != &header.id)
+                {
+                    continue;
+                }
+                headers.push(
+                    SessionHeader::builder()
+                        .id(header.id)
+                        .cwd(header.cwd)
+                        .ownership(header.ownership)
+                        .path(path)
+                        .build(),
+                );
+            }
+        }
+        Ok(headers)
+    }
+
     /// Atomically replaces a session file with the acknowledged valid prefix.
     fn repair_torn_tail(
         path: &Path,
@@ -353,4 +477,7 @@ struct V4Header {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     parent_session_id: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    ownership: Option<SessionOwnership>,
 }
