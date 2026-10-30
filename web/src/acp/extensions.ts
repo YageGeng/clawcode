@@ -18,8 +18,6 @@ export type AcpExtensionMethods = Readonly<{
   mcpResourceRead: string;
   mcpComplete: string;
   mcpOAuthContinue: string;
-  mcpElicitationList: string;
-  mcpElicitationRespond: string;
   extensionCommand: string;
 }>;
 
@@ -46,8 +44,6 @@ export const AcpMethods = {
       mcpResourceRead: `${prefix}/mcp/resource/read`,
       mcpComplete: `${prefix}/mcp/complete`,
       mcpOAuthContinue: `${prefix}/mcp/oauth/continue`,
-      mcpElicitationList: `${prefix}/mcp/elicitation/list`,
-      mcpElicitationRespond: `${prefix}/mcp/elicitation/respond`,
       extensionCommand: `${prefix}/extension/command`
     };
   },

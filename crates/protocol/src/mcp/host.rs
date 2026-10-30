@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AgentMessage, ContentBlock, McpAuthorizationRequest,
     McpAuthorizationResult, McpServerId, Role, SessionId, StopReason,
-    TimestampMs, TraceId, TurnId,
+    TimestampMs, ToolCallId, TraceId, TurnId,
 };
 
 /// Correlation shared by every Turn-scoped MCP Host request.
@@ -28,6 +28,10 @@ pub struct McpRequestContext {
     pub trace_id: TraceId,
     /// Unix millisecond time when the Host received the request.
     pub requested_at_ms: TimestampMs,
+    /// Tool call that raised the request; absent outside MCP tool execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub tool_call_id: Option<ToolCallId>,
 }
 
 /// Provider-neutral Sampling request initiated by an MCP Server.

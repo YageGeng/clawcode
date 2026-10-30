@@ -1220,6 +1220,111 @@
   color: var(--warning);
 }
 
+.tool-card[data-status="cancelled"] .tool-card__icon,
+.tool-card[data-status="cancelled"] .tool-card__status {
+  color: var(--text-muted);
+}
+
+.tool-card__origin {
+  padding: 1px 6px;
+  border-radius: var(--radius-small);
+  color: var(--accent-strong);
+  background: var(--surface-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.terminal-view {
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface-sunken);
+}
+
+.terminal-view__command,
+.terminal-view__exit {
+  padding: 5px 9px;
+  color: var(--text-secondary);
+  font: 11px var(--font-mono);
+}
+
+.terminal-view__command {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.terminal-view__exit {
+  overflow: hidden;
+  border-top: 1px solid var(--border-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-view__output {
+  max-height: 360px;
+  margin: 0;
+  padding: 9px;
+  overflow: auto;
+  color: var(--text-primary);
+  font: 11px/1.45 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-config {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+}
+
+.session-config select {
+  max-width: 180px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-small);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font: inherit;
+}
+
+.session-config__error {
+  color: var(--danger);
+}
+
+.notice-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 32px));
+}
+
+.notice-toast {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 10px 10px 10px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-small);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-floating);
+  font-size: 13px;
+}
+
+.notice-toast__icon {
+  margin-top: 1px;
+  color: var(--warning);
+}
+
+.notice-toast__body p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
 .tool-card__title {
   color: var(--text-primary);
   font-weight: 650;
@@ -1578,8 +1683,14 @@
 }
 
 .composer-card > .form-error,
+.composer-card > .form-hint,
 .outcome-warning {
   margin: 0 13px 5px;
+}
+
+.form-hint {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .outcome-warning {
@@ -2351,23 +2462,73 @@
   margin: 0;
 }
 
-.mcp-elicitation > p,
-.mcp-elicitation > a,
-.mcp-elicitation label {
-  display: block;
-  margin-top: 14px;
+.mcp-elicitation header div {
+  min-width: 0;
 }
 
-.mcp-elicitation textarea {
+.mcp-elicitation header p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-elicitation > p {
+  margin: 14px 0 0;
+}
+
+.elicitation-url {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.elicitation-form {
+  display: grid;
+  gap: 12px;
+  max-height: 55vh;
+  margin-top: 14px;
+  overflow-y: auto;
+}
+
+.elicitation-field {
+  display: grid;
+  gap: 4px;
+}
+
+.elicitation-field small {
+  color: var(--text-muted);
+}
+
+.elicitation-field input:not([type="checkbox"]),
+.elicitation-field select {
   width: 100%;
-  margin-top: 6px;
-  padding: 9px;
-  resize: vertical;
+  padding: 7px 9px;
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
   background: var(--surface-sunken);
   color: var(--text-primary);
-  font: 11px var(--font-mono);
+  font: inherit;
+}
+
+.elicitation-field [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.elicitation-field input[type="checkbox"] {
+  justify-self: start;
+}
+
+.elicitation-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.elicitation-choices label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .mcp-elicitation footer {

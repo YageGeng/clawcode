@@ -71,6 +71,23 @@ impl AgentTool for WriteTool {
         WriteArguments::try_from(call).map(|_arguments| ())
     }
 
+    /// Reports the file a write creates or replaces.
+    async fn locations(
+        &self,
+        call: &ToolCall,
+        cwd: &std::path::Path,
+    ) -> Vec<protocol::ToolLocation> {
+        WriteArguments::try_from(call)
+            .ok()
+            .and_then(|arguments| ResolvedPath::new(&arguments.path, cwd).ok())
+            .map(|path| protocol::ToolLocation {
+                path: path.as_path().to_path_buf(),
+                line: None,
+            })
+            .into_iter()
+            .collect()
+    }
+
     /// Creates parent directories and writes the complete content under a per-file queue.
     async fn execute(
         &self,

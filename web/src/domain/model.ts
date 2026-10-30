@@ -165,13 +165,17 @@ export type SlashCommandMessageMeta = Readonly<{
   name: string;
   source: SlashCommandSource;
   messageKind: "invocation" | "output" | "expansion";
-  status?: "succeeded" | "failed";
+  status?: "succeeded" | "failed" | "cancelled";
 }>;
 
 export type ToolCallEntity = Readonly<{
   toolCallId: ToolCallId;
   title: string;
-  status: "pending" | "in_progress" | "completed" | "failed" | "blocked";
+  status: "pending" | "in_progress" | "completed" | "failed" | "blocked" | "cancelled";
+  kind?: ToolKind;
+  /** Set for a user's own `!` command, which is shown as a tool. */
+  origin?: "user";
+  excludeFromContext?: boolean;
   rawInput?: unknown;
   rawOutput?: unknown;
   subagentSessionId?: SessionId;
@@ -183,28 +187,23 @@ export type ToolCallEntity = Readonly<{
   meta?: EventMeta;
 }>;
 
+/** ACP tool kinds the agent reports; drives the tool card icon. */
+export type ToolKind = "read" | "edit" | "delete" | "move" | "search" | "execute" | "think" | "fetch" | "switch_mode" | "other";
+
+/** One live-only Session warning shown as a dismissible toast. */
+export type SessionNotice = Readonly<{
+  id: string;
+  sessionId: SessionId;
+  title: string;
+  description?: string;
+}>;
+
 export type ToolOutputInfo = Readonly<{
   originalTextBytes: number;
   visibleTextBytes: number;
   omittedMedia: number;
   fullOutputPath?: string;
   saveFailure?: "io" | "too_large" | "cancelled";
-}>;
-
-export type BashExecutionEntity = Readonly<{
-  messageId: MessageId;
-  turnId: TurnId;
-  command: string;
-  output: string;
-  disposition: Readonly<{ type: "completed" }> | Readonly<{ type: "blocked"; reason: string }>;
-  exitCode?: number;
-  cancelled: boolean;
-  truncated: boolean;
-  fullOutputPath?: string;
-  excludeFromContext: boolean;
-  timestampMs: TimestampMs;
-  startedAtMs: TimestampMs;
-  endedAtMs: TimestampMs;
 }>;
 
 export type ExtensionEntity = Readonly<{
@@ -388,24 +387,20 @@ export type McpCompletionResult = Readonly<{
 
 export type McpOAuthState = "notConfigured" | "unauthenticated" | "authorizing" | "ready" | "refreshRequired" | "failed";
 
-export type McpElicitation = Readonly<{
-  requestId: string;
-  context: Readonly<{
-    serverId: string;
-    sessionId: SessionId;
-    turnId: TurnId;
-    traceId: string;
-    requestedAtMs: TimestampMs;
-  }>;
-  mode:
-    | Readonly<{ type: "form"; message: string; requestedSchema: unknown }>
-    | Readonly<{ type: "url"; message: string; url: string; elicitationId: string }>;
+/** One standard `elicitation/create` waiting for the user, oldest first in the queue. */
+export type ElicitationPrompt = Readonly<{
+  key: string;
+  sessionId: SessionId;
+  serverId?: string;
+  message: string;
+  mode: Readonly<{ type: "form"; requestedSchema: unknown }> | Readonly<{ type: "url"; url: string }>;
 }>;
 
-export type McpElicitationSnapshot = Readonly<{
-  sessionId: SessionId;
-  requests: readonly McpElicitation[];
-}>;
+/** The user's answer, serialized as the standard elicitation response. */
+export type ElicitationAnswer =
+  | Readonly<{ action: "accept"; content?: Readonly<Record<string, unknown>> }>
+  | Readonly<{ action: "decline" }>
+  | Readonly<{ action: "cancel" }>;
 
 export type McpServerStatus = Readonly<{
   serverId: string;
@@ -437,12 +432,13 @@ export type SessionEvent = Readonly<{
   payload: Readonly<Record<string, unknown>>;
   order: EventOrder;
   meta?: EventMeta;
+  /** Terminal whose whole output this event carries; a newer one replaces it in the log. */
+  snapshotOf?: string;
 }>;
 
 export type TranscriptEntry =
   | Readonly<{ type: "message"; messageId: MessageId; order: EventOrder }>
   | Readonly<{ type: "tool"; toolCallId: ToolCallId; order: EventOrder }>
-  | Readonly<{ type: "bash"; messageId: MessageId; order: EventOrder }>
   | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>
   | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>
   | Readonly<{ type: "agent_usage"; runId: RunId; order: EventOrder }>

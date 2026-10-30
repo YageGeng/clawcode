@@ -122,6 +122,30 @@ impl AgentTool for ReadTool {
         }
     }
 
+    /// Reports the file a read opens, including its fallback-name resolution.
+    async fn locations(
+        &self,
+        call: &ToolCall,
+        cwd: &std::path::Path,
+    ) -> Vec<protocol::ToolLocation> {
+        let Ok(arguments) = ReadArguments::try_from(call) else {
+            return Vec::new();
+        };
+        let Ok(path) = ResolvedPath::for_read(&arguments.path, cwd).await
+        else {
+            return Vec::new();
+        };
+        // A given offset names the first line read, one-based.
+        let line = arguments
+            .offset
+            .and_then(|_offset| arguments.start_line().ok())
+            .and_then(|start| u32::try_from(start.saturating_add(1)).ok());
+        vec![protocol::ToolLocation {
+            path: path.as_path().to_path_buf(),
+            line,
+        }]
+    }
+
     /// Validates read JSON and numeric pagination without filesystem access.
     fn validate(&self, call: &ToolCall) -> Result<(), ToolError> {
         let arguments = ReadArguments::try_from(call)?;

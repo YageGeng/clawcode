@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use protocol::{
     ContentBlock, ToolCall, ToolCallId, ToolDefinition, ToolPromptContribution,
-    ToolResult, ToolResultDetails, TruncationLimit,
+    ToolResult, ToolResultDetails, TruncationLimit, UserBashResult,
 };
 use serde::Deserialize;
 
@@ -138,45 +138,37 @@ impl AgentTool for BashTool {
         })
         .await?;
         let (visible, details) =
-            Self::format_output(output.snapshot, "(no output)");
-        match output.termination {
-            BashTermination::Exited
-                if output.result.exit_code.is_some_and(|code| code != 0) =>
-            {
-                let code = output.result.exit_code.unwrap_or_default();
-                Err(ToolError::Execution {
-                    tool: call.name,
-                    message: Self::append_status(
-                        &visible,
-                        &format!("Command exited with code {code}"),
-                    ),
-                })
-            }
-            BashTermination::Aborted => Err(ToolError::Execution {
-                tool: call.name,
-                message: Self::append_status(&visible, "Command aborted"),
-            }),
-            BashTermination::TimedOut => Err(ToolError::Execution {
-                tool: call.name,
-                message: Self::append_status(
-                    &visible,
-                    &format!(
-                        "Command timed out after {} seconds",
-                        arguments.timeout_label().unwrap_or_default()
-                    ),
-                ),
-            }),
+            Self::format_output(output.snapshot, "(no output)", &output.result);
+        // Failures stay results so their output and exit details survive.
+        let status = match output.termination {
             BashTermination::Exited => {
-                let builder = ToolResult::builder()
-                    .tool_call_id(call.tool_call_id)
-                    .blocks(vec![ContentBlock::Text { text: visible }])
-                    .is_error(false);
-                Ok(match details {
-                    Some(details) => builder.details(details).build(),
-                    None => builder.build(),
-                })
+                match (output.result.exit_code, output.result.signal.as_deref())
+                {
+                    (Some(code), _) if code != 0 => {
+                        Some(format!("Command exited with code {code}"))
+                    }
+                    (None, Some(signal)) => {
+                        Some(format!("Command terminated by {signal}"))
+                    }
+                    _ => None,
+                }
             }
-        }
+            BashTermination::Aborted => Some("Command aborted".to_string()),
+            BashTermination::TimedOut => Some(format!(
+                "Command timed out after {} seconds",
+                arguments.timeout_label().unwrap_or_default()
+            )),
+        };
+        let (text, is_error) = match status {
+            Some(status) => (Self::append_status(&visible, &status), true),
+            None => (visible, false),
+        };
+        Ok(ToolResult::builder()
+            .tool_call_id(call.tool_call_id)
+            .blocks(vec![ContentBlock::Text { text }])
+            .is_error(is_error)
+            .details(details)
+            .build())
     }
 }
 
@@ -187,9 +179,8 @@ impl BashTool {
         context: &ToolExecutionContext,
         snapshot: BashOutputSnapshot,
     ) {
-        let details = (snapshot.truncation.truncated
-            || snapshot.full_output_path.is_some())
-        .then(|| ToolResultDetails::Bash {
+        // Bash details on every snapshot let clients render it as a terminal.
+        let details = ToolResultDetails::Bash {
             truncation: snapshot
                 .truncation
                 .truncated
@@ -197,24 +188,24 @@ impl BashTool {
             full_output_path: snapshot
                 .full_output_path
                 .map(|path| path.to_string_lossy().into_owned()),
-        });
+            exit_code: None,
+            signal: None,
+        };
         let builder = ToolResult::builder()
             .tool_call_id(tool_call_id.clone())
             .blocks(vec![ContentBlock::Text {
                 text: snapshot.output,
             }])
             .is_error(false);
-        context.publish(match details {
-            Some(details) => builder.details(details).build(),
-            None => builder.build(),
-        });
+        context.publish(builder.details(details).build());
     }
 
-    /// Adds pi's truncation footer and returns typed bash details when needed.
+    /// Adds pi's truncation footer and returns the final bash details with exit status.
     fn format_output(
         snapshot: BashOutputSnapshot,
         empty_text: &str,
-    ) -> (String, Option<ToolResultDetails>) {
+        result: &UserBashResult,
+    ) -> (String, ToolResultDetails) {
         let truncation = snapshot.truncation;
         let mut text = if snapshot.output.is_empty() {
             empty_text.to_string()
@@ -222,7 +213,15 @@ impl BashTool {
             snapshot.output
         };
         if !truncation.truncated {
-            return (text, None);
+            return (
+                text,
+                ToolResultDetails::Bash {
+                    truncation: None,
+                    full_output_path: None,
+                    exit_code: result.exit_code,
+                    signal: result.signal.clone(),
+                },
+            );
         }
         let full_output_path = snapshot
             .full_output_path
@@ -252,10 +251,12 @@ impl BashTool {
         text.push_str(&footer);
         (
             text,
-            Some(ToolResultDetails::Bash {
+            ToolResultDetails::Bash {
                 truncation: Some(truncation),
                 full_output_path,
-            }),
+                exit_code: result.exit_code,
+                signal: result.signal.clone(),
+            },
         )
     }
 

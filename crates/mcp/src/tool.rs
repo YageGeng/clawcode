@@ -199,6 +199,7 @@ impl AgentTool for McpAgentTool {
                     .turn_id(context.turn_id.clone())
                     .trace_id(context.trace_id.clone())
                     .requested_at_ms(TimestampMs::now())
+                    .tool_call_id(call.tool_call_id.clone())
                     .build(),
                 &context.cancellation,
                 Arc::new(AgentToolProgress {

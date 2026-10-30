@@ -22,6 +22,18 @@ pub enum ThinkingLevel {
     XHigh,
 }
 
+impl ThinkingLevel {
+    /// Every level from least to most reasoning.
+    pub const ALL: [Self; 6] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+    ];
+}
+
 /// Source of an active-model change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

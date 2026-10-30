@@ -796,6 +796,7 @@ async fn mcp_sampling_runs_through_current_session_model() {
             },
             Arc::new(DiscardSink),
             TraceId::try_from("trace-sampling").expect("Trace id"),
+            None,
         )
         .await
         .expect("run Kernel");
@@ -901,6 +902,7 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
         .expect("create Session");
     let run_kernel = Arc::clone(&kernel);
     let run_session_id = session_id.clone();
+    let (events, mut received) = tokio::sync::mpsc::channel(256);
     let run = tokio::spawn(async move {
         run_kernel
             .run_traced(
@@ -908,8 +910,9 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
                     session_id: run_session_id,
                     input: "request elicitation".into(),
                 },
-                Arc::new(DiscardSink),
+                Arc::new(kernel::ChannelEventSink::new(events)),
                 TraceId::try_from("trace-elicit").expect("Trace id"),
+                None,
             )
             .await
     });
@@ -929,6 +932,15 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
     .expect("pending elicitation must become queryable");
     assert_eq!(snapshot.session_id, session_id);
     assert_eq!(snapshot.requests[0].request_id, "pending-elicit");
+    // The request names the MCP tool call that raised it.
+    assert_eq!(
+        snapshot.requests[0]
+            .context
+            .tool_call_id
+            .as_ref()
+            .map(ToolCallId::as_str),
+        Some("mcp-elicit-call")
+    );
 
     kernel
         .mcp_respond_elicitation(McpElicitationResponseRequest {
@@ -941,6 +953,21 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
         })
         .await
         .expect("resolve elicitation");
+    // A second answer, such as another client's, learns it was already resolved.
+    let second = kernel
+        .mcp_respond_elicitation(McpElicitationResponseRequest {
+            session_id: session_id.clone(),
+            request_id: "pending-elicit".to_string(),
+            result: McpElicitationResult {
+                action: McpElicitationAction::Decline,
+                content: None,
+            },
+        })
+        .await;
+    assert!(matches!(
+        second,
+        Err(kernel::KernelError::ElicitationResolved(_))
+    ));
     run.await
         .expect("run task")
         .expect("run after elicitation response");
@@ -950,5 +977,35 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
             .expect("resolved snapshot")
             .requests
             .is_empty()
+    );
+    // A pending elicitation blocks the Run, so it is reported as required action.
+    let mut lifecycle = Vec::new();
+    while let Ok(event) = received.try_recv() {
+        match event.payload {
+            protocol::AgentEventPayload::McpElicitationRequested { .. } => {
+                lifecycle.push("requested");
+            }
+            protocol::AgentEventPayload::ActionRequired { request_id } => {
+                assert_eq!(request_id, "pending-elicit");
+                lifecycle.push("action_required");
+            }
+            protocol::AgentEventPayload::McpElicitationResolved { .. } => {
+                lifecycle.push("resolved");
+            }
+            protocol::AgentEventPayload::ActionResolved { request_id } => {
+                assert_eq!(request_id, "pending-elicit");
+                lifecycle.push("action_resolved");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        lifecycle,
+        vec![
+            "requested",
+            "action_required",
+            "resolved",
+            "action_resolved"
+        ]
     );
 }

@@ -115,6 +115,12 @@ impl Kernel {
                     AgentEventPayload::ToolExecutionStart {
                         run_id: batch.run_id.clone(),
                         call: call.clone(),
+                        cwd: batch.session.cwd.clone(),
+                        // The tool resolves paths so clients see the file it opens.
+                        locations: batch
+                            .tools
+                            .locations(&call, &batch.session.cwd)
+                            .await,
                     },
                 )
                 .await?;
@@ -216,6 +222,10 @@ impl Kernel {
                                     text: error.to_string(),
                                 }])
                                 .is_error(true)
+                                .cancelled(matches!(
+                                    error,
+                                    ::tools::ToolError::Cancelled
+                                ))
                                 .build()
                         }
                     },
@@ -259,6 +269,10 @@ impl Kernel {
             else {
                 break;
             };
+            // A failure caused by stopping the Turn is cancellation, not a tool error.
+            result.cancelled |=
+                result.is_error && batch.cancellation.is_cancelled();
+            let cancelled_call = result.cancelled;
             if let Some(update) = update_stream.take_for(&call.tool_call_id) {
                 self.emit_tool_update(&batch, update).await?;
             }
@@ -281,6 +295,8 @@ impl Kernel {
                 )
                 .await;
             result = transformed;
+            // Extensions may rebuild the result; cancellation is not theirs to erase.
+            result.cancelled |= cancelled_call;
             if executed && let Some(tool) = batch.tools.tool(&call.name) {
                 let policy = tool.metadata().output_policy;
                 if policy != protocol::ToolOutputPolicy::Preserve {
@@ -354,6 +370,7 @@ impl Kernel {
                     blocks: result.blocks.clone(),
                     is_error: result.is_error,
                     details: result.details.clone(),
+                    cancelled: result.cancelled,
                 },
             };
             completed.push((index, message, result));

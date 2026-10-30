@@ -63,6 +63,7 @@ axum = { workspace = true }
 # protocol
 rmcp = { workspace = true, features = [
   "client",
+  "elicitation",
   "server",
   "transport-io",
   "transport-streamable-http-server",

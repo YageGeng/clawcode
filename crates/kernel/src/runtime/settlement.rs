@@ -50,6 +50,8 @@ pub(super) struct RunSettlement<'a> {
     turn_id: TurnId,
     cancellation: &'a tokio_util::sync::CancellationToken,
     outcome: &'a AgentOutcome,
+    /// Usage of every settled attempt, carried even when the Run failed or was cancelled.
+    usage: protocol::ModelUsage,
     #[builder(default)]
     messages: Vec<protocol::AgentMessage>,
     #[builder(default)]
@@ -120,6 +122,7 @@ impl RunSettlement<'_> {
                 AgentEventPayload::AgentSettled {
                     run_id: self.run_id.clone(),
                     outcome: self.outcome.clone(),
+                    usage: self.usage,
                 },
             )
             .await?;

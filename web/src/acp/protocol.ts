@@ -112,6 +112,15 @@ export type ResourceLinkContentBlock = Readonly<{
 }>;
 export type PromptContentBlock = TextContentBlock | ImageContentBlock | ResourceLinkContentBlock;
 
+/** One select-type Session config option; other option types are ignored. */
+export type ConfigSelect = Readonly<{
+  configId: string;
+  name: string;
+  category?: string;
+  currentValue: string;
+  options: readonly Readonly<{ value: string; name: string; description?: string }>[];
+}>;
+
 export type SessionUpdateNotification = Readonly<{
   sessionId: SessionId;
   update: Readonly<Record<string, unknown>>;
@@ -128,7 +137,21 @@ export const AcpProtocol = {
     sessionDelete: "session/delete",
     sessionPrompt: "session/prompt",
     sessionCancel: "session/cancel",
+    sessionSetConfigOption: "session/set_config_option",
     sessionUpdate: "session/update"
+  },
+  /** Keeps select options, flattening grouped choices; malformed entries are dropped. */
+  configOptions(value: unknown): readonly ConfigSelect[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const record = (item: unknown): item is Record<string, unknown> => typeof item === "object" && item !== null && !Array.isArray(item);
+    return value.flatMap((item): ConfigSelect[] => {
+      if (!record(item) || item.type !== "select" || typeof item.configId !== "string" || typeof item.name !== "string" || typeof item.currentValue !== "string" || !Array.isArray(item.options)) return [];
+      const entries: unknown[] = item.options.flatMap((entry: unknown): unknown[] => record(entry) && Array.isArray(entry.options) ? entry.options : [entry]);
+      const options = entries.flatMap((entry) => record(entry) && typeof entry.value === "string" && typeof entry.name === "string"
+        ? [{ value: entry.value, name: entry.name, ...(typeof entry.description === "string" ? { description: entry.description } : {}) }]
+        : []);
+      return [{ configId: item.configId, name: item.name, ...(typeof item.category === "string" ? { category: item.category } : {}), currentValue: item.currentValue, options }];
+    });
   },
   decodeRecord(value: unknown, label: string): Record<string, unknown> {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {

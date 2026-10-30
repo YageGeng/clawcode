@@ -181,6 +181,7 @@ fn text_only_model_request_replaces_unsupported_images() {
                 identity: sample_identity("tool-image", "turn-image"),
                 timing: sample_timing("201", "201", "201"),
                 content: MessageContent::ToolResult {
+                    cancelled: false,
                     output: None,
                     tool_call_id: ToolCallId::try_from("tool-call")
                         .expect("tool call id"),

@@ -12,6 +12,9 @@ pub(in crate::runtime) struct SlashCommandExecution<'a> {
     pub(super) sink: Arc<dyn EventSink>,
     pub(super) started_at: TimestampMs,
     pub(super) invocation: protocol::SlashCommandInvocation,
+    /// Reports acceptance once the invocation message is durable.
+    #[builder(default)]
+    pub(super) insertion: Option<&'a InsertionNotice>,
 }
 
 impl SlashCommandExecution<'_> {
@@ -90,6 +93,12 @@ impl Kernel {
                     &invocation_message,
                 )
                 .await?;
+                // A busy command is still inserted; its failure is the
+                // persisted output while the running operation keeps the
+                // foreground state.
+                if let Some(notice) = execution.insertion {
+                    notice.inserted(&invocation_message.identity.message_id);
+                }
                 let output_message = execution.output_message(
                     self,
                     protocol::SlashCommandOutput::builder()
@@ -146,13 +155,52 @@ impl Kernel {
                 },
             )
             .await?;
-        let invocation_message = execution.invocation_message(self, source)?;
-        self.persist_and_emit_slash_message(
-            execution.session,
-            &emitter,
-            &invocation_message,
-        )
-        .await?;
+        let persisted = async {
+            let message = execution.invocation_message(self, source)?;
+            self.persist_and_emit_slash_message(
+                execution.session,
+                &emitter,
+                &message,
+            )
+            .await?;
+            Ok::<_, KernelError>(message)
+        }
+        .await;
+        let invocation_message = match persisted {
+            Ok(message) => message,
+            Err(error) => {
+                // A started command must still reach a terminal state.
+                if let Err(end_error) = emitter
+                    .emit(
+                        execution.turn_id.clone(),
+                        AgentEventPayload::SlashCommandEnd {
+                            run_id: execution.run_id.clone(),
+                            status: protocol::SlashCommandStatus::Failed,
+                            message: None,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to end Slash Command /{} for session {} after its invocation was lost: {}",
+                        execution.invocation.name,
+                        execution.session_id,
+                        end_error
+                    );
+                }
+                tracing::warn!(
+                    "failed to persist Slash Command /{} invocation for session {}, Run {}: {}",
+                    execution.invocation.name,
+                    execution.session_id,
+                    execution.run_id,
+                    error
+                );
+                return Err(error);
+            }
+        };
+        if let Some(notice) = execution.insertion {
+            notice.inserted(&invocation_message.identity.message_id);
+        }
         let outcome = match resolution {
             DirectSlashCommandResolution::Rejected { error, .. } => {
                 Ok(protocol::SlashCommandOutcome::Rejected(error))
@@ -225,8 +273,8 @@ impl Kernel {
                 ));
             }
         };
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
+        let (outcome, stopped) = match outcome {
+            Ok(outcome) => (outcome, false),
             Err(error) => {
                 tracing::warn!(
                     "failed Slash Command /{} for session {}, Run {}, Turn {}, trace {}: {}",
@@ -237,14 +285,17 @@ impl Kernel {
                     execution.trace_id,
                     error
                 );
-                protocol::SlashCommandOutcome::Rejected(
-                    protocol::SlashCommandError::ExecutionFailed {
-                        command: execution.invocation.name.clone(),
-                    },
+                (
+                    protocol::SlashCommandOutcome::Rejected(
+                        protocol::SlashCommandError::ExecutionFailed {
+                            command: execution.invocation.name.clone(),
+                        },
+                    ),
+                    error.is_cancellation(),
                 )
             }
         };
-        let (output, status) = match outcome {
+        let (mut output, mut status) = match outcome {
             protocol::SlashCommandOutcome::Handled { output } => {
                 let status = output.as_ref().map_or(
                     protocol::SlashCommandStatus::Succeeded,
@@ -273,6 +324,36 @@ impl Kernel {
                 ));
             }
         };
+        // A command stopped by cancel or close settles as cancelled, not failed.
+        if status == protocol::SlashCommandStatus::Failed
+            && (stopped || cancellation.is_cancelled())
+        {
+            status = protocol::SlashCommandStatus::Cancelled;
+            output = Some(
+                protocol::SlashCommandOutput::builder()
+                    .command(execution.invocation.name.clone())
+                    .source(source)
+                    .status(protocol::SlashCommandStatus::Cancelled)
+                    .blocks(vec![ContentBlock::Text {
+                        text: format!(
+                            "/{} was cancelled",
+                            execution.invocation.name
+                        ),
+                    }])
+                    .build(),
+            );
+        }
+        // The failure summary is the user-facing output text, never an internal error.
+        let failure = (status == protocol::SlashCommandStatus::Failed)
+            .then(|| {
+                output.as_ref().and_then(|output| {
+                    output.blocks.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                })
+            })
+            .flatten();
         let mut messages = vec![invocation_message];
         if let Some(output) = output {
             let output_message =
@@ -294,6 +375,7 @@ impl Kernel {
                 AgentEventPayload::SlashCommandEnd {
                     run_id: execution.run_id.clone(),
                     status,
+                    message: failure,
                 },
             )
             .await?;

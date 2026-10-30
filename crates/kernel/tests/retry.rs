@@ -580,3 +580,39 @@ async fn submit_cancellation_during_backoff() {
     )));
     assert_eq!(answer.outcome, kernel::AnswerOutcome::Cancelled);
 }
+
+/// Retries contribute each settled attempt once; a failed request has no usage to add.
+#[tokio::test(start_paused = true)]
+async fn retry_usage_counts_each_attempt_once() {
+    let fixture = RetryFixture::new(
+        vec![
+            ScriptedResponse::Failure(ModelFailure {
+                summary: "service unavailable".to_string(),
+                status: Some(503),
+                retry_disposition: ModelRetryDisposition::Retryable,
+            }),
+            ScriptedModel::text("ok"),
+        ],
+        RetryPolicy::builder()
+            .enabled(true)
+            .max_retries(1)
+            .base_delay_ms(1_000)
+            .max_retry_delay_ms(60_000)
+            .build(),
+    )
+    .await;
+    let run = fixture.start();
+    let delay_ms = fixture.sink.retry_delay(1).await;
+    tokio::time::advance(Duration::from_millis(delay_ms)).await;
+    run.await.expect("join run").expect("retry run");
+    let usage = fixture
+        .sink
+        .snapshot()
+        .into_iter()
+        .find_map(|event| match event.payload {
+            AgentEventPayload::AgentSettled { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .expect("settled usage");
+    assert_eq!(usage.total_tokens, 22);
+}

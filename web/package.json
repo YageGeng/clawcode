@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "check": "tsc -b --pretty false && eslint . --max-warnings 0",
+    "test:elicitation": "node --experimental-strip-types --test ../crates/app/tests/web/elicitation_form.test.mjs",
     "build": "tsc -b && vite build"
   },
   "dependencies": {

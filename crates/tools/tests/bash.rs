@@ -94,7 +94,7 @@ async fn bash_executes_commands_and_formats_empty_output() {
 #[tokio::test]
 async fn bash_reports_nonzero_exit_after_output() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let error = registry()
+    let result = registry()
         .execute(
             bash_call("bash-fail", "printf 'before'; exit 7", None),
             &execution_context(
@@ -104,12 +104,80 @@ async fn bash_reports_nonzero_exit_after_output() {
             ),
         )
         .await
-        .expect_err("nonzero command should fail");
+        .expect("nonzero command still yields a result");
 
+    // The failure keeps its output, text, and exit metadata.
+    assert!(result.is_error);
     assert!(
-        error
-            .to_string()
+        result.blocks[0]
+            .text()
+            .expect("bash output")
             .contains("before\n\nCommand exited with code 7")
+    );
+    assert_eq!(BashExit::of(&result), Some(BashExit(Some(7), None)));
+}
+
+/// Exit details of one bash result: exit code and signal name.
+#[derive(Debug, PartialEq, Eq)]
+struct BashExit(Option<i32>, Option<String>);
+
+impl BashExit {
+    /// Reads the exit details a bash result carries, if it has bash details.
+    fn of(result: &ToolResult) -> Option<Self> {
+        match &result.details {
+            Some(ToolResultDetails::Bash {
+                exit_code, signal, ..
+            }) => Some(Self(*exit_code, signal.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// A successful command reports exit code 0 in its details.
+#[tokio::test]
+async fn bash_details_carry_exit_code() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let result = registry()
+        .execute(
+            bash_call("bash-ok", "printf 'fine'", None),
+            &execution_context(
+                root.path(),
+                CancellationToken::new(),
+                Arc::new(RecordingUpdates::default()),
+            ),
+        )
+        .await
+        .expect("successful command");
+    assert!(!result.is_error);
+    assert_eq!(BashExit::of(&result), Some(BashExit(Some(0), None)));
+}
+
+/// A shell ended by a signal is a failure that names the signal.
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_signal_exit_is_an_error_with_its_signal() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let result = registry()
+        .execute(
+            bash_call("bash-term", "printf 'going'; kill -TERM $$", None),
+            &execution_context(
+                root.path(),
+                CancellationToken::new(),
+                Arc::new(RecordingUpdates::default()),
+            ),
+        )
+        .await
+        .expect("signal exit still yields a result");
+    assert!(result.is_error);
+    assert!(
+        result.blocks[0]
+            .text()
+            .expect("bash output")
+            .contains("going\n\nCommand terminated by SIGTERM")
+    );
+    assert_eq!(
+        BashExit::of(&result),
+        Some(BashExit(None, Some("SIGTERM".to_string())))
     );
 }
 
@@ -141,11 +209,19 @@ async fn bash_validates_and_enforces_timeout_seconds() {
     )
     .await
     .expect("tool timeout should settle")
-    .expect_err("command should time out");
+    .expect("timed-out command still yields a result");
+    assert!(timed_out.is_error);
     assert!(
-        timed_out
-            .to_string()
+        timed_out.blocks[0]
+            .text()
+            .expect("bash output")
             .contains("started\n\nCommand timed out after 0.1 seconds")
+    );
+    // We kill the process group, so the signal is known.
+    #[cfg(unix)]
+    assert_eq!(
+        BashExit::of(&timed_out),
+        Some(BashExit(None, Some("SIGKILL".to_string())))
     );
 }
 
@@ -171,12 +247,23 @@ async fn bash_observes_turn_cancellation() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     cancellation.cancel();
 
-    let error = tokio::time::timeout(Duration::from_secs(2), task)
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
         .await
         .expect("cancelled tool should settle")
         .expect("bash task")
-        .expect_err("cancelled command should fail");
-    assert!(error.to_string().contains("running\n\nCommand aborted"));
+        .expect("aborted command still yields a result");
+    assert!(result.is_error);
+    assert!(
+        result.blocks[0]
+            .text()
+            .expect("bash output")
+            .contains("running\n\nCommand aborted")
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        BashExit::of(&result),
+        Some(BashExit(None, Some("SIGKILL".to_string())))
+    );
 }
 
 /// Large output keeps the last 2000 lines and persists the complete stream.
@@ -202,6 +289,7 @@ async fn bash_truncates_tail_and_persists_full_output() {
     let Some(ToolResultDetails::Bash {
         truncation: Some(truncation),
         full_output_path: Some(full_output_path),
+        ..
     }) = result.details
     else {
         panic!("bash truncation details");

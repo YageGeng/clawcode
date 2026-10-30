@@ -199,6 +199,12 @@ pub enum ToolResultDetails {
         /// Temporary file containing complete output when truncation occurred.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full_output_path: Option<String>,
+        /// Process exit code; absent when a signal ended the shell or for older results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// Name of the signal that ended the shell, such as `SIGTERM`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<String>,
     },
     /// Policy disposition produced before a tool implementation is invoked.
     Blocked {
@@ -232,6 +238,16 @@ pub struct ToolDefinition {
 
     /// JSON Schema describing accepted arguments.
     pub parameters: serde_json::Value,
+}
+
+/// A file a tool call touches, resolved the way the tool itself resolves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolLocation {
+    /// Absolute path after the tool's own normalization.
+    pub path: std::path::PathBuf,
+    /// One-based line the call starts at, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 /// One tool invocation requested by the model.
@@ -270,6 +286,11 @@ pub struct ToolResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub output: Option<ToolOutputInfo>,
+
+    /// Whether cancellation stopped the call; takes priority over `is_error`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[builder(default)]
+    pub cancelled: bool,
 }
 
 /// Bounded reasons why a complete temporary output could not be retained.

@@ -125,6 +125,8 @@ pub enum SlashCommandStatus {
     Succeeded,
     /// Command was rejected or failed during execution.
     Failed,
+    /// Command was stopped by cancel or close before it completed.
+    Cancelled,
 }
 
 /// Displayable output from a directly handled Slash Command.

@@ -127,6 +127,15 @@ pub trait AgentTool: Send + Sync {
         call: ToolCall,
         context: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError>;
+
+    /// Reports the files a call touches, resolved exactly as `execute` resolves them.
+    async fn locations(
+        &self,
+        _call: &ToolCall,
+        _cwd: &std::path::Path,
+    ) -> Vec<protocol::ToolLocation> {
+        Vec::new()
+    }
 }
 
 /// Factory interface used by kernel construction to acquire tool registries.
@@ -241,6 +250,18 @@ impl ToolRegistry {
             .tool(&call.name)
             .ok_or_else(|| ToolError::NotFound(call.name.clone()))?;
         tool.validate(call)
+    }
+
+    /// Asks the registered tool which files a call touches; unknown tools touch none.
+    pub async fn locations(
+        &self,
+        call: &ToolCall,
+        cwd: &std::path::Path,
+    ) -> Vec<protocol::ToolLocation> {
+        match self.tools.get(&call.name).map(Arc::clone) {
+            Some(tool) => tool.locations(call, cwd).await,
+            None => Vec::new(),
+        }
     }
 
     /// Dispatches a call to the registered tool with the same name.

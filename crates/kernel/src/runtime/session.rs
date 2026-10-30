@@ -156,6 +156,14 @@ impl Kernel {
             .collect())
     }
 
+    /// Returns the live Session's current display title, if it has one.
+    pub fn session_title(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<String>, KernelError> {
+        self.session(session_id)?.transcript.name()
+    }
+
     /// Reads active Run state without waiting for the Session operation gate.
     pub fn session_runtime(
         &self,

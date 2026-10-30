@@ -6,26 +6,31 @@ import type {
   CompactionEntity,
   CompactionReason,
   EventOrder,
-  McpElicitation,
   MessageEntity,
   ModelUsage,
   SessionEvent,
+  SessionNotice,
   SlashCommandAliasKind,
   SlashCommandMessageMeta,
   SlashCommandSource,
   ToolCallEntity,
+  ToolKind,
   ToolOutputInfo
 } from "../domain/model";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
+import { TerminalDecoder } from "./terminals";
 import type { WorkspaceAction } from "./state";
 
 export type DecodedSessionUpdate =
   | Readonly<{ scope: "global"; actions: readonly WorkspaceAction[]; refreshRuntime: false }>
   | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean }>;
 
+const TOOL_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"]);
+
 /** Narrows ACP wire updates into typed workspace actions without owning UI state. */
 export class SessionUpdateDecoder {
   readonly namespace: string;
+  private readonly terminals = new TerminalDecoder();
 
   /** Creates a decoder for one product extension namespace. */
   constructor(namespace: string) {
@@ -60,6 +65,16 @@ export class SessionUpdateDecoder {
       };
     }
 
+    if (kind === "notice" && typeof update.title === "string") {
+      const notice: SessionNotice = {
+        id: `${notification.sessionId}:${receivedOrder}`,
+        sessionId: notification.sessionId,
+        title: update.title,
+        ...(typeof update.description === "string" ? { description: update.description } : {})
+      };
+      return { scope: "global", actions: [{ type: "notice/added", notice }], refreshRuntime: false };
+    }
+
     const actions: SessionWorkspaceAction[] = [];
     const updateContent = typeof update.content === "object" && update.content !== null && !Array.isArray(update.content) ? update.content as Record<string, unknown> : undefined;
     const rawMeta = update._meta ?? notification._meta;
@@ -72,7 +87,9 @@ export class SessionUpdateDecoder {
       receivedOrder
     };
     if (typeof kind === "string") {
-      const event: SessionEvent = { type: kind, payload: update, order, ...(meta === undefined ? {} : { meta }) };
+      // A whole terminal output replaces the previous one, so the log keeps only the newest.
+      const snapshotOf = kind === "terminal_update" && "output" in update && typeof update.terminalId === "string" ? update.terminalId : undefined;
+      const event: SessionEvent = { type: kind, payload: update, order, ...(meta === undefined ? {} : { meta }), ...(snapshotOf === undefined ? {} : { snapshotOf }) };
       actions.push({ type: "event/received", event });
     }
 
@@ -94,6 +111,8 @@ export class SessionUpdateDecoder {
       if (typeof content.text === "string" && contentMeta !== undefined) {
         actions.push({ type: "message/reasoning-delta", messageId: update.messageId as MessageId, delta: content.text, meta: contentMeta, order });
       }
+    } else if (kind === "user_message" && productMeta?.origin === "user_bash") {
+      // A `!bash` prompt is shown by its bash card, not as a separate user message.
     } else if ((kind === "agent_message" || kind === "user_message") && typeof update.messageId === "string" && meta !== undefined) {
       const messageId = update.messageId as MessageId;
       const existing = state.messages.get(messageId);
@@ -152,17 +171,24 @@ export class SessionUpdateDecoder {
         : typeof messageContent?.details === "object" && messageContent.details !== null && !Array.isArray(messageContent.details)
           ? messageContent.details as Record<string, unknown>
           : undefined;
+      // A user's own `!` command arrives as a tool tagged with its origin.
+      const userShell = productMeta?.origin === "user";
+      const disposition = typeof productMeta?.disposition === "object" && productMeta.disposition !== null ? productMeta.disposition as Record<string, unknown> : undefined;
       // ACP v2 has no native blocked status, so the standard failed status is
       // refined only when the typed product result explicitly carries it.
-      const status = update.status === "failed" && details?.type === "blocked"
+      const status = update.status === "failed" && (details?.type === "blocked" || disposition?.type === "blocked")
         ? "blocked"
-        : update.status === "failed" || update.status === "completed" || update.status === "in_progress"
+        : update.status === "failed" || update.status === "completed" || update.status === "in_progress" || update.status === "cancelled"
           ? update.status
           : previous?.status ?? "pending";
+      const kind = typeof update.kind === "string" && TOOL_KINDS.has(update.kind as ToolKind) ? update.kind as ToolKind : previous?.kind;
       const tool: ToolCallEntity = {
         toolCallId,
         title: typeof update.title === "string" ? update.title : previous?.title ?? update.toolCallId,
         status,
+        ...(kind === undefined ? {} : { kind }),
+        ...(userShell || previous?.origin === "user" ? { origin: "user" as const } : {}),
+        ...(typeof productMeta?.excludeFromContext === "boolean" ? { excludeFromContext: productMeta.excludeFromContext } : previous?.excludeFromContext === undefined ? {} : { excludeFromContext: previous.excludeFromContext }),
         ...(update.rawInput === undefined ? (previous?.rawInput === undefined ? {} : { rawInput: previous.rawInput }) : { rawInput: update.rawInput }),
         ...(rawOutput === undefined ? {} : { rawOutput }),
         // Live results and persisted message replay wrap details differently;
@@ -174,7 +200,7 @@ export class SessionUpdateDecoder {
         // ACP v2 tool content follows the same omitted/clear/replace upsert contract as messages.
         content: !("content" in update) ? previous?.content ?? [] : Array.isArray(update.content) ? update.content : [],
         ...(previous?.startedAtMs === undefined && meta !== undefined ? { startedAtMs: meta.timestampMs } : previous?.startedAtMs === undefined ? {} : { startedAtMs: previous.startedAtMs }),
-        ...(status === "completed" || status === "failed" || status === "blocked" ? (meta === undefined ? {} : { endedAtMs: meta.timestampMs }) : {}),
+        ...(status === "completed" || status === "failed" || status === "blocked" || status === "cancelled" ? (meta === undefined ? {} : { endedAtMs: meta.timestampMs }) : {}),
         ...(meta === undefined ? (previous?.meta === undefined ? {} : { meta: previous.meta }) : { meta })
       };
       actions.push({ type: "tool/upserted", tool, order });
@@ -183,8 +209,16 @@ export class SessionUpdateDecoder {
       if (exact !== undefined && update.used > 0) {
         actions.push({ type: "usage/changed", usage: { used: update.used, size: update.size, exact, updatedAtMs: meta.timestampMs } });
       }
-    } else if (kind === "state_update" && typeof update.state === "string") {
-      actions.push({ type: "running/changed", running: update.state === "running" });
+    } else if (kind === "terminal_update" || kind === "terminal_output_chunk") {
+      const previous = typeof update.terminalId === "string" ? state.terminals.get(update.terminalId) : undefined;
+      const terminal = kind === "terminal_update" ? this.terminals.update(previous, update) : this.terminals.chunk(previous, update);
+      if (terminal !== undefined) actions.push({ type: "terminal/upserted", terminal });
+    } else if (kind === "config_option_update") {
+      const options = AcpProtocol.configOptions(update.configOptions);
+      if (options !== undefined) actions.push({ type: "config/replaced", options });
+    } else if (kind === "state_update" && (update.state === "running" || update.state === "requires_action" || update.state === "idle")) {
+      // Waiting on the user is still foreground work; unknown states leave the flag unchanged.
+      actions.push({ type: "running/changed", running: update.state !== "idle" });
       return { scope: "session", actions, refreshRuntime: update.state === "idle" };
     } else if (kind === `_${this.namespace}/event`) {
       const payload = typeof update.payload === "object" && update.payload !== null && !Array.isArray(update.payload) ? update.payload as Record<string, unknown> : undefined;
@@ -212,77 +246,51 @@ export class SessionUpdateDecoder {
           if (messageId !== undefined && extension !== undefined && extension.display !== false && typeof extension.extension_id === "string" && typeof extension.custom_type === "string") {
             const details = typeof extension.details === "object" && extension.details !== null && !Array.isArray(extension.details) ? extension.details as Record<string, unknown> : undefined;
             actions.push({ type: "extension/upserted", extension: { id: messageId, turnId: meta.turnId, extensionId: extension.extension_id, customType: extension.custom_type, blocks: Array.isArray(extension.blocks) ? extension.blocks : [], ...(extension.details === undefined ? {} : { details: extension.details }), timestampMs: meta.timestampMs, kind: details?.kind === "handler_error" ? "error" : "message" }, order });
-          } else if (messageId !== undefined && content?.type === "bash_execution" && typeof content.bash === "object" && content.bash !== null && !Array.isArray(content.bash)) {
-            const bash = content.bash as Record<string, unknown>;
-            const result = typeof bash.result === "object" && bash.result !== null && !Array.isArray(bash.result) ? bash.result as Record<string, unknown> : undefined;
-            const disposition = typeof result?.disposition === "object" && result.disposition !== null && !Array.isArray(result.disposition) ? result.disposition as Record<string, unknown> : undefined;
-            const timing = this.decodeMessageTiming(productMeta?.messageTiming);
-            const typedDisposition = disposition?.type === "completed"
-              ? { type: "completed" as const }
-              : disposition?.type === "blocked" && typeof disposition.reason === "string"
-                ? { type: "blocked" as const, reason: disposition.reason }
-                : undefined;
-            // Serde encodes a non-skipped Rust Option as null, so both null and
-            // an omitted field represent the absence of a process exit code.
-            if (result !== undefined && typedDisposition !== undefined && typeof bash.command === "string" && typeof result.output === "string" && typeof result.cancelled === "boolean" && typeof result.truncated === "boolean" && typeof bash.excludeFromContext === "boolean" && (result.exitCode == null || typeof result.exitCode === "number") && (result.fullOutputPath == null || typeof result.fullOutputPath === "string")) {
-              actions.push({ type: "bash/upserted", bash: { messageId: messageId as MessageId, turnId: meta.turnId, command: bash.command, output: result.output, disposition: typedDisposition, ...(typeof result.exitCode === "number" ? { exitCode: result.exitCode } : {}), cancelled: result.cancelled, truncated: result.truncated, ...(typeof result.fullOutputPath === "string" ? { fullOutputPath: result.fullOutputPath } : {}), excludeFromContext: bash.excludeFromContext, timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs }, order });
-            }
           }
         } else if (event === "extension_handler_failed" && meta !== undefined && typeof payload.extension_id === "string" && typeof payload.point === "string" && typeof payload.message === "string") {
           actions.push({ type: "extension/upserted", extension: { id: `error:${meta.turnId}:${meta.sequence}`, turnId: meta.turnId, extensionId: payload.extension_id, customType: payload.point, blocks: [], message: payload.message, timestampMs: meta.timestampMs, kind: "error" }, order });
-        } else if (event === "mcp_elicitation_requested" && typeof payload.request === "object" && payload.request !== null && !Array.isArray(payload.request)) {
-          const request = payload.request as Record<string, unknown>;
-          const context = typeof request.context === "object" && request.context !== null && !Array.isArray(request.context) ? request.context as Record<string, unknown> : undefined;
-          const mode = typeof request.mode === "object" && request.mode !== null && !Array.isArray(request.mode) ? request.mode as Record<string, unknown> : undefined;
-          const typedMode = mode?.type === "form" && typeof mode.message === "string"
-            ? { type: "form" as const, message: mode.message, requestedSchema: mode.requestedSchema }
-            : mode?.type === "url" && typeof mode.message === "string" && typeof mode.url === "string" && typeof mode.elicitationId === "string"
-              ? { type: "url" as const, message: mode.message, url: mode.url, elicitationId: mode.elicitationId }
-              : undefined;
-          if (typeof request.requestId === "string" && context !== undefined && typedMode !== undefined && typeof context.serverId === "string" && typeof context.sessionId === "string" && typeof context.turnId === "string" && typeof context.traceId === "string" && typeof context.requestedAtMs === "string") {
-            const elicitation: McpElicitation = { requestId: request.requestId, context: { serverId: context.serverId, sessionId: context.sessionId as McpElicitation["context"]["sessionId"], turnId: context.turnId as McpElicitation["context"]["turnId"], traceId: context.traceId, requestedAtMs: context.requestedAtMs as TimestampMs }, mode: typedMode };
-            actions.push({ type: "mcp/elicitation-requested", request: elicitation });
-          }
-        } else if (event === "mcp_elicitation_resolved" && typeof payload.request_id === "string") {
-          actions.push({ type: "mcp/elicitation-resolved", requestId: payload.request_id });
         } else if (event === "retry_scheduled" && meta !== undefined && typeof payload.attempt === "number" && typeof payload.max_attempts === "number" && typeof payload.delay_ms === "number" && typeof payload.error === "string") {
           actions.push({ type: "retry/changed", retry: { type: "waiting", attempt: payload.attempt, maxAttempts: payload.max_attempts, scheduledAtMs: meta.timestampMs, delayMs: payload.delay_ms, error: payload.error } });
         } else if (event === "retry_start" && typeof payload.attempt === "number" && typeof payload.max_attempts === "number") {
           actions.push({ type: "retry/changed", retry: { type: "running", attempt: payload.attempt, maxAttempts: payload.max_attempts } });
         } else if (event === "retry_end" && typeof payload.attempt === "number" && typeof payload.success === "boolean") {
           actions.push({ type: "retry/changed", retry: { type: "finished", attempt: payload.attempt, success: payload.success, ...(typeof payload.final_error === "string" ? { finalError: payload.final_error } : {}) } });
-        } else if (event === "compaction_start" && meta !== undefined) {
-          const reason = this.decodeCompactionReason(payload.reason);
-          if (reason !== undefined) actions.push({ type: "compaction/changed", compaction: { type: "running", reason, startedAtMs: meta.timestampMs } });
-        } else if (event === "compaction_end" && meta !== undefined) {
-          const reason = this.decodeCompactionReason(payload.reason);
-          const outcome = typeof payload.outcome === "object" && payload.outcome !== null && !Array.isArray(payload.outcome)
-            ? payload.outcome as Record<string, unknown>
-            : undefined;
-          if (reason !== undefined && outcome?.status === "completed" && typeof outcome.result === "object" && outcome.result !== null && !Array.isArray(outcome.result)) {
-            const result = outcome.result as Record<string, unknown>;
-            const usage = result.usage === undefined ? undefined : this.decodeModelUsage(result.usage);
-            if (typeof result.entryId === "string" && typeof result.turnId === "string" && typeof result.summary === "string" && typeof result.tokensBefore === "string" && typeof result.startedAtMs === "string" && typeof result.endedAtMs === "string" && (result.usage === undefined || usage !== undefined)) {
-              const compaction: CompactionEntity = {
-                entryId: result.entryId as EntryId,
-                turnId: result.turnId as TurnId,
-                reason,
-                summary: result.summary,
-                tokensBefore: result.tokensBefore,
-                ...(usage === undefined ? {} : { usage }),
-                startedAtMs: result.startedAtMs as TimestampMs,
-                endedAtMs: result.endedAtMs as TimestampMs
-              };
-              actions.push({ type: "compaction/upserted", compaction, order });
-              actions.push({ type: "compaction/changed", compaction: { type: "finished", reason, entryId: compaction.entryId, endedAtMs: compaction.endedAtMs } });
-              actions.push({ type: "usage/changed", usage: undefined });
-            }
-          } else if (reason !== undefined && outcome?.status === "failed" && typeof outcome.message === "string") {
-            actions.push({ type: "compaction/changed", compaction: { type: "failed", reason, message: outcome.message, endedAtMs: meta.timestampMs } });
-          } else if (reason !== undefined && outcome?.status === "cancelled") {
-            actions.push({ type: "compaction/changed", compaction: { type: "cancelled", reason, endedAtMs: meta.timestampMs } });
-          }
         }
+      }
+    } else if (kind === "compaction_update" && meta !== undefined) {
+      // Status, summary, and error come from the standard entity; the card
+      // details it lacks ride in product metadata.
+      const details = typeof productMeta?.compaction === "object" && productMeta.compaction !== null && !Array.isArray(productMeta.compaction)
+        ? productMeta.compaction as Record<string, unknown>
+        : undefined;
+      const reason = this.decodeCompactionReason(details?.reason);
+      if (reason !== undefined && update.status === "in_progress") {
+        actions.push({ type: "compaction/changed", compaction: { type: "running", reason, startedAtMs: meta.timestampMs } });
+      } else if (reason !== undefined && update.status === "completed" && typeof details?.result === "object" && details.result !== null && !Array.isArray(details.result)) {
+        const result = details.result as Record<string, unknown>;
+        const usage = result.usage === undefined ? undefined : this.decodeModelUsage(result.usage);
+        const summary = Array.isArray(update.summary)
+          ? update.summary.map((block) => typeof block === "object" && block !== null && typeof (block as Record<string, unknown>).text === "string" ? (block as Record<string, unknown>).text as string : "").join("")
+          : undefined;
+        if (summary !== undefined && typeof result.entryId === "string" && typeof result.turnId === "string" && typeof result.tokensBefore === "string" && typeof result.startedAtMs === "string" && typeof result.endedAtMs === "string" && (result.usage === undefined || usage !== undefined)) {
+          const compaction: CompactionEntity = {
+            entryId: result.entryId as EntryId,
+            turnId: result.turnId as TurnId,
+            reason,
+            summary,
+            tokensBefore: result.tokensBefore,
+            ...(usage === undefined ? {} : { usage }),
+            startedAtMs: result.startedAtMs as TimestampMs,
+            endedAtMs: result.endedAtMs as TimestampMs
+          };
+          actions.push({ type: "compaction/upserted", compaction, order });
+          actions.push({ type: "compaction/changed", compaction: { type: "finished", reason, entryId: compaction.entryId, endedAtMs: compaction.endedAtMs } });
+          actions.push({ type: "usage/changed", usage: undefined });
+        }
+      } else if (reason !== undefined && update.status === "failed" && typeof update.error === "string") {
+        actions.push({ type: "compaction/changed", compaction: { type: "failed", reason, message: update.error, endedAtMs: meta.timestampMs } });
+      } else if (reason !== undefined && update.status === "cancelled") {
+        actions.push({ type: "compaction/changed", compaction: { type: "cancelled", reason, endedAtMs: meta.timestampMs } });
       }
     } else if (!(typeof kind === "string" && kind.startsWith("_"))) {
       actions.push({ type: "diagnostic/added", message: `Unknown session update: ${String(kind)}` });
@@ -311,6 +319,8 @@ export class SessionUpdateDecoder {
         return;
       }
       const command = item as Record<string, unknown>;
+      // ACP 1.13 discriminates command kinds; unknown kinds are kept by the server but not shown.
+      if (command.type !== "command") return;
       if (typeof command.name !== "string" || typeof command.description !== "string") {
         diagnostics.push(`Available command ${index} must contain string name and description`);
         return;
@@ -382,7 +392,7 @@ export class SessionUpdateDecoder {
     if (typeof command.name !== "string") return undefined;
     if (command.source !== "builtin" && command.source !== "extension" && command.source !== "skill" && command.source !== "prompt_template") return undefined;
     if (command.messageKind !== "invocation" && command.messageKind !== "output" && command.messageKind !== "expansion") return undefined;
-    if (command.status !== undefined && command.status !== "succeeded" && command.status !== "failed") return undefined;
+    if (command.status !== undefined && command.status !== "succeeded" && command.status !== "failed" && command.status !== "cancelled") return undefined;
     return {
       name: command.name,
       source: command.source,

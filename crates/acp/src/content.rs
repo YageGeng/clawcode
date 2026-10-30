@@ -75,7 +75,7 @@ impl AcpContentMapper {
                     .title(title.clone())
                     .description(description.clone())
                     .mime_type(mime_type.as_deref().map(wire::MediaType::new))
-                    .size(size.and_then(|value| i64::try_from(value).ok()))
+                    .size(*size)
                     .meta(metadata.clone()),
             )),
             ContentBlock::Structured { value } => {

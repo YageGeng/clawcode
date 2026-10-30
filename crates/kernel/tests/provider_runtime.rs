@@ -517,6 +517,7 @@ async fn tool_result_image_is_preserved_in_provider_request() {
             timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
                 .expect("message timing"),
             content: MessageContent::ToolResult {
+                cancelled: false,
                 output: None,
                 tool_call_id: protocol::ToolCallId::try_from("tool-image")
                     .expect("tool id"),
@@ -577,6 +578,7 @@ async fn mcp_tool_result_content_has_stable_provider_projection() {
             timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
                 .expect("message timing"),
             content: MessageContent::ToolResult {
+                cancelled: false,
                 output: None,
                 tool_call_id: protocol::ToolCallId::try_from("tool-mcp")
                     .expect("tool id"),
@@ -797,6 +799,7 @@ async fn empty_mcp_result_reaches_provider() {
         message.identity.message_id =
             MessageId::try_from("empty-result").expect("id");
         message.content = MessageContent::ToolResult {
+            cancelled: false,
             tool_call_id: result.tool_call_id,
             blocks: result.blocks,
             is_error,

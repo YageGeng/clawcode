@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -154,6 +156,7 @@ pub enum Role {
 #[derive(
     Debug,
     Clone,
+    Default,
     PartialEq,
     Eq,
     Serialize,
@@ -184,6 +187,31 @@ pub struct ModelUsage {
     /// Provider-reported total token consumption.
     #[serde(with = "decimal_u64")]
     pub total_tokens: u64,
+}
+
+impl std::ops::AddAssign<&ModelUsage> for ModelUsage {
+    /// Adds one attempt; reasoning stays unknown until some attempt reports it.
+    fn add_assign(&mut self, attempt: &ModelUsage) {
+        self.input_tokens =
+            self.input_tokens.saturating_add(attempt.input_tokens);
+        self.output_tokens =
+            self.output_tokens.saturating_add(attempt.output_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(attempt.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(attempt.cache_write_tokens);
+        self.reasoning_tokens =
+            match (self.reasoning_tokens, attempt.reasoning_tokens) {
+                (None, None) => None,
+                (known, reported) => Some(
+                    known.unwrap_or(0).saturating_add(reported.unwrap_or(0)),
+                ),
+            };
+        self.total_tokens =
+            self.total_tokens.saturating_add(attempt.total_tokens);
+    }
 }
 
 /// Complete model outcome attached only to assistant messages.
@@ -416,6 +444,10 @@ pub struct BashExecutionMessage {
     pub result: UserBashResult,
     /// Whether `!!` excluded this message from future model context.
     pub exclude_from_context: bool,
+    /// Absolute directory the shell ran in; absent in older messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub cwd: Option<PathBuf>,
 }
 
 impl BashExecutionMessage {
@@ -495,6 +527,9 @@ pub enum MessageContent {
         /// Output-budget measurements retained independently from tool-specific details.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<crate::ToolOutputInfo>,
+        /// Whether cancellation stopped the call; older records read as `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
     },
 
     /// User-authored server-side shell execution retained with Pi `!`/`!!` semantics.

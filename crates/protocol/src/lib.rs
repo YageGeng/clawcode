@@ -33,7 +33,7 @@ pub use capability::{
     CompactionReason, CompactionResult, CompactionStep, CompactionStepAttempt,
     CompactionUsageCause, CompactionUsageRecord, ModelInputModalities,
     ModelInputModalitiesError, ModelInputModality, ModelProfile, RetryPolicy,
-    SessionTitle,
+    SessionSettings, SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
@@ -130,7 +130,7 @@ pub use slash_command::{
 };
 pub use tool::{
     McpResourcePageKind, ToolAnnotations, ToolCall, ToolDefinition,
-    ToolExposure, ToolMetadata, ToolOutputInfo, ToolOutputPolicy,
+    ToolExposure, ToolLocation, ToolMetadata, ToolOutputInfo, ToolOutputPolicy,
     ToolOutputSaveFailure, ToolResult, ToolResultDetails, ToolSelection,
     TruncationDetails, TruncationLimit,
 };

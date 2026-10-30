@@ -222,6 +222,17 @@ pub struct ModelProfile {
     pub input: ModelInputModalities,
 }
 
+/// Current model, thinking level, and the configured models a client may pick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSettings {
+    /// Model future Turns will use.
+    pub model: ModelProfile,
+    /// Thinking level future Turns will use.
+    pub thinking_level: crate::ThinkingLevel,
+    /// Every configured model in catalog order.
+    pub models: Vec<ModelProfile>,
+}
+
 /// Cause that initiated a context compaction operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,12 +1,11 @@
-import type { EntryId, MessageId, RunId, TurnId } from "../acp/protocol";
+import type { ConfigSelect, EntryId, MessageId, RunId, TurnId } from "../acp/protocol";
+import type { TerminalEntity } from "./terminals";
 import type {
   AgentRunUsage,
-  BashExecutionEntity,
   CompactionEntity,
   CompactionStatus,
   ContextUsage,
   ExtensionEntity,
-  McpElicitation,
   McpSessionSnapshot,
   MessageEntity,
   ModelUsage,
@@ -19,7 +18,7 @@ import type {
   TranscriptEntry
 } from "../domain/model";
 import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
-import { EventSequenceRanges, initialSessionWorkspaceState, MAX_RETAINED_SESSION_EVENTS } from "./sessionState";
+import { EventSequenceRanges, initialSessionWorkspaceState, retainEvents } from "./sessionState";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 
 /** Retains an immutable Map until one frame action first requests a mutable view. */
@@ -53,12 +52,11 @@ class MapDraft<K, V> {
 export class SessionWorkspaceStager {
   private readonly messages: MapDraft<MessageId, MessageEntity>;
   private readonly tools: MapDraft<string, ToolCallEntity>;
-  private readonly bashExecutions: MapDraft<MessageId, BashExecutionEntity>;
+  private readonly terminals: MapDraft<string, TerminalEntity>;
   private readonly extensions: MapDraft<string, ExtensionEntity>;
   private readonly compactions: MapDraft<EntryId, CompactionEntity>;
   private readonly turnRuns: MapDraft<TurnId, RunId>;
   private readonly runUsages: MapDraft<RunId, AgentRunUsage>;
-  private readonly mcpElicitations: MapDraft<string, McpElicitation>;
   private transcript: readonly TranscriptEntry[];
   private appendedTranscript: TranscriptEntry[] = [];
   private events: readonly SessionEvent[];
@@ -73,6 +71,7 @@ export class SessionWorkspaceStager {
   private mcpSnapshot: McpSessionSnapshot;
   private running: boolean;
   private contextUsage: ContextUsage | undefined;
+  private configOptions: readonly ConfigSelect[];
   private retry: RetryStatus | undefined;
   private compaction: CompactionStatus;
   private outcomeUnknown: boolean;
@@ -81,12 +80,11 @@ export class SessionWorkspaceStager {
   constructor(base: SessionWorkspaceState) {
     this.messages = new MapDraft(base.messages);
     this.tools = new MapDraft(base.tools);
-    this.bashExecutions = new MapDraft(base.bashExecutions);
+    this.terminals = new MapDraft(base.terminals);
     this.extensions = new MapDraft(base.extensions);
     this.compactions = new MapDraft(base.compactions);
     this.turnRuns = new MapDraft(base.turnRuns);
     this.runUsages = new MapDraft(base.runUsages);
-    this.mcpElicitations = new MapDraft(base.mcpElicitations);
     this.transcript = base.transcript;
     this.events = base.events;
     this.diagnostics = base.diagnostics;
@@ -98,6 +96,7 @@ export class SessionWorkspaceStager {
     this.mcpSnapshot = base.mcpSnapshot;
     this.running = base.running;
     this.contextUsage = base.contextUsage;
+    this.configOptions = base.configOptions;
     this.retry = base.retry;
     this.compaction = base.compaction;
     this.outcomeUnknown = base.outcomeUnknown;
@@ -112,12 +111,11 @@ export class SessionWorkspaceStager {
         const outcomeUnknown = this.outcomeUnknown;
         this.messages.replace(new Map());
         this.tools.replace(new Map());
-        this.bashExecutions.replace(new Map());
+        this.terminals.replace(new Map());
         this.extensions.replace(new Map());
         this.compactions.replace(new Map());
         this.turnRuns.replace(new Map());
         this.runUsages.replace(new Map());
-        this.mcpElicitations.replace(new Map());
         this.transcript = [];
         this.appendedTranscript = [];
         this.events = [];
@@ -129,6 +127,7 @@ export class SessionWorkspaceStager {
         this.skills = initialSessionWorkspaceState.skills;
         this.skillDiagnostics = initialSessionWorkspaceState.skillDiagnostics;
         this.availableCommands = initialSessionWorkspaceState.availableCommands;
+        this.configOptions = initialSessionWorkspaceState.configOptions;
         this.mcpSnapshot = initialSessionWorkspaceState.mcpSnapshot;
         this.running = false;
         this.contextUsage = undefined;
@@ -183,14 +182,9 @@ export class SessionWorkspaceStager {
         }
         return;
       }
-      case "bash/upserted": {
-        const exists = this.bashExecutions.read().has(action.bash.messageId);
-        this.bashExecutions.write().set(action.bash.messageId, action.bash);
-        if (!exists) {
-          this.appendedTranscript.push({ type: "bash", messageId: action.bash.messageId, order: action.order });
-        }
+      case "terminal/upserted":
+        this.terminals.write().set(action.terminal.terminalId, action.terminal);
         return;
-      }
       case "extension/upserted": {
         const exists = this.extensions.read().has(action.extension.id);
         this.extensions.write().set(action.extension.id, action.extension);
@@ -271,15 +265,6 @@ export class SessionWorkspaceStager {
       case "mcp/replaced":
         if (action.snapshot.revision >= this.mcpSnapshot.revision) this.mcpSnapshot = action.snapshot;
         return;
-      case "mcp/elicitations-replaced":
-        this.mcpElicitations.replace(new Map(action.snapshot.requests.map((request) => [request.requestId, request])));
-        return;
-      case "mcp/elicitation-requested":
-        this.mcpElicitations.write().set(action.request.requestId, action.request);
-        return;
-      case "mcp/elicitation-resolved":
-        this.mcpElicitations.write().delete(action.requestId);
-        return;
       case "running/changed":
         if (action.running) {
           this.running = true;
@@ -290,6 +275,7 @@ export class SessionWorkspaceStager {
         }
         return;
       case "usage/changed": this.contextUsage = action.usage; return;
+      case "config/replaced": this.configOptions = action.options; return;
       case "retry/changed": this.retry = action.retry; return;
       case "compaction/changed": this.compaction = action.compaction; return;
       case "outcome/unknown": this.outcomeUnknown = action.value; return;
@@ -305,7 +291,7 @@ export class SessionWorkspaceStager {
       messages: this.messages.read(),
       transcript: this.transcript,
       tools: this.tools.read(),
-      bashExecutions: this.bashExecutions.read(),
+      terminals: this.terminals.read(),
       extensions: this.extensions.read(),
       compactions: this.compactions.read(),
       turnRuns: this.turnRuns.read(),
@@ -317,9 +303,9 @@ export class SessionWorkspaceStager {
       skillDiagnostics: this.skillDiagnostics,
       availableCommands: this.availableCommands,
       mcpSnapshot: this.mcpSnapshot,
-      mcpElicitations: this.mcpElicitations.read(),
       running: this.running,
       contextUsage: this.contextUsage,
+      configOptions: this.configOptions,
       retry: this.retry,
       compaction: this.compaction,
       outcomeUnknown: this.outcomeUnknown,
@@ -334,12 +320,12 @@ export class SessionWorkspaceStager {
       : [...this.transcript, ...this.appendedTranscript].sort((left, right) => Ordering.compare(left.order, right.order));
     const events = this.appendedEvents.length === 0
       ? this.events
-      : this.capEvents([...this.events, ...this.appendedEvents].sort((left, right) => Ordering.compare(left.order, right.order)));
+      : retainEvents([...this.events, ...this.appendedEvents]);
     return {
       messages: this.messages.read(),
       transcript,
       tools: this.tools.read(),
-      bashExecutions: this.bashExecutions.read(),
+      terminals: this.terminals.read(),
       extensions: this.extensions.read(),
       compactions: this.compactions.read(),
       turnRuns: this.turnRuns.read(),
@@ -351,9 +337,9 @@ export class SessionWorkspaceStager {
       skillDiagnostics: this.skillDiagnostics,
       availableCommands: this.availableCommands,
       mcpSnapshot: this.mcpSnapshot,
-      mcpElicitations: this.mcpElicitations.read(),
       running: this.running,
       contextUsage: this.contextUsage,
+      configOptions: this.configOptions,
       retry: this.retry,
       compaction: this.compaction,
       outcomeUnknown: this.outcomeUnknown,
@@ -363,10 +349,4 @@ export class SessionWorkspaceStager {
     };
   }
 
-  /** Keeps only the newest retained events after a frame merge. */
-  private capEvents(events: SessionEvent[]): SessionEvent[] {
-    return events.length > MAX_RETAINED_SESSION_EVENTS
-      ? events.slice(events.length - MAX_RETAINED_SESSION_EVENTS)
-      : events;
-  }
 }

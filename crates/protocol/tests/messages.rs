@@ -108,3 +108,26 @@ fn image_content_roundtrips_without_text_projection() {
     assert_eq!(decoded, block);
     assert_eq!(decoded.text(), None);
 }
+
+/// Old shell records stay readable without invented signals or working directories.
+#[test]
+fn old_bash_message_defaults_missing_cwd_and_signal_to_none() {
+    let bash: protocol::BashExecutionMessage =
+        serde_json::from_value(serde_json::json!({
+            "command": "ls",
+            "result": {
+                "disposition": { "type": "completed" },
+                "output": "a",
+                "exitCode": 0,
+                "cancelled": false,
+                "truncated": false
+            },
+            "excludeFromContext": false
+        }))
+        .expect("old bash message");
+    assert_eq!(bash.cwd, None);
+    assert_eq!(bash.result.signal, None);
+    let json = serde_json::to_value(&bash).expect("serialize");
+    assert!(json.get("cwd").is_none());
+    assert!(json["result"].get("signal").is_none());
+}

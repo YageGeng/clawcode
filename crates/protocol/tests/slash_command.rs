@@ -152,6 +152,7 @@ fn slash_command_events_round_trip() {
             payload: AgentEventPayload::SlashCommandEnd {
                 run_id: RunId::try_from("run-command").expect("RunId"),
                 status: SlashCommandStatus::Succeeded,
+                message: None,
             },
         },
     ];

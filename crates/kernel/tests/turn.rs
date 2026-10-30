@@ -1499,6 +1499,7 @@ async fn traced_run_propagates_trace_to_tools() {
             },
             Arc::new(RecordingSink::default()),
             trace_id.clone(),
+            None,
         ),
         dispatch,
     )

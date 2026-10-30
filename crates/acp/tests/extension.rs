@@ -147,7 +147,6 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::InvokeSkill.as_str()
             || method == AcpExtensionMethod::SkillList.as_str()
             || method == AcpExtensionMethod::McpStatus.as_str()
-            || method == AcpExtensionMethod::McpElicitationList.as_str()
             || method == AcpExtensionMethod::PendingMessageRemove.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
     }
@@ -190,12 +189,6 @@ impl JsonRpcMessage for IntegrationRequest {
             }
             method if method == AcpExtensionMethod::McpStatus.as_str() => {
                 AcpExtensionMethod::McpStatus.as_str()
-            }
-            method
-                if method
-                    == AcpExtensionMethod::McpElicitationList.as_str() =>
-            {
-                AcpExtensionMethod::McpElicitationList.as_str()
             }
             method
                 if method
@@ -255,50 +248,6 @@ async fn mcp_status_is_session_scoped_and_strict() {
     )
     .await
     .expect_err("unknown status field");
-    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
-}
-
-/// ACP exposes a strict Session-scoped snapshot of transient MCP elicitations.
-#[tokio::test]
-async fn mcp_elicitation_list_is_session_scoped_and_strict() {
-    let workspace = tempfile::tempdir().expect("workspace directory");
-    let state = tempfile::tempdir().expect("store directory");
-    let kernel = integration_kernel(state.path());
-    let session = send_request(
-        Arc::clone(&kernel),
-        IntegrationRequest::new(
-            SESSION_NEW_METHOD,
-            serde_json::json!({ "cwd": workspace.path() }),
-        ),
-    )
-    .await
-    .expect("create session");
-    let session_id = session["sessionId"].as_str().expect("session id");
-
-    let snapshot = send_request(
-        Arc::clone(&kernel),
-        IntegrationRequest::new(
-            AcpExtensionMethod::McpElicitationList.as_str(),
-            serde_json::json!({ "sessionId": session_id }),
-        ),
-    )
-    .await
-    .expect("MCP elicitation list");
-    assert_eq!(snapshot["sessionId"], session_id);
-    assert_eq!(snapshot["requests"], serde_json::json!([]));
-
-    let error = send_request(
-        kernel,
-        IntegrationRequest::new(
-            AcpExtensionMethod::McpElicitationList.as_str(),
-            serde_json::json!({
-                "sessionId": session_id,
-                "unexpected": true
-            }),
-        ),
-    )
-    .await
-    .expect_err("unknown elicitation list field");
     assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
 }
 
@@ -785,7 +734,14 @@ async fn session_activation_publishes_available_commands() {
             let review = commands
                 .available_commands
                 .iter()
-                .find(|command| command.name == "review")
+                .find_map(|command| match command {
+                    wire::AvailableCommand::Command(command)
+                        if command.name == "review" =>
+                    {
+                        Some(command)
+                    }
+                    _ => None,
+                })
                 .expect("Review Prompt Template command");
             assert_eq!(
                 review.input.as_ref().and_then(|input| match input {
@@ -1127,6 +1083,7 @@ async fn assistant_usage_replays_at_run_end() {
                     ))
                     .expect("message timing"),
                     content: MessageContent::ToolResult {
+                        cancelled: false,
                         output: None,
                         tool_call_id: ToolCallId::try_from("tool-call-replay")
                             .expect("tool call id"),
@@ -1480,7 +1437,8 @@ async fn compaction_card_replays_in_persisted_branch_order() {
                 );
             }
 
-            assert_eq!(replay.len(), 3);
+            // The passthrough card is followed by the standard compaction entity.
+            assert_eq!(replay.len(), 4);
             assert_eq!(replay[0]["sessionUpdate"], "user_message");
             assert_eq!(replay[0]["messageId"], "message-before");
             assert_eq!(
@@ -1492,8 +1450,16 @@ async fn compaction_card_replays_in_persisted_branch_order() {
                 replay[1]["payload"]["outcome"]["result"]["entryId"],
                 compaction_entry_id.as_str()
             );
-            assert_eq!(replay[2]["sessionUpdate"], "user_message");
-            assert_eq!(replay[2]["messageId"], "message-after");
+            assert_eq!(replay[2]["sessionUpdate"], "compaction_update");
+            assert_eq!(replay[2]["status"], "completed");
+            assert_eq!(
+                replay[2]["_meta"][ProductIdentity::ACP_NAMESPACE]
+                    [ProductIdentity::ACP_COMPACTION_METADATA]["result"]
+                    ["entryId"],
+                compaction_entry_id.as_str()
+            );
+            assert_eq!(replay[3]["sessionUpdate"], "user_message");
+            assert_eq!(replay[3]["messageId"], "message-after");
             Ok(())
         })
         .await

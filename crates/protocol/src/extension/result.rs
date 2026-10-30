@@ -268,6 +268,10 @@ pub struct UserBashResult {
     /// Process exit code, absent when the process was terminated by a signal.
     #[builder(default)]
     pub exit_code: Option<i32>,
+    /// Name of the signal that ended the shell, such as `SIGTERM`; absent in older results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub signal: Option<String>,
     /// Whether cancellation terminated the command.
     pub cancelled: bool,
     /// Whether visible output was reduced to Pi's bounded tail.

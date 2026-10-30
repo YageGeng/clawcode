@@ -10,9 +10,9 @@ use protocol::{
     ModelProfile, SessionId, SessionSummary, SessionTreeSnapshot,
     ThinkingLevel, TurnId,
 };
-use store::{EntryKind, NewEntry};
 
-use super::super::Session;
+use super::super::settings::SessionSettingsUpdate;
+use super::super::{RunInvocation, Session};
 use super::context::ExtensionMessageMaterializer;
 
 /// Event sink used when an out-of-band extension command has no ACP stream.
@@ -68,28 +68,6 @@ impl SessionExtensionHost {
             Arc::clone(&self.clock),
             Arc::clone(&self.id_generator),
         )
-    }
-
-    /// Appends one durable session-setting entry before publishing in-memory state.
-    fn persist_setting(
-        &self,
-        kind: EntryKind,
-        payload: serde_json::Value,
-    ) -> Result<(), ExtensionHostError> {
-        self.session
-            .transcript
-            .append_store_only_entry(NewEntry {
-                id: self.entry_id()?,
-                kind,
-                payload,
-            })
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        self.session.sync_store().map_err(|error| {
-            ExtensionHostError::Operation(error.to_string())
-        })?;
-        Ok(())
     }
 
     /// Emits the complete command snapshot when this Session has a live client sink.
@@ -265,14 +243,19 @@ impl ExtensionHost for SessionExtensionHost {
                         input: request.text.into(),
                     },
                     Arc::new(DiscardEventSink),
-                    protocol::InputSource::Extension,
-                    protocol::TraceId::try_from(
-                        self.kernel.id_generator.next(protocol::IdKind::Trace),
-                    )
-                    .map_err(|error| {
-                        ExtensionHostError::Operation(error.to_string())
-                    })?,
-                    None,
+                    RunInvocation::builder()
+                        .input_source(protocol::InputSource::Extension)
+                        .trace_id(
+                            protocol::TraceId::try_from(
+                                self.kernel
+                                    .id_generator
+                                    .next(protocol::IdKind::Trace),
+                            )
+                            .map_err(|error| {
+                                ExtensionHostError::Operation(error.to_string())
+                            })?,
+                        )
+                        .build(),
                 )
                 .await
                 .map_err(|error| {
@@ -578,67 +561,22 @@ impl ExtensionHost for SessionExtensionHost {
         Ok(())
     }
 
-    /// Persists and selects one configured model for future Turn snapshots.
+    /// Persists and selects one configured model through the shared settings path.
     async fn set_model(
         &self,
         invocation: &ExtensionInvocation,
         provider_id: &str,
         model_id: &str,
     ) -> Result<ModelProfile, ExtensionHostError> {
-        let model = self
-            .session
-            .model
-            .resolve(provider_id, model_id)
-            .ok_or_else(|| {
-                ExtensionHostError::Operation(format!(
-                    "model is not configured: {provider_id}/{model_id}"
-                ))
-            })?;
-        let previous_model = self
-            .session
-            .model
-            .active()
-            .map_err(|error| ExtensionHostError::Operation(error.to_string()))?
-            .profile()
-            .clone();
-        if previous_model == *model.profile() {
-            return Ok(previous_model);
-        }
-        let (kind, payload) = (&super::super::settings::SettingChange::Model {
-            provider: provider_id.to_string(),
-            model_id: model_id.to_string(),
-        })
-            .into();
-        self.persist_setting(kind, payload)?;
-        self.session
-            .model
-            .replace_model(Arc::clone(&model))
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        let context = self
-            .kernel
-            .extension_context(
-                &self.session,
-                invocation.run_id.as_ref(),
-                invocation.turn_id.as_ref(),
-            )
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        self.session
-            .extensions
-            .runtime_ref()
-            .emit_model_select(
-                &protocol::ModelSelectEvent {
-                    model: model.profile().clone(),
-                    previous_model: Some(previous_model),
-                    source: protocol::ModelSelectSource::Set,
-                },
-                &context,
-            )
-            .await;
-        Ok(model.profile().clone())
+        SessionSettingsUpdate::builder()
+            .kernel(&self.kernel)
+            .session_id(&invocation.session_id)
+            .session(&self.session)
+            .invocation(Some(invocation))
+            .build()
+            .model(provider_id, model_id)
+            .await
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Returns the current session thinking level.
@@ -652,51 +590,21 @@ impl ExtensionHost for SessionExtensionHost {
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
-    /// Persists the selected thinking level and notifies model observers.
+    /// Persists the selected thinking level through the shared settings path.
     async fn set_thinking_level(
         &self,
         invocation: &ExtensionInvocation,
         level: ThinkingLevel,
     ) -> Result<ThinkingLevel, ExtensionHostError> {
-        let previous_level =
-            self.session.model.thinking_level().map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        if previous_level == level {
-            return Ok(level);
-        }
-        let (kind, payload) =
-            (&super::super::settings::SettingChange::ThinkingLevel(level))
-                .into();
-        self.persist_setting(kind, payload)?;
-        self.session
-            .model
-            .replace_thinking_level(level)
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        let context = self
-            .kernel
-            .extension_context(
-                &self.session,
-                invocation.run_id.as_ref(),
-                invocation.turn_id.as_ref(),
-            )
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        self.session
-            .extensions
-            .runtime_ref()
-            .emit_thinking_level_select(
-                &protocol::ThinkingLevelSelectEvent {
-                    level,
-                    previous_level,
-                },
-                &context,
-            )
-            .await;
-        Ok(level)
+        SessionSettingsUpdate::builder()
+            .kernel(&self.kernel)
+            .session_id(&invocation.session_id)
+            .session(&self.session)
+            .invocation(Some(invocation))
+            .build()
+            .thinking_level(level)
+            .await
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Publishes one value to the session-local extension event log.

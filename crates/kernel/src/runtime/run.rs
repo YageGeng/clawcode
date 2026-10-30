@@ -7,13 +7,36 @@ impl Kernel {
         &self,
         request: RunRequest,
         sink: Arc<dyn EventSink>,
-        input_source: protocol::InputSource,
-        trace_id: TraceId,
-        cancellation_parent: Option<CancellationToken>,
+        invocation: RunInvocation,
     ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+        let result = self.run_until_settled(request, sink, &invocation).await;
+        // Every return path before insertion rejects the prompt; the notice
+        // ignores this once the user message was already inserted.
+        if let (Err(error), Some(notice)) =
+            (&result, invocation.insertion.as_deref())
+        {
+            notice.rejected(error);
+        }
+        result
+    }
+
+    /// Runs every input path to settlement while reporting insertion to an optional notice.
+    async fn run_until_settled(
+        &self,
+        request: RunRequest,
+        sink: Arc<dyn EventSink>,
+        invocation: &RunInvocation,
+    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+        let input_source = invocation.input_source;
+        let trace_id = &invocation.trace_id;
+        let insertion = invocation.insertion.as_deref();
         // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
         if let Some(result) = self
-            .try_execute_user_bash_request(&request, Arc::clone(&sink))
+            .try_execute_user_bash_request(
+                &request,
+                Arc::clone(&sink),
+                insertion,
+            )
             .await?
         {
             return Ok((result, None));
@@ -42,10 +65,11 @@ impl Kernel {
                         .session(&session)
                         .run_id(&run_id)
                         .turn_id(&first_turn_id)
-                        .trace_id(&trace_id)
+                        .trace_id(trace_id)
                         .sink(Arc::clone(&sink))
                         .started_at(operation_started_at)
                         .invocation(invocation)
+                        .insertion(insertion)
                         .build(),
                 )
                 .await?
@@ -55,10 +79,12 @@ impl Kernel {
 
         // Install serialized Run state only after every immediate command path
         // has declined the request.
-        let _run_guard = session.acquire_operation().await?;
-        let cancellation = session
-            .execution
-            .install_cancellation(cancellation_parent.as_ref())?;
+        let (_run_guard, cancellation) = session
+            .acquire_operation_for_prompt(
+                invocation.cancellation_parent.as_ref(),
+                WaiterCancellation::from(insertion),
+            )
+            .await?;
         tracing::info!(
             "started Kernel Run {} for session {} with trace {}",
             run_id,
@@ -104,6 +130,47 @@ impl Kernel {
                         // Input handlers may persist through the Extension Host even
                         // when they consume the request before an Agent Turn starts.
                         session.sync_store()?;
+                        if let Some(notice) = insertion {
+                            // ACP accepts locally handled input by inserting a
+                            // live-only user message that never enters history.
+                            let message = self.message_now(
+                                &first_turn_id,
+                                MessageContent::User {
+                                    blocks: vec![ContentBlock::Text {
+                                        text: command_input,
+                                    }],
+                                },
+                            )?;
+                            emitter
+                                .emit(
+                                    first_turn_id.clone(),
+                                    AgentEventPayload::MessageStart {
+                                        message_id: message
+                                            .identity
+                                            .message_id
+                                            .clone(),
+                                    },
+                                )
+                                .await?;
+                            // Recheck after the asynchronous start event, before live-only insertion.
+                            if cancellation.is_cancelled() {
+                                tracing::info!(
+                                    "cancelled handled input before insertion for session {}, Run {}",
+                                    request.session_id,
+                                    run_id
+                                );
+                                return Err(KernelError::PromptCancelled);
+                            }
+                            emitter
+                                .emit(
+                                    first_turn_id.clone(),
+                                    AgentEventPayload::MessageEnd {
+                                        message: message.clone(),
+                                    },
+                                )
+                                .await?;
+                            notice.inserted(&message.identity.message_id);
+                        }
                         tracing::info!(
                             "completed Kernel Run {} for session {} with trace {} because an extension handled the input",
                             run_id,
@@ -158,6 +225,13 @@ impl Kernel {
         }
         let run_input = expanded_input.text().to_string();
         let initial_message_content = expanded_input.message_content();
+        // Internal input has no client to return it to, so a cancellation
+        // before insertion persists this copy instead of dropping it.
+        let retained_input =
+            insertion.is_none().then(|| initial_message_content.clone());
+        let mut user_message_inserted = false;
+        // Lives outside the execution future so failure and cancellation still report it.
+        let mut run_usage = protocol::ModelUsage::default();
 
         // Persist the Run boundary before Agent hooks or model work begin.
         self.record_operation(
@@ -321,6 +395,15 @@ impl Kernel {
                         None => None,
                     },
                 };
+                // A client prompt cancelled during hooks, compaction, or
+                // preflight is rejected before its message enters history.
+                if insertion.is_some()
+                    && queued_item.is_none()
+                    && user_message.is_some()
+                    && cancellation.is_cancelled()
+                {
+                    return Err(KernelError::PromptCancelled);
+                }
                 if let Some(message) = user_message {
                     let timestamp = message.timing.timestamp_ms;
                     emitter
@@ -365,7 +448,22 @@ impl Kernel {
                                 &item.queued.queue_id,
                             )?;
                         }
-                        None => self.persist_message(&session, &message)?,
+                        None => {
+                            // Message observers may await after the earlier cancellation check.
+                            if insertion.is_some() && cancellation.is_cancelled() {
+                                tracing::info!(
+                                    "cancelled prompt after message hooks before insertion for session {}, Run {}",
+                                    request.session_id,
+                                    run_id
+                                );
+                                return Err(KernelError::PromptCancelled);
+                            }
+                            self.persist_message(&session, &message)?;
+                            user_message_inserted = true;
+                            if let Some(notice) = insertion {
+                                notice.inserted(&message.identity.message_id);
+                            }
+                        }
                     }
                     if let Some(title) =
                         self.ensure_default_title(&session, &message)?
@@ -647,6 +745,10 @@ impl Kernel {
                             (message, Vec::new(), StopReason::Cancelled, None, true)
                         }
                     };
+                // Count the settled attempt before validation or persistence can fail.
+                if let MessageContent::Assistant { metadata, .. } = &assistant.content {
+                    run_usage += &metadata.usage;
+                }
                 let original_identity = assistant.identity.clone();
                 let assistant = session.extensions.runtime_ref().emit_message_end(
                     protocol::MessageEndEvent { message: assistant },
@@ -704,7 +806,7 @@ impl Kernel {
                             .session_id(&request.session_id)
                             .run_id(&run_id)
                             .turn_id(&turn_id)
-                            .trace_id(&trace_id)
+                            .trace_id(trace_id)
                             .session(&session)
                             .emitter(&emitter)
                             .cancellation(&cancellation)
@@ -731,10 +833,18 @@ impl Kernel {
                         &extension_context,
                     ).await;
                     let original_identity = message.identity.clone();
-                    let message = session.extensions.runtime_ref().emit_message_end(
+                    let cancelled_call = matches!(
+                        message.content,
+                        MessageContent::ToolResult { cancelled: true, .. }
+                    );
+                    let mut message = session.extensions.runtime_ref().emit_message_end(
                         protocol::MessageEndEvent { message },
                         &extension_context,
                     ).await;
+                    // A replaced result keeps the cancellation the Turn already decided.
+                    if let MessageContent::ToolResult { cancelled, .. } = &mut message.content {
+                        *cancelled |= cancelled_call;
+                    }
                     if message.identity != original_identity
                         || !matches!(message.content, MessageContent::ToolResult { .. })
                     {
@@ -1027,6 +1137,7 @@ impl Kernel {
                     .turn_id(completion.turn_id)
                     .cancellation(&cancellation)
                     .outcome(&completion.outcome)
+                    .usage(run_usage.clone())
                     .messages(completion.result.messages.clone())
                     .auto_compaction_reason(completion.auto_compaction_reason)
                     .build()
@@ -1042,6 +1153,43 @@ impl Kernel {
                 );
                 Ok((completion.result, Some(answer)))
             }
+            Err(error) if !user_message_inserted && error.is_cancellation() => {
+                if let Some(content) = retained_input {
+                    return RetainedInput::builder()
+                        .session_id(&request.session_id)
+                        .session(&session)
+                        .emitter(&emitter)
+                        .run_id(&run_id)
+                        .turn_id(&first_turn_id)
+                        .cancellation(&cancellation)
+                        .input_source(input_source)
+                        .content(content)
+                        .build()
+                        .settle(self)
+                        .await;
+                }
+                RunSettlement::builder()
+                    .kernel(self)
+                    .session_id(&request.session_id)
+                    .session(&session)
+                    .emitter(&emitter)
+                    .run_id(&run_id)
+                    .turn_id(first_turn_id)
+                    .cancellation(&cancellation)
+                    .outcome(&AgentOutcome::Cancelled)
+                    .usage(run_usage.clone())
+                    .build()
+                    .settle()
+                    .await?;
+                tracing::info!(
+                    "cancelled Kernel Run {} for session {} with trace {} before insertion: {}",
+                    run_id,
+                    request.session_id,
+                    trace_id,
+                    error
+                );
+                Err(KernelError::PromptCancelled)
+            }
             Err(error) => {
                 let outcome = AgentOutcome::Failed {
                     message: error.to_string(),
@@ -1055,6 +1203,7 @@ impl Kernel {
                     .turn_id(first_turn_id)
                     .cancellation(&cancellation)
                     .outcome(&outcome)
+                    .usage(run_usage.clone())
                     .build()
                     .settle()
                     .await?;
@@ -1068,5 +1217,109 @@ impl Kernel {
                 Err(error)
             }
         }
+    }
+}
+
+impl Kernel {
+    /// Materializes one message with a fresh identity at the current time.
+    fn message_now(
+        &self,
+        turn_id: &TurnId,
+        content: MessageContent,
+    ) -> Result<AgentMessage, KernelError> {
+        let timestamp = self.clock.now();
+        Ok(AgentMessage {
+            identity: MessageIdentity {
+                message_id: self.message_id()?,
+                turn_id: turn_id.clone(),
+            },
+            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?,
+            content,
+        })
+    }
+}
+
+/// Per-Run ingress context carried from the protocol adapter or host caller to settlement.
+#[derive(typed_builder::TypedBuilder)]
+pub(in crate::runtime) struct RunInvocation {
+    /// Origin reported to input hooks.
+    input_source: protocol::InputSource,
+    /// Ingress trace that stays stable through Tool calls.
+    trace_id: TraceId,
+    /// Caller-owned cancellation that also stops this Run while it waits.
+    #[builder(default)]
+    cancellation_parent: Option<CancellationToken>,
+    /// Client acceptance report; absent for internal input.
+    #[builder(default)]
+    insertion: Option<Arc<InsertionNotice>>,
+}
+
+/// Internal input whose Run was cancelled before insertion and must stay in history.
+#[derive(typed_builder::TypedBuilder)]
+struct RetainedInput<'a> {
+    session_id: &'a SessionId,
+    session: &'a Arc<Session>,
+    emitter: &'a EventEmitter,
+    run_id: &'a RunId,
+    turn_id: &'a TurnId,
+    cancellation: &'a CancellationToken,
+    input_source: protocol::InputSource,
+    content: MessageContent,
+}
+
+impl RetainedInput<'_> {
+    /// Persists the retained input, then settles its Run as cancelled.
+    async fn settle(
+        self,
+        kernel: &Kernel,
+    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+        let message = kernel.message_now(self.turn_id, self.content)?;
+        self.emitter
+            .emit(
+                self.turn_id.clone(),
+                AgentEventPayload::MessageStart {
+                    message_id: message.identity.message_id.clone(),
+                },
+            )
+            .await?;
+        kernel.persist_message(self.session, &message)?;
+        self.emitter
+            .emit(
+                self.turn_id.clone(),
+                AgentEventPayload::MessageEnd {
+                    message: message.clone(),
+                },
+            )
+            .await?;
+        let answer = RunSettlement::builder()
+            .kernel(kernel)
+            .session_id(self.session_id)
+            .session(self.session)
+            .emitter(self.emitter)
+            .run_id(self.run_id)
+            .turn_id(self.turn_id.clone())
+            .cancellation(self.cancellation)
+            .outcome(&AgentOutcome::Cancelled)
+            // Retained input ends before any model attempt runs.
+            .usage(protocol::ModelUsage::default())
+            .messages(vec![message.clone()])
+            .build()
+            .settle()
+            .await?;
+        tracing::info!(
+            "persisted {:?} input for Kernel Run {} in session {} after cancellation before insertion",
+            self.input_source,
+            self.run_id,
+            self.session_id
+        );
+        Ok((
+            RunResult {
+                run_id: self.run_id.clone(),
+                messages: vec![message],
+                turns: Vec::new(),
+            },
+            Some(answer),
+        ))
     }
 }

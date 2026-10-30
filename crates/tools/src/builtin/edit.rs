@@ -240,6 +240,23 @@ impl AgentTool for EditTool {
         EditArguments::try_from(call)?.validate()
     }
 
+    /// Reports the file an edit changes.
+    async fn locations(
+        &self,
+        call: &ToolCall,
+        cwd: &std::path::Path,
+    ) -> Vec<protocol::ToolLocation> {
+        EditArguments::try_from(call)
+            .ok()
+            .and_then(|arguments| ResolvedPath::new(&arguments.path, cwd).ok())
+            .map(|path| protocol::ToolLocation {
+                path: path.as_path().to_path_buf(),
+                line: None,
+            })
+            .into_iter()
+            .collect()
+    }
+
     /// Applies all replacements atomically from one original snapshot under the file queue.
     async fn execute(
         &self,

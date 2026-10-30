@@ -1,6 +1,7 @@
 import { ImagePlus, Link2, Send, Square, Trash2, X } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { AcpRequestError } from "../../acp/connection";
 import type { SessionId } from "../../acp/protocol";
 import type { ImageMimeType } from "../../acp/protocol";
 import type { AvailableCommandEntity, PendingMessages, PromptImage, PromptInput, PromptResourceLink, QueuedMessage } from "../../domain/model";
@@ -82,11 +83,14 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const [submitting, setSubmitting] = useState(false);
   const [readingImages, setReadingImages] = useState(false);
   const [error, setError] = useState<string>();
+  const [hint, setHint] = useState<string>();
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const imageInput = useRef<HTMLInputElement>(null);
   const imageReadInProgress = useRef(false);
   const imagesRef = useRef(initial.images);
+  // The latest draft, read when a failed prompt is merged back after the user kept typing.
+  const draftRef = useRef<PromptInput>(initial);
   const queued = [...pending.steering, ...pending.followUp];
   const commandQuery = text.startsWith("/") && !/\s/.test(text) ? text.slice(1) : undefined;
   const matchingCommands = commandQuery === undefined ? [] : CommandPaletteModel.matches(availableCommands, commandQuery);
@@ -97,6 +101,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const persist = (draft: PromptInput) => {
     sessionStorage.setItem(storageKey, JSON.stringify({ text: draft.text, resources: draft.resources } satisfies StoredDraft));
     controller.updateDraft(sessionId, draft);
+    draftRef.current = draft;
     imagesRef.current = draft.images;
     setText(draft.text);
     setResources(draft.resources);
@@ -110,16 +115,27 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
     }
     setSubmitting(true);
     setError(undefined);
+    setHint(undefined);
+    // Clear at once: the prompt now resolves only after insertion, and text
+    // typed while it waits must survive both success and failure.
+    persist({ text: "", resources: [], images: [] });
+    sessionStorage.removeItem(storageKey);
+    controller.clearDraft(sessionId);
     try {
       await controller.send(input);
-      sessionStorage.removeItem(storageKey);
-      controller.clearDraft(sessionId);
-      imagesRef.current = [];
-      setText("");
-      setResources([]);
-      setImages([]);
     } catch (reason: unknown) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      // A rejected prompt was never inserted, so its content goes back ahead of newer input.
+      const current = draftRef.current;
+      persist({
+        text: [input.text, current.text].filter((part) => part.trim().length > 0).join("\n\n"),
+        resources: [...input.resources, ...current.resources],
+        images: [...input.images, ...current.images]
+      });
+      if (reason instanceof AcpRequestError && reason.rpc.code === -32800) {
+        setHint("已取消，内容已放回输入框");
+      } else {
+        setError(reason instanceof Error ? reason.message : String(reason));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -215,6 +231,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           }}
         />
         {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}
+        {hint === undefined ? null : <div className="form-hint" role="status">{hint}</div>}
         {outcomeUnknown ? <div className="outcome-warning">上次请求结果未知，系统不会自动重发。<button type="button" disabled={readingImages} onClick={() => void submit({ text, resources, images })}>确认后重新发送</button></div> : null}
         <div className="composer-actions">
           <input ref={imageInput} className="visually-hidden" type="file" accept={SUPPORTED_IMAGE_MIME_TYPES.join(",")} multiple disabled={readingImages} onChange={(event) => {

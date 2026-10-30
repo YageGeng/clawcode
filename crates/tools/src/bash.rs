@@ -147,22 +147,23 @@ impl BashExecutor {
                 None => std::future::pending::<()>().await,
             }
         });
-        let (termination, exit_code) = loop {
+        let (termination, exit_code, signal) = loop {
             tokio::select! {
                 () = request.cancellation.cancelled() => {
                     Self::kill_process_tree(child_pid).await;
-                    break (BashTermination::Aborted, None);
+                    break (BashTermination::Aborted, None, Self::killed());
                 }
                 () = &mut timeout_wait => {
                     Self::kill_process_tree(child_pid).await;
-                    break (BashTermination::TimedOut, None);
+                    break (BashTermination::TimedOut, None, Self::killed());
                 }
                 status = &mut wait => {
                     let status = status.map_err(|error| ToolError::Execution {
                         tool: "bash".to_string(),
                         message: error.to_string(),
                     })?;
-                    break (BashTermination::Exited, status.code());
+                    // Read the signal before the status is dropped; it cannot be recovered later.
+                    break (BashTermination::Exited, status.code(), Self::signal_name(status));
                 }
                 chunk = receiver.recv() => {
                     let Some(chunk) = chunk else {
@@ -217,6 +218,7 @@ impl BashExecutor {
             .disposition(UserBashDisposition::Completed)
             .output(snapshot.output.clone())
             .exit_code(exit_code)
+            .signal(signal)
             .cancelled(termination == BashTermination::Aborted)
             .truncated(snapshot.truncation.truncated);
         let result = match &snapshot.full_output_path {
@@ -230,6 +232,27 @@ impl BashExecutor {
             snapshot,
             termination,
         })
+    }
+
+    /// Names the signal that ended the shell, if one did.
+    #[cfg(unix)]
+    fn signal_name(status: std::process::ExitStatus) -> Option<String> {
+        use std::os::unix::process::ExitStatusExt as _;
+        status
+            .signal()
+            .and_then(|signal| nix::sys::signal::Signal::try_from(signal).ok())
+            .map(|signal| signal.as_str().to_string())
+    }
+
+    /// Other platforms report no signal names.
+    #[cfg(not(unix))]
+    fn signal_name(_status: std::process::ExitStatus) -> Option<String> {
+        None
+    }
+
+    /// Signal recorded when we stop the shell: unix sends SIGKILL, Windows uses taskkill.
+    fn killed() -> Option<String> {
+        cfg!(unix).then(|| "SIGKILL".to_string())
     }
 
     /// Resolves bash using Pi's Unix preference order with a portable sh fallback.

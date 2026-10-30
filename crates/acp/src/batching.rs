@@ -1,11 +1,10 @@
 use std::num::NonZeroUsize;
 
 use agent_client_protocol::{
-    Agent, Channel, Client, ConnectTo, RawJsonRpcMessage, TransportBatch,
-    TransportFrame,
+    Agent, Channel, Client, ConnectTo, ConnectionDriver, RawJsonRpcMessage,
+    TransportBatch, TransportFrame,
 };
 use futures::channel::mpsc;
-use futures::future::BoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::coalescing::coalesce_updates;
@@ -125,8 +124,14 @@ where
         self,
         client: impl ConnectTo<Agent>,
     ) -> Result<(), agent_client_protocol::Error> {
-        let (channel, component_future) =
+        let (channel, component_driver) =
             <Self as ConnectTo<Client>>::into_channel_and_future(self);
+        let component_future = async move {
+            match component_driver {
+                Some(driver) => driver.await,
+                None => Ok(()),
+            }
+        };
         let client_future =
             <Channel as ConnectTo<Client>>::connect_to(channel, client);
         futures::try_join!(component_future, client_future)?;
@@ -134,14 +139,16 @@ where
     }
 
     /// Exposes a frame-aware channel and drives both relay directions to completion.
-    fn into_channel_and_future(
-        self,
-    ) -> (
-        Channel,
-        BoxFuture<'static, Result<(), agent_client_protocol::Error>>,
-    ) {
-        let (inner_channel, inner_future) =
+    fn into_channel_and_future(self) -> (Channel, Option<ConnectionDriver>) {
+        let (inner_channel, inner_driver) =
             self.inner.into_channel_and_future();
+        // An inner endpoint without owned work lives as long as its channel.
+        let inner_future = async move {
+            match inner_driver {
+                Some(driver) => driver.await,
+                None => Ok(()),
+            }
+        };
         let (outer_channel, relay_channel) = Channel::duplex();
         let Channel {
             rx: inner_rx,
@@ -152,7 +159,7 @@ where
             tx: outer_tx,
         } = relay_channel;
         let max_batch_size = self.max_batch_size;
-        let relay = Box::pin(async move {
+        let relay = ConnectionDriver::new(async move {
             futures::try_join!(
                 inner_future,
                 forward_inbound(outer_rx, inner_tx),
@@ -160,7 +167,7 @@ where
             )?;
             Ok(())
         });
-        (outer_channel, relay)
+        (outer_channel, Some(relay))
     }
 }
 

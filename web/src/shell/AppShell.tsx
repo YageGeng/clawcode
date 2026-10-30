@@ -9,7 +9,9 @@ import { Conversation } from "../features/conversation/Conversation";
 import { ContextLens, type ContextSelection } from "../features/inspector/ContextLens";
 import { Inspector } from "../features/inspector/Inspector";
 import { McpPanel } from "../features/mcp/McpPanel";
-import { McpElicitationDialog } from "../features/mcp/McpElicitationDialog";
+import { ElicitationDialog } from "../features/mcp/ElicitationDialog";
+import { NoticeToasts } from "../features/notices/NoticeToasts";
+import { SessionConfigSelects } from "../features/session/SessionConfigSelects";
 import { SkillsPanel } from "../features/skills/SkillsPanel";
 import { initialSessionWorkspaceState } from "../workspace/sessionState";
 import { sessionWorkspaceOf } from "../workspace/selectors";
@@ -39,21 +41,13 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   // Subscribe to the handful of Session fields this shell renders rather than
   // the entire projection, so streaming deltas do not re-render its frame.
   const contextUsage = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.contextUsage);
+  const configOptions = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.configOptions ?? initialSessionWorkspaceState.configOptions);
   const retry = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.retry);
   const skills = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.skills ?? initialSessionWorkspaceState.skills);
   const skillDiagnostics = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.skillDiagnostics ?? initialSessionWorkspaceState.skillDiagnostics);
   const mcpSnapshot = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.mcpSnapshot ?? initialSessionWorkspaceState.mcpSnapshot);
-  // One dialog at a time also serves foreground children attached inside tool cards.
-  const pendingElicitation = useWorkspaceStore((state) => {
-    const own = sessionWorkspaceOf(state)?.mcpElicitations.values().next().value;
-    if (own !== undefined) return own;
-    for (const child of state.sessions) {
-      if (child.ownership?.kind !== "tool" || child.ownership.sessionId !== state.activeSessionId) continue;
-      const pending = state.sessionWorkspaces.get(child.sessionId)?.mcpElicitations.values().next().value;
-      if (pending !== undefined) return pending;
-    }
-    return undefined;
-  });
+  // Requests from any attached Session queue up; one dialog at a time.
+  const pendingElicitation = useWorkspaceStore((state) => state.elicitations[0]);
   const runningSessionIds = useWorkspaceStore((state) => state.runningSessionIds);
   const [section, setSection] = useState<PrimarySection>("sessions");
   const [sessionsOpen, setSessionsOpen] = useState(() => window.innerWidth >= 768);
@@ -206,7 +200,12 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
           }}><PanelLeftOpen size={18} aria-hidden="true" /></button> : null}
           <div className="conversation-header__identity">
             <h1>{activeSession?.title ?? (section === "sessions" ? "Agent 工作台" : section === "skills" ? "Skills" : section === "mcp" ? "MCP" : "关于")}</h1>
-            <p>{bootstrap.activeModel.displayName}{activeSession === undefined ? "" : ` · ${activeSession.cwd}`}</p>
+            <p>
+              {activeSessionId !== undefined && configOptions.length > 0
+                ? <SessionConfigSelects sessionId={activeSessionId} options={configOptions} controller={controller} />
+                : bootstrap.activeModel.displayName}
+              {activeSession === undefined ? "" : ` · ${activeSession.cwd}`}
+            </p>
           </div>
           <div className="runtime-status" aria-label="Agent 运行状态">
             <span className="runtime-chip" data-tone={connectionTone}><span className="runtime-chip__dot" />{connectionLabel}</span>
@@ -278,8 +277,9 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
         />
       ) : null}
       {pendingElicitation === undefined ? null : (
-        <McpElicitationDialog controller={controller} request={pendingElicitation} />
+        <ElicitationDialog key={pendingElicitation.key} controller={controller} prompt={pendingElicitation} />
       )}
+      <NoticeToasts />
     </div>
   );
 }

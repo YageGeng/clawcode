@@ -1,5 +1,5 @@
 import type { SessionId } from "../acp/protocol";
-import type { PromptInput, SessionSummary } from "../domain/model";
+import type { ElicitationPrompt, PromptInput, SessionNotice, SessionSummary } from "../domain/model";
 import {
   initialSessionWorkspaceState,
   reduceSessionWorkspace
@@ -23,6 +23,8 @@ export type WorkspaceState = Readonly<{
   drafts: ReadonlyMap<SessionId, PromptInput>;
   composerRevision: number;
   diagnostics: readonly string[];
+  notices: readonly SessionNotice[];
+  elicitations: readonly ElicitationPrompt[];
 }>;
 
 export type WorkspaceAction =
@@ -36,7 +38,11 @@ export type WorkspaceAction =
   | { readonly type: "draft/activated"; readonly sessionId: SessionId; readonly draft: PromptInput }
   | { readonly type: "draft/changed"; readonly sessionId: SessionId; readonly draft: PromptInput }
   | { readonly type: "draft/cleared"; readonly sessionId: SessionId }
-  | { readonly type: "diagnostic/added"; readonly message: string };
+  | { readonly type: "diagnostic/added"; readonly message: string }
+  | { readonly type: "notice/added"; readonly notice: SessionNotice }
+  | { readonly type: "notice/dismissed"; readonly id: string }
+  | { readonly type: "elicitation/asked"; readonly prompt: ElicitationPrompt }
+  | { readonly type: "elicitation/settled"; readonly key: string };
 
 export const initialWorkspaceState: WorkspaceState = {
   connection: { type: "disconnected" },
@@ -46,7 +52,9 @@ export const initialWorkspaceState: WorkspaceState = {
   runningSessionIds: new Set(),
   drafts: new Map(),
   composerRevision: 0,
-  diagnostics: []
+  diagnostics: [],
+  notices: [],
+  elicitations: []
 };
 
 /** Returns the current projection for one Session, or a shared empty projection before loading. */
@@ -126,5 +134,11 @@ export function reduceWorkspace(
       return { ...state, drafts };
     }
     case "diagnostic/added": return { ...state, diagnostics: [...state.diagnostics, action.message] };
+    // At most three toasts stay on screen; the oldest yields to a new one.
+    case "notice/added": return { ...state, notices: [...state.notices, action.notice].slice(-3) };
+    case "notice/dismissed": return { ...state, notices: state.notices.filter((notice) => notice.id !== action.id) };
+    // Requests queue and the dialog shows the oldest one.
+    case "elicitation/asked": return { ...state, elicitations: [...state.elicitations, action.prompt] };
+    case "elicitation/settled": return { ...state, elicitations: state.elicitations.filter((prompt) => prompt.key !== action.key) };
   }
 }

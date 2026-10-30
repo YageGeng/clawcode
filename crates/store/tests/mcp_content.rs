@@ -44,6 +44,7 @@ fn mcp_content_round_trips_through_session_store() {
         timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
             .expect("message timing"),
         content: MessageContent::ToolResult {
+            cancelled: false,
             output: None,
             tool_call_id: ToolCallId::try_from("call-mcp-content")
                 .expect("tool call id"),

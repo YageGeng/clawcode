@@ -13,7 +13,6 @@ import { Composer } from "../composer/Composer";
 import { MessageView } from "./MessageView";
 import { ExtensionCard } from "./ExtensionCard";
 import { ToolCallCard } from "./ToolCallCard";
-import { BashExecutionCard } from "./BashExecutionCard";
 import { CompactionCard } from "./CompactionCard";
 import { useTranscriptScroll } from "./useTranscriptScroll";
 import { BackgroundSubagents } from "./BackgroundSubagents";
@@ -63,12 +62,9 @@ const ToolRow = memo(function ToolRow({ sessionId, controller, compact, toolCall
   onInspect: (tool: ToolCallEntity) => void;
 }>) {
   const tool = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.tools.get(toolCallId));
-  return tool === undefined ? null : <ToolCallCard tool={tool} controller={controller} inspecting={inspecting} {...(compact ? {} : { onInspect })} />;
-});
-
-const BashRow = memo(function BashRow({ sessionId, messageId }: Readonly<{ sessionId: SessionId; messageId: MessageId }>) {
-  const bash = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.bashExecutions.get(messageId));
-  return bash === undefined ? null : <BashExecutionCard bash={bash} />;
+  // Bash tools and `!` commands use their tool call id as the terminal id.
+  const terminal = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.terminals.get(toolCallId));
+  return tool === undefined ? null : <ToolCallCard tool={tool} controller={controller} inspecting={inspecting} {...(terminal === undefined ? {} : { terminal })} {...(compact ? {} : { onInspect })} />;
 });
 
 const ExtensionRow = memo(function ExtensionRow({ sessionId, id }: Readonly<{ sessionId: SessionId; id: string }>) {
@@ -190,7 +186,6 @@ export function Conversation({ bootstrap, controller, contextSelection, onInspec
             />;
           }
           if (entry.type === "extension") return <ExtensionRow sessionId={activeSessionId} key={`extension:${entry.extensionEventId}`} id={entry.extensionEventId} />;
-          if (entry.type === "bash") return <BashRow sessionId={activeSessionId} key={`bash:${entry.messageId}`} messageId={entry.messageId} />;
           if (entry.type === "compaction") return <CompactionRow sessionId={activeSessionId} key={`compaction:${entry.entryId}`} entryId={entry.entryId} />;
           if (entry.type === "agent_usage") return <AgentUsageRow sessionId={activeSessionId} key={`agent-usage:${entry.runId}`} runId={entry.runId} />;
           return <ToolRow

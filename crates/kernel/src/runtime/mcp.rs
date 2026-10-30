@@ -403,28 +403,29 @@ impl Session {
                 "MCP is disabled for this Session".to_string(),
             )
         })?;
-        match state
-            .elicitations
-            .lock()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host(
-                    "MCP elicitation lock poisoned".to_string(),
-                )
-            })?
-            .entry(request_id.clone())
-        {
-            Entry::Vacant(entry) => {
-                entry.insert(PendingMcpElicitation {
-                    request: request.clone(),
-                    sender,
-                });
+        // The first pending request blocks the Run on the user.
+        let first_pending = {
+            let mut elicitations =
+                state.elicitations.lock().map_err(|_poison_error| {
+                    ::mcp::McpError::Host(
+                        "MCP elicitation lock poisoned".to_string(),
+                    )
+                })?;
+            match elicitations.entry(request_id.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(PendingMcpElicitation {
+                        request: request.clone(),
+                        sender,
+                    });
+                }
+                Entry::Occupied(_entry) => {
+                    return Err(::mcp::McpError::Host(format!(
+                        "duplicate MCP elicitation request '{request_id}'"
+                    )));
+                }
             }
-            Entry::Occupied(_entry) => {
-                return Err(::mcp::McpError::Host(format!(
-                    "duplicate MCP elicitation request '{request_id}'"
-                )));
-            }
-        }
+            elicitations.len() == 1
+        };
         if let Err(error) = self
             .emit_mcp_event(
                 turn_id.clone(),
@@ -446,6 +447,20 @@ impl Session {
                 .remove(&request_id);
             return Err(error);
         }
+        if first_pending {
+            tracing::info!(
+                "Run requires user action for MCP elicitation {}",
+                request_id
+            );
+            self.emit_mcp_event(
+                turn_id.clone(),
+                requested_at_ms,
+                AgentEventPayload::ActionRequired {
+                    request_id: request_id.clone(),
+                },
+            )
+            .await?;
+        }
         let cancellation = self
             .execution
             .cancellation()
@@ -461,24 +476,38 @@ impl Session {
                 ))
             })?,
         };
-        state
-            .elicitations
-            .lock()
-            .map_err(|_poison_error| {
-                ::mcp::McpError::Host(
-                    "MCP elicitation lock poisoned".to_string(),
-                )
-            })?
-            .remove(&request_id);
+        let last_resolved = {
+            let mut elicitations =
+                state.elicitations.lock().map_err(|_poison_error| {
+                    ::mcp::McpError::Host(
+                        "MCP elicitation lock poisoned".to_string(),
+                    )
+                })?;
+            elicitations.remove(&request_id);
+            elicitations.is_empty()
+        };
         self.emit_mcp_event(
-            turn_id,
+            turn_id.clone(),
             TimestampMs::now(),
             AgentEventPayload::McpElicitationResolved {
-                request_id,
+                request_id: request_id.clone(),
                 result: result.clone(),
             },
         )
         .await?;
+        // The Run is still waiting on this tool, so it resumes foreground work.
+        if last_resolved {
+            tracing::info!(
+                "Run resumed after MCP elicitation {} was resolved",
+                request_id
+            );
+            self.emit_mcp_event(
+                turn_id,
+                TimestampMs::now(),
+                AgentEventPayload::ActionResolved { request_id },
+            )
+            .await?;
+        }
         Ok(result)
     }
 
@@ -498,16 +527,19 @@ impl Session {
             .map_err(|_poison_error| KernelError::Poisoned)?
             .remove(&request.request_id)
             .ok_or_else(|| {
-                KernelError::Protocol(format!(
-                    "MCP elicitation is not pending: {}",
+                // Another client answered first, or the Turn cancelled it.
+                tracing::info!(
+                    "ignored response for MCP elicitation {} that is no longer pending",
                     request.request_id
-                ))
+                );
+                KernelError::ElicitationResolved(request.request_id.clone())
             })?;
         pending.sender.send(request.result).map_err(|_result| {
-            KernelError::Protocol(format!(
-                "MCP elicitation is no longer accepting a response: {}",
+            tracing::info!(
+                "MCP elicitation {} stopped waiting before its response arrived",
                 request.request_id
-            ))
+            );
+            KernelError::ElicitationResolved(request.request_id.clone())
         })
     }
 }

@@ -5,7 +5,10 @@ use protocol::{PendingMessages, QueueId, RunId, Sequence, TurnId};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard, Notify};
 use tokio_util::sync::CancellationToken;
 
-use super::{EventSink, KernelError, PendingQueue, PendingQueueItem, Session};
+use super::{
+    EventSink, KernelError, PendingQueue, PendingQueueItem, Session,
+    WaiterCancellation,
+};
 
 /// Serialized lifecycle state for one live session runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +40,9 @@ pub(super) struct SessionExecution {
     gate: AsyncMutex<()>,
     #[builder(default)]
     close_requested: Mutex<CancellationToken>,
+    /// Cancelled and replaced by `cancel()` to reject client prompts still waiting for the gate.
+    #[builder(default)]
+    waiters: Mutex<CancellationToken>,
     #[builder(default)]
     active_run: Mutex<Option<ActiveRunContext>>,
     idle_notify: Notify,
@@ -65,6 +71,87 @@ impl SessionExecution {
         // caller was queued behind an operation that already held the gate.
         self.ensure_active()?;
         Ok(guard)
+    }
+
+    /// Acquires the prompt gate and installs cancellation without an admission gap.
+    pub(super) async fn acquire_operation_for_prompt(
+        &self,
+        cancellation_parent: Option<&CancellationToken>,
+        waiters: WaiterCancellation,
+    ) -> Result<(MutexGuard<'_, ()>, CancellationToken), KernelError> {
+        self.ensure_active()?;
+        let closing = self
+            .close_requested
+            .lock()
+            .map_err(|_lock_error| KernelError::Poisoned)?
+            .clone();
+        // Internal input never observes the session-wide waiter generation.
+        let waiting = match waiters {
+            WaiterCancellation::Reject => Some(
+                self.waiters
+                    .lock()
+                    .map_err(|_lock_error| KernelError::Poisoned)?
+                    .clone(),
+            ),
+            WaiterCancellation::Ignore => None,
+        };
+        let parent = cancellation_parent.cloned().unwrap_or_default();
+        let rejected = async {
+            match &waiting {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let guard = tokio::select! {
+            biased;
+            () = closing.cancelled() => {
+                tracing::info!("rejected waiting prompt because its session is closing");
+                return Err(waiters.closing());
+            }
+            () = parent.cancelled() => {
+                tracing::info!("rejected waiting prompt because its parent was cancelled");
+                return Err(KernelError::PromptCancelled);
+            }
+            () = rejected => {
+                tracing::info!("rejected waiting prompt because its session was cancelled");
+                return Err(KernelError::PromptCancelled);
+            }
+            guard = self.gate.lock() => guard,
+        };
+        // Shutdown may have started while this prompt was queued behind the gate.
+        self.ensure_active().map_err(|error| match error {
+            KernelError::SessionClosing => waiters.closing(),
+            other => other,
+        })?;
+        let mut current = self
+            .cancellation
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        // `cancel()` rejects waiters while holding this lock, so a cancel either
+        // rejects this admission or reaches the token installed below.
+        if waiting
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+            || parent.is_cancelled()
+        {
+            tracing::info!("rejected prompt cancelled during admission");
+            return Err(KernelError::PromptCancelled);
+        }
+        let cancellation = cancellation_parent.map_or_else(
+            CancellationToken::new,
+            CancellationToken::child_token,
+        );
+        if closing.is_cancelled() {
+            match waiters {
+                WaiterCancellation::Reject => {
+                    return Err(KernelError::PromptCancelled);
+                }
+                WaiterCancellation::Ignore => cancellation.cancel(),
+            }
+        }
+        *current = cancellation.clone();
+        drop(current);
+        Ok((guard, cancellation))
     }
 
     /// Attempts to acquire the operation gate without queueing direct commands.
@@ -261,12 +348,21 @@ impl SessionExecution {
         Ok(())
     }
 
-    /// Cancels the current serialized operation without waiting for settlement.
+    /// Cancels the current operation and rejects client prompts waiting for the gate.
     pub(super) fn cancel(&self) -> Result<(), KernelError> {
-        self.cancellation
+        let current = self
+            .cancellation
             .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .cancel();
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        current.cancel();
+        // Waiters are replaced under the admission lock so a cancel cannot fall
+        // between a prompt's gate acquisition and its token installation.
+        let mut waiters = self
+            .waiters
+            .lock()
+            .map_err(|_poison_error| KernelError::Poisoned)?;
+        waiters.cancel();
+        *waiters = CancellationToken::new();
         Ok(())
     }
 
@@ -496,6 +592,17 @@ impl Session {
         self.execution.try_acquire_operation()
     }
 
+    /// Acquires the run gate for prompt input and installs its cancellation atomically.
+    pub(super) async fn acquire_operation_for_prompt(
+        &self,
+        cancellation_parent: Option<&CancellationToken>,
+        waiters: WaiterCancellation,
+    ) -> Result<(MutexGuard<'_, ()>, CancellationToken), KernelError> {
+        self.execution
+            .acquire_operation_for_prompt(cancellation_parent, waiters)
+            .await
+    }
+
     /// Transitions an active runtime into closing while holding its run gate.
     pub(super) fn begin_closing(&self) -> Result<(), KernelError> {
         self.execution.begin_closing()
@@ -653,6 +760,87 @@ mod tests {
                 .expect("waiter unblocked")
                 .expect("join");
         assert!(matches!(result, Err(KernelError::SessionClosing)));
+        drop(guard);
+    }
+
+    /// Cancelling while a prompt waits for the gate rejects it without installing a token.
+    #[tokio::test]
+    async fn cancel_before_admission_rejects_without_token() {
+        let execution = execution();
+        let guard = execution.acquire_operation().await.expect("gate");
+        let previous = execution.cancellation().expect("token");
+        let queued = Arc::clone(&execution);
+        let waiter = tokio::spawn(async move {
+            queued
+                .acquire_operation_for_prompt(None, WaiterCancellation::Reject)
+                .await
+                .map(|(_guard, token)| token)
+        });
+        tokio::task::yield_now().await;
+        execution.cancel().expect("cancel");
+        drop(guard);
+
+        let result = waiter.await.expect("join");
+        assert!(matches!(result, Err(KernelError::PromptCancelled)));
+        let current = execution.cancellation().expect("token");
+        assert!(current.is_cancelled());
+        assert!(previous.is_cancelled());
+    }
+
+    /// A cancel issued right after admission reaches the token installed during admission.
+    #[tokio::test]
+    async fn cancel_after_admission_cancels_installed_token() {
+        let execution = execution();
+        let (_guard, token) = execution
+            .acquire_operation_for_prompt(None, WaiterCancellation::Reject)
+            .await
+            .expect("admitted");
+        execution.cancel().expect("cancel");
+        assert!(token.is_cancelled());
+    }
+
+    /// Internal waiters keep their place when a session-wide cancel only targets client prompts.
+    #[tokio::test]
+    async fn ignored_waiter_cancellation_still_admits() {
+        let execution = execution();
+        let guard = execution.acquire_operation().await.expect("gate");
+        let queued = Arc::clone(&execution);
+        let waiter = tokio::spawn(async move {
+            queued
+                .acquire_operation_for_prompt(None, WaiterCancellation::Ignore)
+                .await
+                .map(|(_guard, token)| token)
+        });
+        tokio::task::yield_now().await;
+        execution.cancel().expect("cancel");
+        drop(guard);
+
+        let token = waiter.await.expect("join").expect("admitted");
+        assert!(!token.is_cancelled());
+    }
+
+    /// A parent cancellation rejects a waiting internal submission.
+    #[tokio::test]
+    async fn parent_cancellation_rejects_ignored_waiter() {
+        let execution = execution();
+        let guard = execution.acquire_operation().await.expect("gate");
+        let parent = CancellationToken::new();
+        let queued = Arc::clone(&execution);
+        let waiting_parent = parent.clone();
+        let waiter = tokio::spawn(async move {
+            queued
+                .acquire_operation_for_prompt(
+                    Some(&waiting_parent),
+                    WaiterCancellation::Ignore,
+                )
+                .await
+                .map(|_admission| ())
+        });
+        tokio::task::yield_now().await;
+        parent.cancel();
+
+        let result = waiter.await.expect("join");
+        assert!(matches!(result, Err(KernelError::PromptCancelled)));
         drop(guard);
     }
 

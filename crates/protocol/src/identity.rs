@@ -57,11 +57,20 @@ impl ProductIdentity {
     /// ACP v2 custom session-update discriminator for runtime events.
     pub const ACP_EVENT_UPDATE: &str = "_clawcode/event";
 
-    /// ACP v2 extension stop reason used when foreground work fails.
-    pub const ACP_ERROR_STOP_REASON: &str = "_clawcode/error";
-
     /// Product metadata key carrying Slash Command source and terminal state.
     pub const ACP_SLASH_COMMAND_METADATA: &str = "slashCommand";
+
+    /// Product metadata key carrying compaction card details absent from the standard entity.
+    pub const ACP_COMPACTION_METADATA: &str = "compaction";
+
+    /// Product metadata key naming where a user message came from.
+    pub const ACP_ORIGIN_METADATA: &str = "origin";
+
+    /// Origin of the tool call that displays a user's own `!` shell command.
+    pub const ACP_USER_TOOL_ORIGIN: &str = "user";
+
+    /// Origin of user messages accepted from a prefixed `!` or `!!` shell prompt.
+    pub const ACP_USER_BASH_ORIGIN: &str = "user_bash";
 
     /// ACP v2 custom content discriminator for structured MCP Tool output.
     pub const ACP_STRUCTURED_CONTENT_BLOCK: &str =
@@ -151,10 +160,6 @@ pub enum AcpExtensionMethod {
     McpComplete,
     /// Continues one pending MCP OAuth browser round.
     McpOAuthContinue,
-    /// Lists pending Turn-scoped MCP elicitations for one Session.
-    McpElicitationList,
-    /// Resolves one pending Turn-scoped MCP elicitation.
-    McpElicitationRespond,
     /// Dispatches a registered extension command.
     ExtensionCommand,
     /// Executes a user-authored shell command entirely on the server.
@@ -194,8 +199,6 @@ impl AcpExtensionMethod {
             Self::McpResourceRead => "_clawcode/mcp/resource/read",
             Self::McpComplete => "_clawcode/mcp/complete",
             Self::McpOAuthContinue => "_clawcode/mcp/oauth/continue",
-            Self::McpElicitationList => "_clawcode/mcp/elicitation/list",
-            Self::McpElicitationRespond => "_clawcode/mcp/elicitation/respond",
             Self::ExtensionCommand => "_clawcode/extension/command",
             Self::UserBash => "_clawcode/session/bash",
         }
@@ -223,8 +226,6 @@ impl AcpExtensionMethod {
             Self::McpResourceRead,
             Self::McpComplete,
             Self::McpOAuthContinue,
-            Self::McpElicitationList,
-            Self::McpElicitationRespond,
             Self::ExtensionCommand,
             Self::UserBash,
         ]

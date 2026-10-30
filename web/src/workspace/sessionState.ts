@@ -1,16 +1,14 @@
-import type { EntryId, EventMeta, MessageId, QueueId, RunId, TurnId } from "../acp/protocol";
+import type { ConfigSelect, EntryId, EventMeta, MessageId, QueueId, RunId, TurnId } from "../acp/protocol";
+import type { TerminalEntity } from "./terminals";
 import type {
   AgentRunUsage,
   AvailableCommandEntity,
-  BashExecutionEntity,
   CompactionEntity,
   CompactionStatus,
   ContextUsage,
   EventOrder,
   EventSequenceRange,
   ExtensionEntity,
-  McpElicitation,
-  McpElicitationSnapshot,
   McpSessionSnapshot,
   MessageEntity,
   ModelUsage,
@@ -29,7 +27,7 @@ export type SessionWorkspaceState = Readonly<{
   messages: ReadonlyMap<MessageId, MessageEntity>;
   transcript: readonly TranscriptEntry[];
   tools: ReadonlyMap<string, ToolCallEntity>;
-  bashExecutions: ReadonlyMap<MessageId, BashExecutionEntity>;
+  terminals: ReadonlyMap<string, TerminalEntity>;
   extensions: ReadonlyMap<string, ExtensionEntity>;
   compactions: ReadonlyMap<EntryId, CompactionEntity>;
   turnRuns: ReadonlyMap<TurnId, RunId>;
@@ -40,8 +38,8 @@ export type SessionWorkspaceState = Readonly<{
   skills: SkillListResult["skills"];
   skillDiagnostics: SkillListResult["diagnostics"];
   availableCommands: readonly AvailableCommandEntity[];
+  configOptions: readonly ConfigSelect[];
   mcpSnapshot: McpSessionSnapshot;
-  mcpElicitations: ReadonlyMap<string, McpElicitation>;
   running: boolean;
   contextUsage: ContextUsage | undefined;
   retry: RetryStatus | undefined;
@@ -56,7 +54,7 @@ export type SessionWorkspaceAction =
   | { readonly type: "message/text-delta"; readonly messageId: MessageId; readonly role: "user" | "assistant"; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
   | { readonly type: "message/reasoning-delta"; readonly messageId: MessageId; readonly delta: string; readonly meta: EventMeta; readonly order: EventOrder }
   | { readonly type: "tool/upserted"; readonly tool: ToolCallEntity; readonly order: EventOrder }
-  | { readonly type: "bash/upserted"; readonly bash: BashExecutionEntity; readonly order: EventOrder }
+  | { readonly type: "terminal/upserted"; readonly terminal: TerminalEntity }
   | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
   | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
   | { readonly type: "turn/settled"; readonly turnId: TurnId; readonly runId: RunId }
@@ -69,11 +67,9 @@ export type SessionWorkspaceAction =
   | { readonly type: "skills/replaced"; readonly result: SkillListResult }
   | { readonly type: "commands/replaced"; readonly commands: readonly AvailableCommandEntity[] }
   | { readonly type: "mcp/replaced"; readonly snapshot: McpSessionSnapshot }
-  | { readonly type: "mcp/elicitations-replaced"; readonly snapshot: McpElicitationSnapshot }
-  | { readonly type: "mcp/elicitation-requested"; readonly request: McpElicitation }
-  | { readonly type: "mcp/elicitation-resolved"; readonly requestId: string }
   | { readonly type: "running/changed"; readonly running: boolean }
   | { readonly type: "usage/changed"; readonly usage: ContextUsage | undefined }
+  | { readonly type: "config/replaced"; readonly options: readonly ConfigSelect[] }
   | { readonly type: "retry/changed"; readonly retry: RetryStatus | undefined }
   | { readonly type: "compaction/changed"; readonly compaction: CompactionStatus }
   | { readonly type: "outcome/unknown"; readonly value: boolean }
@@ -82,11 +78,31 @@ export type SessionWorkspaceAction =
 /** Cap on retained ACP events; the performance blueprint treats these as debug-only. */
 export const MAX_RETAINED_SESSION_EVENTS = 2_000;
 
+/**
+ * Orders the diagnostic event log and bounds it: each terminal keeps only its
+ * newest whole-output snapshot, then the newest events up to the count limit.
+ */
+export function retainEvents(events: readonly SessionEvent[]): SessionEvent[] {
+  const sorted = [...events].sort((left, right) => Ordering.compare(left.order, right.order));
+  const snapshots = new Set<string>();
+  const kept: SessionEvent[] = [];
+  for (let index = sorted.length - 1; index >= 0 && kept.length < MAX_RETAINED_SESSION_EVENTS; index -= 1) {
+    const event = sorted[index];
+    if (event === undefined) continue;
+    if (event.snapshotOf !== undefined) {
+      if (snapshots.has(event.snapshotOf)) continue;
+      snapshots.add(event.snapshotOf);
+    }
+    kept.push(event);
+  }
+  return kept.reverse();
+}
+
 export const initialSessionWorkspaceState: SessionWorkspaceState = {
   messages: new Map(),
   transcript: [],
   tools: new Map(),
-  bashExecutions: new Map(),
+  terminals: new Map(),
   extensions: new Map(),
   compactions: new Map(),
   turnRuns: new Map(),
@@ -97,8 +113,8 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   skills: [],
   skillDiagnostics: [],
   availableCommands: [],
+  configOptions: [],
   mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
-  mcpElicitations: new Map(),
   running: false,
   contextUsage: undefined,
   retry: undefined,
@@ -177,13 +193,10 @@ export function reduceSessionWorkspace(
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, tools, transcript };
     }
-    case "bash/upserted": {
-      const bashExecutions = new Map(state.bashExecutions);
-      const exists = bashExecutions.has(action.bash.messageId);
-      bashExecutions.set(action.bash.messageId, action.bash);
-      const transcript = exists ? state.transcript : [...state.transcript, { type: "bash" as const, messageId: action.bash.messageId, order: action.order }]
-        .sort((left, right) => Ordering.compare(left.order, right.order));
-      return { ...state, bashExecutions, transcript };
+    case "terminal/upserted": {
+      const terminals = new Map(state.terminals);
+      terminals.set(action.terminal.terminalId, action.terminal);
+      return { ...state, terminals };
     }
     case "extension/upserted": {
       const extensions = new Map(state.extensions);
@@ -246,12 +259,7 @@ export function reduceSessionWorkspace(
           .sort((left, right) => Ordering.compare(left.order, right.order))
       };
     }
-    case "event/received": {
-      const retained = state.events.length >= MAX_RETAINED_SESSION_EVENTS
-        ? state.events.slice(state.events.length - (MAX_RETAINED_SESSION_EVENTS - 1))
-        : state.events;
-      return { ...state, events: [...retained, action.event].sort((left, right) => Ordering.compare(left.order, right.order)) };
-    }
+    case "event/received": return { ...state, events: retainEvents([...state.events, action.event]) };
     case "queue/replaced": return {
       ...state,
       // A delayed snapshot must not reintroduce a queue item whose user
@@ -282,20 +290,6 @@ export function reduceSessionWorkspace(
     case "mcp/replaced": return action.snapshot.revision < state.mcpSnapshot.revision
       ? state
       : { ...state, mcpSnapshot: action.snapshot };
-    case "mcp/elicitations-replaced": return {
-      ...state,
-      mcpElicitations: new Map(action.snapshot.requests.map((request) => [request.requestId, request]))
-    };
-    case "mcp/elicitation-requested": {
-      const mcpElicitations = new Map(state.mcpElicitations);
-      mcpElicitations.set(action.request.requestId, action.request);
-      return { ...state, mcpElicitations };
-    }
-    case "mcp/elicitation-resolved": {
-      const mcpElicitations = new Map(state.mcpElicitations);
-      mcpElicitations.delete(action.requestId);
-      return { ...state, mcpElicitations };
-    }
     case "running/changed": return action.running
       ? { ...state, running: true }
       : {
@@ -305,6 +299,7 @@ export function reduceSessionWorkspace(
           compaction: state.compaction.type === "running" ? { type: "idle" } : state.compaction
         };
     case "usage/changed": return { ...state, contextUsage: action.usage };
+    case "config/replaced": return { ...state, configOptions: action.options };
     case "retry/changed": return { ...state, retry: action.retry };
     case "compaction/changed": return { ...state, compaction: action.compaction };
     case "outcome/unknown": return { ...state, outcomeUnknown: action.value };

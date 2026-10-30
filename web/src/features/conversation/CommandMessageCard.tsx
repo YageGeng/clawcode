@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { MessageEntity, SlashCommandSource } from "../../domain/model";
+import type { MessageEntity, SlashCommandMessageMeta, SlashCommandSource } from "../../domain/model";
 import { MarkdownContent } from "./MarkdownContent";
 
 const SOURCE_LABELS: Readonly<Record<SlashCommandSource, string>> = {
@@ -15,6 +15,12 @@ export type CommandMessageCardProps = Readonly<{
   actions?: ReactNode;
 }>;
 
+const STATUS_LABELS: Readonly<Record<NonNullable<SlashCommandMessageMeta["status"]>, string>> = {
+  succeeded: "成功",
+  failed: "失败",
+  cancelled: "已取消"
+};
+
 /** Renders one decoded Slash Command message without inspecting raw ACP data. */
 export function CommandMessageCard({ message, actions }: CommandMessageCardProps) {
   const command = message.slashCommand;
@@ -25,7 +31,7 @@ export function CommandMessageCard({ message, actions }: CommandMessageCardProps
         <code>/{command.name}</code>
         <span className="command-source-badge" data-source={command.source}>{SOURCE_LABELS[command.source]}</span>
         <span className="command-message__kind">{command.messageKind === "output" ? "结果" : command.messageKind === "expansion" ? "展开调用" : "调用"}</span>
-        {command.status === undefined ? null : <span className="command-message__status">{command.status === "succeeded" ? "成功" : "失败"}</span>}
+        {command.status === undefined ? null : <span className="command-message__status">{STATUS_LABELS[command.status]}</span>}
       </header>
       {message.text.length === 0 ? null : <div className="command-message__body"><MarkdownContent text={message.text} /></div>}
       {actions}

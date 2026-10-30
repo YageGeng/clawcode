@@ -65,11 +65,10 @@ impl AcpServerFactory {
                 |error| AcpTransportError::InvalidOrigin(error.to_string()),
             )?
         };
-        let server_options = ServerOptions {
-            path: options.path,
-            cors,
-            health_endpoint: options.health_endpoint,
-        };
+        let server_options = ServerOptions::default()
+            .with_path(options.path)
+            .with_cors(cors)
+            .with_health_endpoint(options.health_endpoint);
 
         // Every HTTP/SSE or WebSocket connection inherits the immutable
         // application batch limit captured at router construction time.

@@ -12,6 +12,9 @@ export type AcpNotification = Readonly<{
   params: unknown;
 }>;
 
+/** Answers one agent-to-client request; throwing `AcpRequestError` replies with its code. */
+export type AcpRequestHandler = (params: unknown, signal: AbortSignal) => Promise<unknown>;
+
 export type AcpConnectionCallbacks = Readonly<{
   notifications: (notifications: readonly AcpNotification[]) => void;
   diagnostic: (message: string) => void;
@@ -35,6 +38,9 @@ export class AcpConnection {
   private socket: WebSocket | undefined;
   private requestId = 0;
   private readonly pending = new Map<number, PendingRequest>();
+  private readonly handlers = new Map<string, AcpRequestHandler>();
+  // Agent requests still being answered, aborted by `$/cancel_request` or close.
+  private readonly inbound = new Map<number | string, AbortController>();
   private explicitlyClosed = false;
 
   constructor(url: URL, callbacks: AcpConnectionCallbacks) {
@@ -79,6 +85,7 @@ export class AcpConnection {
           reject(new Error(reason));
         }
         this.rejectPending(new Error(reason));
+        this.abortInbound();
         if (this.socket === socket) this.socket = undefined;
         if (!this.explicitlyClosed) {
           this.callbacks.closed(reason);
@@ -122,6 +129,11 @@ export class AcpConnection {
     });
   }
 
+  /** Registers the handler for one agent-to-client request method. */
+  handle(method: string, handler: AcpRequestHandler): void {
+    this.handlers.set(method, handler);
+  }
+
   notify(method: string, params: unknown): void {
     this.openSocket().send(JSON.stringify({ jsonrpc: "2.0", method, params }));
   }
@@ -129,6 +141,7 @@ export class AcpConnection {
   close(): void {
     this.explicitlyClosed = true;
     this.rejectPending(new Error("ACP connection closed"));
+    this.abortInbound();
     this.socket?.close(1000, "client closed");
     this.socket = undefined;
   }
@@ -196,11 +209,12 @@ export class AcpConnection {
         continue;
       }
       if ("method" in message && "id" in message) {
-        this.openSocket().send(JSON.stringify({
-          jsonrpc: "2.0",
-          id: message.id,
-          error: { code: -32601, message: "Client callbacks are not supported" }
-        }));
+        this.answer(message.id, message.method, message.params);
+        continue;
+      }
+      if ("method" in message && message.method === "$/cancel_request") {
+        const params = message.params as Readonly<{ requestId?: number | string }> | undefined;
+        if (params?.requestId !== undefined) this.inbound.get(params.requestId)?.abort();
         continue;
       }
       if ("method" in message) {
@@ -208,6 +222,36 @@ export class AcpConnection {
       }
     }
     if (notifications.length > 0) this.callbacks.notifications(notifications);
+  }
+
+  /** Runs a registered handler and replies once; unknown methods get -32601. */
+  private answer(id: number | string, method: string, params: unknown): void {
+    const reply = (body: Readonly<{ result: unknown }> | Readonly<{ error: JsonRpcError }>) => {
+      // A closed connection has nobody left to answer.
+      const socket = this.socket;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ jsonrpc: "2.0", id, ...body }));
+    };
+    const handler = this.handlers.get(method);
+    if (handler === undefined) {
+      reply({ error: { code: -32601, message: `Method not found: ${method}` } });
+      return;
+    }
+    const controller = new AbortController();
+    this.inbound.set(id, controller);
+    handler(params, controller.signal)
+      .then((result) => reply({ result }))
+      .catch((reason: unknown) => reply({
+        error: reason instanceof AcpRequestError
+          ? reason.rpc
+          : { code: -32603, message: reason instanceof Error ? reason.message : String(reason) }
+      }))
+      .finally(() => this.inbound.delete(id));
+  }
+
+  /** Abandons agent requests whose connection is gone. */
+  private abortInbound(): void {
+    for (const controller of this.inbound.values()) controller.abort();
+    this.inbound.clear();
   }
 
   private rejectPending(error: Error): void {

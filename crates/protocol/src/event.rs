@@ -1,10 +1,13 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentMessage, CompactionOutcome, CompactionReason, ExtensionId,
     McpElicitationRequest, McpElicitationResult, MessageId, ModelUsage, RunId,
-    Sequence, SlashCommandDefinition, SlashCommandInvocation,
-    SlashCommandStatus, TimestampMs, ToolCall, ToolResult, TurnId, TurnRecord,
+    Sequence, SessionSettings, SlashCommandDefinition, SlashCommandInvocation,
+    SlashCommandStatus, TimestampMs, ToolCall, ToolLocation, ToolResult,
+    TurnId, TurnRecord,
 };
 
 /// Typed terminal result shared by run lifecycle events and ACP mapping.
@@ -132,6 +135,13 @@ pub enum AgentEventPayload {
 
         /// Parsed tool call in source order.
         call: ToolCall,
+
+        /// Absolute Session directory the call runs in.
+        cwd: PathBuf,
+
+        /// Files the call touches, resolved by the tool that will run it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<ToolLocation>,
     },
 
     /// One tool invocation published a replaceable partial result.
@@ -173,6 +183,9 @@ pub enum AgentEventPayload {
         run_id: RunId,
         /// Typed reason the final settled work stopped.
         outcome: AgentOutcome,
+        /// Sum of every settled assistant attempt in this Run.
+        #[serde(default)]
+        usage: ModelUsage,
     },
 
     /// A directly handled Slash Command has started.
@@ -189,12 +202,69 @@ pub enum AgentEventPayload {
         run_id: RunId,
         /// Stable terminal status used by ACP and WebUI.
         status: SlashCommandStatus,
+        /// User-facing failure summary; absent when the command did not fail.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+
+    /// A Run became blocked on user input, such as a pending MCP elicitation.
+    ActionRequired {
+        /// Request whose arrival moved the pending count from zero to one.
+        request_id: String,
+    },
+
+    /// The last pending user input of a still-running Run was answered.
+    ActionResolved {
+        /// Request whose resolution emptied the pending set.
+        request_id: String,
+    },
+
+    /// A prefixed user shell command was accepted and is about to run.
+    UserBashStarted {
+        /// Run-shaped operation identifier used for recovery correlation.
+        run_id: RunId,
+        /// Identity shared by the accepted user message and the persisted result.
+        message_id: MessageId,
+        /// Command text without its `!` or `!!` prefix.
+        command: String,
+        /// Absolute Session working directory the command runs in.
+        cwd: PathBuf,
+        /// Whether the result stays out of model context (`!!`).
+        exclude_from_context: bool,
+    },
+
+    /// A running user shell's visible output changed.
+    UserBashOutput {
+        /// Run-shaped operation identifier used for recovery correlation.
+        run_id: RunId,
+        /// Identity of the accepted user message.
+        message_id: MessageId,
+        /// Whole current visible tail; replaces earlier snapshots, never appends.
+        output: String,
+    },
+
+    /// A user shell operation reached its single foreground terminal state.
+    UserBashFinished {
+        /// Run-shaped operation identifier used for recovery correlation.
+        run_id: RunId,
+        /// Identity of the accepted user message.
+        message_id: MessageId,
+        /// Terminal outcome of the operation.
+        outcome: AgentOutcome,
+        /// Whether the persisted result message was emitted before this event.
+        result_emitted: bool,
     },
 
     /// The persisted display title for this session changed.
     SessionTitleChanged {
         /// New normalized session title.
         title: String,
+    },
+
+    /// The Session's model or thinking level changed.
+    SettingsChanged {
+        /// Complete current settings, so clients can rebuild every option list.
+        settings: SessionSettings,
     },
 
     /// The complete Session command snapshot changed.

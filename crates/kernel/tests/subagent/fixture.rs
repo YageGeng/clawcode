@@ -80,6 +80,8 @@ pub struct RoutedModel {
     profile: ModelProfile,
     route: Box<Router>,
     pub requests: Mutex<Vec<ModelRequest>>,
+    /// Makes provider readiness fail so tests can end a Run before insertion.
+    pub preflight_failure: Mutex<Option<fn() -> ModelError>>,
 }
 
 impl RoutedModel {
@@ -105,9 +107,12 @@ impl Model for RoutedModel {
         &self.profile
     }
 
-    /// Avoids external provider checks for isolated Kernel tests.
+    /// Avoids external provider checks unless a test scripts a readiness failure.
     async fn preflight(&self) -> Result<(), ModelError> {
-        Ok(())
+        match *self.preflight_failure.lock().expect("preflight") {
+            Some(failure) => Err(failure()),
+            None => Ok(()),
+        }
     }
 
     /// Controls only the model boundary; persistence, tools, and lifecycle remain real.
@@ -156,6 +161,7 @@ impl ModelFactory for StaticModelFactory {
                     profile,
                     route: Box::new(|_| Route::answer("secondary answer")),
                     requests: Mutex::new(Vec::new()),
+                    preflight_failure: Mutex::new(None),
                 }),
             ],
         )
@@ -171,6 +177,19 @@ struct RecordingSink {
 }
 
 impl RecordingSinks {
+    /// Returns every payload emitted for one Session in emission order.
+    // Only the protocol_alignment target, which shares this fixture, reads payloads.
+    #[allow(dead_code)]
+    pub fn payloads(&self, session: &SessionId) -> Vec<AgentEventPayload> {
+        self.0
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|(id, _event)| id == session)
+            .map(|(_id, event)| event.payload.clone())
+            .collect()
+    }
+
     /// Checks events emitted by real Kernel runs for a particular Session.
     pub fn saw(
         &self,
@@ -287,6 +306,7 @@ impl TestKernel {
             profile: PROFILE.clone(),
             route: Box::new(route),
             requests: Mutex::new(Vec::new()),
+            preflight_failure: Mutex::new(None),
         });
         let clock: Arc<dyn Clock> = Arc::new(SequenceClock::default());
         let kernel = KernelFactory::builder()

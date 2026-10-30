@@ -180,6 +180,7 @@ fn tool_mcp_content_uses_native_blocks_and_raw_output() {
                     is_error: result.is_error,
                     details: result.details,
                     output: result.output,
+                    cancelled: false,
                 },
             },
         },

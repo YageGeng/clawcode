@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v2 as wire;
 use agent_client_protocol::{
-    Client, ConnectionTo, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, UntypedMessage,
+    Client, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, UntypedMessage, V2ConnectionTo,
 };
 use kernel::{Kernel, KernelError};
 use protocol::{
@@ -155,11 +155,11 @@ impl JsonRpcResponse for AcpExtensionResponse {
 #[derive(typed_builder::TypedBuilder)]
 pub(crate) struct AcpExtensionDispatcher {
     pub kernel: Arc<Kernel>,
-    pub connection: ConnectionTo<Client>,
+    pub connection: V2ConnectionTo<Client>,
     pub mcp_watchers: Arc<Mutex<BTreeSet<protocol::SessionId>>>,
     pub projections: Arc<ProjectionRegistry>,
-    pub session_watchers:
-        Arc<Mutex<BTreeMap<protocol::SessionId, Arc<CancellationToken>>>>,
+    pub session_watchers: crate::server::SessionWatchers,
+    pub elicitations: Arc<crate::elicitation::ElicitationBridge>,
 }
 
 impl AcpExtensionDispatcher {
@@ -259,14 +259,15 @@ impl AcpExtensionDispatcher {
                             agent_client_protocol::Error::into_internal_error,
                         )?,
                 };
-                let receiver =
-                    self.projections.subscribe_live(&fork_id).map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?;
+                let live = self.projections.subscribe_live(&fork_id).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?;
                 let server = AcpServer::new(
                     Arc::clone(&self.kernel),
                     Arc::clone(&self.projections),
+                    Arc::clone(&self.elicitations),
                 );
+                // A fork answers with its id; commands arrive as a notification.
                 server.send_available_commands(&fork_id, &self.connection)?;
                 server.watch_mcp(
                     &fork_id,
@@ -277,10 +278,7 @@ impl AcpExtensionDispatcher {
                     &fork_id,
                     &self.connection,
                     Arc::clone(&self.session_watchers),
-                    ProjectionWatch::builder()
-                        .backlog(Vec::new())
-                        .receiver(receiver)
-                        .build(),
+                    ProjectionWatch::from(live),
                 )?;
                 serde_json::json!({ "sessionId": fork_id.to_string() })
             }
@@ -452,8 +450,8 @@ impl AcpExtensionDispatcher {
                         agent_client_protocol::Error::internal_error()
                     })?
                     .get(&input.session_id)
-                    .map_or_else(CancellationToken::new, |token| {
-                        token.child_token()
+                    .map_or_else(CancellationToken::new, |watcher| {
+                        watcher.cancellation.child_token()
                     });
                 let _cancel_on_drop = cancellation.clone().drop_guard();
                 serde_json::to_value(
@@ -490,26 +488,6 @@ impl AcpExtensionDispatcher {
                         )?,
                 )
                 .map_err(agent_client_protocol::Error::into_internal_error)?
-            }
-            AcpExtensionMethod::McpElicitationList => {
-                let input: AcpSessionParameters =
-                    serde_json::from_value(request.parameters)
-                        .map_err(invalid_parameters)?;
-                serde_json::to_value(
-                    self.kernel.mcp_elicitations(&input.session_id).map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?,
-                )
-                .map_err(agent_client_protocol::Error::into_internal_error)?
-            }
-            AcpExtensionMethod::McpElicitationRespond => {
-                let input: protocol::McpElicitationResponseRequest =
-                    serde_json::from_value(request.parameters)
-                        .map_err(invalid_parameters)?;
-                self.kernel.mcp_respond_elicitation(input).await.map_err(
-                    agent_client_protocol::Error::into_internal_error,
-                )?;
-                serde_json::json!({ "resolved": true })
             }
             AcpExtensionMethod::ExtensionCommand => {
                 let input: AcpCommandParameters =

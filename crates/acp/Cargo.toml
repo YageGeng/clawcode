@@ -20,7 +20,7 @@ tracing = { workspace = true }
 # async
 async-trait = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "io-util", "net", "sync"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "sync", "time"] }
 tokio-util = { workspace = true }
 
 # http
@@ -28,6 +28,7 @@ agent-client-protocol-http = { workspace = true, features = ["server"] }
 axum = { workspace = true }
 
 # serde
+jsonschema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -35,7 +36,7 @@ serde_json = { workspace = true }
 typed-builder = { workspace = true }
 
 # protocol
-agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2"] }
+agent-client-protocol = { workspace = true, features = ["stdio", "unstable_end_turn_token_usage", "unstable_protocol_v2"] }
 
 # misc
 base64 = { workspace = true }
@@ -43,13 +44,14 @@ base64 = { workspace = true }
 [dev-dependencies]
 # workspace crates
 extension = { workspace = true }
+mcp = { workspace = true }
 prompt = { workspace = true }
 skill = { workspace = true }
 store = { workspace = true }
 tools = { workspace = true }
 
 # async
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["test-util", "time"] }
 tokio-util = { workspace = true }
 
 # tracing & log

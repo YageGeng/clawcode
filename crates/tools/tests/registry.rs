@@ -208,3 +208,57 @@ async fn registry_composition_preserves_duplicate_and_override_semantics() {
         matches!(target.subset(["missing"]), Err(ToolError::NotFound(name)) if name == "missing")
     );
 }
+
+/// File tools report the path execution resolves, not the raw argument text.
+#[tokio::test]
+async fn file_tools_report_paths_resolved_like_execution() {
+    let root = tempfile::tempdir().expect("root");
+    std::fs::write(root.path().join("page.txt"), "page").expect("page");
+    let registry = BuiltinToolFactory::new().create().expect("registry");
+    let home = dirs::home_dir().expect("home directory");
+    let file_url = url::Url::from_file_path(root.path().join("new.txt"))
+        .expect("file URL")
+        .to_string();
+    for (call, path, line) in [
+        (
+            tool_call(
+                "read",
+                serde_json::json!({ "path": "@page.txt", "offset": 7 }),
+            ),
+            root.path().join("page.txt"),
+            Some(7),
+        ),
+        (
+            tool_call(
+                "write",
+                serde_json::json!({ "path": file_url, "content": "" }),
+            ),
+            root.path().join("new.txt"),
+            None,
+        ),
+        (
+            tool_call(
+                "edit",
+                serde_json::json!({ "path": "~/notes.md", "edits": [] }),
+            ),
+            home.join("notes.md"),
+            None,
+        ),
+    ] {
+        assert_eq!(
+            registry.locations(&call, root.path()).await,
+            vec![protocol::ToolLocation { path, line }],
+            "{}",
+            call.name
+        );
+    }
+    assert!(
+        registry
+            .locations(
+                &tool_call("bash", serde_json::json!({ "command": "ls" })),
+                root.path(),
+            )
+            .await
+            .is_empty()
+    );
+}

@@ -11,6 +11,7 @@ use protocol::{
 use tokio::sync::broadcast;
 
 use crate::AcpEventMapper;
+use crate::elicitation::ElicitationChange;
 use crate::recovery::{
     GroupMeta, OperationPhase, RecoveryMode, RecoveryPlan, SessionCursor,
 };
@@ -33,6 +34,12 @@ pub(crate) struct EventGroup {
     /// Internal Operation kind used to distinguish nested compaction boundaries.
     #[builder(default, setter(strip_option))]
     operation_kind: Option<OperationKind>,
+    /// Elicitation change for live watchers; replay drops it so settled requests are not re-sent.
+    #[builder(default)]
+    pub(crate) elicitation: Option<ElicitationChange>,
+    /// Terminal id of a live output snapshot; a newer snapshot replaces it in the journal.
+    #[builder(default)]
+    pub(crate) snapshot_of: Option<String>,
 }
 
 /// Recoverable top-level Operation owning one journal.
@@ -41,9 +48,40 @@ pub(crate) enum OperationKind {
     Run,
     SlashCommand,
     Compaction,
+    UserBash,
 }
 
 impl EventGroup {
+    /// Returns this group as history: without live-only state updates and notices,
+    /// or `None` when nothing remains.
+    ///
+    /// Filtering before `notifications` keeps the projection count equal to what is sent.
+    pub(crate) fn replayed(&self) -> Option<Self> {
+        let updates: Vec<_> = self
+            .updates
+            .iter()
+            .filter(|update| {
+                !matches!(
+                    update,
+                    wire::SessionUpdate::StateUpdate(_)
+                        | wire::SessionUpdate::Notice(_)
+                )
+            })
+            .cloned()
+            .collect();
+        // Fields are listed so the updates are cloned once, not again with the group.
+        (!updates.is_empty()).then(|| Self {
+            run_id: self.run_id.clone(),
+            sequence: self.sequence,
+            metadata: self.metadata.clone(),
+            updates,
+            operation_phase: self.operation_phase,
+            operation_kind: self.operation_kind,
+            elicitation: None,
+            snapshot_of: self.snapshot_of.clone(),
+        })
+    }
+
     /// Builds ordered ACP notifications with an atomic projection-group envelope.
     pub(crate) fn notifications(
         &self,
@@ -110,10 +148,58 @@ struct OperationJournal {
     incremental_available: bool,
 }
 
+/// Foreground state most recently projected for one Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ForegroundState {
+    Running,
+    RequiresAction,
+    #[default]
+    Idle,
+}
+
+impl From<ForegroundState> for wire::StateUpdate {
+    /// Builds a snapshot that reports the state without new completion or cancellation meaning.
+    fn from(state: ForegroundState) -> Self {
+        match state {
+            ForegroundState::Running => {
+                Self::Running(wire::RunningStateUpdate::new())
+            }
+            ForegroundState::RequiresAction => {
+                Self::RequiresAction(wire::RequiresActionStateUpdate::new())
+            }
+            ForegroundState::Idle => Self::Idle(wire::IdleStateUpdate::new()),
+        }
+    }
+}
+
 /// Mutable journal state protected independently for each Session.
 #[derive(Default)]
 struct ProjectionState {
     journal: Option<OperationJournal>,
+    /// Newest sequence broadcast for this Session, including groups outside any journal.
+    last_sequence: Option<Sequence>,
+    /// Foreground state left by the newest broadcast state update.
+    foreground: ForegroundState,
+}
+
+impl ProjectionState {
+    /// Records a broadcast group so delivery waits, subscriptions, and resume snapshots agree.
+    fn record_broadcast(&mut self, group: &EventGroup) {
+        self.last_sequence = self.last_sequence.max(Some(group.sequence));
+        for update in &group.updates {
+            if let wire::SessionUpdate::StateUpdate(state) = update {
+                self.foreground = match state {
+                    wire::StateUpdate::Running(_) => ForegroundState::Running,
+                    wire::StateUpdate::RequiresAction(_) => {
+                        ForegroundState::RequiresAction
+                    }
+                    wire::StateUpdate::Idle(_) => ForegroundState::Idle,
+                    // An unknown future state leaves the running judgment unchanged.
+                    _ => self.foreground,
+                };
+            }
+        }
+    }
 }
 
 /// Failures while retaining or replaying one Session projection.
@@ -145,8 +231,21 @@ pub(crate) struct ProjectionFeed {
     pub(crate) next_sequence: Sequence,
     /// Last sequence present when the snapshot was captured.
     pub(crate) tail_sequence: Sequence,
+    /// Newest Session sequence broadcast before the receiver subscribed.
+    pub(crate) delivered: Option<Sequence>,
+    /// Foreground state at subscription time, for the resume snapshot.
+    pub(crate) state: ForegroundState,
     /// Whether the Operation was still active at snapshot time.
     pub(crate) running: bool,
+}
+
+/// Live receiver plus the newest sequence broadcast before it subscribed.
+pub(crate) struct LiveFeed {
+    pub(crate) receiver: broadcast::Receiver<Arc<EventGroup>>,
+    /// Groups at or before this sequence never reach `receiver`.
+    pub(crate) delivered: Option<Sequence>,
+    /// Foreground state at subscription time, for the resume snapshot.
+    pub(crate) state: ForegroundState,
 }
 
 /// Exclusive source selected for a durable replay after its Store snapshot.
@@ -156,7 +255,7 @@ pub(crate) enum DurableResumeSelection {
     /// No journal existed, so the captured Store snapshot precedes the live stream.
     Live {
         replay: Vec<SessionReplayItem>,
-        receiver: broadcast::Receiver<Arc<EventGroup>>,
+        live: LiveFeed,
     },
 }
 
@@ -174,11 +273,6 @@ impl SessionProjection {
             state: Mutex::new(ProjectionState::default()),
             sender,
         }
-    }
-
-    /// Creates a live receiver without changing retained journal state.
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Arc<EventGroup>> {
-        self.sender.subscribe()
     }
 
     /// Appends one group to its Operation journal before broadcasting it.
@@ -213,15 +307,49 @@ impl SessionProjection {
                 && journal.running
                 && group.run_id.as_ref() == Some(&journal.run_id)
             {
+                // A long-running shell keeps only its latest output snapshot, so the
+                // journal and every resume stay bounded; the rest stays in order.
+                if let Some(terminal_id) = &group.snapshot_of {
+                    journal.groups.retain(|kept| {
+                        kept.snapshot_of.as_ref() != Some(terminal_id)
+                    });
+                }
                 journal.groups.push(Arc::clone(&group));
                 if group.operation_phase == Some(OperationPhase::End) {
                     journal.running = false;
                 }
             }
+            state.record_broadcast(&group);
+            // Broadcasting under the state lock lets subscribers split the stream
+            // at an exact sequence. A missing receiver is expected while every
+            // ACP transport is offline.
+            let _send_result = self.sender.send(group);
         }
-        // A missing receiver is expected while every ACP transport is offline.
-        let _send_result = self.sender.send(group);
         Ok(())
+    }
+
+    /// Subscribes to future groups together with the boundary already broadcast.
+    pub(crate) fn subscribe_live(&self) -> Result<LiveFeed, ProjectionError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_poison_error| ProjectionError::Poisoned)?;
+        Ok(LiveFeed {
+            receiver: self.sender.subscribe(),
+            delivered: state.last_sequence,
+            state: state.foreground,
+        })
+    }
+
+    /// Returns the newest broadcast sequence, independent of any recovery cursor.
+    pub(crate) fn last_sequence(
+        &self,
+    ) -> Result<Option<Sequence>, ProjectionError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_poison_error| ProjectionError::Poisoned)?
+            .last_sequence)
     }
 
     /// Returns retained groups from one inclusive Operation event cursor.
@@ -268,13 +396,13 @@ impl SessionProjection {
         run_id: &RunId,
         sequence: Sequence,
     ) -> Result<ProjectionFeed, ProjectionError> {
-        // Subscribe before taking the snapshot so concurrent appends can only
-        // overlap the backlog; the watcher removes that overlap by sequence.
-        let receiver = self.sender.subscribe();
+        // Appends broadcast under this lock, so subscribing inside it splits the
+        // stream exactly between the snapshot and the live receiver.
         let state = self
             .state
             .lock()
             .map_err(|_poison_error| ProjectionError::Poisoned)?;
+        let receiver = self.sender.subscribe();
         let journal = state
             .journal
             .as_ref()
@@ -311,6 +439,8 @@ impl SessionProjection {
             .run_id(journal.run_id.clone())
             .next_sequence(sequence)
             .tail_sequence(tail_sequence)
+            .delivered(state.last_sequence)
+            .state(state.foreground)
             .running(journal.running)
             .build())
     }
@@ -319,11 +449,11 @@ impl SessionProjection {
     pub(crate) fn subscribe_from_start(
         &self,
     ) -> Result<ProjectionFeed, ProjectionError> {
-        let receiver = self.sender.subscribe();
         let state = self
             .state
             .lock()
             .map_err(|_poison_error| ProjectionError::Poisoned)?;
+        let receiver = self.sender.subscribe();
         let journal = state
             .journal
             .as_ref()
@@ -345,6 +475,8 @@ impl SessionProjection {
             .run_id(journal.run_id.clone())
             .next_sequence(next_sequence)
             .tail_sequence(tail_sequence)
+            .delivered(state.last_sequence)
+            .state(state.foreground)
             .running(journal.running)
             .build())
     }
@@ -419,23 +551,21 @@ impl SessionProjection {
 
     /// Publishes an ungrouped Idle fallback and disables incremental recovery.
     fn publish_terminal_fallback(&self) -> Result<(), ProjectionError> {
-        let sequence = {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_poison_error| ProjectionError::Poisoned)?;
-            let next = state
-                .journal
-                .as_ref()
-                .and_then(|journal| journal.groups.last())
-                .map_or(1, |group| group.sequence.get().saturating_add(1));
-            if let Some(journal) = state.journal.as_mut() {
-                journal.running = false;
-                journal.incremental_available = false;
-            }
-            Sequence::try_from(next)
-                .map_err(|error| ProjectionError::Metadata(error.to_string()))?
-        };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_poison_error| ProjectionError::Poisoned)?;
+        let next = state
+            .journal
+            .as_ref()
+            .and_then(|journal| journal.groups.last())
+            .map_or(1, |group| group.sequence.get().saturating_add(1));
+        if let Some(journal) = state.journal.as_mut() {
+            journal.running = false;
+            journal.incremental_available = false;
+        }
+        let sequence = Sequence::try_from(next)
+            .map_err(|error| ProjectionError::Metadata(error.to_string()))?;
         let terminal = EventGroup::builder()
             .sequence(sequence)
             .metadata(wire::Meta::default())
@@ -443,7 +573,9 @@ impl SessionProjection {
                 wire::StateUpdate::Idle(wire::IdleStateUpdate::new()),
             )])
             .build();
-        let _send_result = self.sender.send(Arc::new(terminal));
+        let terminal = Arc::new(terminal);
+        state.record_broadcast(&terminal);
+        let _send_result = self.sender.send(terminal);
         Ok(())
     }
 }
@@ -487,12 +619,26 @@ impl ProjectionRegistry {
         })
     }
 
-    /// Subscribes to future projected groups for one Session.
+    /// Subscribes to future projected groups for one Session with their delivery boundary.
     pub(crate) fn subscribe_live(
         &self,
         session_id: &SessionId,
-    ) -> Result<broadcast::Receiver<Arc<EventGroup>>, ProjectionError> {
-        Ok(self.projection(session_id)?.subscribe())
+    ) -> Result<LiveFeed, ProjectionError> {
+        self.projection(session_id)?.subscribe_live()
+    }
+
+    /// Returns the newest broadcast sequence for a projected Session, if any.
+    pub(crate) fn last_sequence(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Sequence>, ProjectionError> {
+        let projection = self
+            .sessions
+            .lock()
+            .map_err(|_poison_error| ProjectionError::Poisoned)?
+            .get(session_id)
+            .map(Arc::clone);
+        projection.map_or(Ok(None), |projection| projection.last_sequence())
     }
 
     /// Atomically subscribes from one inclusive Operation cursor.
@@ -528,7 +674,7 @@ impl ProjectionRegistry {
     pub(crate) fn select_durable_resume(
         &self,
         session_id: &SessionId,
-        receiver: broadcast::Receiver<Arc<EventGroup>>,
+        live: LiveFeed,
         replay: Vec<SessionReplayItem>,
     ) -> Result<DurableResumeSelection, ProjectionError> {
         match self.subscribe_from_start(session_id) {
@@ -536,7 +682,7 @@ impl ProjectionRegistry {
                 Ok(DurableResumeSelection::Retained(subscription))
             }
             Err(ProjectionError::CursorUnavailable) => {
-                Ok(DurableResumeSelection::Live { replay, receiver })
+                Ok(DurableResumeSelection::Live { replay, live })
             }
             Err(error) => Err(error),
         }
@@ -671,6 +817,16 @@ impl EventSink for ProjectionSink {
                 Some(OperationPhase::End),
                 Some(OperationKind::SlashCommand),
             ),
+            AgentEventPayload::UserBashStarted { run_id, .. } => (
+                Some(run_id.clone()),
+                Some(OperationPhase::Start),
+                Some(OperationKind::UserBash),
+            ),
+            AgentEventPayload::UserBashFinished { run_id, .. } => (
+                Some(run_id.clone()),
+                Some(OperationPhase::End),
+                Some(OperationKind::UserBash),
+            ),
             AgentEventPayload::CompactionStart { run_id, .. }
                 if active_operation.is_none() =>
             {
@@ -740,6 +896,33 @@ impl EventSink for ProjectionSink {
             SinkError::Consumer(error.to_string())
         })?;
         let sequence = event.metadata.sequence;
+        // shortcut: the outbound queue still holds every unsent snapshot; upgrade
+        // by keeping only the newest unsent snapshot per terminal in the watcher.
+        let snapshot_of = match &event.payload {
+            AgentEventPayload::UserBashOutput { message_id, .. } => {
+                Some(message_id.to_string())
+            }
+            AgentEventPayload::ToolExecutionUpdate { result, .. }
+                if matches!(
+                    result.details,
+                    Some(protocol::ToolResultDetails::Bash { .. })
+                ) =>
+            {
+                Some(result.tool_call_id.to_string())
+            }
+            _ => None,
+        };
+        let elicitation = match &event.payload {
+            AgentEventPayload::McpElicitationRequested { request } => {
+                Some(ElicitationChange::Requested(Box::new(request.clone())))
+            }
+            AgentEventPayload::McpElicitationResolved {
+                request_id, ..
+            } => Some(ElicitationChange::Resolved {
+                request_id: request_id.clone(),
+            }),
+            _ => None,
+        };
         let updates = AcpEventMapper::map(event).map_err(|error| {
             tracing::error!(
                 "failed to map ACP updates for Session {} at sequence {}: {}",
@@ -752,7 +935,9 @@ impl EventSink for ProjectionSink {
         let builder = EventGroup::builder()
             .sequence(sequence)
             .metadata(metadata)
-            .updates(updates);
+            .updates(updates)
+            .elicitation(elicitation)
+            .snapshot_of(snapshot_of);
         let group = match (run_id, operation_phase, operation_kind) {
             (Some(run_id), Some(operation_phase), Some(operation_kind)) => {
                 builder
@@ -826,7 +1011,7 @@ mod tests {
     use prompt::FilesystemPromptFactory;
     use protocol::{
         AgentEvent, AgentEventPayload, AgentOutcome, CompactionOutcome,
-        CompactionReason, EventMetadata, ModelFinal, ModelProfile,
+        CompactionReason, EventMetadata, MessageId, ModelFinal, ModelProfile,
         ModelRequest, ModelStreamEvent, ModelUsage, RunId, Sequence, SessionId,
         StopReason, TimestampMs, TurnId,
     };
@@ -835,7 +1020,7 @@ mod tests {
     use tools::BuiltinToolFactory;
 
     use super::{
-        DurableResumeSelection, EventGroup, ProjectionError,
+        DurableResumeSelection, EventGroup, ForegroundState, ProjectionError,
         ProjectionRegistry, SessionProjection,
     };
     use crate::recovery::{OperationPhase, RecoveryMode, SessionCursor};
@@ -945,8 +1130,8 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_one_group_to_multiple_watchers() {
         let projection = SessionProjection::new(8);
-        let mut first = projection.subscribe();
-        let mut second = projection.subscribe();
+        let mut first = projection.subscribe_live().expect("first").receiver;
+        let mut second = projection.subscribe_live().expect("second").receiver;
         let group = Arc::new(
             EventGroup::builder()
                 .run_id(RunId::try_from("run-1").expect("Run id"))
@@ -1190,7 +1375,7 @@ mod tests {
         .await
         .expect("emit projected event");
 
-        let group = receiver.recv().await.expect("projected group");
+        let group = receiver.receiver.recv().await.expect("projected group");
         assert_eq!(group.run_id.as_ref().map(RunId::as_str), Some("run-1"));
         assert_eq!(group.operation_phase, Some(OperationPhase::Start));
         assert!(!group.updates.is_empty());
@@ -1230,7 +1415,7 @@ mod tests {
             )
             .await
             .expect("submit");
-        let group = receiver.try_recv().expect("RunStart");
+        let group = receiver.receiver.try_recv().expect("RunStart");
         assert_eq!(group.operation_phase, Some(OperationPhase::Start));
         assert!(
             registry
@@ -1256,6 +1441,102 @@ mod tests {
             .expect("install");
         drop(registry);
         assert!(weak.upgrade().is_none());
+    }
+
+    /// Emits a running shell with `snapshots` output updates into a fresh projection.
+    async fn shell_projection(
+        state: &std::path::Path,
+        workspace: &std::path::Path,
+        snapshots: u64,
+    ) -> (Arc<ProjectionRegistry>, SessionId, RunId) {
+        let kernel = projection_kernel(state);
+        let session_id =
+            SessionId::try_from("session-shell").expect("Session id");
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: session_id.clone(),
+                cwd: workspace.to_path_buf(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("create Session");
+        let registry = Arc::new(ProjectionRegistry::new(kernel));
+        let sink = registry.sink(session_id.clone());
+        let run_id = RunId::try_from("run-shell").expect("Run id");
+        let message_id = MessageId::try_from("message-shell").expect("id");
+        let started = AgentEventPayload::UserBashStarted {
+            run_id: run_id.clone(),
+            message_id: message_id.clone(),
+            command: "yes".to_string(),
+            cwd: workspace.to_path_buf(),
+            exclude_from_context: false,
+        };
+        let outputs =
+            (1..=snapshots).map(|index| AgentEventPayload::UserBashOutput {
+                run_id: run_id.clone(),
+                message_id: message_id.clone(),
+                output: format!("line {index}"),
+            });
+        for (index, payload) in
+            std::iter::once(started).chain(outputs).enumerate()
+        {
+            sink.emit(AgentEvent {
+                metadata: EventMetadata {
+                    turn_id: TurnId::try_from("turn-shell").expect("Turn id"),
+                    timestamp_ms: TimestampMs::from(index as u64 + 1),
+                    sequence: Sequence::try_from(index as u64 + 1)
+                        .expect("sequence"),
+                },
+                payload,
+            })
+            .await
+            .expect("emit shell event");
+        }
+        (registry, session_id, run_id)
+    }
+
+    /// A long-running shell keeps one retained snapshot per terminal.
+    #[tokio::test]
+    async fn journal_keeps_only_latest_terminal_snapshot() {
+        let state = tempfile::tempdir().expect("store root");
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let (registry, session_id, _run_id) =
+            shell_projection(state.path(), workspace.path(), 1_000).await;
+        let subscription = registry
+            .subscribe_from_start(&session_id)
+            .expect("running shell projection");
+        let sequences = subscription
+            .backlog
+            .iter()
+            .map(|group| group.sequence.get())
+            .collect::<Vec<_>>();
+        // The start and the newest snapshot, still in sequence order.
+        assert_eq!(sequences, vec![1, 1_001]);
+        assert_eq!(
+            subscription.backlog[1].snapshot_of.as_deref(),
+            Some("message-shell")
+        );
+    }
+
+    /// A cursor that points at a replaced snapshot resumes from the latest one.
+    #[tokio::test]
+    async fn cursor_into_replaced_snapshot_replays_latest() {
+        let state = tempfile::tempdir().expect("store root");
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let (registry, session_id, run_id) =
+            shell_projection(state.path(), workspace.path(), 5).await;
+        let groups = registry
+            .projection(&session_id)
+            .expect("projection")
+            .snapshot_from(&run_id, Sequence::try_from(3).expect("sequence"))
+            .expect("cursor still available");
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.sequence.get())
+                .collect::<Vec<_>>(),
+            vec![6]
+        );
     }
 
     /// Nested compaction events stay inside the active Agent Run recovery journal.
@@ -1295,6 +1576,7 @@ mod tests {
             AgentEventPayload::AgentSettled {
                 run_id: agent_run.clone(),
                 outcome: AgentOutcome::Succeeded,
+                usage: protocol::ModelUsage::default(),
             },
         ];
         for (index, payload) in payloads.into_iter().enumerate() {
@@ -1337,6 +1619,133 @@ mod tests {
             ]
         );
         assert!(!subscription.running);
+    }
+
+    /// A resume snapshot taken while an elicitation blocks the Run reports requires_action.
+    #[tokio::test]
+    async fn pending_action_is_the_resume_snapshot_state() {
+        let state = tempfile::tempdir().expect("store root");
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let kernel = projection_kernel(state.path());
+        let session_id =
+            SessionId::try_from("session-action").expect("Session id");
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: session_id.clone(),
+                cwd: workspace.path().to_path_buf(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("create Session");
+        let registry = Arc::new(ProjectionRegistry::new(kernel));
+        let sink = registry.sink(session_id.clone());
+        let run_id = RunId::try_from("run-action").expect("Run id");
+        for (sequence, payload) in [
+            (1_u64, AgentEventPayload::RunStart { run_id }),
+            (
+                2,
+                AgentEventPayload::ActionRequired {
+                    request_id: "elicit-1".to_string(),
+                },
+            ),
+        ] {
+            sink.emit(AgentEvent {
+                metadata: EventMetadata {
+                    turn_id: TurnId::try_from("turn-action").expect("Turn id"),
+                    timestamp_ms: TimestampMs::from(sequence),
+                    sequence: Sequence::try_from(sequence).expect("sequence"),
+                },
+                payload,
+            })
+            .await
+            .expect("emit projected event");
+        }
+
+        let subscription = registry
+            .subscribe_from_start(&session_id)
+            .expect("running journal");
+        assert_eq!(subscription.state, ForegroundState::RequiresAction);
+    }
+
+    /// A running shell retains its accepted message before the final transcript write.
+    #[tokio::test]
+    async fn user_bash_journal_retains_started_message_until_finished() {
+        let state = tempfile::tempdir().expect("store root");
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let kernel = projection_kernel(state.path());
+        let session_id =
+            SessionId::try_from("session-user-bash").expect("Session id");
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: session_id.clone(),
+                cwd: workspace.path().to_path_buf(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("create Session");
+        let registry = Arc::new(ProjectionRegistry::new(kernel));
+        let sink = registry.sink(session_id.clone());
+        let run_id = RunId::try_from("run-user-bash").expect("Run id");
+        let message_id = MessageId::try_from("message-user-bash").expect("id");
+        let emit = async |sequence: u64, payload: AgentEventPayload| {
+            sink.emit(AgentEvent {
+                metadata: EventMetadata {
+                    turn_id: TurnId::try_from("turn-user-bash")
+                        .expect("Turn id"),
+                    timestamp_ms: TimestampMs::from(sequence),
+                    sequence: Sequence::try_from(sequence).expect("sequence"),
+                },
+                payload,
+            })
+            .await
+            .expect("emit projected event");
+        };
+
+        emit(
+            1,
+            AgentEventPayload::UserBashStarted {
+                run_id: run_id.clone(),
+                message_id: message_id.clone(),
+                command: "sleep 1".to_string(),
+                cwd: workspace.path().to_path_buf(),
+                exclude_from_context: false,
+            },
+        )
+        .await;
+        let running = registry
+            .subscribe_from_start(&session_id)
+            .expect("running shell journal");
+        assert!(running.running);
+        assert_eq!(running.backlog.len(), 1);
+        assert_eq!(running.backlog[0].run_id.as_ref(), Some(&run_id));
+        assert!(running.backlog[0].updates.iter().any(|update| matches!(
+            update,
+            wire::SessionUpdate::UserMessage(message)
+                if message.message_id.to_string() == message_id.as_str()
+        )));
+
+        emit(
+            2,
+            AgentEventPayload::UserBashFinished {
+                run_id: run_id.clone(),
+                message_id,
+                outcome: AgentOutcome::Succeeded,
+                result_emitted: true,
+            },
+        )
+        .await;
+        let finished = registry
+            .subscribe_from_start(&session_id)
+            .expect("finished shell journal");
+        assert!(!finished.running);
+        assert_eq!(
+            finished
+                .backlog
+                .iter()
+                .map(|group| group.operation_phase)
+                .collect::<Vec<_>>(),
+            vec![Some(OperationPhase::Start), Some(OperationPhase::End)]
+        );
     }
 
     /// A journal appearing after durable capture replaces that snapshot completely.
@@ -1462,7 +1871,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_fallback_invalidates_incremental_journal() {
         let projection = SessionProjection::new(8);
-        let mut receiver = projection.subscribe();
+        let mut receiver = projection.subscribe_live().expect("live").receiver;
         projection
             .append_group(
                 group("run-1", 10, Some(OperationPhase::Start)),

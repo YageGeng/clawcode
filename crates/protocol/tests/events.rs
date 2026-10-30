@@ -53,6 +53,8 @@ fn lifecycle_events_share_turn_and_timestamp_metadata() {
                 name: "read".to_string(),
                 arguments: serde_json::json!({ "path": "README.md" }),
             },
+            cwd: "/work".into(),
+            locations: Vec::new(),
         },
     };
 
@@ -222,4 +224,35 @@ fn compaction_end_round_trips_typed_outcomes() {
             ["status"],
         "cancelled"
     );
+}
+
+/// Builds a usage value with an optional reasoning count.
+fn usage_with_reasoning(
+    total: u64,
+    reasoning: Option<u64>,
+) -> protocol::ModelUsage {
+    protocol::ModelUsage::builder()
+        .input_tokens(total)
+        .output_tokens(0)
+        .cache_read_tokens(0)
+        .cache_write_tokens(0)
+        .reasoning_tokens(reasoning)
+        .total_tokens(total)
+        .build()
+}
+
+/// Unknown reasoning counts stay unknown unless at least one attempt reports a value.
+#[test]
+fn reasoning_usage_preserves_none_and_sums_known_values() {
+    let mut unknown = protocol::ModelUsage::default();
+    unknown += &usage_with_reasoning(1, None);
+    unknown += &usage_with_reasoning(2, None);
+    assert_eq!(unknown.reasoning_tokens, None);
+    assert_eq!(unknown.total_tokens, 3);
+
+    let mut known = protocol::ModelUsage::default();
+    for reasoning in [None, Some(3), Some(4)] {
+        known += &usage_with_reasoning(1, reasoning);
+    }
+    assert_eq!(known.reasoning_tokens, Some(7));
 }

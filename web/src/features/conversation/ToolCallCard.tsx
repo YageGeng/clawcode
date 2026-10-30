@@ -1,8 +1,10 @@
-import { Ban, Check, ChevronDown, CircleAlert, LoaderCircle, ScanSearch, Wrench } from "lucide-react";
+import { Ban, Check, ChevronDown, CircleAlert, CircleSlash, FilePen, FileText, LoaderCircle, ScanSearch, Search, SquareTerminal, Wrench } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
-import type { ToolCallEntity } from "../../domain/model";
+import type { ToolCallEntity, ToolKind } from "../../domain/model";
 import { CodeBlock, JsonBlock, MarkdownContent } from "./MarkdownContent";
+import { TerminalView } from "./TerminalView";
+import type { TerminalEntity } from "../../workspace/terminals";
 import type { WorkspaceController } from "../../workspace/controller";
 import { SubagentPanel } from "./SubagentPanel";
 
@@ -19,13 +21,32 @@ function parseJsonLike(text: string): Readonly<{ value: unknown }> | undefined {
 
 export type ToolCallCardProps = Readonly<{
   tool: ToolCallEntity;
+  terminal?: TerminalEntity;
   inspecting?: boolean;
   onInspect?: (tool: ToolCallEntity) => void;
   controller?: WorkspaceController;
 }>;
 
+const STATUS_LABELS: Readonly<Record<ToolCallEntity["status"], string>> = {
+  pending: "等待中",
+  in_progress: "执行中",
+  completed: "完成",
+  failed: "失败",
+  blocked: "已阻止",
+  cancelled: "已取消"
+};
+
+/** Picks the idle icon for a tool's ACP kind; unknown kinds keep the generic wrench. */
+function KindIcon({ kind }: Readonly<{ kind: ToolKind | undefined }>) {
+  if (kind === "read") return <FileText size={14} />;
+  if (kind === "edit") return <FilePen size={14} />;
+  if (kind === "execute") return <SquareTerminal size={14} />;
+  if (kind === "search") return <Search size={14} />;
+  return <Wrench size={14} />;
+}
+
 /** Renders ACP text as Markdown while preserving image, diff, and structured JSON output. */
-function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "rawOutput">) {
+function ToolOutput({ content, rawOutput, terminal }: Pick<ToolCallEntity, "content" | "rawOutput"> & Readonly<{ terminal?: TerminalEntity }>) {
   if (content.length === 0) {
     if (rawOutput === undefined) return null;
     if (typeof rawOutput !== "string") return <JsonBlock value={rawOutput} />;
@@ -44,6 +65,9 @@ function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "ra
           : <JsonBlock key={index} value={parsed.value} />;
       }
       const entry = item as Readonly<Record<string, unknown>>;
+      if (entry.type === "terminal") {
+        return terminal !== undefined && entry.terminalId === terminal.terminalId ? <TerminalView key={index} terminal={terminal} /> : null;
+      }
       if (entry.type === "content" && typeof entry.content === "object" && entry.content !== null && !Array.isArray(entry.content)) {
         const block = entry.content as Readonly<Record<string, unknown>>;
         if (block.type === "text" && typeof block.text === "string") {
@@ -66,22 +90,23 @@ function ToolOutput({ content, rawOutput }: Pick<ToolCallEntity, "content" | "ra
 }
 
 /** Renders one ACP tool lifecycle with product-specific blocked refinement. */
-export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = false, onInspect, controller }: ToolCallCardProps) {
+export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspecting = false, onInspect, controller }: ToolCallCardProps) {
   // Bash cards first mount from the in-progress ACP update, so reveal streamed
   // output immediately while preserving the user's later expand/collapse choice.
   const childId = tool.subagentSessionId;
   const phase = childId === undefined ? "ordinary" : `${childId}:${tool.status}`;
   const [manual, setManual] = useState<Readonly<{ phase: string; open: boolean }>>();
-  const open = manual?.phase === phase ? manual.open : (childId !== undefined || tool.title === "bash") && tool.status === "in_progress";
+  // Terminal output and subagents are what a running tool is worth watching.
+  const open = manual?.phase === phase ? manual.open : (childId !== undefined || terminal !== undefined || tool.title === "bash") && tool.status === "in_progress";
   useEffect(() => {
     if (childId === undefined || controller === undefined) return;
     void controller.ensureSessionListed(childId).catch(() => {});
   }, [childId, controller]);
-  const statusLabel = tool.status === "completed" ? "完成" : tool.status === "blocked" ? "已阻止" : tool.status === "failed" ? "失败" : tool.status === "in_progress" ? "执行中" : "等待中";
-  const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <Wrench size={14} />;
+  const statusLabel = STATUS_LABELS[tool.status];
+  const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "cancelled" ? <CircleSlash size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <KindIcon kind={tool.kind} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);
   return (
-    <details className="tool-card" data-status={tool.status} open={open}>
+    <details className="tool-card" data-status={tool.status} data-kind={tool.kind} data-origin={tool.origin} open={open}>
       <summary onClick={(event) => {
         // Mount large tool payloads only on demand; collapsed tool cards are
         // common during replay and must not parse hidden Markdown or JSON.
@@ -89,7 +114,8 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = fals
         setManual({ phase, open: !open });
       }}>
         <span className="tool-card__icon">{icon}</span>
-        <span className="tool-card__title">{tool.title}</span>
+        <span className="tool-card__title">{tool.origin === "user" ? `$ ${tool.title}` : tool.title}</span>
+        {tool.origin === "user" ? <span className="tool-card__origin">用户执行{tool.excludeFromContext === true ? " · 不进上下文" : ""}</span> : null}
         <span className="tool-card__status">{statusLabel}{elapsed === undefined ? "" : ` · ${elapsed} ms`}</span>
         <ChevronDown className="tool-card__chevron" size={14} aria-hidden="true" />
       </summary>
@@ -106,7 +132,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, inspecting = fals
           {tool.output.fullOutputPath === undefined ? null : <p>完整结果临时文件：<code>{tool.output.fullOutputPath}</code></p>}
           {tool.output.saveFailure === undefined ? null : <p>完整结果未保存：{tool.output.saveFailure === "too_large" ? "超过 64 MiB" : tool.output.saveFailure === "cancelled" ? "保存已取消" : "文件写入失败"}。</p>}
         </section>}
-        {tool.content.length === 0 && tool.rawOutput === undefined ? null : <section><h4>输出</h4><ToolOutput content={tool.content} rawOutput={tool.rawOutput} /></section>}
+        {tool.content.length === 0 && tool.rawOutput === undefined ? null : <section><h4>输出</h4><ToolOutput content={tool.content} rawOutput={tool.rawOutput} {...(terminal === undefined ? {} : { terminal })} /></section>}
         <dl className="diagnostics-list">
           <dt>ToolCallId</dt><dd>{tool.toolCallId}</dd>
           {tool.meta === undefined ? null : <><dt>TurnId</dt><dd>{tool.meta.turnId}</dd><dt>TimestampMs</dt><dd>{tool.meta.timestampMs}</dd></>}

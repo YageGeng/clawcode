@@ -2,13 +2,18 @@
 
 mod batching;
 mod coalescing;
+mod config;
 mod content;
+mod delivery;
+mod elicitation;
 mod extension;
 mod input;
 mod mapping;
 mod projection;
 mod recovery;
 mod server;
+mod terminal;
+mod tool_call;
 mod trace;
 mod transport;
 

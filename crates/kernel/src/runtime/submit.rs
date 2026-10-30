@@ -166,16 +166,20 @@ impl Kernel {
                     "started Submit for session {}",
                     request.session_id
                 );
-                let result = Box::pin(self.run_with_source(
-                    RunRequest {
-                        session_id: request.session_id.clone(),
-                        input: RunInput::Blocks(request.content.clone()),
-                    },
-                    self.session_sink(&request.session_id),
-                    protocol::InputSource::Extension,
-                    trace_id.clone(),
-                    request.cancellation.clone(),
-                ))
+                let result = Box::pin(
+                    self.run_with_source(
+                        RunRequest {
+                            session_id: request.session_id.clone(),
+                            input: RunInput::Blocks(request.content.clone()),
+                        },
+                        self.session_sink(&request.session_id),
+                        RunInvocation::builder()
+                            .input_source(protocol::InputSource::Extension)
+                            .trace_id(trace_id.clone())
+                            .cancellation_parent(request.cancellation.clone())
+                            .build(),
+                    ),
+                )
                 .await;
                 match result {
                     Ok((_run, Some(answer))) => {
@@ -194,6 +198,14 @@ impl Kernel {
                             "structured submission has no agent settlement"
                                 .into(),
                         ));
+                    }
+                    Err(KernelError::PromptCancelled) => {
+                        // The parent stopped this input before it reached history.
+                        tracing::info!(
+                            "cancelled Submit for session {} before insertion",
+                            request.session_id
+                        );
+                        return Ok(SubmissionAnswer::cancelled());
                     }
                     Err(error) => {
                         tracing::warn!(

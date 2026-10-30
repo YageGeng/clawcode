@@ -3,6 +3,7 @@ mod command;
 mod compaction;
 mod extension;
 mod input;
+mod insertion;
 mod lifecycle;
 mod mcp;
 mod model_state;
@@ -23,10 +24,12 @@ mod tree;
 mod user_bash;
 
 use extension::{KernelExtensionDiagnostics, SessionExtensions};
+use insertion::WaiterCancellation;
 use lifecycle::{ActiveRunContext, SessionExecution, SessionLifecycle};
 use mcp::SessionMcpRuntime;
 use model_state::SessionModelState;
 use resources::SessionResources;
+use run::RunInvocation;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -75,6 +78,7 @@ use compaction::{
     CompactionExecution, CompactionIdentity, CompactionPolicyExt,
     OverflowRecovery, SummaryGeneration, SummaryProtocol,
 };
+pub use insertion::{InsertionNotice, InsertionReceiver};
 use queue::{PendingQueue, PendingQueueItem, QueueCancellationReason};
 pub use retry::RetryClassifier;
 use retry::RetryState;
@@ -165,6 +169,9 @@ pub enum KernelError {
     /// A recognized Slash Command produced a stable domain rejection.
     #[error(transparent)]
     SlashCommandRejected(#[from] protocol::SlashCommandError),
+    /// The elicitation was already answered, cancelled, or never pending.
+    #[error("MCP elicitation is already resolved: {0}")]
+    ElicitationResolved(String),
     /// The active branch has no model-visible history before its retention boundary.
     #[error("there is no context to compact")]
     NoContextToCompact,
@@ -180,6 +187,36 @@ pub enum KernelError {
     /// A queue identifier did not match any pending message.
     #[error("pending message not found: {0}")]
     PendingMessageNotFound(QueueId),
+    /// A client prompt was cancelled or closed before its user message was inserted.
+    #[error("prompt was cancelled before insertion")]
+    PromptCancelled,
+}
+
+impl KernelError {
+    /// Copies a pre-insertion failure for the protocol adapter, keeping variants it maps specially.
+    pub(in crate::runtime) fn for_insertion(&self) -> Self {
+        match self {
+            Self::PromptCancelled => Self::PromptCancelled,
+            Self::SessionNotFound(session_id) => {
+                Self::SessionNotFound(session_id.clone())
+            }
+            Self::SessionClosing => Self::SessionClosing,
+            Self::ExtensionBlocked(reason) => {
+                Self::ExtensionBlocked(reason.clone())
+            }
+            other => Self::Protocol(other.to_string()),
+        }
+    }
+
+    /// Reports whether this error is cooperative cancellation rather than a failure.
+    pub(in crate::runtime) fn is_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Self::PromptCancelled
+                | Self::Model(ModelError::Cancelled)
+                | Self::Tool(::tools::ToolError::Cancelled)
+        )
+    }
 }
 
 /// Dependency-injected builder for one modular kernel lifecycle.
@@ -281,22 +318,28 @@ impl Kernel {
     ) -> Result<RunResult, KernelError> {
         let trace_id = TraceId::try_from(self.id_generator.next(IdKind::Trace))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        self.run_traced(request, sink, trace_id).await
+        self.run_traced(request, sink, trace_id, None).await
     }
 
     /// Executes one run under an ingress Trace that remains stable through Tool calls.
+    ///
+    /// `insertion` resolves once the user message is inserted, or with the error that ended the
+    /// Run first, so protocol adapters can accept a prompt exactly at insertion.
     pub async fn run_traced(
         &self,
         request: RunRequest,
         sink: Arc<dyn EventSink>,
         trace_id: TraceId,
+        insertion: Option<Arc<InsertionNotice>>,
     ) -> Result<RunResult, KernelError> {
         self.run_with_source(
             request,
             sink,
-            protocol::InputSource::Rpc,
-            trace_id,
-            None,
+            RunInvocation::builder()
+                .input_source(protocol::InputSource::Rpc)
+                .trace_id(trace_id)
+                .insertion(insertion)
+                .build(),
         )
         .await
         .map(|(result, _answer)| result)
@@ -504,6 +547,9 @@ struct Session {
     extensions: SessionExtensions,
     tools: Arc<SessionToolState>,
     model: SessionModelState,
+    /// Serializes settings changes so reported snapshots follow change order.
+    #[builder(default)]
+    settings_changes: tokio::sync::Mutex<()>,
     execution: Arc<SessionExecution>,
 }
 

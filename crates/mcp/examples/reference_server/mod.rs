@@ -4,13 +4,14 @@ use std::borrow::Cow;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult,
-    CompleteRequestParams, CompleteResult, CompletionInfo,
-    GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation,
-    ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
-    ListToolsResult, PaginatedRequestParams, Prompt, PromptArgument,
-    PromptMessage, ProtocolVersion, ReadResourceRequestParams,
-    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents,
-    ResourceTemplate, Role, ServerCapabilities, ServerInfo, Tool,
+    CompleteRequestParams, CompleteResult, CompletionInfo, ElicitRequestParams,
+    ElicitationSchema, GetPromptRequestParams, GetPromptResponse,
+    GetPromptResult, Implementation, ListPromptsResult,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role,
+    ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler};
@@ -93,7 +94,18 @@ impl ServerHandler for ReferenceServer {
             .with_title("Large reference report")
             .with_annotations(rmcp::model::ToolAnnotations::new().read_only(true).destructive(false));
         report.output_schema = Some(std::sync::Arc::new(serde_json::json!({"type":"object","properties":{"records":{"type":"array"}}}).as_object().cloned().unwrap_or_default()));
+        let empty = serde_json::json!({"type":"object","properties":{},"additionalProperties":false}).as_object().cloned().unwrap_or_default();
         Ok(ListToolsResult::with_all_items(vec![
+            Tool::new(
+                "ask",
+                "Ask the user to choose a strategy through a form elicitation",
+                empty.clone(),
+            ),
+            Tool::new(
+                "visit",
+                "Ask the user to visit an authorization page through a URL elicitation",
+                empty,
+            ),
             Tool::new(
                 TOOL_NAME,
                 "Returns the supplied value as structured MCP content",
@@ -112,8 +124,50 @@ impl ServerHandler for ReferenceServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == "ask" || request.name == "visit" {
+            // Exercise the Host's elicitation path with a form or URL request.
+            let params = if request.name == "ask" {
+                let schema = serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "strategy": { "type": "string", "title": "Strategy", "enum": ["fast", "balanced", "thorough"] },
+                        "note": { "type": "string", "title": "Note", "maxLength": 40 },
+                        "count": { "type": "integer", "title": "Count", "minimum": 1, "maximum": 5, "default": 2 },
+                        "confirm": { "type": "boolean", "title": "Confirm", "default": true }
+                    },
+                    "required": ["strategy"]
+                });
+                ElicitRequestParams::FormElicitationParams {
+                    meta: None,
+                    message: "Choose how to proceed".to_string(),
+                    requested_schema: ElicitationSchema::from_json_schema(
+                        schema.as_object().cloned().unwrap_or_default(),
+                    )
+                    .map_err(|error| {
+                        ErrorData::internal_error(error.to_string(), None)
+                    })?,
+                }
+            } else {
+                ElicitRequestParams::UrlElicitationParams {
+                    meta: None,
+                    message: "Authorize the reference server".to_string(),
+                    url: "https://example.com/authorize".to_string(),
+                    elicitation_id: "reference-visit".to_string(),
+                }
+            };
+            let result =
+                context.peer.create_elicitation(params).await.map_err(
+                    |error| ErrorData::internal_error(error.to_string(), None),
+                )?;
+            return Ok(CallToolResult::structured(
+                serde_json::to_value(result).map_err(|error| {
+                    ErrorData::internal_error(error.to_string(), None)
+                })?,
+            )
+            .into());
+        }
         if request.name == "large.report" {
             // Demonstrate bounded text and structured output through the same real transport path.
             let mut result = CallToolResult::structured(

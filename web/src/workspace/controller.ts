@@ -6,7 +6,8 @@ import { AcpProtocol } from "../acp/protocol";
 import type { InitializeRecovery, InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionRecoveryPlan, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
 import type { BranchEditPlan } from "../domain/messageActions";
-import type { McpCompletionResult, McpElicitation, McpElicitationSnapshot, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import type { ElicitationAnswer, ElicitationPrompt, McpCompletionResult, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import { ElicitationForm, UnrenderableSchema } from "../features/mcp/elicitationForm";
 import { useWorkspaceStore } from "./store";
 import type { SessionWorkspaceAction } from "./sessionState";
 import { sessionWorkspace } from "./state";
@@ -36,6 +37,9 @@ export class WorkspaceController {
   private readonly deletingSessionIds = new Set<SessionId>();
   private readonly attachedSessionIds = new Set<SessionId>();
   private readonly attachingSessions = new Map<SessionId, Promise<void>>();
+  // Resolvers for queued elicitation dialogs, keyed like their store prompts.
+  private readonly elicitationAnswers = new Map<string, (answer: ElicitationAnswer) => void>();
+  private elicitationSequence = 0;
   private sessionRefresh: Readonly<{ connection: AcpConnection; promise: Promise<void> }> | undefined;
   private listenersInstalled = false;
   private stopped = false;
@@ -105,27 +109,21 @@ export class WorkspaceController {
       // client may have changed the persisted transcript while this tab slept.
       this.updateRouter.requireFullReplay(sessionId);
       this.dispatchSession(sessionId, { type: "transcript/cleared" });
-      await connection.request(AcpProtocol.methods.sessionResume, {
-        sessionId,
-        cwd: session.cwd,
-        replayFrom: { type: "start" }
-      });
+      await this.resume(connection, sessionId, { sessionId, cwd: session.cwd, replayFrom: { type: "start" } });
       this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
       this.attachedSessionIds.add(sessionId);
     }
 
-    const [tree, pending, skills, mcpSnapshot, mcpElicitations] = await Promise.all([
+    const [tree, pending, skills, mcpSnapshot] = await Promise.all([
       connection.request<SessionTree>(this.methods.tree, { sessionId }),
       connection.request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
       connection.request<SkillListResult>(this.methods.skillList, { sessionId }),
-      connection.request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId }),
-      connection.request<McpElicitationSnapshot>(this.methods.mcpElicitationList, { sessionId })
+      connection.request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId })
     ]);
     this.dispatchSession(sessionId, { type: "tree/replaced", tree });
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
-    this.dispatchSession(sessionId, { type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
   }
 
   async newSession(cwd: string): Promise<SessionId> {
@@ -308,20 +306,71 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
   }
 
-  /** Resolves one pending MCP elicitation through its Session-scoped ACP route. */
-  async respondMcpElicitation(
-    request: McpElicitation,
-    action: "accept" | "decline" | "cancel",
-    content?: unknown
-  ): Promise<void> {
-    await this.requireConnection().request(this.methods.mcpElicitationRespond, {
-      sessionId: request.context.sessionId,
-      requestId: request.requestId,
-      result: { action, ...(content === undefined ? {} : { content }) }
-    });
-    this.dispatchSession(request.context.sessionId, {
-      type: "mcp/elicitation-resolved",
-      requestId: request.requestId
+  /** Changes one Session config option; the response carries every option's new value. */
+  async setConfigOption(sessionId: SessionId, configId: string, value: string): Promise<void> {
+    const result = await this.requireConnection().request<Readonly<{ configOptions?: unknown }>>(
+      AcpProtocol.methods.sessionSetConfigOption,
+      { sessionId, configId, type: "id", value }
+    );
+    const options = AcpProtocol.configOptions(result.configOptions);
+    if (options !== undefined) this.dispatchSession(sessionId, { type: "config/replaced", options });
+  }
+
+  /** Attaches through session/resume and keeps the config options its response carries. */
+  private async resume(connection: AcpConnection, sessionId: SessionId, params: Readonly<Record<string, unknown>>): Promise<void> {
+    const result = await connection.request<Readonly<{ configOptions?: unknown }> | null>(AcpProtocol.methods.sessionResume, params);
+    const options = AcpProtocol.configOptions(result?.configOptions);
+    if (options !== undefined) this.dispatchSession(sessionId, { type: "config/replaced", options });
+  }
+
+  /** Sends the user's answer for one queued elicitation and closes its dialog. */
+  answerElicitation(key: string, answer: ElicitationAnswer): void {
+    const resolve = this.elicitationAnswers.get(key);
+    this.elicitationAnswers.delete(key);
+    this.dispatch({ type: "elicitation/settled", key });
+    resolve?.(answer);
+  }
+
+  /** Queues one agent `elicitation/create` and resolves with the user's answer. */
+  private async elicit(params: unknown, signal: AbortSignal): Promise<ElicitationAnswer> {
+    const request = AcpProtocol.decodeRecord(params, "elicitation/create params");
+    const invalid = (message: string) => new AcpRequestError({ code: -32602, message });
+    if (typeof request.sessionId !== "string" || typeof request.message !== "string") {
+      throw invalid("elicitation/create needs a Session scope and a message");
+    }
+    let mode: ElicitationPrompt["mode"];
+    if (request.mode === "form") {
+      try {
+        ElicitationForm.parse(request.requestedSchema);
+      } catch (reason: unknown) {
+        // The agent learns the form cannot be shown instead of waiting on it.
+        if (reason instanceof UnrenderableSchema) throw invalid(reason.message);
+        throw reason;
+      }
+      mode = { type: "form", requestedSchema: request.requestedSchema };
+    } else if (request.mode === "url" && typeof request.url === "string" && URL.canParse(request.url)) {
+      mode = { type: "url", url: request.url };
+    } else {
+      throw invalid(`unsupported elicitation mode: ${String(request.mode)}`);
+    }
+    const product = AcpProtocol.productMeta(request._meta, this.bootstrap.product.slug);
+    const key = `elicitation-${++this.elicitationSequence}`;
+    const prompt: ElicitationPrompt = {
+      key,
+      sessionId: request.sessionId as SessionId,
+      ...(typeof product?.mcpServerId === "string" ? { serverId: product.mcpServerId } : {}),
+      message: request.message,
+      mode
+    };
+    return new Promise<ElicitationAnswer>((resolve, reject) => {
+      this.elicitationAnswers.set(key, resolve);
+      // Answered elsewhere, or the connection closed: withdraw the dialog.
+      signal.addEventListener("abort", () => {
+        if (!this.elicitationAnswers.delete(key)) return;
+        this.dispatch({ type: "elicitation/settled", key });
+        reject(new AcpRequestError({ code: -32800, message: "Request cancelled" }));
+      }, { once: true });
+      this.dispatch({ type: "elicitation/asked", prompt });
     });
   }
 
@@ -422,6 +471,7 @@ export class WorkspaceController {
       },
       closed: (reason) => this.disconnected(generation, connection, reason)
     });
+    connection.handle("elicitation/create", (params, signal) => this.elicit(params, signal));
     this.connection = connection;
     try {
       await connection.connect();
@@ -431,7 +481,7 @@ export class WorkspaceController {
       const initialized = await connection.request<InitializeResult>(AcpProtocol.methods.initialize, {
         protocolVersion: 2,
         info: { name: `${this.bootstrap.product.slug}-web`, version: "0.1.0" },
-        capabilities: {},
+        capabilities: { elicitation: { form: {}, url: {} } },
         _meta: {
           [this.bootstrap.product.slug]: {
             sessionRecovery: { version: 1, sessions: this.updateRouter.recoveryCursors() }
@@ -564,7 +614,7 @@ export class WorkspaceController {
         const plan = plans.get(sessionId);
         if (plan?.mode === "watch" && plan.runId !== undefined && plan.nextSequence !== undefined) {
           try {
-            await connection.request(AcpProtocol.methods.sessionResume, {
+            await this.resume(connection, sessionId, {
               sessionId,
               cwd: session.cwd,
               replayFrom: {
@@ -610,11 +660,7 @@ export class WorkspaceController {
   ): Promise<void> {
     this.updateRouter.requireFullReplay(sessionId);
     this.dispatchSession(sessionId, { type: "transcript/cleared" });
-    await connection.request(AcpProtocol.methods.sessionResume, {
-      sessionId,
-      cwd,
-      replayFrom: { type: "start" }
-    });
+    await this.resume(connection, sessionId, { sessionId, cwd, replayFrom: { type: "start" } });
     this.assertCurrentConnection(generation, connection);
     this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
   }
@@ -625,13 +671,12 @@ export class WorkspaceController {
     generation: number,
     sessionId: SessionId
   ): Promise<void> {
-    const [runtime, tree, pending, skills, mcpSnapshot, mcpElicitations] = await Promise.all([
+    const [runtime, tree, pending, skills, mcpSnapshot] = await Promise.all([
       connection.request<SessionRuntimeSnapshot>(this.methods.sessionRuntime, { sessionId }),
       connection.request<SessionTree>(this.methods.tree, { sessionId }),
       connection.request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
       connection.request<SkillListResult>(this.methods.skillList, { sessionId }),
-      connection.request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId }),
-      connection.request<McpElicitationSnapshot>(this.methods.mcpElicitationList, { sessionId })
+      connection.request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId })
     ]);
     this.assertCurrentConnection(generation, connection);
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
@@ -639,7 +684,6 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
-    this.dispatchSession(sessionId, { type: "mcp/elicitations-replaced", snapshot: mcpElicitations });
   }
 
   /** Identifies the stable ACP error that requires a one-time full replay fallback. */

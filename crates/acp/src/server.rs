@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
 use agent_client_protocol::{
-    Agent, Client, ConnectTo, ConnectionTo, JsonRpcMessage, Responder,
+    Agent, Client, ConnectTo, JsonRpcMessage, Responder, V2ConnectionTo,
 };
-use kernel::{Kernel, KernelError};
+use kernel::{InsertionNotice, Kernel, KernelError};
 use protocol::{
     AcpExtensionMethod, AcpWorkingDirectory, AgentEvent, AgentEventPayload,
     EventMetadata, IdGenerator, McpSessionChange,
@@ -17,12 +18,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::AcpEventMapper;
 use crate::batching::BatchComponent;
+use crate::config::{ConfigChange, ConfigOptionsOf};
+use crate::delivery::SessionDelivery;
+use crate::elicitation::{
+    ElicitationBridge, ElicitationChange, ElicitationModes,
+};
 use crate::extension::{
     AcpExtensionDispatcher, AcpExtensionRequest, AcpMcpUpdateNotification,
 };
 use crate::input::PromptInput;
 use crate::projection::{
-    DurableResumeSelection, EventGroup, ProjectionFeed, ProjectionRegistry,
+    DurableResumeSelection, EventGroup, ForegroundState, LiveFeed,
+    ProjectionFeed, ProjectionRegistry,
 };
 use crate::recovery::{
     AcpReplayRequest, CursorErrorData, RECOVERY_VERSION, RecoveryMode,
@@ -34,6 +41,7 @@ use crate::trace::AcpTraceFactory;
 pub(crate) struct AcpServer {
     kernel: Arc<Kernel>,
     projections: Arc<ProjectionRegistry>,
+    elicitations: Arc<ElicitationBridge>,
 }
 
 /// Snapshot and live stream installed for one connection-level Session watcher.
@@ -45,6 +53,15 @@ pub(crate) struct ProjectionWatch {
     run_id: Option<protocol::RunId>,
     #[builder(default, setter(strip_option))]
     next_sequence: Option<Sequence>,
+    /// Newest sequence already broadcast before `receiver` subscribed.
+    #[builder(default)]
+    delivered: Option<Sequence>,
+    /// Foreground state captured with the subscription.
+    #[builder(default)]
+    state: ForegroundState,
+    /// Whether the watcher reports `state` as a snapshot after the backlog (resume only).
+    #[builder(default)]
+    report_state: bool,
 }
 
 impl From<ProjectionFeed> for ProjectionWatch {
@@ -55,11 +72,76 @@ impl From<ProjectionFeed> for ProjectionWatch {
             .receiver(subscription.receiver)
             .run_id(subscription.run_id)
             .next_sequence(subscription.next_sequence)
+            .delivered(subscription.delivered)
+            .state(subscription.state)
             .build()
     }
 }
 
+impl From<LiveFeed> for ProjectionWatch {
+    /// Watches only groups broadcast after the live subscription.
+    fn from(live: LiveFeed) -> Self {
+        Self::builder()
+            .backlog(Vec::new())
+            .receiver(live.receiver)
+            .delivered(live.delivered)
+            .state(live.state)
+            .build()
+    }
+}
+
+/// One connection's watcher for a Session: its stop signal and its delivery progress.
+#[derive(Clone)]
+pub(crate) struct SessionWatcher {
+    pub(crate) cancellation: Arc<CancellationToken>,
+    pub(crate) delivery: SessionDelivery,
+}
+
+/// Session watchers installed on one ACP connection; membership defines an active Session.
+pub(crate) type SessionWatchers =
+    Arc<Mutex<BTreeMap<SessionId, SessionWatcher>>>;
+
+/// A standard Session request for a Session this connection never created or resumed.
+struct InactiveSession<'a>(&'a SessionId);
+
+impl From<InactiveSession<'_>> for agent_client_protocol::Error {
+    /// Maps to `-32002` with the requested Session id.
+    fn from(inactive: InactiveSession<'_>) -> Self {
+        Self::new(-32002, "Session is not active on this connection")
+            .data(serde_json::json!({ "sessionId": inactive.0.as_str() }))
+    }
+}
+
+/// Returns this connection's watcher for an active Session, or the inactive-Session error.
+fn active_watcher(
+    watchers: &SessionWatchers,
+    session_id: &SessionId,
+) -> Result<SessionWatcher, agent_client_protocol::Error> {
+    let watcher = watchers
+        .lock()
+        .map_err(|_poison_error| {
+            agent_client_protocol::Error::into_internal_error(
+                std::io::Error::other("ACP Session watcher lock poisoned"),
+            )
+        })?
+        .get(session_id)
+        .cloned();
+    watcher.ok_or_else(|| {
+        tracing::warn!(
+            "rejected request for Session {} that is not active on this connection",
+            session_id
+        );
+        InactiveSession(session_id).into()
+    })
+}
+
 impl ProjectionWatch {
+    /// Marks a resume watcher, which reports the current state after replaying history.
+    fn resumed(mut self) -> Self {
+        self.report_state = true;
+        self
+    }
+
     /// Advances the recoverable cursor after one projection group is sent.
     fn record_sent(&mut self, group: &EventGroup) {
         let Some(run_id) = &group.run_id else {
@@ -81,34 +163,92 @@ impl AcpServer {
     pub(crate) fn new(
         kernel: Arc<Kernel>,
         projections: Arc<ProjectionRegistry>,
+        elicitations: Arc<ElicitationBridge>,
     ) -> Self {
         Self {
             kernel,
             projections,
+            elicitations,
         }
+    }
+
+    /// Builds the Session's current config options for setup responses.
+    pub(crate) fn config_options(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<wire::SessionConfigOption>, agent_client_protocol::Error>
+    {
+        let settings = self
+            .kernel
+            .session_settings(session_id)
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        Ok(Vec::from(ConfigOptionsOf(&settings)))
+    }
+
+    /// Asks this connection again for every elicitation a resumed Session still holds.
+    pub(crate) fn reestablish_elicitations(
+        &self,
+        session_id: &SessionId,
+        connection: &V2ConnectionTo<Client>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        self.elicitations
+            .reestablish(connection, &self.kernel, session_id)
+            .map_err(agent_client_protocol::Error::into_internal_error)
     }
 
     /// Sends the complete Session command snapshot through native ACP v2.
     pub(crate) fn send_available_commands(
         &self,
         session_id: &SessionId,
-        connection: &ConnectionTo<Client>,
-    ) -> Result<(), agent_client_protocol::Error> {
+        connection: &V2ConnectionTo<Client>,
+    ) -> Result<Vec<wire::AvailableCommand>, agent_client_protocol::Error> {
         let event = self
             .kernel
             .available_commands_event(session_id)
             .map_err(agent_client_protocol::Error::into_internal_error)?;
         let metadata = AcpEventMapper::metadata(&event)
             .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let mut commands = Vec::new();
         for update in AcpEventMapper::map(event)
             .map_err(agent_client_protocol::Error::into_internal_error)?
         {
+            // The same snapshot also seeds the setup response.
+            if let wire::SessionUpdate::AvailableCommandsUpdate(update) =
+                &update
+            {
+                commands.clone_from(&update.available_commands);
+            }
             connection.send_notification(
                 wire::UpdateSessionNotification::new(
                     session_id.to_string(),
                     update,
                 )
                 .meta(metadata.clone()),
+            )?;
+        }
+        Ok(commands)
+    }
+
+    /// Reports startup Prompt diagnostics as notices once the client knows the Session id.
+    pub(crate) fn send_prompt_notices(
+        &self,
+        session_id: &SessionId,
+        connection: &V2ConnectionTo<Client>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let diagnostics = self
+            .kernel
+            .prompt_diagnostics(session_id)
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        for diagnostic in diagnostics {
+            connection.send_notification(
+                wire::UpdateSessionNotification::new(
+                    session_id.to_string(),
+                    AcpEventMapper::warning_notice(
+                        "Prompt resource issue",
+                        diagnostic.message,
+                        wire::Meta::default(),
+                    ),
+                ),
             )?;
         }
         Ok(())
@@ -118,7 +258,7 @@ impl AcpServer {
     fn send_replay_items(
         &self,
         session_id: &SessionId,
-        connection: &ConnectionTo<Client>,
+        connection: &V2ConnectionTo<Client>,
         items: Vec<protocol::SessionReplayItem>,
     ) -> Result<(), agent_client_protocol::Error> {
         let mut event_index = 0_usize;
@@ -211,6 +351,10 @@ impl AcpServer {
                 for update in AcpEventMapper::map(event).map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )? {
+                    // Durable replay is history; the current state follows as a snapshot.
+                    if matches!(update, wire::SessionUpdate::StateUpdate(_)) {
+                        continue;
+                    }
                     connection.send_notification(
                         wire::UpdateSessionNotification::new(
                             session_id.to_string(),
@@ -228,7 +372,7 @@ impl AcpServer {
     pub(crate) fn watch_mcp(
         &self,
         session_id: &SessionId,
-        connection: &ConnectionTo<Client>,
+        connection: &V2ConnectionTo<Client>,
         watched: Arc<Mutex<BTreeSet<SessionId>>>,
     ) -> Result<(), agent_client_protocol::Error> {
         let Some(mut events) = self
@@ -272,13 +416,40 @@ impl AcpServer {
                 let notification = McpSessionRevisionNotification::builder()
                     .session_id(session_id.clone())
                     .revision(revision)
-                    .server_id(server_id)
+                    .server_id(server_id.clone())
                     .change(change)
                     .timestamp_ms(TimestampMs::now())
                     .build();
                 if task_connection
                     .send_notification(AcpMcpUpdateNotification(notification))
                     .is_err()
+                {
+                    break;
+                }
+                // A Server that failed to start or run is surfaced to the user once per change.
+                if change == McpSessionChange::ServerStatus
+                    && let Some(server_id) = &server_id
+                    && kernel.mcp_status(&session_id).is_ok_and(|snapshot| {
+                        snapshot.servers.iter().any(|server| {
+                            &server.server_id == server_id
+                                && server.state
+                                    == protocol::McpServerState::Failed
+                        })
+                    })
+                    && task_connection
+                        .send_notification(
+                            wire::UpdateSessionNotification::new(
+                                session_id.to_string(),
+                                AcpEventMapper::warning_notice(
+                                    "MCP server unavailable",
+                                    format!(
+                                        "MCP server {server_id} is unavailable"
+                                    ),
+                                    wire::Meta::default(),
+                                ),
+                            ),
+                        )
+                        .is_err()
                 {
                     break;
                 }
@@ -298,33 +469,77 @@ impl AcpServer {
     pub(crate) fn watch_projection(
         &self,
         session_id: &SessionId,
-        connection: &ConnectionTo<Client>,
-        watched: Arc<Mutex<BTreeMap<SessionId, Arc<CancellationToken>>>>,
+        connection: &V2ConnectionTo<Client>,
+        watched: SessionWatchers,
         mut watch: ProjectionWatch,
     ) -> Result<(), agent_client_protocol::Error> {
         let cancellation = Arc::new(CancellationToken::new());
+        // Backlog groups are at or before the subscription boundary, so progress
+        // starts there and only advances as live groups are queued.
+        let (delivery, publisher) = SessionDelivery::new(watch.delivered);
         {
             let mut watchers = watched.lock().map_err(|_poison_error| {
                 agent_client_protocol::Error::into_internal_error(
                     std::io::Error::other("ACP Session watcher lock poisoned"),
                 )
             })?;
-            if let Some(previous) =
-                watchers.insert(session_id.clone(), Arc::clone(&cancellation))
-            {
-                previous.cancel();
+            if let Some(previous) = watchers.insert(
+                session_id.clone(),
+                SessionWatcher {
+                    cancellation: Arc::clone(&cancellation),
+                    delivery,
+                },
+            ) {
+                previous.cancellation.cancel();
             }
         }
         for group in std::mem::take(&mut watch.backlog) {
-            for notification in group
-                .notifications(session_id, ProductIdentity::ACP_NAMESPACE)
-                .map_err(agent_client_protocol::Error::into_internal_error)?
-            {
-                connection.send_notification(notification)?;
+            // Replayed history never reports past states as current activity.
+            if let Some(replayed) = group.replayed() {
+                for notification in replayed
+                    .notifications(session_id, ProductIdentity::ACP_NAMESPACE)
+                    .map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?
+                {
+                    connection.send_notification(notification)?;
+                }
             }
             watch.record_sent(&group);
         }
+        if watch.report_state {
+            // The current title precedes the state snapshot after replay.
+            if let Some(title) = self
+                .kernel
+                .session_title(session_id)
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            {
+                connection.send_notification(
+                    wire::UpdateSessionNotification::new(
+                        session_id.to_string(),
+                        wire::SessionUpdate::SessionInfoUpdate(
+                            wire::SessionInfoUpdate::new().title(title),
+                        ),
+                    ),
+                )?;
+            }
+            // Sent before the live watcher starts, so a newer live state always
+            // follows this snapshot instead of being overwritten by it.
+            tracing::info!(
+                "sent {:?} state snapshot for resumed Session {}",
+                watch.state,
+                session_id
+            );
+            connection.send_notification(
+                wire::UpdateSessionNotification::new(
+                    session_id.to_string(),
+                    wire::SessionUpdate::StateUpdate(watch.state.into()),
+                ),
+            )?;
+        }
         let projections = Arc::clone(&self.projections);
+        let kernel = Arc::clone(&self.kernel);
+        let elicitations = Arc::clone(&self.elicitations);
         let task_connection = connection.clone();
         let task_session_id = session_id.clone();
         let task_cancellation = Arc::clone(&cancellation);
@@ -395,6 +610,9 @@ impl AcpServer {
                     }) {
                         continue;
                     }
+                    // Response handlers holding the send permit pause this
+                    // watcher between groups, never inside one.
+                    let _sending = publisher.sending().await;
                     let notifications = group
                         .notifications(
                             &task_session_id,
@@ -415,12 +633,29 @@ impl AcpServer {
                             break 'watch Ok(());
                         }
                     }
+                    // Requests go out after the notifications that announce them.
+                    match &group.elicitation {
+                        Some(ElicitationChange::Requested(request)) => {
+                            elicitations.request(
+                                &task_connection,
+                                &kernel,
+                                &task_session_id,
+                                request,
+                            );
+                        }
+                        Some(ElicitationChange::Resolved { request_id }) => {
+                            elicitations
+                                .resolved(&task_session_id, request_id);
+                        }
+                        None => {}
+                    }
                     watch.record_sent(&group);
+                    publisher.sent_through(group.sequence);
                 }
             };
             if let Ok(mut watchers) = watched.lock()
                 && watchers.get(&task_session_id).is_some_and(|current| {
-                    Arc::ptr_eq(current, &task_cancellation)
+                    Arc::ptr_eq(&current.cancellation, &task_cancellation)
                 })
             {
                 watchers.remove(&task_session_id);
@@ -460,7 +695,8 @@ struct ComponentContext {
 /// Mutable watcher collections shared by handlers on one ACP connection.
 struct ConnectionWatchers {
     mcp: Arc<Mutex<BTreeSet<SessionId>>>,
-    sessions: Arc<Mutex<BTreeMap<SessionId, Arc<CancellationToken>>>>,
+    sessions: SessionWatchers,
+    elicitations: Arc<ElicitationBridge>,
 }
 
 impl AcpServerFactory {
@@ -509,6 +745,7 @@ impl AcpServerFactory {
                 .watchers(ConnectionWatchers {
                     mcp: Arc::new(Mutex::new(BTreeSet::new())),
                     sessions: Arc::new(Mutex::new(BTreeMap::new())),
+                    elicitations: Arc::new(ElicitationBridge::default()),
                 })
                 .build(),
         );
@@ -520,10 +757,18 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::InitializeRequest,
                                 responder: Responder<wire::InitializeResponse>,
-                                _connection: ConnectionTo<Client>| {
+                                _connection: V2ConnectionTo<Client>| {
                     let projections = Arc::clone(&context.projections);
+                    context.watchers.elicitations.negotiated(ElicitationModes::from(
+                        request.capabilities.elicitation.as_ref(),
+                    ));
                     let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
+                        // The SDK has already negotiated and rewritten the version.
+                        tracing::info!(
+                            "negotiated ACP protocol version {}",
+                            request.protocol_version
+                        );
                         let recovery = RecoveryRequest::from_meta(
                             request.meta.as_ref(),
                             ProductIdentity::ACP_NAMESPACE,
@@ -586,8 +831,6 @@ impl AcpServerFactory {
                         AcpExtensionMethod::McpResourceRead,
                         AcpExtensionMethod::McpComplete,
                         AcpExtensionMethod::McpOAuthContinue,
-                        AcpExtensionMethod::McpElicitationList,
-                        AcpExtensionMethod::McpElicitationRespond,
                         AcpExtensionMethod::ExtensionCommand,
                         AcpExtensionMethod::UserBash,
                     ]
@@ -648,11 +891,12 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::NewSessionRequest,
                                 responder: Responder<wire::NewSessionResponse>,
-                                connection: ConnectionTo<Client>| {
+                                connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
+                    let elicitations = Arc::clone(&context.watchers.elicitations);
                     let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         let cwd = AcpWorkingDirectory::try_from(
@@ -666,13 +910,14 @@ impl AcpServerFactory {
                             .create_generated_session(cwd.into_inner())
                             .await
                             .map_err(agent_client_protocol::Error::into_internal_error)?;
-                        let receiver = projections
+                        let live = projections
                             .subscribe_live(&session_id)
                             .map_err(
                                 agent_client_protocol::Error::into_internal_error,
                             )?;
-                        let server = AcpServer::new(kernel, projections);
-                        server.send_available_commands(&session_id, &connection)?;
+                        let server = AcpServer::new(kernel, projections, elicitations);
+                        let commands =
+                            server.send_available_commands(&session_id, &connection)?;
                         server.watch_mcp(
                             &session_id,
                             &connection,
@@ -682,14 +927,15 @@ impl AcpServerFactory {
                             &session_id,
                             &connection,
                             session_watchers,
-                            ProjectionWatch::builder()
-                                .backlog(Vec::new())
-                                .receiver(receiver)
-                                .build(),
+                            ProjectionWatch::from(live),
                         )?;
-                        responder.respond(wire::NewSessionResponse::new(
-                            session_id.to_string(),
-                        ))
+                        responder.respond(
+                            wire::NewSessionResponse::new(session_id.to_string())
+                                .available_commands(commands)
+                                .config_options(server.config_options(&session_id)?),
+                        )?;
+                        // Diagnostics follow the response so the Session id is known.
+                        server.send_prompt_notices(&session_id, &connection)
                     }).await
                     }
                 },
@@ -700,7 +946,7 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::ListSessionsRequest,
                                 responder: Responder<wire::ListSessionsResponse>,
-                                _connection: ConnectionTo<Client>| {
+                                _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
@@ -745,11 +991,12 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::ResumeSessionRequest,
                                 responder: Responder<wire::ResumeSessionResponse>,
-                                connection: ConnectionTo<Client>| {
+                                connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
+                    let elicitations = Arc::clone(&context.watchers.elicitations);
                     let operation = context.traces.request(&responder, &request)?;
                     operation.run(async move {
                         let session_id = SessionId::try_from(request.session_id.to_string())
@@ -805,6 +1052,7 @@ impl AcpServerFactory {
                         let server = AcpServer::new(
                             Arc::clone(&kernel),
                             Arc::clone(&projections),
+                            elicitations,
                         );
                         let durable_replay_from_start =
                             matches!(&replay, AcpReplayRequest::Start);
@@ -932,17 +1180,14 @@ impl AcpServerFactory {
                                                 .build();
                                             (ProjectionWatch::from(subscription), metadata)
                                         }
-                                        DurableResumeSelection::Live { replay, receiver } => {
+                                        DurableResumeSelection::Live { replay, live } => {
                                             server.send_replay_items(
                                                 &session_id,
                                                 &connection,
                                                 replay,
                                             )?;
                                             (
-                                                ProjectionWatch::builder()
-                                                    .backlog(Vec::new())
-                                                    .receiver(receiver)
-                                                    .build(),
+                                                ProjectionWatch::from(live),
                                                 ResumeMeta::builder()
                                                     .mode(RecoveryMode::Resume)
                                                     .running(false)
@@ -952,10 +1197,7 @@ impl AcpServerFactory {
                                     }
                                 } else {
                                     (
-                                        ProjectionWatch::builder()
-                                            .backlog(Vec::new())
-                                            .receiver(live_receiver)
-                                            .build(),
+                                        ProjectionWatch::from(live_receiver),
                                         ResumeMeta::builder()
                                             .mode(RecoveryMode::Resume)
                                             .running(false)
@@ -964,7 +1206,19 @@ impl AcpServerFactory {
                                 }
                             }
                         };
-                        server.send_available_commands(&session_id, &connection)?;
+                        // Startup diagnostics were already shown on this connection.
+                        let reattached = session_watchers
+                            .lock()
+                            .map_err(|_poison_error| {
+                                agent_client_protocol::Error::into_internal_error(
+                                    std::io::Error::other(
+                                        "ACP Session watcher lock poisoned",
+                                    ),
+                                )
+                            })?
+                            .contains_key(&session_id);
+                        let commands =
+                            server.send_available_commands(&session_id, &connection)?;
                         server.watch_mcp(
                             &session_id,
                             &connection,
@@ -974,10 +1228,15 @@ impl AcpServerFactory {
                             &session_id,
                             &connection,
                             session_watchers,
-                            watch,
+                            watch.resumed(),
                         )?;
+                        // Pending requests follow replay and the state snapshot.
+                        server.reestablish_elicitations(&session_id, &connection)?;
                         responder.respond(
-                            wire::ResumeSessionResponse::new().meta(
+                            wire::ResumeSessionResponse::new()
+                                .available_commands(commands)
+                                .config_options(server.config_options(&session_id)?)
+                                .meta(
                                 wire::Meta::from_iter([(
                                     ProductIdentity::ACP_NAMESPACE.to_string(),
                                     serde_json::json!({
@@ -985,7 +1244,16 @@ impl AcpServerFactory {
                                     }),
                                 )]),
                             ),
-                        )
+                        )?;
+                        if reattached {
+                            tracing::info!(
+                                "skipped repeated prompt notices for Session {} re-attached on its connection",
+                                session_id
+                            );
+                            return Ok(());
+                        }
+                        // Diagnostics follow the response so the Session id is known.
+                        server.send_prompt_notices(&session_id, &connection)
                     }).await
                     }
                 },
@@ -996,27 +1264,79 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::CloseSessionRequest,
                                 responder: Responder<wire::CloseSessionResponse>,
-                                _connection: ConnectionTo<Client>| {
-                    let kernel = Arc::clone(&context.kernel);
-                    let projections = Arc::clone(&context.projections);
+                                connection: V2ConnectionTo<Client>| {
                     let operation = context.traces.request(&responder, &request)?;
-                    operation.run(async move {
-                        let session_id = SessionId::try_from(request.session_id.to_string())
-                            .map_err(|error| {
-                                agent_client_protocol::Error::invalid_params()
-                                    .data(error.to_string())
-                            })?;
-                        kernel
-                            .close_session(&session_id)
-                            .await
-                            .map_err(agent_client_protocol::Error::into_internal_error)?;
-                        projections
-                            .remove(&session_id)
-                            .map_err(
-                                agent_client_protocol::Error::into_internal_error,
-                            )?;
-                        responder.respond(wire::CloseSessionResponse::new())
-                    }).await
+                    operation.start();
+                    let accepted = SessionId::try_from(request.session_id.to_string())
+                        .map_err(|error| {
+                            agent_client_protocol::Error::invalid_params()
+                                .data(error.to_string())
+                        })
+                        .and_then(|session_id| {
+                            active_watcher(&context.watchers.sessions, &session_id)
+                                .map(|watcher| (session_id, watcher))
+                        });
+                    let (session_id, watcher) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            operation.fail(&error);
+                            return Err(error);
+                        }
+                    };
+                    let close = SessionClose::builder()
+                        .kernel(Arc::clone(&context.kernel))
+                        .projections(Arc::clone(&context.projections))
+                        .session_id(session_id)
+                        .delivery(watcher.delivery)
+                        .responder(responder)
+                        .build();
+                    // Closing waits for the current Run to exit, so it runs outside
+                    // the dispatch loop to keep this connection's other Sessions live.
+                    connection.spawn(async move {
+                        let _settled = operation.settle(close.run()).await;
+                        Ok(())
+                    })
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let context = Arc::clone(&context);
+                    async move |request: wire::SetSessionConfigOptionRequest,
+                                responder: Responder<wire::SetSessionConfigOptionResponse>,
+                                connection: V2ConnectionTo<Client>| {
+                    let operation = context.traces.request(&responder, &request)?;
+                    operation.start();
+                    let accepted = SessionId::try_from(request.session_id.to_string())
+                        .map_err(|error| {
+                            agent_client_protocol::Error::invalid_params()
+                                .data(error.to_string())
+                        })
+                        .and_then(|session_id| {
+                            active_watcher(&context.watchers.sessions, &session_id)
+                                .map(|watcher| (session_id, watcher))
+                        });
+                    let (session_id, watcher) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            operation.fail(&error);
+                            return Err(error);
+                        }
+                    };
+                    let update = SessionConfigUpdate::builder()
+                        .kernel(Arc::clone(&context.kernel))
+                        .projections(Arc::clone(&context.projections))
+                        .session_id(session_id)
+                        .delivery(watcher.delivery)
+                        .request(request)
+                        .responder(responder)
+                        .build();
+                    // Waiting on this connection's watcher must not hold the dispatch loop.
+                    connection.spawn(async move {
+                        let _settled = operation.settle(update.run()).await;
+                        Ok(())
+                    })
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -1026,7 +1346,7 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::DeleteSessionRequest,
                                 responder: Responder<wire::DeleteSessionResponse>,
-                                _connection: ConnectionTo<Client>| {
+                                _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let operation = context.traces.request(&responder, &request)?;
@@ -1059,9 +1379,10 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: wire::PromptRequest,
                                 responder: Responder<wire::PromptResponse>,
-                                _connection: ConnectionTo<Client>| {
+                                connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
+                    let watchers = Arc::clone(&context.watchers.sessions);
                     let operation = context.traces.request(&responder, &request)?;
                     let trace_id = operation.trace_id().clone();
                     operation.start();
@@ -1072,13 +1393,14 @@ impl AcpServerFactory {
                                 agent_client_protocol::Error::invalid_params()
                                     .data(error.to_string())
                             })?;
+                        active_watcher(&watchers, &session_id)?;
                         let input = PromptInput::try_from(request.prompt)
                             .map_err(|error| {
                                 agent_client_protocol::Error::invalid_params()
                                     .data(error.to_string())
                             })?
                             .into_inner();
-                        responder.respond(wire::PromptResponse::new())?;
+                        let (notice, insertion) = InsertionNotice::new();
 
                         let task_session_id = session_id.clone();
                         // A Prompt Run belongs to the Kernel Session rather than
@@ -1093,7 +1415,7 @@ impl AcpServerFactory {
                                 .settle(Box::pin(async move {
                                     let sink = projections
                                         .sink(task_session_id.clone());
-                                    if let Err(error) = kernel
+                                    match kernel
                                         .run_traced(
                                             RunRequest {
                                                 session_id: task_session_id
@@ -1102,24 +1424,37 @@ impl AcpServerFactory {
                                             },
                                             sink,
                                             trace_id,
+                                            Some(notice),
                                         )
                                         .await
                                     {
-                                        tracing::error!(
-                                            "Kernel Run for session {} failed: {}",
-                                            task_session_id,
-                                            error
-                                        );
-                                        if let Err(fallback_error) = projections
-                                            .publish_terminal_fallback(
-                                                &task_session_id,
-                                            )
-                                        {
-                                            tracing::error!(
-                                                "failed to publish terminal ACP fallback for Session {}: {}",
-                                                task_session_id,
-                                                fallback_error
+                                        Ok(_result) => {}
+                                        // A prompt rejected before insertion either
+                                        // settled its own Run or never started one;
+                                        // another Run may still own the live state.
+                                        Err(KernelError::PromptCancelled) => {
+                                            tracing::info!(
+                                                "prompt for session {} was cancelled before insertion",
+                                                task_session_id
                                             );
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(
+                                                "Kernel Run for session {} failed: {}",
+                                                task_session_id,
+                                                error
+                                            );
+                                            if let Err(fallback_error) = projections
+                                                .publish_terminal_fallback(
+                                                    &task_session_id,
+                                                )
+                                            {
+                                                tracing::error!(
+                                                    "failed to publish terminal ACP fallback for Session {}: {}",
+                                                    task_session_id,
+                                                    fallback_error
+                                                );
+                                            }
                                         }
                                     }
                                     Ok(())
@@ -1133,6 +1468,36 @@ impl AcpServerFactory {
                                 );
                             }
                         });
+
+                        // The callback returns at once so this connection keeps
+                        // dispatching session/cancel and elicitation replies while
+                        // the prompt waits for the gate or pre-insertion hooks.
+                        connection.spawn(async move {
+                            let response = match insertion.await {
+                                Ok(Ok(message_id)) => Ok(wire::PromptResponse::new(
+                                    message_id.to_string(),
+                                )),
+                                Ok(Err(error)) => {
+                                    Err(PromptRejection(error).into())
+                                }
+                                Err(_closed) => {
+                                    tracing::error!(
+                                        "prompt for session {} ended without reporting insertion",
+                                        session_id
+                                    );
+                                    Err(agent_client_protocol::Error::internal_error()
+                                        .data("prompt ended before insertion"))
+                                }
+                            };
+                            if let Err(error) = responder.respond_with_result(response) {
+                                tracing::warn!(
+                                    "failed to answer prompt for session {}: {}",
+                                    session_id,
+                                    error
+                                );
+                            }
+                            Ok(())
+                        })?;
                         Ok(())
                     }).await;
                     if let Err(error) = &result {
@@ -1147,7 +1512,7 @@ impl AcpServerFactory {
                 {
                     let context = Arc::clone(&context);
                     async move |notification: wire::CancelSessionNotification,
-                                _connection: ConnectionTo<Client>| {
+                                _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let operation = context.traces.notification(
                         notification.method(),
@@ -1174,11 +1539,12 @@ impl AcpServerFactory {
                     let context = Arc::clone(&context);
                     async move |request: AcpExtensionRequest,
                                 responder,
-                                connection: ConnectionTo<Client>| {
+                                connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
+                    let elicitations = Arc::clone(&context.watchers.elicitations);
                     let operation = context.traces.request(
                         &responder,
                         request.parameters(),
@@ -1192,6 +1558,7 @@ impl AcpServerFactory {
                             .mcp_watchers(mcp_watchers)
                             .projections(projections)
                             .session_watchers(session_watchers)
+                            .elicitations(elicitations)
                             .build()
                         .execute(request)
                         .await?;
@@ -1203,6 +1570,224 @@ impl AcpServerFactory {
             ),
             self.runtime.max_batch_size,
         )
+    }
+}
+
+/// Longest a close response waits for the Kernel before reporting that closing continues.
+const CLOSE_GRACE: Duration = Duration::from_secs(10);
+
+/// One accepted `session/close` running outside the connection dispatch loop.
+#[derive(typed_builder::TypedBuilder)]
+struct SessionClose {
+    kernel: Arc<Kernel>,
+    projections: Arc<ProjectionRegistry>,
+    session_id: SessionId,
+    delivery: SessionDelivery,
+    responder: Responder<wire::CloseSessionResponse>,
+}
+
+impl SessionClose {
+    /// Starts the close, confirms its final updates were queued, then answers.
+    ///
+    /// The close itself belongs to the Kernel, not to this connection: a client
+    /// that disconnects must not leave the Session half closed.
+    async fn run(self) -> Result<(), agent_client_protocol::Error> {
+        let Self {
+            kernel,
+            projections,
+            session_id,
+            delivery,
+            responder,
+        } = self;
+        let (closed_sender, mut closed) = tokio::sync::oneshot::channel();
+        let (answered, answer_done) = tokio::sync::oneshot::channel::<()>();
+        {
+            let session_id = session_id.clone();
+            let projections = Arc::clone(&projections);
+            tokio::spawn(async move {
+                let result = kernel.close_session(&session_id).await;
+                let succeeded = result.is_ok();
+                let _connection_gone = closed_sender.send(result);
+                // Watchers end with the projection, so drop it only after this
+                // connection answered, gave up waiting, or went away.
+                let _answered = answer_done.await;
+                if succeeded {
+                    Self::forget(&projections, &session_id);
+                }
+            });
+        }
+        // shortcut: the grace period stops waiting but never aborts a stuck Run,
+        // because dropping its future could leave partial persistence; upgrade
+        // with an abortable Run handle that marks the Session for recovery.
+        let closed = match tokio::time::timeout(CLOSE_GRACE, &mut closed).await
+        {
+            Ok(Ok(closed)) => closed,
+            Ok(Err(_task_ended)) => {
+                let error = agent_client_protocol::Error::internal_error()
+                    .data("Session close task ended without a result");
+                tracing::warn!(
+                    "close task for Session {} ended without a result",
+                    session_id
+                );
+                responder.respond_with_error(error.clone())?;
+                return Err(error);
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    "close of Session {} exceeded {} s; answering while closing continues",
+                    session_id,
+                    CLOSE_GRACE.as_secs()
+                );
+                let error = agent_client_protocol::Error::internal_error()
+                    .data(serde_json::json!({
+                        "sessionId": session_id.as_str(),
+                        "closing": true,
+                    }));
+                responder.respond_with_error(error.clone())?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = closed {
+            tracing::warn!("failed to close Session {}: {}", session_id, error);
+            let error =
+                agent_client_protocol::Error::into_internal_error(error);
+            responder.respond_with_error(error.clone())?;
+            return Err(error);
+        }
+        // The response must follow every update the close produced, such as
+        // idle(cancelled), on this connection's outbound queue.
+        let delivered = match projections.last_sequence(&session_id) {
+            Ok(Some(sequence)) => delivery.wait_through(sequence).await,
+            Ok(None) => Ok(()),
+            Err(error) => {
+                Err(agent_client_protocol::Error::into_internal_error(error))
+            }
+        };
+        if let Err(error) = &delivered {
+            tracing::warn!(
+                "closed Session {} but could not confirm delivery of its final updates: {}",
+                session_id,
+                error
+            );
+        }
+        let answered_result = responder.respond_with_result(
+            delivered
+                .clone()
+                .map(|()| wire::CloseSessionResponse::new()),
+        );
+        // Lets the close task drop the projection now that the answer is queued.
+        drop(answered);
+        answered_result?;
+        delivered
+    }
+
+    /// Drops the closed Session's projection, which also ends its watchers.
+    fn forget(projections: &ProjectionRegistry, session_id: &SessionId) {
+        if let Err(error) = projections.remove(session_id) {
+            tracing::warn!(
+                "failed to drop ACP projection for closed Session {}: {}",
+                session_id,
+                error
+            );
+        }
+    }
+}
+
+/// One session/set_config_option request answered after this connection's updates.
+#[derive(typed_builder::TypedBuilder)]
+struct SessionConfigUpdate {
+    kernel: Arc<Kernel>,
+    projections: Arc<ProjectionRegistry>,
+    session_id: SessionId,
+    delivery: SessionDelivery,
+    request: wire::SetSessionConfigOptionRequest,
+    responder: Responder<wire::SetSessionConfigOptionResponse>,
+}
+
+impl SessionConfigUpdate {
+    /// Applies the change, then answers no older than any update this connection sent.
+    async fn run(self) -> Result<(), agent_client_protocol::Error> {
+        let Self {
+            kernel,
+            projections,
+            session_id,
+            delivery,
+            request,
+            responder,
+        } = self;
+        let applied = async {
+            let settings = kernel
+                .session_settings(&session_id)
+                .map_err(agent_client_protocol::Error::into_internal_error)?;
+            let change = ConfigChange::try_from((&settings, &request))?;
+            // The change belongs to the Kernel: a disconnect must not stop it
+            // between persisting it and publishing it.
+            let task_kernel = Arc::clone(&kernel);
+            let task_session_id = session_id.clone();
+            tokio::spawn(async move {
+                match change {
+                    ConfigChange::Model { provider, model_id } => task_kernel
+                        .set_session_model(
+                            &task_session_id,
+                            &provider,
+                            &model_id,
+                        )
+                        .await
+                        .map(|_model| ()),
+                    ConfigChange::ThinkingLevel(level) => task_kernel
+                        .set_session_thinking_level(&task_session_id, level)
+                        .await
+                        .map(|_level| ()),
+                }
+            })
+            .await
+            .map_err(agent_client_protocol::Error::into_internal_error)?
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+            // An unchanged value adds no event, so this waits only for what is queued.
+            match projections.last_sequence(&session_id) {
+                Ok(Some(sequence)) => delivery.wait_through(sequence).await,
+                Ok(None) => Ok(()),
+                Err(error) => Err(
+                    agent_client_protocol::Error::into_internal_error(error),
+                ),
+            }
+        }
+        .await;
+        if let Err(error) = applied {
+            responder.respond_with_error(error.clone())?;
+            return Err(error);
+        }
+        // While held, no update can be queued, so a later one is always newer
+        // than the snapshot this response carries.
+        let _permit = delivery.send_permit().await;
+        let answer = kernel
+            .session_settings(&session_id)
+            .map(|settings| {
+                wire::SetSessionConfigOptionResponse::new(Vec::from(
+                    ConfigOptionsOf(&settings),
+                ))
+            })
+            .map_err(agent_client_protocol::Error::into_internal_error);
+        tracing::info!(
+            "answered session/set_config_option {} for Session {}",
+            request.config_id,
+            session_id
+        );
+        responder.respond_with_result(answer.clone())?;
+        answer.map(|_answer| ())
+    }
+}
+
+/// Kernel failure that ended a prompt before insertion.
+struct PromptRejection(KernelError);
+
+impl From<PromptRejection> for agent_client_protocol::Error {
+    /// Maps cancellation to `-32800` and any other pre-insertion failure to an internal error.
+    fn from(rejection: PromptRejection) -> Self {
+        match rejection.0 {
+            KernelError::PromptCancelled => Self::request_cancelled(),
+            error => Self::internal_error().data(error.to_string()),
+        }
     }
 }
 
