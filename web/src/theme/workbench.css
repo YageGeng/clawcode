@@ -521,7 +521,8 @@
   min-width: 0;
   height: 100%;
   flex-direction: column;
-  overflow: hidden;
+  /* Queue focus must scroll its list, never shift the entire conversation pane. */
+  overflow: clip;
   border-top: 1px solid rgb(255 255 255 / 76%);
   border-bottom: 1px solid rgb(255 255 255 / 76%);
   background: var(--surface-content);
@@ -1418,6 +1419,7 @@
 
 .composer-area {
   z-index: 2;
+  container-type: inline-size;
   padding: 8px max(20px, calc((100% - 840px) / 2)) 18px;
   background: linear-gradient(transparent, var(--surface-canvas) 22%);
 }
@@ -1430,6 +1432,55 @@
   box-shadow: var(--shadow-soft);
 }
 
+/* Show focus around the whole card instead of clipping the textarea ring into horizontal lines. */
+.composer-card:has(textarea:focus-visible) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring), var(--shadow-soft);
+}
+
+/* Make delivery timing visible without repeating technical queue names in the draft. */
+.composer-delivery {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 0;
+}
+
+.composer-delivery__options {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--surface-muted);
+}
+
+.composer-delivery__options button {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 11px;
+}
+
+.composer-delivery__options button[aria-pressed="true"] {
+  color: var(--accent-strong);
+  background: var(--surface-raised);
+  box-shadow: 0 1px 4px rgb(43 62 101 / 10%);
+}
+
+.composer-delivery > span {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-card textarea {
   display: block;
   width: 100%;
@@ -1439,6 +1490,7 @@
   padding: 14px 15px 8px;
   border: 0;
   outline: 0;
+  box-shadow: none;
   background: transparent;
   line-height: 1.5;
 }
@@ -1543,50 +1595,290 @@
 }
 
 .composer-actions .primary-button,
-.composer-actions .danger-button,
-.pending-queue__heading button {
+.composer-actions .danger-button {
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 
+/* Queue limits and neutral surfaces keep ordinary waiting from looking like a warning. */
 .pending-queue {
-  margin-bottom: 7px;
+  margin-bottom: 8px;
   overflow: hidden;
-  border: 1px solid #edd7ab;
-  border-radius: 10px;
-  background: var(--warning-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-raised);
   font-size: 12px;
 }
 
 .pending-queue__heading {
-  justify-content: space-between;
-  padding: 7px 10px;
-  color: var(--warning);
-  font-weight: 650;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--surface-muted);
 }
 
-.pending-queue__heading button,
-.pending-item button,
+.pending-queue button,
 .resource-chip button,
 .outcome-warning button {
   color: inherit;
   background: transparent;
 }
 
-.pending-item {
-  gap: 8px;
-  padding: 7px 10px;
-  border-top: 1px solid #f0dfbd;
+.pending-queue__heading button {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  border-radius: 6px;
+}
+
+.pending-queue__toggle {
+  min-width: 0;
+  flex: 1;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.pending-queue__toggle > svg:first-child {
   color: var(--text-secondary);
 }
 
-.pending-item span {
+.pending-queue__count {
+  min-width: 19px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: 10px;
+  text-align: center;
+}
+
+.pending-queue__description {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-queue__chevron {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  transition: transform var(--motion-fast) ease;
+}
+
+.pending-queue__toggle[aria-expanded="false"] .pending-queue__chevron {
+  transform: rotate(-90deg);
+}
+
+.pending-queue__heading .pending-queue__clear {
+  flex: 0 0 auto;
+  padding: 0 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.pending-queue__clear:hover:not(:disabled),
+.pending-item__remove:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pending-queue__confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--danger-soft);
+  font-size: 11px;
+}
+
+.pending-queue__confirm > span {
+  flex: 1;
+}
+
+.pending-queue__confirm button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.pending-queue__confirm .pending-queue__confirm-clear {
+  color: var(--danger);
+  background: var(--surface-raised);
+}
+
+.pending-queue__list {
+  max-height: min(280px, 30vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.pending-item {
+  align-items: flex-start;
+  gap: 7px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.pending-item__position {
+  width: 12px;
+  flex: 0 0 auto;
+  padding-top: 9px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.pending-item__kind {
+  flex: 0 0 auto;
+  margin-top: 6px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.pending-item__kind[data-kind="steering"] {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.pending-item__details {
+  min-width: 0;
+  flex: 1;
+}
+
+.pending-item__details summary {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.pending-item__details summary::-webkit-details-marker {
+  display: none;
+}
+
+.pending-item__details summary:hover,
+.pending-item__promote:hover:not(:disabled) {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.pending-item__preview {
   min-width: 0;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pending-item__details summary svg {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  transition: transform var(--motion-fast) ease;
+}
+
+.pending-item__details[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.pending-item__content {
+  max-height: 180px;
+  margin: 3px 0 8px;
+  padding: 9px 10px;
+  overflow: auto;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pending-item__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.pending-item__actions button {
+  display: flex;
+  min-width: 32px;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.pending-queue__spinner {
+  animation: spin 1s linear infinite;
+}
+
+/* Account for narrow conversation columns as well as small browser windows. */
+@container (max-width: 560px) {
+  .composer-delivery > span,
+  .composer-actions > span,
+  .pending-queue__description,
+  .pending-item__promote span {
+    display: none;
+  }
+
+  .composer-actions .danger-button {
+    margin-left: auto;
+  }
+
+  .composer-actions .primary-button:last-child {
+    margin-left: auto;
+  }
+
+  .composer-actions .danger-button + .primary-button {
+    margin-left: 0;
+  }
+}
+
+/* Keep both attachment controls and send actions visible at the 320px minimum viewport. */
+@container (max-width: 360px) {
+  .composer-actions {
+    gap: 4px;
+    padding-inline: 7px;
+  }
+
+  .composer-actions .icon-button {
+    width: 32px;
+  }
+
+  .composer-actions .primary-button,
+  .composer-actions .danger-button {
+    padding-inline: 8px;
+  }
+
+  .pending-item {
+    gap: 4px;
+    padding-inline: 7px;
+  }
+
+  .pending-item__position {
+    display: none;
+  }
 }
 
 .resource-chips {
@@ -3220,7 +3512,3 @@
 .message--subagent-report { border-left: 3px solid var(--accent); padding-left: 12px; }
 .session-children { padding-left: 14px; border-left: 1px solid var(--border-subtle); margin-left: 10px; }
 .session-children > summary { cursor: pointer; padding: 6px; font-size: 12px; color: var(--text-secondary); }
-
-.pending-queue__group h4 { margin: 8px 0 4px; font-size: 11px; font-weight: 600; opacity: .75; }
-.pending-item > span { flex: 1; min-width: 0; }
-.pending-item > button { flex-shrink: 0; }

@@ -11,7 +11,7 @@ use rmcp::model::{
     PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
     ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
     ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role,
-    ServerCapabilities, ServerInfo, Tool,
+    ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler};
@@ -54,8 +54,9 @@ impl ReferenceServer {
 
 impl ServerHandler for ReferenceServer {
     /// Advertises all baseline capabilities exercised by the agent and WebUI.
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        // Use the SDK's current configuration alias to avoid deprecation warnings.
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_completions()
                 .enable_prompts()

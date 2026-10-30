@@ -1,13 +1,14 @@
-import { ImagePlus, Link2, Send, Square, Trash2, X } from "lucide-react";
+import { ArrowUpToLine, ImagePlus, Link2, ListOrdered, Send, Square, X } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { AcpRequestError } from "../../acp/connection";
 import type { SessionId } from "../../acp/protocol";
 import type { ImageMimeType } from "../../acp/protocol";
-import type { AvailableCommandEntity, PendingMessages, PromptImage, PromptInput, PromptResourceLink, QueuedMessage } from "../../domain/model";
+import type { AvailableCommandEntity, PendingMessages, PromptImage, PromptInput, PromptResourceLink } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandPalette } from "./CommandPalette";
 import { CommandPaletteModel } from "./commandPaletteModel";
+import { PendingQueue } from "./PendingQueue";
 
 export type ComposerProps = Readonly<{
   productSlug: string;
@@ -46,30 +47,7 @@ const DraftCodec = {
   }
 } as const;
 
-const QueuedMessageView = {
-  text(item: QueuedMessage): string {
-    const content = item.message.content;
-    if (typeof content !== "object" || content === null || Array.isArray(content)) return item.queueId;
-    const contentRecord = content as Record<string, unknown>;
-    const expansion = typeof contentRecord.expansion === "object" && contentRecord.expansion !== null && !Array.isArray(contentRecord.expansion)
-      ? contentRecord.expansion as Record<string, unknown>
-      : undefined;
-    const invocation = typeof expansion?.invocation === "object" && expansion.invocation !== null && !Array.isArray(expansion.invocation)
-      ? expansion.invocation as Record<string, unknown>
-      : undefined;
-    if (typeof invocation?.original === "string") return invocation.original;
-    const blocks = contentRecord.blocks;
-    if (!Array.isArray(blocks)) return item.queueId;
-    const text = blocks.map((block) => {
-      if (typeof block !== "object" || block === null || Array.isArray(block)) return "";
-      const text = (block as Record<string, unknown>).text;
-      return typeof text === "string" ? text : "";
-    }).join("");
-    const imageCount = blocks.filter((block) => typeof block === "object" && block !== null && !Array.isArray(block) && (block as Record<string, unknown>).type === "image").length;
-    return [text, imageCount === 0 ? "" : `${imageCount} 张图片`].filter((part) => part.length > 0).join(" · ") || item.queueId;
-  }
-} as const;
-
+/** Composes drafts with an explicit delivery choice while the current task is running. */
 export function Composer({ productSlug, sessionId, running, outcomeUnknown, pending, availableCommands, initialDraft, controller }: ComposerProps) {
   const storageKey = `${productSlug}:agent-draft:${sessionId}`;
   const stored = DraftCodec.parse(sessionStorage.getItem(storageKey));
@@ -85,10 +63,10 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const [hint, setHint] = useState<string>();
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [steering, setSteering] = useState(controller.bootstrap.whenBusy === "steer");
   const imageInput = useRef<HTMLInputElement>(null);
   const imageReadInProgress = useRef(false);
   const imagesRef = useRef(initial.images);
-  const queued = [...pending.steering, ...pending.followUp];
   const commandQuery = text.startsWith("/") && !/\s/.test(text) ? text.slice(1) : undefined;
   const matchingCommands = commandQuery === undefined ? [] : CommandPaletteModel.matches(availableCommands, commandQuery);
   const paletteOpen = commandQuery !== undefined && !paletteDismissed;
@@ -110,7 +88,9 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
     setError(undefined);
     setHint(undefined);
     try {
-      controller.submit(input, { alternate });
+      // Keep the existing backend policy while making the selected mode and Alt+Enter agree.
+      const useSteering = alternate ? !steering : steering;
+      controller.submit(input, { alternate: running ? useSteering !== (controller.bootstrap.whenBusy === "steer") : alternate });
       persist({ text: "", resources: [], images: [] });
       sessionStorage.removeItem(storageKey);
       controller.clearDraft(sessionId);
@@ -126,8 +106,6 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
       ? "会话持久化异常，请关闭并重新打开会话"
       : reason instanceof Error ? reason.message : String(reason));
   };
-  const defaultPlacement = controller.bootstrap.whenBusy === "steer" ? "steer" : "follow-up";
-  const alternatePlacement = defaultPlacement === "steer" ? "follow-up" : "steer";
 
   /** Writes one discovered command into the draft without expanding it in the browser. */
   const selectCommand = (command: AvailableCommandEntity) => {
@@ -142,22 +120,15 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
 
   return (
     <div className="composer-area">
-      {queued.length === 0 ? null : (
-        <section className="pending-queue" aria-label="待处理消息">
-          <div className="pending-queue__heading"><span>{queued.length} 条消息等待执行</span><button type="button" onClick={() => void controller.clearPending().catch(queueError)}><Trash2 size={13} /> 清空</button></div>
-          {([{ label: "Steer", items: pending.steering }, { label: "Follow-up", items: pending.followUp }] as const).map((group) => group.items.length === 0 ? null : (
-            <div className="pending-queue__group" key={group.label}>
-              <h4>{group.label}</h4>
-              {group.items.map((item) => <div className="pending-item" key={item.queueId}>
-                <span>{QueuedMessageView.text(item)}</span>
-                {item.kind === "followUp" ? <button type="button" onClick={() => void controller.promotePending(item.queueId).then((promoted) => { if (!promoted) setHint("已开始执行，无法转换"); }).catch(queueError)}>转为 steer</button> : null}
-                <button type="button" title="移除" onClick={() => void controller.removePending(item.queueId).catch(queueError)}><X size={13} /></button>
-              </div>)}
-            </div>
-          ))}
-        </section>
-      )}
+      {pending.steering.length + pending.followUp.length === 0 ? null : <PendingQueue pending={pending} controller={controller} onError={queueError} onHint={setHint} />}
       <div className="composer-card">
+        {running ? <div className="composer-delivery">
+          <div className="composer-delivery__options" role="group" aria-label="运行时发送方式">
+            <button type="button" aria-pressed={!steering} onClick={() => setSteering(false)}><ListOrdered size={13} aria-hidden="true" />稍后发送</button>
+            <button type="button" aria-pressed={steering} onClick={() => setSteering(true)}><ArrowUpToLine size={13} aria-hidden="true" />本轮补充</button>
+          </div>
+          <span>{steering ? "在下一次模型请求前补充" : "当前任务完成后依次发送"}</span>
+        </div> : null}
         {resources.length === 0 ? null : <div className="resource-chips">{resources.map((resource) => <span className="resource-chip" key={`${resource.name}:${resource.uri}`}><Link2 size={12} />{resource.name}<button type="button" title="移除资源链接" onClick={() => persist({ text, resources: resources.filter((item) => item !== resource), images })}><X size={12} /></button></span>)}</div>}
         {images.length === 0 ? null : <div className="image-previews">{images.map((image) => <figure className="image-preview" key={image.id}><img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name} /><figcaption title={image.name}>{image.name}</figcaption><button type="button" title={`移除 ${image.name}`} onClick={() => persist({ text, resources, images: images.filter((item) => item.id !== image.id) })}><X size={12} /></button></figure>)}</div>}
         {showResourceForm ? <div className="resource-form"><input aria-label="资源名称" placeholder="显示名称" value={resourceName} onChange={(event) => setResourceName(event.target.value)} /><input aria-label="资源 URI" placeholder="file:///path 或 https://…" value={resourceUri} onChange={(event) => setResourceUri(event.target.value)} /><button className="secondary-button" type="button" onClick={() => {
@@ -186,7 +157,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           aria-controls={paletteOpen ? "command-palette" : undefined}
           aria-expanded={paletteOpen}
           aria-activedescendant={paletteOpen && matchingCommands.length > 0 ? `command-option-${activeCommandIndex}` : undefined}
-          placeholder={running ? `当前 Turn 运行中；发送内容将加入 ${defaultPlacement}…` : "发送消息…"}
+          placeholder={running ? steering ? "补充当前任务的要求…" : "写下下一条消息…" : "发送消息…"}
           rows={3}
           value={text}
           onChange={(event) => {
@@ -229,7 +200,6 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
         />
         {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}
         {hint === undefined ? null : <div className="form-hint" role="status">{hint}</div>}
-        {running ? <div className="form-hint">Enter 排队 {defaultPlacement} · Alt+Enter 发送 {alternatePlacement}</div> : null}
         {outcomeUnknown ? <div className="outcome-warning">请求结果未知，原始输入已保留，系统不会自动重发。<button type="button" disabled={readingImages} onClick={() => controller.restoreUnknownInput(sessionId)}>取回输入并检查</button></div> : null}
         <div className="composer-actions">
           <input ref={imageInput} className="visually-hidden" type="file" accept={SUPPORTED_IMAGE_MIME_TYPES.join(",")} multiple disabled={readingImages} onChange={(event) => {
@@ -286,9 +256,9 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           }} />
           <button className="icon-button" type="button" title={readingImages ? "正在读取图片" : "添加图片"} disabled={readingImages} onClick={() => imageInput.current?.click()}><ImagePlus size={17} /></button>
           <button className="icon-button" type="button" title="添加资源链接" onClick={() => setShowResourceForm((value) => !value)}><Link2 size={17} /></button>
-          <span>{readingImages ? "正在读取图片…" : "Enter 发送 · Shift+Enter 换行"}</span>
+          <span>{readingImages ? "正在读取图片…" : running ? `Enter ${steering ? "补充" : "排队"} · Alt+Enter ${steering ? "排队" : "补充"} · Shift+Enter 换行` : "Enter 发送 · Shift+Enter 换行"}</span>
           {running ? <button className="danger-button" type="button" onClick={() => controller.cancel()}><Square size={13} /> 停止</button> : null}
-          <button aria-keyshortcuts="Enter" className="primary-button" type="button" disabled={!canSubmit} onClick={() => void submit({ text, resources, images })}><Send size={14} /> {running ? "加入队列" : "发送"}</button>
+          <button aria-keyshortcuts="Enter" className="primary-button" type="button" disabled={!canSubmit} onClick={() => void submit({ text, resources, images })}><Send size={14} /> {running ? steering ? "补充本轮" : "加入队列" : "发送"}</button>
         </div>
       </div>
     </div>
