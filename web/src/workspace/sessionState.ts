@@ -79,8 +79,8 @@ export type SessionWorkspaceAction =
 export const MAX_RETAINED_SESSION_EVENTS = 2_000;
 
 /**
- * Orders the diagnostic event log and bounds it: each terminal keeps only its
- * newest whole-output snapshot, then the newest events up to the count limit.
+ * Orders and bounds the diagnostic log, keeping only the newest complete queue
+ * and terminal snapshots before applying the event count limit.
  */
 export function retainEvents(events: readonly SessionEvent[]): SessionEvent[] {
   const sorted = [...events].sort((left, right) => Ordering.compare(left.order, right.order));

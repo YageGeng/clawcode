@@ -9,6 +9,7 @@ use super::KernelError;
 pub type InsertionReceiver = oneshot::Receiver<Result<MessageId, KernelError>>;
 
 /// One-shot report of whether a Run inserted its user message (ACP v2 prompt acceptance).
+#[derive(Debug)]
 pub struct InsertionNotice(
     Mutex<Option<oneshot::Sender<Result<MessageId, KernelError>>>>,
 );
@@ -19,6 +20,15 @@ impl InsertionNotice {
     pub fn new() -> (Arc<Self>, InsertionReceiver) {
         let (sender, receiver) = oneshot::channel();
         (Arc::new(Self(Mutex::new(Some(sender)))), receiver)
+    }
+
+    /// Reports whether a client still awaits this input's acceptance.
+    pub fn is_listening(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|sender| !sender.is_closed())
     }
 
     /// Reports insertion once; later calls are ignored.
@@ -56,19 +66,21 @@ impl InsertionNotice {
 }
 
 /// Whether a session-wide cancel may reject a Run still waiting before insertion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(in crate::runtime) enum WaiterCancellation {
     /// A client awaits acceptance and still holds the input after a `-32800` rejection.
     Reject,
     /// Internal input has no client to return it to, so it keeps its place.
     Ignore,
+    /// Cancellation generation captured at protocol arrival, before asynchronous hooks.
+    Captured(tokio_util::sync::CancellationToken),
 }
 
 impl WaiterCancellation {
     /// Maps a close observed before admission to this waiter's rejection.
-    pub(in crate::runtime) fn closing(self) -> KernelError {
+    pub(in crate::runtime) fn closing(&self) -> KernelError {
         match self {
-            Self::Reject => KernelError::PromptCancelled,
+            Self::Reject | Self::Captured(_) => KernelError::PromptCancelled,
             Self::Ignore => KernelError::SessionClosing,
         }
     }

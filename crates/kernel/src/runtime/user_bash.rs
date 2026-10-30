@@ -14,6 +14,7 @@ impl Kernel {
         request: &RunRequest,
         sink: Arc<dyn EventSink>,
         insertion: Option<&InsertionNotice>,
+        admission: Option<&AdmissionTicket>,
     ) -> Result<Option<RunResult>, KernelError> {
         let Some(input) = request
             .input
@@ -28,6 +29,7 @@ impl Kernel {
                 input,
                 sink,
                 insertion,
+                admission,
             )
             .await?;
         Ok(Some(RunResult {
@@ -53,6 +55,7 @@ impl Kernel {
                 },
                 sink,
                 None,
+                None,
             )
             .await?;
         Ok(execution.result)
@@ -65,15 +68,26 @@ impl Kernel {
         input: UserBashInput,
         sink: Arc<dyn EventSink>,
         insertion: Option<&InsertionNotice>,
+        admission: Option<&AdmissionTicket>,
     ) -> Result<UserBashExecution, KernelError> {
         // A cancel or close while this shell waits for the gate must reject it
         // before any process is spawned.
         let (_run_guard, cancellation) = session
             .acquire_operation_for_prompt(
                 None,
-                WaiterCancellation::from(insertion),
+                admission.map_or_else(
+                    || WaiterCancellation::from(insertion),
+                    |ticket| {
+                        WaiterCancellation::Captured(
+                            ticket.cancellation.clone(),
+                        )
+                    },
+                ),
             )
             .await?;
+        if let Some(ticket) = admission {
+            ticket.release();
+        }
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let turn_id = TurnId::try_from(self.id_generator.next(IdKind::Turn))

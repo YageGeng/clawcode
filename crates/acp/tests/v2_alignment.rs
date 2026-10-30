@@ -1480,6 +1480,15 @@ async fn initialize_selects_v2_for_newer_request() {
     let response = initialize_with(3).await.expect("initialize");
     let json = serde_json::to_value(&response).expect("serialize");
     assert_eq!(json["protocolVersion"], 2);
+    let methods = json["_meta"]["clawcode"]["methods"]
+        .as_array()
+        .expect("advertised methods");
+    assert!(
+        methods
+            .iter()
+            .any(|value| value == "_clawcode/session/pending_message/promote")
+    );
+    assert!(!methods.iter().any(|value| value == "_clawcode/followUp"));
 }
 
 /// A client that only speaks an older version is rejected with the supported list.
@@ -2437,4 +2446,226 @@ async fn close_completes_after_requesting_connection_drops() {
     })
     .await
     .expect("close finishes without its connection");
+}
+
+/// Metadata validation happens before the prompt can run or enter the queue.
+#[tokio::test]
+async fn invalid_busy_options_are_rejected_before_insertion() {
+    let root = tempfile::tempdir().unwrap();
+    let kernel = alignment_kernel(
+        root.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(
+        &acp(&kernel),
+        root.path(),
+        async |connection, session, _updates| {
+            for product in [
+                serde_json::json!({"whenBusy":"follow_up"}),
+                serde_json::json!({"whenBusy":7}),
+                serde_json::json!({"submissionId":""}),
+                serde_json::json!({"submissionId":"x".repeat(129)}),
+            ] {
+                let request = prompt(&session, "must not insert").meta(
+                    wire::Meta::from_iter([("clawcode".into(), product)]),
+                );
+                let error = connection
+                    .send_request(request)
+                    .block_task()
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    agent_client_protocol::ErrorCode::InvalidParams
+                );
+            }
+            assert!(
+                kernel
+                    .session_transcript(
+                        &protocol::SessionId::try_from(session.to_string())
+                            .unwrap()
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            Ok(())
+        },
+    )
+    .await;
+}
+
+/// Rapid requests keep transport arrival order, insertion ids, and queue correlation together.
+#[tokio::test]
+async fn rapid_busy_prompts_insert_in_send_order() {
+    let root = tempfile::tempdir().unwrap();
+    let model = ScriptedModel::new();
+    let kernel = alignment_kernel(
+        root.path(),
+        &model,
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(&acp(&kernel), root.path(), async |connection, session, updates| {
+        connection.send_request(prompt(&session, "hold")).block_task().await?;
+        let requests = (1..=5).map(|n| connection.send_request(prompt(&session, &format!("p{n}")).meta(wire::Meta::from_iter([("clawcode".into(), serde_json::json!({"submissionId":format!("submission-{n}")}))]))).block_task()).collect::<Vec<_>>();
+        let release = async {
+            let queued = next_matching(updates, |value| value["payload"]["event"] == "queue_changed" && value["payload"]["pending"]["followUp"].as_array().is_some_and(|items| items.len() == 5)).await;
+            assert_eq!(queued["payload"]["pending"]["followUp"][4]["submissionId"], "submission-5");
+            model.release.notify_one();
+        };
+        let (answers, ()) = tokio::join!(futures::future::join_all(requests), release);
+        let messages = kernel.session_transcript(&protocol::SessionId::try_from(session.to_string()).unwrap()).unwrap();
+        let users = messages.iter().filter(|m| matches!(m.content, MessageContent::User { .. })).collect::<Vec<_>>();
+        assert_eq!(users.len(), 6);
+        for (n, answer) in answers.into_iter().enumerate() {
+            assert_eq!(answer?.message_id.to_string(), users[n+1].identity.message_id.to_string());
+            assert_eq!(users[n+1].content.text_content().unwrap(), format!("p{}", n+1));
+        }
+        Ok(())
+    }).await;
+}
+
+/// Close delivers an empty queue snapshot and cancellation for every queued request before returning.
+#[tokio::test]
+async fn close_delivers_final_queue_and_cancels_all_busy_prompts() {
+    let root = tempfile::tempdir().unwrap();
+    let kernel = alignment_kernel(
+        root.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(
+        &acp(&kernel),
+        root.path(),
+        async |connection, session, updates| {
+            connection
+                .send_request(prompt(&session, "hang"))
+                .block_task()
+                .await?;
+            let requests = (1..=3)
+                .map(|n| {
+                    connection
+                        .send_request(prompt(&session, &format!("q{n}")))
+                        .block_task()
+                })
+                .collect::<Vec<_>>();
+            let close = async {
+                next_matching(updates, |value| {
+                    value["payload"]["event"] == "queue_changed"
+                        && value["payload"]["pending"]["followUp"]
+                            .as_array()
+                            .is_some_and(|items| items.len() == 3)
+                })
+                .await;
+                connection
+                    .send_request(wire::CloseSessionRequest::new(
+                        session.clone(),
+                    ))
+                    .block_task()
+                    .await
+                    .unwrap();
+                let delivered = dispatched(updates);
+                let last = delivered
+                    .iter()
+                    .rfind(|v| v["payload"]["event"] == "queue_changed")
+                    .expect("queue snapshot delivered before close response");
+                assert_eq!(
+                    last["payload"]["pending"],
+                    serde_json::json!({"steering":[],"followUp":[]})
+                );
+            };
+            let (answers, ()) =
+                tokio::join!(futures::future::join_all(requests), close);
+            for answer in answers {
+                assert_eq!(
+                    answer.unwrap_err().code,
+                    agent_client_protocol::ErrorCode::RequestCancelled
+                );
+            }
+            Ok(())
+        },
+    )
+    .await;
+}
+
+#[path = "../../kernel/tests/support/failing_queue_store.rs"]
+mod failing_queue_store;
+
+/// Partial durable queue writes retain the outcomeUnknown marker through the real ACP insertion channel.
+#[tokio::test]
+async fn uncertain_queue_persistence_reaches_the_prompt_response() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for failure in ["enqueue", "consume", "remove", "clear", "promote"] {
+        let root = tempfile::tempdir().unwrap();
+        let model = ScriptedModel::new();
+        let fail_sync = Arc::new(AtomicBool::new(false));
+        let fail_consumed = Arc::new(AtomicBool::new(false));
+        let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+        let kernel = Arc::new(
+            KernelFactory::builder()
+                .model_factory(Arc::new(ScriptedModelFactory(Arc::clone(
+                    &model,
+                ))))
+                .tool_factory(Arc::new(BuiltinToolFactory::new()))
+                .store_factory(Arc::new(
+                    failing_queue_store::FailingQueueStoreFactory {
+                        inner: JsonlStoreFactory::new(
+                            root.path(),
+                            Arc::clone(&clock),
+                        ),
+                        fail_sync: Arc::clone(&fail_sync),
+                        fail_consumed: Arc::clone(&fail_consumed),
+                    },
+                ))
+                .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+                    root.path().join("config"),
+                    protocol::PromptPolicy::default(),
+                )))
+                .extension_factory(Arc::new(StaticExtensionFactory::default()))
+                .clock(clock)
+                .id_generator(Arc::new(NanoidIdGenerator))
+                .build()
+                .build()
+                .unwrap(),
+        );
+        with_session(&acp(&kernel), root.path(), async |connection, session, updates| {
+            connection.send_request(prompt(&session, "hold")).block_task().await?;
+            if failure == "enqueue" { fail_sync.store(true, Ordering::SeqCst); }
+            let queued = connection.send_request(prompt(&session, "uncertain")).block_task();
+            let release = async {
+                if failure != "enqueue" {
+                    let snapshot = next_matching(updates, |value| value["payload"]["event"] == "queue_changed" && value["payload"]["pending"]["followUp"].as_array().is_some_and(|q| q.len() == 1)).await;
+                    if failure == "consume" {
+                        fail_consumed.store(true, Ordering::SeqCst);
+                        model.release.notify_one();
+                    } else {
+                        let queue_id = &snapshot["payload"]["pending"]["followUp"][0]["queueId"];
+                        let (method, params) = match failure {
+                            "remove" => (protocol::AcpExtensionMethod::PendingMessageRemove, serde_json::json!({"sessionId": session, "queueId": queue_id})),
+                            "promote" => (protocol::AcpExtensionMethod::PendingMessagePromote, serde_json::json!({"sessionId": session, "queueId": queue_id})),
+                            _ => (protocol::AcpExtensionMethod::ClearQueue, serde_json::json!({"sessionId": session})),
+                        };
+                        fail_sync.store(true, Ordering::SeqCst);
+                        let error = connection.send_request(agent_client_protocol::UntypedMessage::new(method.as_str(), &params).unwrap()).block_task().await.unwrap_err();
+                        assert_eq!(error.code, agent_client_protocol::ErrorCode::InternalError);
+                        assert_eq!(error.data.as_ref().unwrap()["outcomeUnknown"], true);
+                        // A poisoned transcript also prevents stop from reporting a safe withdrawal.
+                        assert!(matches!(kernel.cancel_session(&protocol::SessionId::try_from(session.to_string()).unwrap()), Err(kernel::KernelError::SessionPersistenceUncertain)));
+                    }
+                }
+            };
+            let (answer, ()) = tokio::join!(queued, release);
+            let error = answer.unwrap_err();
+            assert_eq!(error.code, agent_client_protocol::ErrorCode::InternalError);
+            assert_eq!(error.data.as_ref().unwrap()["outcomeUnknown"], true);
+            if failure == "enqueue" {
+                tokio::time::sleep(SETTLE).await;
+                assert!(!dispatched(updates).iter().any(|value| value["sessionUpdate"] == "state_update" && value["state"] == "idle"), "a rejected queued prompt must not settle the active Run");
+            }
+            kernel.cancel_session(&protocol::SessionId::try_from(session.to_string()).unwrap()).unwrap();
+            model.release.notify_one();
+            connection.send_request(wire::CloseSessionRequest::new(session)).block_task().await?;
+            Ok(())
+        }).await;
+    }
 }

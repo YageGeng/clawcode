@@ -80,7 +80,6 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const [resourceName, setResourceName] = useState("");
   const [resourceUri, setResourceUri] = useState("");
   const [showResourceForm, setShowResourceForm] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [readingImages, setReadingImages] = useState(false);
   const [error, setError] = useState<string>();
   const [hint, setHint] = useState<string>();
@@ -89,57 +88,46 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const imageInput = useRef<HTMLInputElement>(null);
   const imageReadInProgress = useRef(false);
   const imagesRef = useRef(initial.images);
-  // The latest draft, read when a failed prompt is merged back after the user kept typing.
-  const draftRef = useRef<PromptInput>(initial);
   const queued = [...pending.steering, ...pending.followUp];
   const commandQuery = text.startsWith("/") && !/\s/.test(text) ? text.slice(1) : undefined;
   const matchingCommands = commandQuery === undefined ? [] : CommandPaletteModel.matches(availableCommands, commandQuery);
   const paletteOpen = commandQuery !== undefined && !paletteDismissed;
   const activeCommandIndex = matchingCommands.length === 0 ? 0 : selectedCommandIndex % matchingCommands.length;
-  const canSubmit = !submitting && !readingImages && (text.trim().length > 0 || resources.length > 0 || images.length > 0);
+  const canSubmit = !readingImages && (text.trim().length > 0 || resources.length > 0 || images.length > 0);
 
   const persist = (draft: PromptInput) => {
     sessionStorage.setItem(storageKey, JSON.stringify({ text: draft.text, resources: draft.resources } satisfies StoredDraft));
     controller.updateDraft(sessionId, draft);
-    draftRef.current = draft;
     imagesRef.current = draft.images;
     setText(draft.text);
     setResources(draft.resources);
     setImages(draft.images);
   };
 
-  const submit = async (input: PromptInput) => {
-    if (imageReadInProgress.current) {
-      setError("图片仍在读取，请稍候");
-      return;
-    }
-    setSubmitting(true);
+  /** Clears only after synchronous validation; delayed outcomes belong to the controller. */
+  const submit = (input: PromptInput, alternate = false) => {
+    if (imageReadInProgress.current) { setError("图片仍在读取，请稍候"); return; }
     setError(undefined);
     setHint(undefined);
-    // Clear at once: the prompt now resolves only after insertion, and text
-    // typed while it waits must survive both success and failure.
-    persist({ text: "", resources: [], images: [] });
-    sessionStorage.removeItem(storageKey);
-    controller.clearDraft(sessionId);
     try {
-      await controller.send(input);
+      controller.submit(input, { alternate });
+      persist({ text: "", resources: [], images: [] });
+      sessionStorage.removeItem(storageKey);
+      controller.clearDraft(sessionId);
     } catch (reason: unknown) {
-      // A rejected prompt was never inserted, so its content goes back ahead of newer input.
-      const current = draftRef.current;
-      persist({
-        text: [input.text, current.text].filter((part) => part.trim().length > 0).join("\n\n"),
-        resources: [...input.resources, ...current.resources],
-        images: [...input.images, ...current.images]
-      });
-      if (reason instanceof AcpRequestError && reason.rpc.code === -32800) {
-        setHint("已取消，内容已放回输入框");
-      } else {
-        setError(reason instanceof Error ? reason.message : String(reason));
-      }
-    } finally {
-      setSubmitting(false);
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
+
+  /** Explains uncertain queue mutations without implying that their input was returned. */
+  const queueError = (reason: unknown) => {
+    const data = reason instanceof AcpRequestError ? reason.rpc.data : undefined;
+    setError(typeof data === "object" && data !== null && "outcomeUnknown" in data && data.outcomeUnknown === true
+      ? "会话持久化异常，请关闭并重新打开会话"
+      : reason instanceof Error ? reason.message : String(reason));
+  };
+  const defaultPlacement = controller.bootstrap.whenBusy === "steer" ? "steer" : "follow-up";
+  const alternatePlacement = defaultPlacement === "steer" ? "follow-up" : "steer";
 
   /** Writes one discovered command into the draft without expanding it in the browser. */
   const selectCommand = (command: AvailableCommandEntity) => {
@@ -156,8 +144,17 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
     <div className="composer-area">
       {queued.length === 0 ? null : (
         <section className="pending-queue" aria-label="待处理消息">
-          <div className="pending-queue__heading"><span>{queued.length} 条 follow-up 等待执行</span><button type="button" onClick={() => void controller.clearPending().catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><Trash2 size={13} /> 清空</button></div>
-          {queued.map((item) => <div className="pending-item" key={item.queueId}><span>{QueuedMessageView.text(item)}</span><button type="button" title="移除" onClick={() => void controller.removePending(item.queueId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))}><X size={13} /></button></div>)}
+          <div className="pending-queue__heading"><span>{queued.length} 条消息等待执行</span><button type="button" onClick={() => void controller.clearPending().catch(queueError)}><Trash2 size={13} /> 清空</button></div>
+          {([{ label: "Steer", items: pending.steering }, { label: "Follow-up", items: pending.followUp }] as const).map((group) => group.items.length === 0 ? null : (
+            <div className="pending-queue__group" key={group.label}>
+              <h4>{group.label}</h4>
+              {group.items.map((item) => <div className="pending-item" key={item.queueId}>
+                <span>{QueuedMessageView.text(item)}</span>
+                {item.kind === "followUp" ? <button type="button" onClick={() => void controller.promotePending(item.queueId).then((promoted) => { if (!promoted) setHint("已开始执行，无法转换"); }).catch(queueError)}>转为 steer</button> : null}
+                <button type="button" title="移除" onClick={() => void controller.removePending(item.queueId).catch(queueError)}><X size={13} /></button>
+              </div>)}
+            </div>
+          ))}
         </section>
       )}
       <div className="composer-card">
@@ -189,7 +186,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           aria-controls={paletteOpen ? "command-palette" : undefined}
           aria-expanded={paletteOpen}
           aria-activedescendant={paletteOpen && matchingCommands.length > 0 ? `command-option-${activeCommandIndex}` : undefined}
-          placeholder={running ? "当前 Turn 运行中；发送内容将加入 follow-up…" : "发送消息…"}
+          placeholder={running ? `当前 Turn 运行中；发送内容将加入 ${defaultPlacement}…` : "发送消息…"}
           rows={3}
           value={text}
           onChange={(event) => {
@@ -226,13 +223,14 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              if (canSubmit) void submit({ text, resources, images });
+              if (canSubmit) submit({ text, resources, images }, event.altKey);
             }
           }}
         />
         {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}
         {hint === undefined ? null : <div className="form-hint" role="status">{hint}</div>}
-        {outcomeUnknown ? <div className="outcome-warning">上次请求结果未知，系统不会自动重发。<button type="button" disabled={readingImages} onClick={() => void submit({ text, resources, images })}>确认后重新发送</button></div> : null}
+        {running ? <div className="form-hint">Enter 排队 {defaultPlacement} · Alt+Enter 发送 {alternatePlacement}</div> : null}
+        {outcomeUnknown ? <div className="outcome-warning">请求结果未知，原始输入已保留，系统不会自动重发。<button type="button" disabled={readingImages} onClick={() => controller.restoreUnknownInput(sessionId)}>取回输入并检查</button></div> : null}
         <div className="composer-actions">
           <input ref={imageInput} className="visually-hidden" type="file" accept={SUPPORTED_IMAGE_MIME_TYPES.join(",")} multiple disabled={readingImages} onChange={(event) => {
             const files = [...(event.target.files ?? [])];

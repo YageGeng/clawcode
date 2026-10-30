@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use extension::ExtensionDiagnosticSink;
@@ -36,6 +36,7 @@ pub(in crate::runtime) struct KernelExtensionDiagnostics {
     execution: Arc<SessionExecution>,
     transcript: Arc<SessionTranscript>,
     id_generator: Arc<dyn IdGenerator>,
+    event_sinks: Arc<OnceLock<Arc<dyn crate::SessionEventSinks>>>,
 }
 
 #[async_trait]
@@ -155,7 +156,14 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
         };
         // Live delivery remains independent from persistence so one failing
         // diagnostic path does not hide failures in the other infrastructure.
-        let sink = active_run.map(|active_run| Arc::clone(&active_run.sink));
+        let sink = active_run
+            .map(|active_run| Arc::clone(&active_run.sink))
+            .or_else(|| {
+                // Prompt admission runs input hooks before an active Run exists.
+                self.event_sinks.get().and_then(|sinks| {
+                    self.transcript.session_id().ok().map(|id| sinks.sink(&id))
+                })
+            });
         let Some(sink) = sink else {
             return;
         };

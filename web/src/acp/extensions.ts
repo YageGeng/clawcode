@@ -1,5 +1,4 @@
 export type AcpExtensionMethods = Readonly<{
-  followUp: string;
   tree: string;
   navigate: string;
   branch: string;
@@ -7,6 +6,7 @@ export type AcpExtensionMethods = Readonly<{
   compact: string;
   pendingMessages: string;
   pendingMessageRemove: string;
+  pendingMessagePromote: string;
   clearQueue: string;
   sessionRename: string;
   sessionRuntime: string;
@@ -25,7 +25,6 @@ export const AcpMethods = {
   forNamespace(namespace: string): AcpExtensionMethods {
     const prefix = `_${namespace}`;
     return {
-      followUp: `${prefix}/session/follow_up`,
       tree: `${prefix}/session/tree`,
       navigate: `${prefix}/session/navigate`,
       branch: `${prefix}/session/branch`,
@@ -33,6 +32,7 @@ export const AcpMethods = {
       compact: `${prefix}/session/compact`,
       pendingMessages: `${prefix}/session/pending_messages`,
       pendingMessageRemove: `${prefix}/session/pending_message/remove`,
+      pendingMessagePromote: `${prefix}/session/pending_message/promote`,
       clearQueue: `${prefix}/session/clear_queue`,
       sessionRename: `${prefix}/session/rename`,
       sessionRuntime: `${prefix}/session/runtime`,

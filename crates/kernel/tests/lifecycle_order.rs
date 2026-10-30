@@ -1335,7 +1335,7 @@ async fn queue_lifecycle_is_logged_without_message_content() {
     assert!(!output.contains("sensitive-queued-message"));
 }
 
-/// Queue rejection is logged with Session context before the error is returned.
+/// Closed-queue admission retains debug context without reporting an operational error.
 #[tokio::test]
 async fn queue_rejection_is_logged_before_returning() {
     let root = tempfile::tempdir().expect("store root");
@@ -1399,11 +1399,13 @@ async fn queue_rejection_is_logged_before_returning() {
 
     let output = logs.content();
     assert!(
-        output.contains(
-            "failed Queue enqueue FollowUp for session session-queue-rejection-log: session is not running: session-queue-rejection-log"
-        ),
+        output.lines().any(|line| line.contains("DEBUG")
+            && line.contains("session-queue-rejection-log")
+            && line.contains("session is not running")),
         "missing contextual queue rejection in captured logs: {output:?}"
     );
+    assert!(!output.lines().any(|line| line.contains("ERROR")
+        && line.contains("session-queue-rejection-log")));
     assert!(!output.contains("sensitive-rejected-message"));
 }
 

@@ -272,9 +272,15 @@ impl TestKernel {
         route: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
         extensions: Arc<dyn extension::ExtensionFactory>,
     ) -> Self {
-        Self::with_factories(route, extensions, |root, clock| {
-            Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
-        })
+        Self::with_factories(
+            route,
+            extensions,
+            |root, clock| {
+                Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
+            },
+            config::TurnLimit::default(),
+            WhenBusy::default(),
+        )
     }
 
     /// Substitutes only storage while retaining the production Kernel and tool pipeline.
@@ -289,6 +295,26 @@ impl TestKernel {
             route,
             Arc::new(StaticExtensionFactory::default()),
             store,
+            config::TurnLimit::default(),
+            WhenBusy::default(),
+        )
+    }
+
+    /// Overrides Run limits and queue policy without changing production dependencies.
+    #[allow(dead_code)] // Used by the protocol_alignment integration target.
+    pub fn with_policy(
+        route: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
+        max_turns: config::TurnLimit,
+        when_busy: WhenBusy,
+    ) -> Self {
+        Self::with_factories(
+            route,
+            Arc::new(StaticExtensionFactory::default()),
+            |root, clock| {
+                Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
+            },
+            max_turns,
+            when_busy,
         )
     }
 
@@ -300,6 +326,8 @@ impl TestKernel {
             &std::path::Path,
             Arc<dyn Clock>,
         ) -> Arc<dyn store::StoreFactory>,
+        max_turns: config::TurnLimit,
+        when_busy: WhenBusy,
     ) -> Self {
         let root = tempfile::tempdir().expect("root");
         let model = Arc::new(RoutedModel {
@@ -310,6 +338,8 @@ impl TestKernel {
         });
         let clock: Arc<dyn Clock> = Arc::new(SequenceClock::default());
         let kernel = KernelFactory::builder()
+            .max_turns(max_turns)
+            .when_busy(when_busy)
             .model_factory(Arc::new(StaticModelFactory(Arc::clone(&model))))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(store(root.path(), Arc::clone(&clock)))

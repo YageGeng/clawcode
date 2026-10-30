@@ -45,7 +45,7 @@ export function SessionTree({ tree, cwd, focusEntryId, controller }: SessionTree
     });
   }, [focusEntryId, tree]);
 
-  const operate = async (name: string, operation: () => Promise<unknown>) => {
+  const operate = async (name: string, operation: () => unknown) => {
     setBusy(name);
     setError(undefined);
     try {
@@ -67,7 +67,7 @@ export function SessionTree({ tree, cwd, focusEntryId, controller }: SessionTree
         <button type="button" disabled={busy !== undefined || target === null || cwd === undefined} title="Fork 为新会话" onClick={() => {
           if (target !== null && cwd !== undefined) void operate("fork", () => controller.fork(target, cwd));
         }}><GitFork size={14} />Fork</button>
-        <button type="button" disabled={busy !== undefined} title="自动压缩上下文" onClick={() => void operate("compact", () => controller.send({ text: "/compact", resources: [], images: [] }))}><Minimize2 size={14} />Compact</button>
+        <button type="button" disabled={busy !== undefined} title="自动压缩上下文" onClick={() => void operate("compact", () => controller.submit({ text: "/compact", resources: [], images: [] }))}><Minimize2 size={14} />Compact</button>
       </div>
       {busy === undefined ? null : <div className="operation-status">{busy} 进行中…</div>}
       {error === undefined ? null : <div className="form-error" role="alert">{error}</div>}

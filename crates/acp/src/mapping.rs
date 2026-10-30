@@ -33,6 +33,9 @@ impl AcpEventMapper {
     ) -> Result<Vec<wire::SessionUpdate>, AcpMappingError> {
         let metadata = Self::metadata(&event)?;
         let updates = match &event.payload {
+            AgentEventPayload::QueueChanged { .. } => {
+                vec![Self::extension_update(&event)?]
+            }
             AgentEventPayload::MessageTextDelta { message_id, delta } => {
                 vec![wire::SessionUpdate::AgentMessageChunk(
                     wire::ContentChunk::new(
@@ -771,7 +774,8 @@ impl AcpEventMapper {
                 product
                     .insert("usage".to_string(), serde_json::to_value(usage)?);
             }
-            AgentEventPayload::RunStart { .. }
+            AgentEventPayload::QueueChanged { .. }
+            | AgentEventPayload::RunStart { .. }
             | AgentEventPayload::RunEnd { .. }
             | AgentEventPayload::SlashCommandStart { .. }
             | AgentEventPayload::TurnStart { .. }

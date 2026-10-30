@@ -2,10 +2,21 @@ use super::*;
 use protocol::{QueueKind, RunInput};
 
 /// Placement of delegated input that arrives during an active run.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum WhenBusy {
     Steer,
+    #[default]
     FollowUp,
+}
+
+impl From<config::QueuePlacement> for WhenBusy {
+    /// Converts persisted configuration into the runtime queue policy.
+    fn from(value: config::QueuePlacement) -> Self {
+        match value {
+            config::QueuePlacement::Steer => Self::Steer,
+            config::QueuePlacement::FollowUp => Self::FollowUp,
+        }
+    }
 }
 
 impl From<WhenBusy> for QueueKind {
@@ -54,18 +65,18 @@ pub struct SubmissionAnswer {
     pub outcome: AnswerOutcome,
 }
 
+type ReceiptResult = Result<Arc<SubmissionAnswer>, KernelError>;
+
 /// One in-memory submission receipt, settled exactly once by consumption or withdrawal.
 #[derive(Debug)]
 pub(super) struct SubmissionReceipt {
-    sender: Mutex<Option<tokio::sync::oneshot::Sender<Arc<SubmissionAnswer>>>>,
+    sender: Mutex<Option<tokio::sync::oneshot::Sender<ReceiptResult>>>,
 }
 
 impl SubmissionReceipt {
     /// Creates a receipt before enqueueing so even immediate consumption cannot lose its answer.
-    pub(super) fn new() -> (
-        Arc<Self>,
-        tokio::sync::oneshot::Receiver<Arc<SubmissionAnswer>>,
-    ) {
+    pub(super) fn new()
+    -> (Arc<Self>, tokio::sync::oneshot::Receiver<ReceiptResult>) {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         (
             Arc::new(Self {
@@ -84,7 +95,18 @@ impl SubmissionReceipt {
             error.into_inner()
         });
         if let Some(sender) = sender.take() {
-            let _ = sender.send(answer);
+            let _ = sender.send(Ok(answer));
+        }
+    }
+    /// Reports uncertainty without disguising an unknown outcome as cancelled input.
+    pub(super) fn reject(&self, error: &KernelError) {
+        if let Some(sender) = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = sender.send(Err(error.for_insertion()));
         }
     }
 }
@@ -160,8 +182,20 @@ impl Kernel {
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
         };
         let cancellation = request.cancellation.clone().unwrap_or_default();
-        loop {
-            if session.execution.is_idle()? {
+        let (receipt, mut answer) = SubmissionReceipt::new();
+        let queued = self
+            .enqueue(
+                &request.session_id,
+                super::queue::QueueRequest::builder()
+                    .kind(request.when_busy.into())
+                    .input(RunInput::Blocks(request.content.clone()))
+                    .cancellation(request.cancellation.clone())
+                    .waiter(Some(super::queue::QueueWaiter::Receipt(receipt)))
+                    .build(),
+            )
+            .await;
+        let queued = match queued {
+            Err(KernelError::SessionNotRunning(_)) => {
                 tracing::info!(
                     "started Submit for session {}",
                     request.session_id
@@ -217,96 +251,58 @@ impl Kernel {
                     }
                 }
             }
-            let (receipt, mut answer) = SubmissionReceipt::new();
-            let queued = match self
-                .queue_message_with_receipt(
-                    &request.session_id,
-                    request.when_busy.into(),
-                    RunInput::Blocks(request.content.clone()),
-                    Some(receipt),
-                )
-                .await
-            {
-                Ok(queued) => queued,
-                Err(KernelError::SessionNotRunning(_)) => continue,
-                Err(error) => return Err(error),
-            };
-            tracing::info!(
-                "queued Submit {} for session {}",
-                queued.queue_id,
-                request.session_id
-            );
+            Err(KernelError::PromptCancelled) => {
+                return Ok(SubmissionAnswer::cancelled());
+            }
+            Err(error) => return Err(error),
+            Ok(queued) => queued,
+        };
+        tracing::info!(
+            "queued Submit {} for session {}",
+            queued.queue_id,
+            request.session_id
+        );
 
-            // A receipt completes before the execution gate is released. Later runs may
-            // own that gate by the time this task wakes, but cannot replace its answer.
-            let received = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => None,
-                result = &mut answer => Some(result),
-                idle = session.execution.wait_for_idle() => {
-                    idle?;
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => None,
-                        result = &mut answer => Some(result),
-                        operation = session.acquire_operation() => {
-                            match operation {
-                                Ok(guard) => {
-                                    if session.execution.pending_ids()?.contains(&queued.queue_id) {
-                                        self.remove_pending_message(&request.session_id, &queued.queue_id)?;
-                                        tracing::info!("rescued stranded Submit {} for session {}", queued.queue_id, request.session_id);
-                                        drop(guard);
-                                        continue;
-                                    }
-                                    drop(guard);
-                                    Some(answer.await)
-                                }
-                                Err(KernelError::SessionClosing) => {
-                                    if session.execution.pending_ids()?.contains(&queued.queue_id) {
-                                        let record = self.queue_cancellation_record(&session, None, queued.queue_id.clone(), QueueCancellationReason::Removed)?;
-                                        session.remove_pending(record, &queued.queue_id)?;
-                                    }
-                                    return Ok(SubmissionAnswer::cancelled());
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
-                    }
+        // A receipt completes before the execution gate is released. Later runs may
+        // own that gate by the time this task wakes, but cannot replace its answer.
+        let received = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            result = &mut answer => Some(result),
+        };
+        match received {
+            Some(Ok(Ok(answer))) => {
+                tracing::info!(
+                    "completed queued Submit {} for session {}",
+                    queued.queue_id,
+                    request.session_id
+                );
+                Ok((*answer).clone())
+            }
+            Some(Ok(Err(error))) => Err(error),
+            Some(Err(error)) => {
+                tracing::warn!(
+                    "lost Submit receipt {} for session {}: {}",
+                    queued.queue_id,
+                    request.session_id,
+                    error
+                );
+                Err(KernelError::Protocol(
+                    "submission receipt ended without settlement".into(),
+                ))
+            }
+            None => {
+                session.execution.cancel()?;
+                match self.withdraw_pending(&request.session_id) {
+                    Ok(())
+                    | Err(
+                        KernelError::SessionClosing
+                        | KernelError::SessionNotFound(_),
+                    ) => {}
+                    Err(error) => return Err(error),
                 }
-            };
-            match received {
-                Some(Ok(answer)) => {
-                    tracing::info!(
-                        "completed queued Submit {} for session {}",
-                        queued.queue_id,
-                        request.session_id
-                    );
-                    return Ok((*answer).clone());
-                }
-                Some(Err(error)) => {
-                    tracing::warn!(
-                        "lost Submit receipt {} for session {}: {}",
-                        queued.queue_id,
-                        request.session_id,
-                        error
-                    );
-                    return Err(KernelError::Protocol(
-                        "submission receipt ended without settlement".into(),
-                    ));
-                }
-                None => {
-                    session.execution.cancel()?;
-                    match self.clear_pending_messages(&request.session_id) {
-                        Ok(())
-                        | Err(
-                            KernelError::SessionClosing
-                            | KernelError::SessionNotFound(_),
-                        ) => {}
-                        Err(error) => return Err(error),
-                    }
-                    session.execution.wait_for_idle().await?;
-                    return Ok(SubmissionAnswer::cancelled());
-                }
+                session.execution.wait_for_idle().await?;
+                Ok(SubmissionAnswer::cancelled())
             }
         }
     }

@@ -239,6 +239,7 @@ export type PromptInput = Readonly<{
 
 export type QueuedMessage = Readonly<{
   queueId: QueueId;
+  submissionId?: string;
   kind: "steering" | "followUp";
   message: Readonly<Record<string, unknown>>;
 }>;

@@ -20,12 +20,22 @@ const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_IDLE_MS = 20_000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 
+type Submission = {
+  seq: number;
+  submissionId: string;
+  input: PromptInput;
+  state: "sent" | "queued" | "disconnected" | "orphaned" | "unknown";
+};
+
 export class WorkspaceController {
   readonly bootstrap: UiBootstrap;
   readonly methods: AcpExtensionMethods;
   readonly notifications: AcpExtensionNotifications;
   private readonly updateRouter: SessionUpdateRouter;
   private connection: AcpConnection | undefined;
+  private submissionSequence = 0;
+  private readonly submissions = new Map<SessionId, Map<string, Submission>>();
+  private readonly returnedInputs = new Map<SessionId, { items: { submission: Submission; error?: string }[]; timer: number }>();
   private connectionGeneration = 0;
   private connectPromise: Promise<void> | undefined;
   private reconnectTimer: number | undefined;
@@ -110,7 +120,7 @@ export class WorkspaceController {
       this.updateRouter.requireFullReplay(sessionId);
       this.dispatchSession(sessionId, { type: "transcript/cleared" });
       await this.resume(connection, sessionId, { sessionId, cwd: session.cwd, replayFrom: { type: "start" } });
-      this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
+      this.dispatchSession(sessionId, { type: "outcome/unknown", value: [...(this.submissions.get(sessionId)?.values() ?? [])].some((record) => record.state === "unknown") });
       this.attachedSessionIds.add(sessionId);
     }
 
@@ -162,6 +172,10 @@ export class WorkspaceController {
       for (const id of deleting) {
         this.updateRouter.resetRecovery(id);
         this.attachedSessionIds.delete(id);
+        this.submissions.delete(id);
+        const returned = this.returnedInputs.get(id);
+        if (returned !== undefined) window.clearTimeout(returned.timer);
+        this.returnedInputs.delete(id);
       }
       await this.refreshSessions(true);
     } finally {
@@ -169,48 +183,127 @@ export class WorkspaceController {
     }
   }
 
-  async send(input: PromptInput): Promise<void> {
-    const state = useWorkspaceStore.getState();
-    if (state.activeSessionId === undefined) throw new Error("No active session");
-    const sessionId = state.activeSessionId;
-    const workspace = sessionWorkspace(state, sessionId);
-    const text = input.text;
-    if (text.trim().length === 0 && input.resources.length === 0 && input.images.length === 0) throw new Error("Prompt is empty");
+  /** Sends immediately; this controller owns every eventual response and original input. */
+  submit(input: PromptInput, options?: { alternate: boolean }): void {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    if (input.text.trim().length === 0 && input.resources.length === 0 && input.images.length === 0) throw new Error("Prompt is empty");
+    const connection = this.requireConnection();
     const prompt: PromptContentBlock[] = [
-      ...(text.length === 0 ? [] : [{ type: "text" as const, text }]),
+      ...(input.text.length === 0 ? [] : [{ type: "text" as const, text: input.text }]),
       ...input.resources.map((resource) => ({ type: "resource_link" as const, name: resource.name, uri: resource.uri })),
       ...input.images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))
     ];
-    const connection = this.requireConnection();
-    this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
-    try {
-      if (workspace.running) {
-        await connection.request(this.methods.followUp, { sessionId, prompt });
-        await this.refreshPending(sessionId);
-      } else {
-        await connection.request(AcpProtocol.methods.sessionPrompt, {
-          sessionId,
-          prompt
-        });
+    const submission: Submission = { seq: ++this.submissionSequence, submissionId: crypto.randomUUID(), input, state: "sent" };
+    let records = this.submissions.get(sessionId);
+    if (records === undefined) { records = new Map(); this.submissions.set(sessionId, records); }
+    records.set(submission.submissionId, submission);
+    const whenBusy = this.bootstrap.whenBusy === "steer" ? "followUp" : "steer";
+    void connection.request(AcpProtocol.methods.sessionPrompt, {
+      sessionId, prompt,
+      _meta: { [this.bootstrap.product.slug]: { submissionId: submission.submissionId, ...(options?.alternate === true ? { whenBusy } : {}) } }
+    }).then(() => {
+      records.delete(submission.submissionId);
+    }).catch((reason: unknown) => {
+      if (!this.submissions.get(sessionId)?.has(submission.submissionId)) return;
+      if (!(reason instanceof AcpRequestError)) {
+        // Transport loss cannot establish whether the request reached or entered history.
+        submission.state = "disconnected";
+        return;
       }
-    } catch (reason: unknown) {
-      if (this.connection !== connection) this.dispatchSession(sessionId, { type: "outcome/unknown", value: true });
-      throw reason;
+      const data = reason.rpc.data;
+      if (typeof data === "object" && data !== null && "outcomeUnknown" in data && data.outcomeUnknown === true) {
+        this.markUnknown(sessionId, submission, "会话持久化异常，请关闭并重新打开会话");
+        return;
+      }
+      records.delete(submission.submissionId);
+      this.returnInput(sessionId, submission, reason.rpc.code === -32800 ? undefined : reason.message);
+    });
+  }
+
+  /** Reconciles only authoritative queue snapshots, never inferred message history. */
+  private reconcileSubmissions(sessionId: SessionId, pending: PendingMessages, reconnected = false): void {
+    const records = this.submissions.get(sessionId);
+    if (records === undefined) return;
+    const queued = new Set([...pending.steering, ...pending.followUp].map((item) => item.submissionId));
+    for (const record of records.values()) {
+      if (record.state === "unknown") continue;
+      if (record.state === "disconnected") {
+        if (!reconnected) continue;
+        if (queued.has(record.submissionId)) record.state = "orphaned";
+        else this.markUnknown(sessionId, record, "请求结果未知，原始输入已保留，系统不会自动重发");
+      } else if (record.state === "orphaned") {
+        if (!queued.has(record.submissionId)) records.delete(record.submissionId);
+      } else if (queued.has(record.submissionId)) record.state = "queued";
     }
+  }
+
+  /** Keeps uncertain input separate from returned drafts until the user retrieves it. */
+  private markUnknown(sessionId: SessionId, submission: Submission, message: string): void {
+    submission.state = "unknown";
+    this.dispatchSession(sessionId, { type: "outcome/unknown", value: true });
+    this.dispatch({ type: "notice/added", notice: {
+      id: `unknown-${submission.submissionId}`, sessionId, title: message,
+      description: [submission.input.text, `${submission.input.images.length} 张图片 · ${submission.input.resources.length} 个资源`].filter(Boolean).join("\n")
+    } });
+  }
+
+  /** Explicitly retrieves uncertain inputs for inspection without sending them. */
+  restoreUnknownInput(sessionId: SessionId): void {
+    const records = this.submissions.get(sessionId);
+    if (records === undefined) return;
+    for (const record of records.values()) {
+      if (record.state !== "unknown") continue;
+      records.delete(record.submissionId);
+      this.returnInput(sessionId, record, "已取回结果未知的输入，请核对历史后再决定是否发送");
+    }
+    this.dispatchSession(sessionId, { type: "outcome/unknown", value: [...(this.submissions.get(sessionId)?.values() ?? [])].some((record) => record.state === "unknown") });
+  }
+
+  /** Coalesces prompt rejections before prepending them to the latest, Session-scoped draft. */
+  private returnInput(sessionId: SessionId, submission: Submission, error?: string): void {
+    const item = { submission, ...(error === undefined ? {} : { error }) };
+    const existing = this.returnedInputs.get(sessionId);
+    if (existing !== undefined) { existing.items.push(item); return; }
+    const items = [item];
+    // shortcut: responses more than 50 ms apart form separate batches; widen only with evidence of reordered delivery.
+    const timer = window.setTimeout(() => {
+      this.returnedInputs.delete(sessionId);
+      items.sort((left, right) => left.submission.seq - right.submission.seq);
+      const current = useWorkspaceStore.getState().drafts.get(sessionId) ?? { text: "", resources: [], images: [] };
+      const inputs = [...items.map((item) => item.submission.input), current];
+      const draft = {
+        text: inputs.map((input) => input.text).filter((text) => text.trim().length > 0).join("\n\n"),
+        resources: inputs.flatMap((input) => input.resources), images: inputs.flatMap((input) => input.images)
+      };
+      this.dispatch({ type: "draft/activated", sessionId, draft });
+      sessionStorage.setItem(`${this.bootstrap.product.slug}:agent-draft:${sessionId}`, JSON.stringify({ text: draft.text, resources: draft.resources }));
+      const errors = items.flatMap((item) => item.error === undefined ? [] : [item.error]);
+      this.dispatch({ type: "notice/added", notice: { id: `returned-${submission.submissionId}`, sessionId,
+        title: errors.length === 0 ? `已停止，${items.length} 条未执行的消息已放回输入框` : "输入已放回输入框",
+        ...(errors.length === 0 ? {} : { description: errors.join("\n") }) } });
+    }, 50);
+    this.returnedInputs.set(sessionId, { items, timer });
+  }
+
+  /** Moves a pending follow-up into steering; false means the consumer already claimed it. */
+  async promotePending(queueId: string): Promise<boolean> {
+    const sessionId = useWorkspaceStore.getState().activeSessionId;
+    if (sessionId === undefined) throw new Error("No active session");
+    const result = await this.requireConnection().request<{ promoted: boolean }>(this.methods.pendingMessagePromote, { sessionId, queueId });
+    return result.promoted;
   }
 
   async removePending(queueId: string): Promise<void> {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
     await this.requireConnection().request(this.methods.pendingMessageRemove, { sessionId, queueId });
-    await this.refreshPending(sessionId);
   }
 
   async clearPending(): Promise<void> {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
     await this.requireConnection().request(this.methods.clearQueue, { sessionId });
-    await this.refreshPending(sessionId);
   }
 
   async navigate(entryId: string | null): Promise<void> {
@@ -662,7 +755,7 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "transcript/cleared" });
     await this.resume(connection, sessionId, { sessionId, cwd, replayFrom: { type: "start" } });
     this.assertCurrentConnection(generation, connection);
-    this.dispatchSession(sessionId, { type: "outcome/unknown", value: false });
+    this.dispatchSession(sessionId, { type: "outcome/unknown", value: [...(this.submissions.get(sessionId)?.values() ?? [])].some((record) => record.state === "unknown") });
   }
 
   /** Refreshes mutable Session snapshots after its watcher is attached. */
@@ -682,6 +775,7 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
     this.dispatchSession(sessionId, { type: "tree/replaced", tree });
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
+    this.reconcileSubmissions(sessionId, pending, true);
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
   }
@@ -732,12 +826,16 @@ export class WorkspaceController {
         ) as SessionUpdateNotification
       );
     }
-    if (sessionUpdates.length > 0) this.updateRouter.applyMany(sessionUpdates);
-  }
-
-  private async refreshPending(sessionId: SessionId): Promise<void> {
-    const pending = await this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId });
-    this.dispatchSession(sessionId, { type: "queue/replaced", pending });
+    if (sessionUpdates.length > 0) {
+      const before = useWorkspaceStore.getState();
+      this.updateRouter.applyMany(sessionUpdates);
+      const after = useWorkspaceStore.getState();
+      for (const sessionId of new Set(sessionUpdates.map((update) => update.sessionId))) {
+        const pending = sessionWorkspace(after, sessionId).pending;
+        // Streaming and ignored replay groups do not change the authoritative queue view.
+        if (pending !== sessionWorkspace(before, sessionId).pending) this.reconcileSubmissions(sessionId, pending);
+      }
+    }
   }
 
   /** Reads and applies the latest atomic MCP snapshot to its owning Session. */
@@ -759,14 +857,12 @@ export class WorkspaceController {
   /** Refreshes terminal Run state plus mutable Session snapshots after settlement. */
   private async refreshSessionRuntime(sessionId: SessionId): Promise<void> {
     await this.refreshSessions(true);
-    const [runtime, tree, pending] = await Promise.all([
+    const [runtime, tree] = await Promise.all([
       this.requireConnection().request<SessionRuntimeSnapshot>(this.methods.sessionRuntime, { sessionId }),
-      this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId }),
-      this.requireConnection().request<PendingMessages>(this.methods.pendingMessages, { sessionId })
+      this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId })
     ]);
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
     this.dispatchSession(sessionId, { type: "tree/replaced", tree });
-    this.dispatchSession(sessionId, { type: "queue/replaced", pending });
   }
 
   /** Handles closure only when it belongs to the currently installed generation. */

@@ -31,13 +31,15 @@ impl Kernel {
         let trace_id = &invocation.trace_id;
         let insertion = invocation.insertion.as_deref();
         // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
-        if let Some(result) = self
-            .try_execute_user_bash_request(
-                &request,
-                Arc::clone(&sink),
-                insertion,
-            )
-            .await?
+        if !invocation.input_processed
+            && let Some(result) = self
+                .try_execute_user_bash_request(
+                    &request,
+                    Arc::clone(&sink),
+                    insertion,
+                    invocation.admission.as_ref(),
+                )
+                .await?
         {
             return Ok((result, None));
         }
@@ -54,10 +56,11 @@ impl Kernel {
 
         // Direct Slash Commands share Run correlation but bypass the Agent
         // lifecycle and serialized Turn loop.
-        if let Some(invocation) =
-            request.input.slash_command_text().and_then(|input| {
-                protocol::SlashCommandInvocation::try_from(input).ok()
-            })
+        if !invocation.input_processed
+            && let Some(command_invocation) =
+                request.input.slash_command_text().and_then(|input| {
+                    protocol::SlashCommandInvocation::try_from(input).ok()
+                })
             && let Some(result) = self
                 .try_execute_direct_slash_command(
                     command::SlashCommandExecution::builder()
@@ -68,7 +71,8 @@ impl Kernel {
                         .trace_id(trace_id)
                         .sink(Arc::clone(&sink))
                         .started_at(operation_started_at)
-                        .invocation(invocation)
+                        .invocation(command_invocation)
+                        .admission(invocation.admission.as_ref())
                         .insertion(insertion)
                         .build(),
                 )
@@ -82,9 +86,12 @@ impl Kernel {
         let (_run_guard, cancellation) = session
             .acquire_operation_for_prompt(
                 invocation.cancellation_parent.as_ref(),
-                WaiterCancellation::from(insertion),
+                invocation.waiters(),
             )
             .await?;
+        if let Some(ticket) = &invocation.admission {
+            ticket.release();
+        }
         tracing::info!(
             "started Kernel Run {} for session {} with trace {}",
             run_id,
@@ -111,65 +118,39 @@ impl Kernel {
         // Skill and Template expansion; structured blocks remain unchanged.
         let run_input = match request.input {
             protocol::RunInput::Text(command_input) => {
-                let input = session
-                    .extensions
-                    .runtime_ref()
-                    .emit_input(
-                        protocol::InputEvent {
-                            text: command_input.clone(),
-                            source: input_source,
-                            streaming_behavior: None,
-                        },
-                        &extension_context,
-                    )
-                    .await;
+                let input = if invocation.input_processed {
+                    protocol::InputResult::Continue
+                } else {
+                    session
+                        .extensions
+                        .runtime_ref()
+                        .emit_input(
+                            protocol::InputEvent {
+                                text: command_input.clone(),
+                                source: input_source,
+                                streaming_behavior: None,
+                            },
+                            &extension_context,
+                        )
+                        .await
+                };
                 let run_input = match input {
                     protocol::InputResult::Continue => command_input,
                     protocol::InputResult::Transform { text } => text,
                     protocol::InputResult::Handled => {
                         // Input handlers may persist through the Extension Host even
                         // when they consume the request before an Agent Turn starts.
-                        session.sync_store()?;
                         if let Some(notice) = insertion {
-                            // ACP accepts locally handled input by inserting a
-                            // live-only user message that never enters history.
-                            let message = self.message_now(
+                            self.insert_handled(
+                                &emitter,
                                 &first_turn_id,
-                                MessageContent::User {
-                                    blocks: vec![ContentBlock::Text {
-                                        text: command_input,
-                                    }],
-                                },
-                            )?;
-                            emitter
-                                .emit(
-                                    first_turn_id.clone(),
-                                    AgentEventPayload::MessageStart {
-                                        message_id: message
-                                            .identity
-                                            .message_id
-                                            .clone(),
-                                    },
-                                )
-                                .await?;
-                            // Recheck after the asynchronous start event, before live-only insertion.
-                            if cancellation.is_cancelled() {
-                                tracing::info!(
-                                    "cancelled handled input before insertion for session {}, Run {}",
-                                    request.session_id,
-                                    run_id
-                                );
-                                return Err(KernelError::PromptCancelled);
-                            }
-                            emitter
-                                .emit(
-                                    first_turn_id.clone(),
-                                    AgentEventPayload::MessageEnd {
-                                        message: message.clone(),
-                                    },
-                                )
-                                .await?;
-                            notice.inserted(&message.identity.message_id);
+                                command_input,
+                                notice,
+                                &cancellation,
+                            )
+                            .await?;
+                        } else {
+                            session.sync_store()?;
                         }
                         tracing::info!(
                             "completed Kernel Run {} for session {} with trace {} because an extension handled the input",
@@ -241,6 +222,7 @@ impl Kernel {
             serde_json::json!({ "operation": "agent" }),
         )?;
 
+        session.execution.open_queue()?;
         let execution: Result<RunCompletion, KernelError> = async {
             // Freeze Run-scoped tools, Skills, and System Prompt contributions
             // before invoking Agent lifecycle hooks.
@@ -318,11 +300,11 @@ impl Kernel {
                     return Err(KernelError::TurnLimit(max_turns.get()));
                 }
 
-                let queued_item = next_queued_item.take();
+                let mut queued_item = next_queued_item.take();
                 let turn_id = queued_item
                     .as_ref()
-                    .map(|item: &PendingQueueItem| {
-                        item.queued.message.identity.turn_id.clone()
+                    .map(|item: &super::queue::ClaimedItem| {
+                        item.item().queued.message.identity.turn_id.clone()
                     })
                     .or_else(|| next_turn_id.take())
                     .map_or_else(
@@ -374,7 +356,7 @@ impl Kernel {
                 // Materialize and persist the user-side message associated with
                 // either initial input or one queued follow-up.
                 let user_message = match queued_item.as_ref() {
-                    Some(item) => Some(item.queued.message.clone()),
+                    Some(item) => Some(item.item().queued.message.clone()),
                     None => match next_initial_input.take() {
                         Some(content) => {
                             let timestamp = self.clock.now();
@@ -433,20 +415,19 @@ impl Kernel {
                             &extension_context,
                         )
                         .await;
-                    match queued_item.as_ref() {
-                        Some(item) => {
+                    if queued_item.is_some() && cancellation.is_cancelled() {
+                        return Err(KernelError::PromptCancelled);
+                    }
+                    match queued_item.take() {
+                        Some(claimed) => {
+                            let item = claimed.item();
                             let record = self.queue_cancellation_record(
                                 &session,
                                 Some(&run_id),
                                 item.queued.queue_id.clone(),
                                 QueueCancellationReason::Consumed,
                             )?;
-                            session.consume_pending(
-                                &message,
-                                item.entry_id.clone(),
-                                record,
-                                &item.queued.queue_id,
-                            )?;
+                            session.consume_claimed(claimed, &message, record)?;
                         }
                         None => {
                             // Message observers may await after the earlier cancellation check.
@@ -1083,7 +1064,8 @@ impl Kernel {
                     !tool_terminated && !tool_calls.is_empty();
                 next_queued_item = session
                     .execution
-                    .next_pending(!should_continue_for_tools)?;
+                    .claim_next_or_close(!should_continue_for_tools)?;
+                if next_queued_item.is_some() { self.publish_queue_changed(&request.session_id); }
                 let should_continue =
                     should_continue_for_tools || next_queued_item.is_some();
                 if !should_continue {
@@ -1123,6 +1105,13 @@ impl Kernel {
             }
         }
         .await;
+
+        session.execution.close_queue()?;
+        self.publish_queue_changed(&request.session_id);
+        if !matches!(&execution, Ok(completion) if matches!(completion.outcome, AgentOutcome::Succeeded))
+        {
+            self.withdraw_pending(&request.session_id)?;
+        }
 
         // Settle the durable Run exactly once after the internal execution
         // returns either a terminal completion or an operational error.
@@ -1222,7 +1211,7 @@ impl Kernel {
 
 impl Kernel {
     /// Materializes one message with a fresh identity at the current time.
-    fn message_now(
+    pub(super) fn message_now(
         &self,
         turn_id: &TurnId,
         content: MessageContent,
@@ -1253,6 +1242,20 @@ pub(in crate::runtime) struct RunInvocation {
     /// Client acceptance report; absent for internal input.
     #[builder(default)]
     insertion: Option<Arc<InsertionNotice>>,
+    #[builder(default)]
+    input_processed: bool,
+    #[builder(default)]
+    admission: Option<AdmissionTicket>,
+}
+
+impl RunInvocation {
+    /// Retains the ingress cancellation generation through every fallback gate wait.
+    fn waiters(&self) -> WaiterCancellation {
+        self.admission.as_ref().map_or_else(
+            || WaiterCancellation::from(self.insertion.as_deref()),
+            |ticket| WaiterCancellation::Captured(ticket.cancellation.clone()),
+        )
+    }
 }
 
 /// Internal input whose Run was cancelled before insertion and must stay in history.

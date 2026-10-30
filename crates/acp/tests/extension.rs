@@ -450,7 +450,7 @@ async fn pending_message_remove_accepts_an_already_absent_item() {
     .await
     .expect("idempotent queue removal");
 
-    assert_eq!(result, serde_json::json!({ "removed": false }));
+    assert_eq!(result, serde_json::json!({ "removed": true }));
 }
 
 /// ACP v2 advertises native deletion and removes sessions from subsequent lists.

@@ -21,7 +21,7 @@ pub(super) struct SessionTranscript {
 struct SessionTranscriptState {
     store: Box<dyn SessionStore>,
     history: Vec<AgentMessage>,
-    // Failed setting durability requires reopening before another mutation may proceed.
+    // Failed durability requires reopening before another mutation may proceed.
     write_failed: bool,
 }
 
@@ -68,6 +68,12 @@ impl SessionTranscript {
         Ok(state)
     }
 
+    /// Rejects ingress before hooks or command side effects when prior writes were uncertain.
+    pub(super) fn ensure_writable(&self) -> Result<(), KernelError> {
+        drop(self.writable()?);
+        Ok(())
+    }
+
     /// Reads a complete target branch, treating an empty root as default Session settings.
     pub(super) fn branch_at(
         &self,
@@ -103,6 +109,79 @@ impl SessionTranscript {
         }
         Ok(())
     }
+    /// Commits a queue mutation and its durability checkpoint under one transcript lock.
+    pub(super) fn commit_records(
+        &self,
+        records: Vec<NewRecord>,
+    ) -> Result<(), KernelError> {
+        let mut state = self.writable()?;
+        for record in records {
+            let id = record.id.clone();
+            if let Err(error) = state.store.append_record(record) {
+                state.write_failed = true;
+                tracing::error!(
+                    "failed queue record {} for session {}; persistence uncertain: {}",
+                    id,
+                    state.store.session_id(),
+                    error
+                );
+                return Err(KernelError::SessionPersistenceUncertain);
+            }
+        }
+        if let Err(error) = state.store.sync() {
+            state.write_failed = true;
+            tracing::error!(
+                "failed queue sync for session {}; persistence uncertain: {}",
+                state.store.session_id(),
+                error
+            );
+            return Err(KernelError::SessionPersistenceUncertain);
+        }
+        Ok(())
+    }
+
+    /// Appends the reserved message and consumption record as one insertion boundary.
+    pub(super) fn commit_consumed(
+        &self,
+        entry_id: EntryId,
+        message: &AgentMessage,
+        record: NewRecord,
+    ) -> Result<(), KernelError> {
+        let payload = serde_json::to_value(message)?;
+        let mut state = self.writable()?;
+        let result = state.store.append_entry(
+            &self.lane,
+            NewEntry {
+                id: entry_id.clone(),
+                kind: EntryKind::Message,
+                payload,
+            },
+        );
+        if let Err(error) = result {
+            state.write_failed = true;
+            tracing::error!(
+                "failed queued message entry {} for session {}; persistence uncertain: {}",
+                entry_id,
+                state.store.session_id(),
+                error
+            );
+            return Err(KernelError::SessionPersistenceUncertain);
+        }
+        // The entry exists even if the following consumption record fails; recovery checks its id.
+        state.history.push(message.clone());
+        if let Err(error) = state.store.append_record(record) {
+            state.write_failed = true;
+            tracing::error!(
+                "failed consumption for entry {} in session {}; persistence uncertain: {}",
+                entry_id,
+                state.store.session_id(),
+                error
+            );
+            return Err(KernelError::SessionPersistenceUncertain);
+        }
+        Ok(())
+    }
+
     /// Creates a transcript from one opened Store and its reconstructed context.
     pub(super) fn new(
         store: Box<dyn SessionStore>,

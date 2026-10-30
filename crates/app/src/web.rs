@@ -47,6 +47,9 @@ pub struct UiBootstrapResponse {
     pub default_cwd: String,
     /// Active immutable model selection.
     pub active_model: ActiveModelInfo,
+    /// Default placement for input submitted during an agent Run.
+    #[builder(default)]
+    pub when_busy: config::QueuePlacement,
 }
 
 /// Same-origin Web server routes and static asset location.

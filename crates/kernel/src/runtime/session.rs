@@ -389,10 +389,16 @@ impl Kernel {
             session.background.shutdown.cancel();
             tracing::info!("abandoned subagent reports for closing session {}", session_id);
             let _run_guard = session.execution.acquire_close().await?;
+            if let Err(error) = self.withdraw_pending(session_id) {
+                tracing::warn!("failed queue withdrawal while closing session {}: {}", session_id, error);
+            }
             let _creation_guard = session.owned_creation.write().await;
             // Transition before invoking hooks so reentrant host operations fail
             // immediately instead of waiting on the gate held by this shutdown.
             session.begin_closing()?;
+            tracing::debug!("waiting for {} queue publications while closing session {}", session.queue_publishes.len(), session_id);
+            session.queue_publishes.close();
+            session.queue_publishes.wait().await;
             let mut children_result = Ok(());
             for child in self.live_children(session_id)? {
                 tracing::info!("started cascading close of session {} owned by {}", child, session_id);
@@ -523,7 +529,8 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
-        session.execution.cancel()
+        session.execution.cancel()?;
+        self.withdraw_pending(session_id)
     }
 
     /// Returns the compaction-aware active model context for runtime inspection.
@@ -894,7 +901,7 @@ impl Kernel {
             // Usage events synthesized from persisted Assistant messages.
             let initial_event_sequence =
                 Self::replay_sequence_floor(store.as_ref(), &lane)?;
-            let queue = PendingQueue::from_records(&store.records())?;
+            let queue = PendingQueue::restore(store.as_ref())?;
             let commands =
                 DynamicCommandRegistry::new(extension_registry.commands())
                     .map_err(|error| {
@@ -946,6 +953,7 @@ impl Kernel {
                 Arc::clone(&extension_registry),
                 Arc::new(
                     KernelExtensionDiagnostics::builder()
+                        .event_sinks(Arc::clone(&self.event_sinks))
                         .clock(Arc::clone(&self.clock))
                         .execution(Arc::clone(&execution))
                         .transcript(Arc::clone(&transcript))

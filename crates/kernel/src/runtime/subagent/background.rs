@@ -223,6 +223,15 @@ impl Reporter {
         )
         .await
         {
+            Ok(answer)
+                if answer.outcome == super::super::AnswerOutcome::Cancelled =>
+            {
+                tracing::info!(
+                    "subagent report {} -> {} was withdrawn before delivery",
+                    self.child,
+                    self.owner
+                )
+            }
             Ok(_) => tracing::info!(
                 "completed subagent report {} -> {}",
                 self.child,

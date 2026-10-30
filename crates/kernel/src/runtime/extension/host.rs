@@ -235,7 +235,12 @@ impl ExtensionHost for SessionExtensionHost {
         request: ExtensionUserMessage,
     ) -> Result<(), ExtensionHostError> {
         self.session.ensure_extension_operation()?;
-        if self.is_idle(invocation)? {
+        if self
+            .session
+            .try_acquire_operation()
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))?
+            .is_some()
+        {
             self.kernel
                 .run_with_source(
                     protocol::RunRequest {
@@ -301,12 +306,58 @@ impl ExtensionHost for SessionExtensionHost {
             protocol::InputResult::Transform { text } => text,
             protocol::InputResult::Handled => return Ok(()),
         };
-        self.kernel
-            .queue_message(&invocation.session_id, delivery, text)
+        match self
+            .kernel
+            .enqueue(
+                &invocation.session_id,
+                super::super::queue::QueueRequest::builder()
+                    .kind(delivery)
+                    .input(text.clone().into())
+                    .input_processed(true)
+                    .build(),
+            )
             .await
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
+        {
+            Ok(_) => {}
+            Err(crate::KernelError::SessionNotRunning(_)) => {
+                let kernel = self.kernel.clone();
+                let session_id = invocation.session_id.clone();
+                let trace_id = protocol::TraceId::try_from(
+                    kernel.id_generator.next(protocol::IdKind::Trace),
+                )
+                .map_err(|error| {
+                    ExtensionHostError::Operation(error.to_string())
+                })?;
+                // A non-agent hook owns the gate: wait on another task so the hook can return.
+                tokio::spawn(async move {
+                    let sink = kernel.session_sink(&session_id);
+                    if let Err(error) = kernel
+                        .run_with_source(
+                            protocol::RunRequest {
+                                session_id: session_id.clone(),
+                                input: text.into(),
+                            },
+                            sink,
+                            RunInvocation::builder()
+                                .input_source(protocol::InputSource::Extension)
+                                .trace_id(trace_id)
+                                .input_processed(true)
+                                .build(),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            "failed deferred extension input for session {}: {}",
+                            session_id,
+                            error
+                        );
+                    }
+                });
+            }
+            Err(error) => {
+                return Err(ExtensionHostError::Operation(error.to_string()));
+            }
+        }
         Ok(())
     }
 

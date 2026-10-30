@@ -52,13 +52,12 @@ export function SkillCard({ skill, hasSession, controller }: SkillCardProps) {
           setBusy(true);
           setError(undefined);
           const arguments_ = input.trim();
-          void controller.send({
+          try { controller.submit({
             text: `/skill:${skill.name}${arguments_.length === 0 ? "" : ` ${arguments_}`}`,
             resources: [],
             images: []
-          })
-            .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
-            .finally(() => setBusy(false));
+          }); } catch (reason: unknown) { setError(reason instanceof Error ? reason.message : String(reason)); }
+          finally { setBusy(false); }
         }}
       >
         <Play size={13} />{busy ? "调用中…" : "调用并发送"}

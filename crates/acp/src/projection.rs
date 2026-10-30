@@ -37,7 +37,7 @@ pub(crate) struct EventGroup {
     /// Elicitation change for live watchers; replay drops it so settled requests are not re-sent.
     #[builder(default)]
     pub(crate) elicitation: Option<ElicitationChange>,
-    /// Terminal id of a live output snapshot; a newer snapshot replaces it in the journal.
+    /// Namespaced snapshot key; a newer queue or terminal view replaces it in the journal.
     #[builder(default)]
     pub(crate) snapshot_of: Option<String>,
 }
@@ -307,11 +307,11 @@ impl SessionProjection {
                 && journal.running
                 && group.run_id.as_ref() == Some(&journal.run_id)
             {
-                // A long-running shell keeps only its latest output snapshot, so the
-                // journal and every resume stay bounded; the rest stays in order.
-                if let Some(terminal_id) = &group.snapshot_of {
+                // Complete queue and terminal snapshots supersede earlier views;
+                // discarded sequence positions remain valid inclusive resume cursors.
+                if let Some(snapshot_key) = &group.snapshot_of {
                     journal.groups.retain(|kept| {
-                        kept.snapshot_of.as_ref() != Some(terminal_id)
+                        kept.snapshot_of.as_ref() != Some(snapshot_key)
                     });
                 }
                 journal.groups.push(Arc::clone(&group));
@@ -899,8 +899,9 @@ impl EventSink for ProjectionSink {
         // shortcut: the outbound queue still holds every unsent snapshot; upgrade
         // by keeping only the newest unsent snapshot per terminal in the watcher.
         let snapshot_of = match &event.payload {
+            AgentEventPayload::QueueChanged { .. } => Some("queue".to_string()),
             AgentEventPayload::UserBashOutput { message_id, .. } => {
-                Some(message_id.to_string())
+                Some(format!("terminal:{message_id}"))
             }
             AgentEventPayload::ToolExecutionUpdate { result, .. }
                 if matches!(
@@ -908,7 +909,7 @@ impl EventSink for ProjectionSink {
                     Some(protocol::ToolResultDetails::Bash { .. })
                 ) =>
             {
-                Some(result.tool_call_id.to_string())
+                Some(format!("terminal:{}", result.tool_call_id))
             }
             _ => None,
         };
@@ -1514,8 +1515,116 @@ mod tests {
         assert_eq!(sequences, vec![1, 1_001]);
         assert_eq!(
             subscription.backlog[1].snapshot_of.as_deref(),
-            Some("message-shell")
+            Some("terminal:message-shell")
         );
+    }
+
+    /// Queue snapshots release old image payloads while live delivery and skipped cursors stay valid.
+    #[tokio::test]
+    async fn queue_snapshots_keep_latest_without_losing_terminal_or_cursor() {
+        let state = tempfile::tempdir().expect("state");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (registry, session_id, run_id) =
+            shell_projection(state.path(), workspace.path(), 0).await;
+        let projection = registry.projection(&session_id).expect("projection");
+        let mut live = projection.subscribe_live().expect("live").receiver;
+        let sink = registry.sink(session_id.clone());
+        let item = protocol::QueuedMessage::builder()
+            .queue_id(
+                protocol::QueueId::try_from("queue-image").expect("queue id"),
+            )
+            .kind(protocol::QueueKind::FollowUp)
+            .message(protocol::AgentMessage {
+                identity: protocol::MessageIdentity {
+                    message_id: MessageId::try_from("image-message")
+                        .expect("message"),
+                    turn_id: TurnId::try_from("image-turn").expect("turn"),
+                },
+                timing: protocol::MessageTiming::try_from((
+                    TimestampMs::from(1),
+                    TimestampMs::from(1),
+                    TimestampMs::from(1),
+                ))
+                .expect("timing"),
+                content: protocol::MessageContent::User {
+                    blocks: vec![protocol::ContentBlock::Image {
+                        data: "A".repeat(128 * 1024),
+                        mime_type: "image/png".into(),
+                    }],
+                },
+            })
+            .build();
+        for sequence in 2..=5 {
+            let payload = if sequence == 3 {
+                AgentEventPayload::UserBashOutput {
+                    run_id: run_id.clone(),
+                    message_id: MessageId::try_from("queue")
+                        .expect("terminal id"),
+                    output: "keep terminal".into(),
+                }
+            } else {
+                AgentEventPayload::QueueChanged {
+                    pending: protocol::PendingMessages::builder()
+                        .steering(Vec::new())
+                        .follow_up(if sequence == 5 {
+                            Vec::new()
+                        } else {
+                            vec![item.clone()]
+                        })
+                        .build(),
+                }
+            };
+            sink.emit(AgentEvent {
+                metadata: EventMetadata {
+                    turn_id: TurnId::try_from("queue-turn").expect("turn"),
+                    timestamp_ms: TimestampMs::from(sequence),
+                    sequence: Sequence::try_from(sequence).expect("sequence"),
+                },
+                payload,
+            })
+            .await
+            .expect("emit");
+            assert_eq!(
+                live.recv().await.expect("live event").sequence.get(),
+                sequence
+            );
+        }
+        let full = registry
+            .subscribe_from_start(&session_id)
+            .expect("full replay");
+        assert_eq!(
+            full.backlog
+                .iter()
+                .map(|group| group.sequence.get())
+                .collect::<Vec<_>>(),
+            [1, 3, 5]
+        );
+        let notifications = full
+            .backlog
+            .last()
+            .expect("latest queue")
+            .notifications(&session_id, "clawcode")
+            .expect("notifications");
+        let json = serde_json::to_value(notifications).expect("serialize");
+        assert_eq!(
+            json[0]["update"]["payload"]["pending"]["followUp"],
+            serde_json::json!([])
+        );
+        for (cursor, expected) in [(2, vec![3, 5]), (4, vec![5]), (6, vec![])] {
+            let feed = projection
+                .subscribe_from_cursor(
+                    &run_id,
+                    Sequence::try_from(cursor).expect("cursor"),
+                )
+                .expect("resume across replaced snapshots");
+            assert_eq!(
+                feed.backlog
+                    .iter()
+                    .map(|group| group.sequence.get())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     /// A cursor that points at a replaced snapshot resumes from the latest one.

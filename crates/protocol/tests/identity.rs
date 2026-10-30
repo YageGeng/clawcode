@@ -4,7 +4,6 @@ use protocol::{AcpExtensionMethod, ProductIdentity};
 #[test]
 fn acp_extension_methods_use_the_product_namespace() {
     let methods = [
-        AcpExtensionMethod::FollowUp,
         AcpExtensionMethod::Tree,
         AcpExtensionMethod::Navigate,
         AcpExtensionMethod::Branch,
@@ -12,6 +11,7 @@ fn acp_extension_methods_use_the_product_namespace() {
         AcpExtensionMethod::Compact,
         AcpExtensionMethod::PendingMessages,
         AcpExtensionMethod::PendingMessageRemove,
+        AcpExtensionMethod::PendingMessagePromote,
         AcpExtensionMethod::ClearQueue,
         AcpExtensionMethod::SessionRename,
         AcpExtensionMethod::SessionRuntime,

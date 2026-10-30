@@ -42,6 +42,8 @@ pub struct EventMetadata {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AgentEventPayload {
+    /// Authoritative snapshot after a pending-input queue mutation.
+    QueueChanged { pending: crate::PendingMessages },
     /// A run has acquired its session and is beginning its first turn.
     RunStart {
         /// Stable run identifier.

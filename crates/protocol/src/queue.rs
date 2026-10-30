@@ -24,6 +24,10 @@ pub struct QueuedMessage {
     pub kind: QueueKind,
     /// Complete message identity, timing, and content accepted by the kernel.
     pub message: AgentMessage,
+    /// Client correlation retained only in the pending queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub submission_id: Option<String>,
 }
 
 /// Queued messages grouped by their run scheduling behavior.

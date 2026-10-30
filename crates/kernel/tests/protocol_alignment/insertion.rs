@@ -171,7 +171,7 @@ where
 }
 
 /// Wraps a registration closure into a static extension factory.
-fn hooks<F>(register: F) -> Arc<dyn extension::ExtensionFactory>
+pub(super) fn hooks<F>(register: F) -> Arc<dyn extension::ExtensionFactory>
 where
     F: Fn(&mut ExtensionRegistrar) -> Result<(), ExtensionError>
         + Clone

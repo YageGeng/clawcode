@@ -1,6 +1,7 @@
 export type UiBootstrap = Readonly<{
   product: Readonly<{ name: string; slug: string }>;
   acpPath: string;
+  whenBusy: "follow_up" | "steer";
   defaultCwd: string;
   activeModel: Readonly<{ id: string; displayName: string }>;
 }>;
@@ -29,6 +30,7 @@ export const UiBootstrapDecoder = {
       typeof product.name !== "string" ||
       typeof product.slug !== "string" ||
       typeof root.acpPath !== "string" ||
+      (root.whenBusy !== "follow_up" && root.whenBusy !== "steer") ||
       typeof root.defaultCwd !== "string" ||
       typeof activeModel.id !== "string" ||
       typeof activeModel.displayName !== "string"
@@ -38,6 +40,7 @@ export const UiBootstrapDecoder = {
     return {
       product: { name: product.name, slug: product.slug },
       acpPath: root.acpPath,
+      whenBusy: root.whenBusy,
       defaultCwd: root.defaultCwd,
       activeModel: {
         id: activeModel.id,

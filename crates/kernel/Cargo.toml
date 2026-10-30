@@ -30,7 +30,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["process", "sync", "time"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 
 # http
 url = { workspace = true }

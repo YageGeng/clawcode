@@ -15,6 +15,8 @@ pub(in crate::runtime) struct SlashCommandExecution<'a> {
     /// Reports acceptance once the invocation message is durable.
     #[builder(default)]
     pub(super) insertion: Option<&'a InsertionNotice>,
+    #[builder(default)]
+    pub(super) admission: Option<&'a AdmissionTicket>,
 }
 
 impl SlashCommandExecution<'_> {
@@ -82,7 +84,28 @@ impl Kernel {
             sink: Arc::clone(&execution.sink),
             session: Arc::clone(execution.session),
         };
-        let operation = match execution.session.try_acquire_operation()? {
+        let admitted = if let Some(ticket) = execution.admission {
+            let operation = execution
+                .session
+                .acquire_operation_for_prompt(
+                    None,
+                    WaiterCancellation::Captured(ticket.cancellation.clone()),
+                )
+                .await?;
+            ticket.release();
+            Some(operation)
+        } else {
+            None
+        };
+        let mut admitted_cancellation = None;
+        let available = match admitted {
+            Some((guard, cancellation)) => {
+                admitted_cancellation = Some(cancellation);
+                Some(guard)
+            }
+            None => execution.session.try_acquire_operation()?,
+        };
+        let operation = match available {
             Some(operation) => operation,
             None => {
                 let invocation_message =
@@ -135,8 +158,13 @@ impl Kernel {
                 }));
             }
         };
-        let cancellation =
-            execution.session.execution.install_cancellation(None)?;
+        let cancellation = match admitted_cancellation {
+            Some(token) => token,
+            None => execution.session.execution.install_cancellation(None)?,
+        };
+        if execution.admission.is_some() && cancellation.is_cancelled() {
+            return Err(KernelError::PromptCancelled);
+        }
         tracing::info!(
             "started Slash Command /{} for session {}, Run {}, Turn {}, trace {}",
             execution.invocation.name,

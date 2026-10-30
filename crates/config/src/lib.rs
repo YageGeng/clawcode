@@ -23,7 +23,7 @@ pub use config::{
 };
 pub use extensions::{DEFAULT_EXTENSION_ID, ExtensionsConfig};
 pub use hook::{HookEventsToml, HookHandlerConfig, HooksFile, MatcherGroup};
-pub use kernel::{KernelConfig, TurnLimit};
+pub use kernel::{KernelConfig, QueuePlacement, TurnLimit};
 pub use llm::{
     ApiKeyConfig, LlmModel, LlmProvider, ProviderAuthConfig, ProviderId,
     ProviderType,

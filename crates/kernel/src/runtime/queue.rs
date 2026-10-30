@@ -7,10 +7,13 @@ use protocol::{
     TurnId,
 };
 use serde::{Deserialize, Serialize};
-use store::{NewRecord, RecordKind, SessionRecord};
+use store::{NewRecord, RecordKind, SessionRecord, SessionStore};
 
 use super::input::PromptInputExpansion;
-use super::{EventEmitter, Kernel, KernelError, Session};
+use super::{
+    EventEmitter, InsertionNotice, Kernel, KernelError, Session,
+    SessionExecution,
+};
 
 impl Kernel {
     /// Persists and queues a complete user message for the active run.
@@ -20,18 +23,30 @@ impl Kernel {
         kind: QueueKind,
         input: impl Into<protocol::RunInput>,
     ) -> Result<QueuedMessage, KernelError> {
-        self.queue_message_with_receipt(session_id, kind, input.into(), None)
-            .await
+        self.enqueue(
+            session_id,
+            QueueRequest::builder()
+                .kind(kind)
+                .input(input.into())
+                .build(),
+        )
+        .await
     }
 
-    /// Attaches delegated input's receipt before publishing its durable queue item.
-    pub(super) async fn queue_message_with_receipt(
+    /// Accepts input only while an agent Run can consume the durable queue.
+    pub(super) async fn enqueue(
         &self,
         session_id: &SessionId,
-        kind: QueueKind,
-        input: protocol::RunInput,
-        receipt: Option<Arc<super::submit::SubmissionReceipt>>,
+        request: QueueRequest,
     ) -> Result<QueuedMessage, KernelError> {
+        let QueueRequest {
+            kind,
+            input,
+            waiter,
+            submission_id,
+            input_processed,
+            cancellation,
+        } = request;
         tracing::debug!(
             "started Queue enqueue {:?} for session {}",
             kind,
@@ -40,6 +55,7 @@ impl Kernel {
         let result: Result<(QueuedMessage, protocol::RunId), KernelError> =
             async {
                 let session = self.session(session_id)?;
+                session.transcript.ensure_writable()?;
                 let run_id = session
                     .execution
                     .active_run()?
@@ -47,7 +63,8 @@ impl Kernel {
                     .ok_or_else(|| {
                         KernelError::SessionNotRunning(session_id.clone())
                     })?;
-                if let Some(command_input) = input.slash_command_text()
+                if !input_processed
+                    && let Some(command_input) = input.slash_command_text()
                     && let Ok(invocation) =
                         protocol::SlashCommandInvocation::try_from(
                             command_input,
@@ -114,6 +131,7 @@ impl Kernel {
                         })?,
                     )
                     .kind(kind)
+                    .submission_id(submission_id)
                     .message(AgentMessage {
                         identity: MessageIdentity {
                             message_id: self.message_id()?,
@@ -140,7 +158,7 @@ impl Kernel {
                             KernelError::Protocol(error.to_string())
                         })?,
                 );
-                item.receipt = receipt;
+                item.waiter = waiter;
                 let record_id =
                     RecordId::try_from(self.id_generator.next(IdKind::Record))
                         .map_err(|error| {
@@ -155,20 +173,34 @@ impl Kernel {
                         .payload(item.enqueued_payload()?)
                         .build(),
                     item,
+                    cancellation.as_ref(),
                 )?;
                 Ok((queued, run_id))
             }
             .await;
         match result {
             Ok((queued, run_id)) => {
+                self.publish_queue_changed(session_id);
                 tracing::info!(
-                    "completed Queue enqueue {} as {:?} for session {} and Kernel Run {}",
+                    "completed Queue enqueue {} as {:?} for session {} and Kernel Run {}, submission {:?}",
                     queued.queue_id,
                     queued.kind,
                     session_id,
-                    run_id
+                    run_id,
+                    queued.submission_id
                 );
                 Ok(queued)
+            }
+            Err(
+                error @ (KernelError::SessionNotRunning(_)
+                | KernelError::PromptCancelled),
+            ) => {
+                tracing::debug!(
+                    "queue admission ended for session {}: {}",
+                    session_id,
+                    error
+                );
+                Err(error)
             }
             Err(error) => {
                 tracing::error!(
@@ -209,7 +241,7 @@ impl Kernel {
             .iter()
             .any(|candidate| candidate == queue_id);
         if !exists {
-            return Err(KernelError::PendingMessageNotFound(queue_id.clone()));
+            return Ok(());
         }
         let record = self.queue_cancellation_record(
             &session,
@@ -218,6 +250,7 @@ impl Kernel {
             QueueCancellationReason::Removed,
         )?;
         session.remove_pending(record, queue_id)?;
+        self.publish_queue_changed(session_id);
         tracing::info!(
             "completed queued message removal {} for session {}",
             queue_id,
@@ -236,7 +269,13 @@ impl Kernel {
             session_id
         );
         let session = self.session(session_id)?;
-        let queue_ids = session.execution.pending_ids()?;
+        // Keep selection, durable cancellation, and draining under one lock so claims cannot race.
+        let mut queue = session
+            .execution
+            .queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        let queue_ids = queue.ids();
         let records = queue_ids
             .iter()
             .map(|queue_id| {
@@ -248,13 +287,195 @@ impl Kernel {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        session.clear_pending(records, &queue_ids)?;
+        session.transcript.commit_records(records)?;
+        for item in queue.steering.drain(..) {
+            item.reject(&KernelError::PromptCancelled);
+        }
+        for item in queue.follow_up.drain(..) {
+            item.reject(&KernelError::PromptCancelled);
+        }
+        drop(queue);
+        self.publish_queue_changed(session_id);
         tracing::info!(
             "completed queued message clear of {} items for session {}",
             queue_ids.len(),
             session_id
         );
         Ok(())
+    }
+
+    /// Moves one pending follow-up to steering with a single replayable enqueue record.
+    pub fn promote_pending_message(
+        &self,
+        session_id: &SessionId,
+        queue_id: &QueueId,
+    ) -> Result<bool, KernelError> {
+        let session = self.session(session_id)?;
+        let mut queue = session
+            .execution
+            .queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        if queue
+            .steering
+            .iter()
+            .any(|item| &item.queued.queue_id == queue_id)
+        {
+            return Ok(true);
+        }
+        let Some(item) = queue
+            .follow_up
+            .iter()
+            .find(|item| &item.queued.queue_id == queue_id)
+        else {
+            return Ok(false);
+        };
+        let mut promoted = item.clone();
+        promoted.queued.kind = QueueKind::Steering;
+        let record = NewRecord::builder()
+            .id(RecordId::try_from(self.id_generator.next(IdKind::Record))
+                .map_err(|e| KernelError::Protocol(e.to_string()))?)
+            .lane(session.transcript.lane())
+            .kind(RecordKind::QueueEnqueued)
+            .payload(promoted.enqueued_payload()?)
+            .build();
+        session.transcript.commit_records(vec![record])?;
+        queue.remove(queue_id);
+        queue.push(promoted);
+        drop(queue);
+        tracing::info!(
+            "promoted queue item {} to steering for session {}",
+            queue_id,
+            session_id
+        );
+        self.publish_queue_changed(session_id);
+        Ok(true)
+    }
+
+    /// Registers snapshot delivery so shutdown can wait for the final queue view.
+    pub(super) fn publish_queue_changed(&self, session_id: &SessionId) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let session = match self.session(session_id) {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(
+                    "failed scheduling queue snapshot for session {}: {}",
+                    session_id,
+                    error
+                );
+                return;
+            }
+        };
+        let kernel = self.clone();
+        let session_id = session_id.clone();
+        let publishing = Arc::clone(&session);
+        session.queue_publishes.spawn_on(
+            async move {
+                // Read and send under one asynchronous lock; late tasks cannot publish stale snapshots.
+                let _guard = publishing.queue_publish.lock().await;
+                let result: Result<(), KernelError> = async {
+                    let pending = publishing.execution.pending_snapshot()?;
+                    let active = publishing.execution.active_run()?;
+                    let turn_id = match &active {
+                        Some(active) => active.turn_id.clone(),
+                        None => TurnId::try_from(
+                            kernel.id_generator.next(IdKind::Turn),
+                        )
+                        .map_err(|e| KernelError::Protocol(e.to_string()))?,
+                    };
+                    let sink = active.map_or_else(
+                        || kernel.session_sink(&session_id),
+                        |active| active.sink,
+                    );
+                    EventEmitter {
+                        clock: Arc::clone(&kernel.clock),
+                        sink,
+                        session: Arc::clone(&publishing),
+                    }
+                    .emit(
+                        turn_id,
+                        protocol::AgentEventPayload::QueueChanged { pending },
+                    )
+                    .await
+                }
+                .await;
+                if let Err(error) = result {
+                    tracing::warn!(
+                        "failed publishing queue snapshot for session {}: {}",
+                        session_id,
+                        error
+                    );
+                }
+            },
+            &handle,
+        );
+    }
+
+    /// Withdraws only live client waiters and delegated receipts after consumption has stopped.
+    pub(super) fn withdraw_pending(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), KernelError> {
+        let session = self.session(session_id)?;
+        let mut queue = session
+            .execution
+            .queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        queue.open = false;
+        let ids = queue
+            .steering
+            .iter()
+            .chain(&queue.follow_up)
+            .filter(|item| match &item.waiter {
+                Some(QueueWaiter::Insertion(notice)) => notice.is_listening(),
+                Some(QueueWaiter::Receipt(_)) => true,
+                None => false,
+            })
+            .map(|item| item.queued.queue_id.clone())
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let records = ids
+            .iter()
+            .map(|id| {
+                self.queue_cancellation_record(
+                    &session,
+                    None,
+                    id.clone(),
+                    QueueCancellationReason::Withdrawn,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        match session.transcript.commit_records(records) {
+            Ok(()) => {
+                for id in &ids {
+                    if let Some(item) = queue.remove(id) {
+                        item.reject(&KernelError::PromptCancelled);
+                    }
+                }
+                drop(queue);
+                self.publish_queue_changed(session_id);
+                tracing::info!(
+                    "withdrew {} queued inputs for session {}",
+                    ids.len(),
+                    session_id
+                );
+                Ok(())
+            }
+            Err(error) => {
+                // An uncertain write cannot authorize returning input for resubmission.
+                for item in queue.steering.iter().chain(&queue.follow_up) {
+                    if ids.contains(&item.queued.queue_id) {
+                        item.reject(&error);
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Appends a queue cancellation with an optional active-run correlation.
@@ -279,52 +500,194 @@ impl Kernel {
 }
 
 impl Session {
-    /// Persists and syncs an accepted item before exposing it in memory.
+    /// Serializes acceptance with the Run's final queue check and durable commit.
     fn enqueue_pending(
         &self,
         record: NewRecord,
         item: PendingQueueItem,
+        cancellation: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<(), KernelError> {
-        self.transcript.append_record(record)?;
-        self.sync_store()?;
-        self.execution.push_pending(item)
+        let mut queue = self
+            .execution
+            .queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        if cancellation
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(KernelError::PromptCancelled);
+        }
+        if !queue.open {
+            return Err(KernelError::SessionNotRunning(
+                self.transcript.session_id()?,
+            ));
+        }
+        self.transcript.commit_records(vec![record])?;
+        queue.push(item);
+        Ok(())
     }
 
-    /// Persists and syncs one removal before deleting its in-memory item.
+    /// Commits removal under the same lock used by claims, so inserted items cannot be removed.
     pub(super) fn remove_pending(
         &self,
         record: NewRecord,
         queue_id: &QueueId,
     ) -> Result<(), KernelError> {
-        self.transcript.append_record(record)?;
-        self.sync_store()?;
-        self.execution.remove_pending(queue_id)
-    }
-
-    /// Persists and syncs all clear records before deleting in-memory items.
-    fn clear_pending(
-        &self,
-        records: Vec<NewRecord>,
-        queue_ids: &[QueueId],
-    ) -> Result<(), KernelError> {
-        for record in records {
-            self.transcript.append_record(record)?;
+        let mut queue = self
+            .execution
+            .queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        if !queue.ids().contains(queue_id) {
+            return Ok(());
         }
-        self.sync_store()?;
-        self.execution.remove_pending_batch(queue_ids)
+        self.transcript.commit_records(vec![record])?;
+        if let Some(item) = queue.remove(queue_id) {
+            item.reject(&KernelError::PromptCancelled);
+        }
+        Ok(())
     }
 
-    /// Commits one consumed message and cancellation before removing its item.
-    pub(super) fn consume_pending(
+    /// Ends the claim before the first write; uncertain commits must never be retried in memory.
+    pub(super) fn consume_claimed(
         &self,
+        mut claimed: ClaimedItem,
         message: &AgentMessage,
-        entry_id: EntryId,
         record: NewRecord,
-        queue_id: &QueueId,
     ) -> Result<(), KernelError> {
-        self.transcript.append_context_message(entry_id, message)?;
-        self.transcript.append_record(record)?;
-        self.execution.consume_pending(queue_id)
+        // Cancel and the first write share this boundary, including multi-threaded callers.
+        let cancellation = self
+            .execution
+            .cancellation
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        if cancellation.is_cancelled() {
+            return Err(KernelError::PromptCancelled);
+        }
+        claimed.committed = true;
+        if let Err(error) = self.transcript.commit_consumed(
+            claimed.item.entry_id.clone(),
+            message,
+            record,
+        ) {
+            claimed.item.reject(&error);
+            return Err(error);
+        }
+        match &claimed.item.waiter {
+            Some(QueueWaiter::Insertion(notice)) => {
+                notice.inserted(&message.identity.message_id)
+            }
+            Some(QueueWaiter::Receipt(receipt)) => {
+                self.execution.accept_receipt(Arc::clone(receipt))?
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+/// Admission data kept together until the durable enqueue succeeds.
+#[derive(typed_builder::TypedBuilder)]
+pub(super) struct QueueRequest {
+    pub(super) kind: QueueKind,
+    pub(super) input: protocol::RunInput,
+    #[builder(default)]
+    pub(super) waiter: Option<QueueWaiter>,
+    #[builder(default)]
+    pub(super) submission_id: Option<String>,
+    #[builder(default)]
+    pub(super) input_processed: bool,
+    #[builder(default)]
+    pub(super) cancellation: Option<tokio_util::sync::CancellationToken>,
+}
+
+/// Exactly one consumer owns the result of a queued input.
+#[derive(Debug, Clone)]
+pub(super) enum QueueWaiter {
+    Insertion(Arc<InsertionNotice>),
+    Receipt(Arc<super::submit::SubmissionReceipt>),
+}
+
+/// Returns a claim to its original lane unless persistence has already started.
+pub(super) struct ClaimedItem {
+    item: PendingQueueItem,
+    execution: Arc<SessionExecution>,
+    committed: bool,
+}
+
+impl ClaimedItem {
+    /// Borrows the reserved message without transferring claim ownership.
+    pub(super) fn item(&self) -> &PendingQueueItem {
+        &self.item
+    }
+}
+
+impl Drop for ClaimedItem {
+    /// Restores unconsumed input even when preflight, hooks, or event delivery fail.
+    fn drop(&mut self) {
+        if !self.committed {
+            match self.execution.queue.lock() {
+                Ok(mut queue) => match self.item.queued.kind {
+                    QueueKind::Steering => {
+                        queue.steering.push_front(self.item.clone())
+                    }
+                    QueueKind::FollowUp => {
+                        queue.follow_up.push_front(self.item.clone())
+                    }
+                },
+                Err(error) => tracing::error!(
+                    "failed returning claimed queue item {}: {}",
+                    self.item.queued.queue_id,
+                    error
+                ),
+            }
+        }
+    }
+}
+
+impl SessionExecution {
+    /// Opens acceptance only for an agent Run, never for a command or maintenance operation.
+    pub(super) fn open_queue(&self) -> Result<(), KernelError> {
+        let cancellation = self
+            .cancellation
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?;
+        self.queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?
+            .open = !cancellation.is_cancelled();
+        Ok(())
+    }
+
+    /// Closes acceptance before settlement or cancellation withdraws pending inputs.
+    pub(super) fn close_queue(&self) -> Result<(), KernelError> {
+        self.queue
+            .lock()
+            .map_err(|_error| KernelError::Poisoned)?
+            .open = false;
+        Ok(())
+    }
+
+    /// Atomically claims eligible input or closes acceptance when no continuation remains.
+    pub(super) fn claim_next_or_close(
+        self: &Arc<Self>,
+        allow_follow_up: bool,
+    ) -> Result<Option<ClaimedItem>, KernelError> {
+        let mut queue =
+            self.queue.lock().map_err(|_error| KernelError::Poisoned)?;
+        let item = queue.steering.pop_front().or_else(|| {
+            allow_follow_up
+                .then(|| queue.follow_up.pop_front())
+                .flatten()
+        });
+        if item.is_none() && allow_follow_up {
+            queue.open = false;
+        }
+        Ok(item.map(|item| ClaimedItem {
+            item,
+            execution: Arc::clone(self),
+            committed: false,
+        }))
     }
 }
 
@@ -333,7 +696,7 @@ impl Session {
 pub(super) struct PendingQueueItem {
     pub(super) queued: QueuedMessage,
     pub(super) entry_id: EntryId,
-    pub(super) receipt: Option<Arc<super::submit::SubmissionReceipt>>,
+    pub(super) waiter: Option<QueueWaiter>,
 }
 
 impl PendingQueueItem {
@@ -342,7 +705,24 @@ impl PendingQueueItem {
         Self {
             queued,
             entry_id,
-            receipt: None,
+            waiter: None,
+        }
+    }
+
+    /// Delivers a definitive cancellation or an uncertainty error to the item's sole waiter.
+    fn reject(&self, error: &KernelError) {
+        match &self.waiter {
+            Some(QueueWaiter::Insertion(notice)) => notice.rejected(error),
+            Some(QueueWaiter::Receipt(receipt)) => {
+                if matches!(error, KernelError::PromptCancelled) {
+                    receipt.resolve(Arc::new(
+                        super::SubmissionAnswer::cancelled(),
+                    ));
+                } else {
+                    receipt.reject(error);
+                }
+            }
+            None => {}
         }
     }
 
@@ -372,16 +752,39 @@ pub(super) enum QueueCancellationReason {
     Removed,
     /// A client cleared every pending queue item.
     Cleared,
+    /// A live submitter receives input that the Run did not insert.
+    Withdrawn,
 }
 
 /// In-memory view reconstructed from append-only queue records.
 #[derive(Debug, Default)]
 pub(super) struct PendingQueue {
+    open: bool,
     steering: VecDeque<PendingQueueItem>,
     follow_up: VecDeque<PendingQueueItem>,
 }
 
 impl PendingQueue {
+    /// Recovers queue records while excluding message entries already written before a crash.
+    pub(super) fn restore(
+        store: &dyn SessionStore,
+    ) -> Result<Self, KernelError> {
+        let mut queue = Self::from_records(&store.records())?;
+        for id in queue.ids() {
+            let item = queue.remove(&id).expect("id from locked queue");
+            if store.get_entry(&item.entry_id).is_some() {
+                tracing::warn!(
+                    "ignored consumed queue item {} with existing entry {} during recovery",
+                    id,
+                    item.entry_id
+                );
+            } else {
+                queue.push(item);
+            }
+        }
+        Ok(queue)
+    }
+
     /// Replays queue records and retains only items without a later cancellation.
     pub(super) fn from_records(
         records: &[SessionRecord],
@@ -401,6 +804,7 @@ impl PendingQueue {
                                 .to_string(),
                         ));
                     }
+                    queue.remove(&data.queue_id);
                     queue
                         .push(PendingQueueItem::new(data.queue, data.entry_id));
                 }
@@ -427,18 +831,6 @@ impl PendingQueue {
             QueueKind::Steering => self.steering.push_back(item),
             QueueKind::FollowUp => self.follow_up.push_back(item),
         }
-    }
-
-    /// Returns the next eligible item without removing it before persistence.
-    pub(super) fn next(
-        &self,
-        allow_follow_up: bool,
-    ) -> Option<PendingQueueItem> {
-        self.steering.front().cloned().or_else(|| {
-            allow_follow_up
-                .then(|| self.follow_up.front().cloned())
-                .flatten()
-        })
     }
 
     /// Reports whether both scheduling lanes contain no pending item.

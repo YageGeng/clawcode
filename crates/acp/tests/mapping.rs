@@ -1426,3 +1426,28 @@ fn user_bash_finished_with_result_does_not_duplicate_tool_end() {
             && update["sessionUpdate"] != "terminal_update"
     }));
 }
+
+/// Queue updates preserve the submitting client's correlation without creating transcript messages.
+#[test]
+fn queue_changed_maps_to_product_event_with_submission_identity() {
+    let pending: protocol::PendingMessages = serde_json::from_value(serde_json::json!({"steering":[],"followUp":[{
+        "queueId":"queue-map", "kind":"followUp", "submissionId":"client-map",
+        "message":{"message_id":"message-map","turn_id":"turn-map","timestamp_ms":"1","started_at_ms":"1","ended_at_ms":"1","content":{"type":"user","blocks":[{"type":"text","text":"queued"}]}}
+    }]})).unwrap();
+    let updates = AcpEventMapper::map(AgentEvent {
+        metadata: EventMetadata {
+            turn_id: TurnId::try_from("turn-map").unwrap(),
+            timestamp_ms: TimestampMs::from(1),
+            sequence: Sequence::try_from(1).unwrap(),
+        },
+        payload: AgentEventPayload::QueueChanged { pending },
+    })
+    .unwrap();
+    assert_eq!(updates.len(), 1);
+    let value = serde_json::to_value(&updates[0]).unwrap();
+    assert_eq!(value["sessionUpdate"], "_clawcode/event");
+    assert_eq!(
+        value["payload"]["pending"]["followUp"][0]["submissionId"],
+        "client-map"
+    );
+}

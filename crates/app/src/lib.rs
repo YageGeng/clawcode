@@ -123,6 +123,7 @@ impl ApplicationFactory {
         let active_model_id =
             format!("{}/{}", model_profile.provider_id, model_profile.model_id);
         let ui_bootstrap = UiBootstrapResponse::builder()
+            .when_busy(snapshot.kernel.when_busy)
             .product(ProductInfo {
                 name: ProductIdentity::NAME.to_string(),
                 slug: ProductIdentity::SLUG.to_string(),
@@ -184,6 +185,7 @@ impl ApplicationFactory {
             .skill_factory(skill_factory)
             .include_skill_instructions(snapshot.skills.include_instructions)
             .max_turns(snapshot.kernel.max_turns)
+            .when_busy(snapshot.kernel.when_busy.into())
             .compaction_policy(snapshot.compaction)
             .retry_policy(snapshot.retry.agent)
             .build()

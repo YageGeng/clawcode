@@ -633,3 +633,25 @@ approval_policy = "on-request"
         config::AskForApproval::OnRequest
     );
 }
+
+/// Busy input policy defaults to follow-up and accepts only the documented configuration spellings.
+#[test]
+fn kernel_busy_policy_loads_default_and_explicit_values() {
+    for (input, expected) in [
+        ("", config::QueuePlacement::FollowUp),
+        (
+            "[kernel]\nwhen_busy = 'steer'",
+            config::QueuePlacement::Steer,
+        ),
+        (
+            "[kernel]\nwhen_busy = 'follow_up'",
+            config::QueuePlacement::FollowUp,
+        ),
+    ] {
+        let config: AppConfig =
+            toml::from_str(input).expect("parse busy policy");
+        assert_eq!(config.kernel.when_busy, expected);
+    }
+    toml::from_str::<AppConfig>("[kernel]\nwhen_busy = 'followUp'")
+        .expect_err("ACP spelling is not configuration spelling");
+}

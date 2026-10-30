@@ -1,35 +1,22 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v2 as wire;
 use agent_client_protocol::{
     Client, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, UntypedMessage, V2ConnectionTo,
 };
-use kernel::{Kernel, KernelError};
+use kernel::Kernel;
 use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExtensionMethod,
     AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpSessionParameters,
     AcpSessionRenameParameters, AcpSkillParameters, AcpUserBashParameters,
-    McpSessionRevisionNotification, ProductIdentity, QueueKind, SessionTitle,
+    McpSessionRevisionNotification, ProductIdentity, SessionTitle,
 };
-use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::input::PromptInput;
 use crate::projection::ProjectionRegistry;
 use crate::server::{AcpServer, ProjectionWatch};
-
-/// Parameters for adding one multimodal follow-up to the active run.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AcpQueueMessageParameters {
-    /// Session that owns the queue.
-    session_id: protocol::SessionId,
-    /// Ordered ACP prompt blocks supplied by the client.
-    prompt: Vec<wire::ContentBlock>,
-}
 
 /// Converts any parameter decoding failure into the ACP invalid-parameters category.
 fn invalid_parameters(
@@ -169,25 +156,6 @@ impl AcpExtensionDispatcher {
         request: AcpExtensionRequest,
     ) -> Result<AcpExtensionResponse, agent_client_protocol::Error> {
         let result = match request.method {
-            AcpExtensionMethod::FollowUp => {
-                let input: AcpQueueMessageParameters =
-                    serde_json::from_value(request.parameters)
-                        .map_err(invalid_parameters)?;
-                let session_id = input.session_id;
-                let prompt = PromptInput::try_from(input.prompt)
-                    .map_err(invalid_parameters)?
-                    .into_inner();
-                let queued = self
-                    .kernel
-                    .queue_message(&session_id, QueueKind::FollowUp, prompt)
-                    .await
-                    .map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?;
-                serde_json::to_value(queued).map_err(
-                    agent_client_protocol::Error::into_internal_error,
-                )?
-            }
             AcpExtensionMethod::Tree => {
                 let input: AcpSessionParameters =
                     serde_json::from_value(request.parameters)
@@ -316,36 +284,20 @@ impl AcpExtensionDispatcher {
                 let input: AcpPendingMessageRemoveParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                let removed = match self
-                    .kernel
+                self.kernel
                     .remove_pending_message(&input.session_id, &input.queue_id)
-                {
-                    Ok(()) => true,
-                    Err(KernelError::PendingMessageNotFound(_)) => {
-                        // The queue consumer may win the race after the WebUI
-                        // rendered its last snapshot. DELETE remains idempotent.
-                        tracing::debug!(
-                            "pending message {} for session {} was already absent during removal",
-                            input.queue_id,
-                            input.session_id
-                        );
-                        false
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            "failed to remove pending message {} from session {}: {}",
-                            input.queue_id,
-                            input.session_id,
-                            error
-                        );
-                        return Err(
-                            agent_client_protocol::Error::into_internal_error(
-                                error,
-                            ),
-                        );
-                    }
-                };
-                serde_json::json!({ "removed": removed })
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({ "removed": true })
+            }
+            AcpExtensionMethod::PendingMessagePromote => {
+                let input: AcpPendingMessageRemoveParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let promoted = self
+                    .kernel
+                    .promote_pending_message(&input.session_id, &input.queue_id)
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({ "promoted": promoted })
             }
             AcpExtensionMethod::ClearQueue => {
                 let input: AcpSessionParameters =
@@ -353,9 +305,7 @@ impl AcpExtensionDispatcher {
                         .map_err(invalid_parameters)?;
                 self.kernel
                     .clear_pending_messages(&input.session_id)
-                    .map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?;
+                    .map_err(crate::server::KernelFailure)?;
                 serde_json::json!({ "cleared": true })
             }
             AcpExtensionMethod::SessionRename => {
@@ -524,30 +474,5 @@ impl AcpExtensionDispatcher {
             }
         };
         Ok(AcpExtensionResponse(result))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::AcpQueueMessageParameters;
-
-    /// Follow-up parameters preserve ordered ACP text and image blocks.
-    #[test]
-    fn follow_up_parameters_accept_acp_prompt_blocks() {
-        let parameters: AcpQueueMessageParameters =
-            serde_json::from_value(serde_json::json!({
-                "sessionId": "session-follow-up",
-                "prompt": [
-                    { "type": "text", "text": "inspect" },
-                    {
-                        "type": "image",
-                        "data": "Q0xBVy03MzE5",
-                        "mimeType": "image/png"
-                    }
-                ]
-            }))
-            .expect("multimodal follow-up parameters");
-
-        assert_eq!(parameters.prompt.len(), 2);
     }
 }

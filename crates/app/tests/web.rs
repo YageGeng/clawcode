@@ -193,6 +193,7 @@ async fn bootstrap_uses_product_identity_and_configured_model() {
     assert_eq!(json["product"]["slug"], ProductIdentity::SLUG);
     assert_eq!(json["acpPath"], ProductIdentity::DEFAULT_ACP_PATH);
     assert_eq!(json["activeModel"]["id"], "provider/model");
+    assert_eq!(json["whenBusy"], "follow_up");
 }
 
 /// Missing frontend assets do not disable ACP transport health checks.

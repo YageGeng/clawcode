@@ -812,7 +812,6 @@ impl AcpServerFactory {
                             );
                         }
                         let methods = [
-                        AcpExtensionMethod::FollowUp,
                         AcpExtensionMethod::Tree,
                         AcpExtensionMethod::Navigate,
                         AcpExtensionMethod::Branch,
@@ -820,6 +819,7 @@ impl AcpServerFactory {
                         AcpExtensionMethod::Compact,
                         AcpExtensionMethod::PendingMessages,
                         AcpExtensionMethod::PendingMessageRemove,
+                        AcpExtensionMethod::PendingMessagePromote,
                         AcpExtensionMethod::ClearQueue,
                         AcpExtensionMethod::SessionRename,
                         AcpExtensionMethod::SessionRuntime,
@@ -1400,6 +1400,8 @@ impl AcpServerFactory {
                                     .data(error.to_string())
                             })?
                             .into_inner();
+                        let options = PromptOptions::try_from(request.meta.as_ref())?;
+                        let ticket = kernel.admission_ticket(&session_id).map_err(KernelFailure)?;
                         let (notice, insertion) = InsertionNotice::new();
 
                         let task_session_id = session_id.clone();
@@ -1416,16 +1418,10 @@ impl AcpServerFactory {
                                     let sink = projections
                                         .sink(task_session_id.clone());
                                     match kernel
-                                        .run_traced(
-                                            RunRequest {
-                                                session_id: task_session_id
-                                                    .clone(),
-                                                input,
-                                            },
-                                            sink,
-                                            trace_id,
-                                            Some(notice),
-                                        )
+                                        .prompt(kernel::PromptRequest::builder()
+                                            .run(RunRequest { session_id: task_session_id.clone(), input })
+                                            .sink(sink).trace_id(trace_id).insertion(notice).ticket(ticket)
+                                            .when_busy(options.when_busy).submission_id(options.submission_id).build())
                                         .await
                                     {
                                         Ok(_result) => {}
@@ -1444,7 +1440,9 @@ impl AcpServerFactory {
                                                 task_session_id,
                                                 error
                                             );
-                                            if let Err(fallback_error) = projections
+                                            // An enqueue can fail while another Run still owns the Session.
+                                            if kernel.session_runtime(&task_session_id).is_ok_and(|runtime| !runtime.running)
+                                                && let Err(fallback_error) = projections
                                                 .publish_terminal_fallback(
                                                     &task_session_id,
                                                 )
@@ -1478,7 +1476,7 @@ impl AcpServerFactory {
                                     message_id.to_string(),
                                 )),
                                 Ok(Err(error)) => {
-                                    Err(PromptRejection(error).into())
+                                    Err(KernelFailure(error).into())
                                 }
                                 Err(_closed) => {
                                     tracing::error!(
@@ -1778,14 +1776,59 @@ impl SessionConfigUpdate {
     }
 }
 
-/// Kernel failure that ended a prompt before insertion.
-struct PromptRejection(KernelError);
+/// Product options carried only by this client prompt.
+pub(crate) struct PromptOptions {
+    pub(crate) when_busy: Option<kernel::WhenBusy>,
+    pub(crate) submission_id: Option<String>,
+}
 
-impl From<PromptRejection> for agent_client_protocol::Error {
+impl TryFrom<Option<&wire::Meta>> for PromptOptions {
+    type Error = agent_client_protocol::Error;
+
+    /// Validates product metadata before any ticket, hook, or durable write occurs.
+    fn try_from(meta: Option<&wire::Meta>) -> Result<Self, Self::Error> {
+        let mut options = Self {
+            when_busy: None,
+            submission_id: None,
+        };
+        let Some(value) = meta.and_then(|meta| meta.get("clawcode")) else {
+            return Ok(options);
+        };
+        let product =
+            value.as_object().ok_or_else(Self::Error::invalid_params)?;
+        if let Some(value) = product.get("whenBusy") {
+            options.when_busy = Some(match value.as_str() {
+                Some("followUp") => kernel::WhenBusy::FollowUp,
+                Some("steer") => kernel::WhenBusy::Steer,
+                _ => {
+                    return Err(Self::Error::invalid_params()
+                        .data("whenBusy must be followUp or steer"));
+                }
+            });
+        }
+        if let Some(value) = product.get("submissionId") {
+            let id = value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.chars().count() <= 128)
+                .ok_or_else(|| {
+                    Self::Error::invalid_params()
+                        .data("submissionId must contain 1 to 128 characters")
+                })?;
+            options.submission_id = Some(id.to_owned());
+        }
+        Ok(options)
+    }
+}
+
+/// Kernel failure that ended a prompt before insertion.
+pub(crate) struct KernelFailure(pub(crate) KernelError);
+
+impl From<KernelFailure> for agent_client_protocol::Error {
     /// Maps cancellation to `-32800` and any other pre-insertion failure to an internal error.
-    fn from(rejection: PromptRejection) -> Self {
+    fn from(rejection: KernelFailure) -> Self {
         match rejection.0 {
             KernelError::PromptCancelled => Self::request_cancelled(),
+            error @ KernelError::SessionPersistenceUncertain => Self::internal_error().data(serde_json::json!({"outcomeUnknown": true, "message": error.to_string()})),
             error => Self::internal_error().data(error.to_string()),
         }
     }

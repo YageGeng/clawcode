@@ -6,8 +6,7 @@ use tokio::sync::{Mutex as AsyncMutex, MutexGuard, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    EventSink, KernelError, PendingQueue, PendingQueueItem, Session,
-    WaiterCancellation,
+    EventSink, KernelError, PendingQueue, Session, WaiterCancellation,
 };
 
 /// Serialized lifecycle state for one live session runtime.
@@ -36,6 +35,8 @@ pub(super) struct ActiveRunContext {
 pub(super) struct SessionExecution {
     #[builder(default)]
     submissions: Mutex<Vec<Arc<super::submit::SubmissionReceipt>>>,
+    #[builder(default)]
+    pub(super) admission: Mutex<super::admission::AdmissionState>,
     lifecycle: RwLock<SessionLifecycle>,
     gate: AsyncMutex<()>,
     #[builder(default)]
@@ -46,8 +47,8 @@ pub(super) struct SessionExecution {
     #[builder(default)]
     active_run: Mutex<Option<ActiveRunContext>>,
     idle_notify: Notify,
-    cancellation: Mutex<CancellationToken>,
-    queue: Mutex<PendingQueue>,
+    pub(super) cancellation: Mutex<CancellationToken>,
+    pub(super) queue: Mutex<PendingQueue>,
     sequence: AtomicU64,
 }
 
@@ -86,7 +87,7 @@ impl SessionExecution {
             .map_err(|_lock_error| KernelError::Poisoned)?
             .clone();
         // Internal input never observes the session-wide waiter generation.
-        let waiting = match waiters {
+        let waiting = match &waiters {
             WaiterCancellation::Reject => Some(
                 self.waiters
                     .lock()
@@ -94,6 +95,7 @@ impl SessionExecution {
                     .clone(),
             ),
             WaiterCancellation::Ignore => None,
+            WaiterCancellation::Captured(token) => Some(token.clone()),
         };
         let parent = cancellation_parent.cloned().unwrap_or_default();
         let rejected = async {
@@ -143,7 +145,8 @@ impl SessionExecution {
         );
         if closing.is_cancelled() {
             match waiters {
-                WaiterCancellation::Reject => {
+                WaiterCancellation::Reject
+                | WaiterCancellation::Captured(_) => {
                     return Err(KernelError::PromptCancelled);
                 }
                 WaiterCancellation::Ignore => cancellation.cancel(),
@@ -254,61 +257,15 @@ impl SessionExecution {
             .map_err(|_poison_error| KernelError::Poisoned)
     }
 
-    /// Returns the next eligible pending item without consuming it.
-    pub(super) fn next_pending(
+    /// Transfers a consumed receipt to the Run holding the execution gate.
+    pub(super) fn accept_receipt(
         &self,
-        allow_follow_up: bool,
-    ) -> Result<Option<PendingQueueItem>, KernelError> {
-        self.queue
-            .lock()
-            .map(|queue| queue.next(allow_follow_up))
-            .map_err(|_poison_error| KernelError::Poisoned)
-    }
-
-    /// Adds one item after its enqueue record becomes durable.
-    pub(super) fn push_pending(
-        &self,
-        item: PendingQueueItem,
+        receipt: Arc<super::submit::SubmissionReceipt>,
     ) -> Result<(), KernelError> {
-        self.queue
+        self.submissions
             .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .push(item);
-        Ok(())
-    }
-
-    /// Removes one item after its cancellation or consumption is durable.
-    pub(super) fn remove_pending(
-        &self,
-        queue_id: &QueueId,
-    ) -> Result<(), KernelError> {
-        let item = self
-            .queue
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .remove(queue_id);
-        if let Some(receipt) = item.and_then(|item| item.receipt) {
-            receipt.resolve(Arc::new(super::SubmissionAnswer::cancelled()));
-        }
-        Ok(())
-    }
-
-    /// Transfers a consumed receipt to the Run holding this Session's execution gate.
-    pub(super) fn consume_pending(
-        &self,
-        queue_id: &QueueId,
-    ) -> Result<(), KernelError> {
-        let mut queue =
-            self.queue.lock().map_err(|_error| KernelError::Poisoned)?;
-        let mut submissions = self
-            .submissions
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
-        if let Some(receipt) =
-            queue.remove(queue_id).and_then(|item| item.receipt)
-        {
-            submissions.push(receipt);
-        }
+            .map_err(|_error| KernelError::Poisoned)?
+            .push(receipt);
         Ok(())
     }
 
@@ -329,23 +286,15 @@ impl SessionExecution {
         Ok(())
     }
 
-    /// Removes a stable set of items under one queue lock after durable cancellation.
-    pub(super) fn remove_pending_batch(
+    /// Captures the stop generation when a protocol prompt arrives.
+    pub(super) fn waiter_token(
         &self,
-        queue_ids: &[QueueId],
-    ) -> Result<(), KernelError> {
-        let mut queue = self
-            .queue
+    ) -> Result<CancellationToken, KernelError> {
+        Ok(self
+            .waiters
             .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        for queue_id in queue_ids {
-            if let Some(receipt) =
-                queue.remove(queue_id).and_then(|item| item.receipt)
-            {
-                receipt.resolve(Arc::new(super::SubmissionAnswer::cancelled()));
-            }
-        }
-        Ok(())
+            .map_err(|_error| KernelError::Poisoned)?
+            .clone())
     }
 
     /// Cancels the current operation and rejects client prompts waiting for the gate.
@@ -363,7 +312,7 @@ impl SessionExecution {
             .map_err(|_poison_error| KernelError::Poisoned)?;
         waiters.cancel();
         *waiters = CancellationToken::new();
-        Ok(())
+        self.close_queue()
     }
 
     /// Publishes all active-Run correlation fields under one lock.
@@ -545,6 +494,7 @@ pub(super) struct ActiveRunLease {
 impl Drop for ActiveRunLease {
     /// Clears only the active Run identity installed by this lease.
     fn drop(&mut self) {
+        let _ = self.execution.close_queue();
         // Fail only receipts left unresolved by an operational error or a dropped Run future.
         if let Err(error) = self.execution.settle_submissions(Arc::new(
             super::SubmissionAnswer {

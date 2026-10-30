@@ -122,8 +122,6 @@ impl ProductIdentity {
 /// Identifies every product-specific ACP extension method without raw strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AcpExtensionMethod {
-    /// Starts a follow-up turn.
-    FollowUp,
     /// Reads the persisted session tree.
     Tree,
     /// Moves the active session cursor.
@@ -138,6 +136,8 @@ pub enum AcpExtensionMethod {
     PendingMessages,
     /// Removes one queued message by its stable queue identifier.
     PendingMessageRemove,
+    /// Moves a pending follow-up to steering.
+    PendingMessagePromote,
     /// Clears queued messages.
     ClearQueue,
     /// Changes the persisted display title for one session.
@@ -178,13 +178,15 @@ impl AcpExtensionMethod {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::FollowUp => "_clawcode/session/follow_up",
             Self::Tree => "_clawcode/session/tree",
             Self::Navigate => "_clawcode/session/navigate",
             Self::Branch => "_clawcode/session/branch",
             Self::Fork => "_clawcode/session/fork",
             Self::Compact => "_clawcode/session/compact",
             Self::PendingMessages => "_clawcode/session/pending_messages",
+            Self::PendingMessagePromote => {
+                "_clawcode/session/pending_message/promote"
+            }
             Self::PendingMessageRemove => {
                 "_clawcode/session/pending_message/remove"
             }
@@ -207,7 +209,6 @@ impl AcpExtensionMethod {
     /// Parses one product-scoped ACP extension method without accepting foreign namespaces.
     pub fn parse(method: &str) -> Option<Self> {
         [
-            Self::FollowUp,
             Self::Tree,
             Self::Navigate,
             Self::Branch,
@@ -215,6 +216,7 @@ impl AcpExtensionMethod {
             Self::Compact,
             Self::PendingMessages,
             Self::PendingMessageRemove,
+            Self::PendingMessagePromote,
             Self::ClearQueue,
             Self::SessionRename,
             Self::SessionRuntime,

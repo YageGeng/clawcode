@@ -256,3 +256,18 @@ fn reasoning_usage_preserves_none_and_sums_known_values() {
     }
     assert_eq!(known.reasoning_tokens, Some(7));
 }
+
+/// Queue snapshots use the product event discriminant and preserve camel-case lane names.
+#[test]
+fn queue_changed_serializes_pending_lanes() {
+    let payload = AgentEventPayload::QueueChanged {
+        pending: protocol::PendingMessages::builder()
+            .steering(Vec::new())
+            .follow_up(Vec::new())
+            .build(),
+    };
+    assert_eq!(
+        serde_json::to_value(payload).unwrap(),
+        serde_json::json!({"event":"queue_changed", "pending":{"steering":[],"followUp":[]}})
+    );
+}

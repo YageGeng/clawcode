@@ -8,6 +8,7 @@ import type {
   EventOrder,
   MessageEntity,
   ModelUsage,
+  PendingMessages,
   SessionEvent,
   SessionNotice,
   SlashCommandAliasKind,
@@ -87,8 +88,10 @@ export class SessionUpdateDecoder {
       receivedOrder
     };
     if (typeof kind === "string") {
-      // A whole terminal output replaces the previous one, so the log keeps only the newest.
-      const snapshotOf = kind === "terminal_update" && "output" in update && typeof update.terminalId === "string" ? update.terminalId : undefined;
+      // Full queue and terminal views replace older payloads, including their image data.
+      const snapshotOf = kind === `_${this.namespace}/event` && typeof update.payload === "object" && update.payload !== null
+        && "event" in update.payload && update.payload.event === "queue_changed" ? "queue"
+        : kind === "terminal_update" && "output" in update && typeof update.terminalId === "string" ? `terminal:${update.terminalId}` : undefined;
       const event: SessionEvent = { type: kind, payload: update, order, ...(meta === undefined ? {} : { meta }), ...(snapshotOf === undefined ? {} : { snapshotOf }) };
       actions.push({ type: "event/received", event });
     }
@@ -140,15 +143,6 @@ export class SessionUpdateDecoder {
       const timing = this.decodeMessageTiming(productMeta?.messageTiming);
       const message: MessageEntity = { messageId, turnId: meta.turnId, role: kind === "user_message" ? "user" : "assistant", text, images, reasoning: existing?.reasoning ?? "", timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? existing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false, ...(assistant === undefined ? (existing?.assistant === undefined ? {} : { assistant: existing.assistant }) : { assistant }), ...(slashCommand === undefined ? (existing?.slashCommand === undefined ? {} : { slashCommand: existing.slashCommand }) : { slashCommand }) };
       actions.push({ type: "message/upserted", message, order });
-      if (kind === "user_message") {
-        // A queued message is removed durably before its native ACP user
-        // update is emitted, so the matching local snapshot is now stale.
-        const consumed = [...state.pending.steering, ...state.pending.followUp]
-          .find((item) => item.message.message_id === update.messageId);
-        if (consumed !== undefined) {
-          actions.push({ type: "queue/removed", queueId: consumed.queueId });
-        }
-      }
     } else if (kind === "agent_thought" && typeof update.messageId === "string" && meta !== undefined) {
       const messageId = update.messageId as MessageId;
       const previous = state.messages.get(messageId);
@@ -224,7 +218,17 @@ export class SessionUpdateDecoder {
       const payload = typeof update.payload === "object" && update.payload !== null && !Array.isArray(update.payload) ? update.payload as Record<string, unknown> : undefined;
       if (payload !== undefined) {
         const event = payload.event;
-        if (event === "turn_end" && meta !== undefined && typeof payload.turn === "object" && payload.turn !== null && !Array.isArray(payload.turn)) {
+        if (event === "queue_changed") {
+          const pending = payload.pending;
+          if (typeof pending === "object" && pending !== null && "steering" in pending && "followUp" in pending
+            && Array.isArray(pending.steering) && Array.isArray(pending.followUp)
+            && [...(pending.steering as unknown[]), ...(pending.followUp as unknown[])].every((item: unknown) => typeof item === "object" && item !== null
+              && "queueId" in item && typeof item.queueId === "string" && "kind" in item && (item.kind === "steering" || item.kind === "followUp")
+              && "message" in item && typeof item.message === "object" && item.message !== null
+              && (!("submissionId" in item) || typeof item.submissionId === "string"))) {
+            actions.push({ type: "queue/replaced", pending: pending as PendingMessages });
+          } else actions.push({ type: "diagnostic/added", message: "Invalid queue snapshot" });
+        } else if (event === "turn_end" && meta !== undefined && typeof payload.turn === "object" && payload.turn !== null && !Array.isArray(payload.turn)) {
           const turn = payload.turn as Record<string, unknown>;
           // TurnEnd contributes usage to the owning Run but does not publish a
           // row because Pi may immediately begin another model Turn.

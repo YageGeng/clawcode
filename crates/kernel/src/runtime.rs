@@ -1,3 +1,4 @@
+mod admission;
 mod attempt;
 mod command;
 mod compaction;
@@ -70,6 +71,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     EventSink, Model, ModelCatalog, ModelError, ModelFactory, SinkError,
 };
+pub use admission::{AdmissionTicket, PromptOutcome, PromptRequest};
 use attempt::{
     AssistantAttempt, AssistantAttemptResult, AssistantAttemptSettlement,
 };
@@ -79,7 +81,7 @@ use compaction::{
     OverflowRecovery, SummaryGeneration, SummaryProtocol,
 };
 pub use insertion::{InsertionNotice, InsertionReceiver};
-use queue::{PendingQueue, PendingQueueItem, QueueCancellationReason};
+use queue::{PendingQueue, QueueCancellationReason};
 pub use retry::RetryClassifier;
 use retry::RetryState;
 use settlement::{RunCompletion, RunSettlement};
@@ -112,7 +114,7 @@ pub enum KernelError {
     Store(#[from] store::StoreError),
     /// A failed durable setting left the current Store outcome uncertain.
     #[error(
-        "session persistence is uncertain after a failed setting write; close and resume the session before continuing"
+        "session persistence is uncertain after a failed write; close and resume the session before continuing"
     )]
     SessionPersistenceUncertain,
     /// Extension construction or dispatch failed.
@@ -197,6 +199,9 @@ impl KernelError {
     pub(in crate::runtime) fn for_insertion(&self) -> Self {
         match self {
             Self::PromptCancelled => Self::PromptCancelled,
+            Self::SessionPersistenceUncertain => {
+                Self::SessionPersistenceUncertain
+            }
             Self::SessionNotFound(session_id) => {
                 Self::SessionNotFound(session_id.clone())
             }
@@ -242,6 +247,8 @@ pub struct KernelFactory {
     /// Controls whether sequential Turns are unlimited or explicitly bounded.
     #[builder(default)]
     max_turns: TurnLimit,
+    #[builder(default)]
+    when_busy: WhenBusy,
     /// Controls how many recent user Turns remain verbatim after compaction.
     #[builder(default)]
     compaction_policy: CompactionPolicy,
@@ -273,6 +280,7 @@ impl KernelFactory {
             .skill_factory(self.skill_factory)
             .include_skill_instructions(self.include_skill_instructions)
             .max_turns(self.max_turns)
+            .when_busy(self.when_busy)
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
@@ -301,6 +309,8 @@ pub struct Kernel {
     skill_factory: Option<Arc<dyn skill::SkillFactory>>,
     include_skill_instructions: bool,
     max_turns: TurnLimit,
+    #[builder(default)]
+    when_busy: WhenBusy,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
@@ -534,6 +544,10 @@ impl From<serde_json::Error> for KernelError {
 
 #[derive(typed_builder::TypedBuilder)]
 struct Session {
+    #[builder(default)]
+    queue_publish: tokio::sync::Mutex<()>,
+    #[builder(default)]
+    queue_publishes: tokio_util::task::TaskTracker,
     #[builder(default)]
     owned_creation: tokio::sync::RwLock<()>,
     #[builder(default)]

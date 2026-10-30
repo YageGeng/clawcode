@@ -28,4 +28,18 @@ pub struct KernelConfig {
     /// Maximum sequential Turn policy for one Run.
     #[serde(default)]
     pub max_turns: TurnLimit,
+    /// Default placement for user input arriving during an agent Run.
+    #[serde(default)]
+    pub when_busy: QueuePlacement,
+}
+
+/// Default lane for client input while an agent Run is busy.
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePlacement {
+    #[default]
+    FollowUp,
+    Steer,
 }

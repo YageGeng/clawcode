@@ -93,9 +93,9 @@ async fn submit_queues_when_busy_and_answers_after_run() {
     first.await.expect("join").expect("first answer");
 }
 
-/// Inputs queued too late for a cancelled run are rescued into their own run.
+/// Stopping a Run withdraws delegated input instead of silently starting a replacement Run.
 #[tokio::test]
-async fn submit_rescues_message_left_queued_by_cancelled_run() {
+async fn stop_withdraws_queued_submit_receipt() {
     let test = TestKernel::new(|r| {
         if r.messages
             .last()
@@ -126,8 +126,8 @@ async fn submit_rescues_message_left_queued_by_cancelled_run() {
     .await;
     test.kernel.cancel_session(&session).expect("cancel");
     assert_eq!(
-        second.await.expect("join").expect("answer").text,
-        "answer for B"
+        second.await.expect("join").expect("answer").outcome,
+        AnswerOutcome::Cancelled
     );
     first.await.expect("join").expect("first answer");
 }
