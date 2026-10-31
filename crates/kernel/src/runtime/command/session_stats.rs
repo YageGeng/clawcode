@@ -12,11 +12,7 @@ pub(super) struct SessionStatistics {
     assistant_messages: usize,
     tool_results: usize,
     tool_calls: usize,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-    total_tokens: u64,
+    usage: protocol::ModelUsage,
 }
 
 impl SessionStatistics {
@@ -33,11 +29,7 @@ impl SessionStatistics {
             .assistant_messages(0)
             .tool_results(0)
             .tool_calls(0)
-            .input_tokens(0)
-            .output_tokens(0)
-            .cache_read_tokens(0)
-            .cache_write_tokens(0)
-            .total_tokens(0)
+            .usage(protocol::ModelUsage::default())
             .build();
         for message in transcript {
             match &message.content {
@@ -45,29 +37,24 @@ impl SessionStatistics {
                 | MessageContent::ExpandedUser { .. } => {
                     statistics.user_messages += 1;
                 }
-                MessageContent::Assistant { blocks, metadata } => {
+                MessageContent::Assistant {
+                    blocks, metadata, ..
+                } => {
                     statistics.assistant_messages += 1;
                     statistics.tool_calls += blocks
                         .iter()
                         .filter(|block| {
-                            matches!(block, ContentBlock::ToolCall { .. })
+                            matches!(
+                                block,
+                                ContentBlock::ToolCall {
+                                    invalid_arguments: None,
+                                    ..
+                                }
+                            )
                         })
                         .count();
-                    statistics.input_tokens = statistics
-                        .input_tokens
-                        .saturating_add(metadata.usage.input_tokens);
-                    statistics.output_tokens = statistics
-                        .output_tokens
-                        .saturating_add(metadata.usage.output_tokens);
-                    statistics.cache_read_tokens = statistics
-                        .cache_read_tokens
-                        .saturating_add(metadata.usage.cache_read_tokens);
-                    statistics.cache_write_tokens = statistics
-                        .cache_write_tokens
-                        .saturating_add(metadata.usage.cache_write_tokens);
-                    statistics.total_tokens = statistics
-                        .total_tokens
-                        .saturating_add(metadata.usage.total_tokens);
+                    // All summaries use the same upstream partial-counter semantics.
+                    statistics.usage += &metadata.usage;
                 }
                 MessageContent::ToolResult { .. } => {
                     statistics.tool_results += 1;
@@ -99,14 +86,26 @@ impl Display for SessionStatistics {
         )?;
         writeln!(formatter, "- Tool calls: {}", self.tool_calls)?;
         writeln!(formatter, "- Tool results: {}", self.tool_results)?;
-        writeln!(formatter, "- Input tokens: {}", self.input_tokens)?;
-        writeln!(formatter, "- Output tokens: {}", self.output_tokens)?;
-        writeln!(formatter, "- Cache read tokens: {}", self.cache_read_tokens)?;
-        writeln!(
-            formatter,
-            "- Cache write tokens: {}",
-            self.cache_write_tokens
-        )?;
-        write!(formatter, "- Total tokens: {}", self.total_tokens)
+        let usage = self.usage.as_ref();
+        // Keep CLI text in English and preserve the report's original lack of a trailing newline.
+        for (index, (label, count)) in [
+            ("Input tokens", usage.input_tokens),
+            ("Output tokens", usage.output_tokens),
+            ("Cache read tokens", usage.cached_input_tokens),
+            ("Cache write tokens", usage.cache_creation_input_tokens),
+            ("Total tokens", usage.total_tokens),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                writeln!(formatter)?;
+            }
+            match count {
+                Some(count) => write!(formatter, "- {label}: {count}")?,
+                None => write!(formatter, "- {label}: unknown")?,
+            }
+        }
+        Ok(())
     }
 }

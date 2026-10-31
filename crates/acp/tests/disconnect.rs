@@ -14,8 +14,8 @@ use kernel::{
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
-    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage,
-    SessionId, StopReason,
+    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, SessionId,
+    StopReason,
 };
 use store::{JsonlStoreFactory, SystemClock};
 use tokio::sync::Notify;
@@ -51,17 +51,20 @@ impl Model for DisconnectModel {
         self.release.notified().await;
         Ok(Box::pin(stream::iter([
             Ok(ModelStreamEvent::TextDelta("detached complete".to_string())),
-            Ok(ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: Some("stop".to_string()),
-                usage: ModelUsage::builder()
-                    .input_tokens(1)
-                    .output_tokens(2)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(3)
+            Ok(ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(Some("stop".to_string()))
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(1)
+                            .output_tokens(2)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(3),
+                    ))
                     .build(),
-            })),
+            )),
         ])))
     }
 }

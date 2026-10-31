@@ -1,973 +1,392 @@
-//! Dynamic LLM factory: pre-builds configured providers into a cache,
-//! dispatches provider_id/model_id → Arc<dyn Llm> via O(1) lookup.
+//! Immutable configuration definitions shared by independent session model bindings.
 
-mod event;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-pub use crate::completion::ProviderFinishReason;
-pub use event::{DynLlmStream, LlmCompletion, LlmStreamEvent, ProviderFinal};
-
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use config::{LlmProvider, ProviderAuthConfig, ProviderId, ProviderType};
-use futures::StreamExt;
-use serde::Serialize;
+use config::{
+    LlmModel, LlmProvider, ProviderId, ProviderRetryConfig, ProviderType,
+};
+use rig_core::providers::chatgpt::auth::{
+    AuthContext, AuthError, Authenticator,
+};
+use rig_core::{
+    DynModel, Model,
+    completion::CompletionRequest,
+    http_client::DynHttpClient,
+    operation::Completion,
+    providers::{anthropic, chatgpt, openai},
+};
 use serde_json::Value;
 
-use crate::client::CompletionClient;
-use crate::completion::{
-    CompletionError, CompletionModel, CompletionRequest, GetFinishReason,
-    GetTokenUsage,
-};
-use crate::streaming::StreamingCompletionResponse;
-use crate::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
-
-// ── Llm trait ───────────────────────────────────────────────────────────────
-
-/// Dynamic LLM abstraction supporting both completion and streaming.
-///
-/// Implementations wrap a concrete [`CompletionModel`] behind this
-/// object-safe facade so that callers can route requests without
-/// knowing the provider type at compile time.
-pub trait Llm: std::fmt::Debug + WasmCompatSend + WasmCompatSync {
-    /// Returns the configured provider id (e.g. `"openai"`, `"deepseek"`).
-    fn provider_id(&self) -> &str;
-
-    /// Returns the configured model id (e.g. `"gpt-5"`, `"deepseek-v4-flash"`).
-    fn model_id(&self) -> &str;
-
-    /// Verifies that the dynamic provider handle is ready without sending a request.
-    fn preflight(&self) -> Result<(), CompletionError> {
-        Ok(())
-    }
-
-    /// Execute a provider-agnostic completion request.
-    fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<event::LlmCompletion, CompletionError>>;
-
-    /// Start a provider-agnostic streaming request.
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<event::DynLlmStream, CompletionError>>;
+/// Configuration failures retained for a provider/model lookup without leaking credentials.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ProviderBuildError {
+    /// A caller requested a model absent from the explicit configuration.
+    #[error("provider model '{0}' is not configured")]
+    NotConfigured(String),
+    /// A configured entry failed validation or client construction.
+    #[error("provider model '{model}' could not be built: {reason}")]
+    Invalid { model: String, reason: String },
 }
 
-/// Shared handle for dynamic LLM dispatch.
-pub type ArcLlm = Arc<dyn Llm>;
-
-// ── ProviderBackedLlm adapter ───────────────────────────────────────────────
-
-/// Adapter that wraps a concrete [`CompletionModel`] behind the object-safe
-/// [`Llm`] trait.
-///
-/// `M` can be any completion-model type whose response types are serializable.
-struct ProviderBackedLlm<M> {
-    provider_id: String,
-    model_id: String,
-    model_extra_params: Value,
-    inner: M,
+/// Authentication and upstream request failures stay distinguishable at the model boundary.
+#[derive(Debug)]
+pub enum ProviderConnectError {
+    /// The upstream authenticator could not supply a credential.
+    Authentication(Box<AuthError>),
+    /// A subscription model was constructed without its resolved credential.
+    MissingAuthentication,
 }
 
-impl<M> ProviderBackedLlm<M> {
-    fn new(
-        provider_id: String,
-        model_id: String,
-        model_extra_params: Value,
-        inner: M,
-    ) -> Self {
-        Self {
-            provider_id,
-            model_id,
-            model_extra_params,
-            inner,
+impl std::fmt::Display for ProviderConnectError {
+    /// Emits actionable typed categories without exposing upstream auth text or credentials.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self::Authentication(error) = self else {
+            return formatter.write_str(
+                "missing authentication context for model construction",
+            );
+        };
+        formatter.write_str("ChatGPT authentication failed: ")?;
+        // AuthError Display may contain response bodies, URLs, file contents, or store secrets.
+        match error.as_ref() {
+            AuthError::Io(error) => {
+                write!(formatter, "I/O ({:?})", error.kind())
+            }
+            AuthError::Json(error) => write!(
+                formatter,
+                "JSON {:?} at line {}, column {}",
+                error.classify(),
+                error.line(),
+                error.column()
+            ),
+            AuthError::Http(error) => match error.non_success_status() {
+                Some(status) => write!(formatter, "HTTP {}", status.as_u16()),
+                None => formatter.write_str("HTTP transport or protocol error"),
+            },
+            AuthError::Store(_) => formatter.write_str("token store failure"),
+            AuthError::Message(_) => {
+                formatter.write_str("authentication flow failure")
+            }
         }
     }
 }
 
-impl<M> std::fmt::Debug for ProviderBackedLlm<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderBackedLlm")
-            .field("provider_id", &self.provider_id)
-            .field("model_id", &self.model_id)
-            .finish()
+impl std::error::Error for ProviderConnectError {
+    /// Retains the original source for typed inspection, never for ordinary diagnostic logging.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error.as_ref()),
+            Self::MissingAuthentication => None,
+        }
     }
 }
 
-impl<M> Llm for ProviderBackedLlm<M>
-where
-    M: CompletionModel + WasmCompatSend + WasmCompatSync + 'static,
-    M::Response: Serialize,
-    M::StreamingResponse: GetFinishReason + GetTokenUsage + Serialize,
-{
-    fn provider_id(&self) -> &str {
-        &self.provider_id
-    }
+/// A boxed upstream model keeps large wire configurations off request futures.
+/// Cloning preserves its session-owned Prepared history.
+#[derive(Clone, Debug)]
+pub enum ProviderCompletion {
+    /// All OpenAI-family dialects select Chat or Responses through their wire.
+    Openai(Box<Model<openai::wire::OpenAiWire>>),
+    /// Anthropic and its compatible dialects share Messages.
+    Anthropic(Box<Model<anthropic::wire::Messages>>),
+}
 
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-
-    fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<event::LlmCompletion, CompletionError>>
-    {
-        Box::pin({
-            let m = self.inner.clone();
-            let model_extra_params = self.model_extra_params.clone();
-            async move {
-                let mut request = request;
-                request.additional_params = merge_additional_params(
-                    &model_extra_params,
-                    request.additional_params,
-                );
-                let resp = m.completion(request).await?;
-                Ok(event::LlmCompletion {
-                    choice: resp.choice,
-                    usage: resp.usage,
-                    raw_response: serde_json::to_value(&resp.raw_response)
-                        .map_err(CompletionError::JsonError)?,
-                    message_id: resp.message_id,
-                })
+impl ProviderCompletion {
+    /// Attaches a request-local transport without rebuilding the cloned upstream model.
+    pub fn with_transport(self, http: DynHttpClient) -> DynModel<Completion> {
+        match self {
+            Self::Openai(mut model) => {
+                model.transport = http;
+                (*model).erase()
             }
-        })
-    }
-
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<event::DynLlmStream, CompletionError>> {
-        Box::pin({
-            let m = self.inner.clone();
-            let model_extra_params = self.model_extra_params.clone();
-            async move {
-                let mut request = request;
-                request.additional_params = merge_additional_params(
-                    &model_extra_params,
-                    request.additional_params,
-                );
-                let stream_resp: StreamingCompletionResponse<
-                    M::StreamingResponse,
-                > = m.stream(request).await?;
-                let mapped = stream_resp
-                    .map(|item| item.and_then(event::LlmStreamEvent::try_from));
-                Ok(Box::pin(mapped) as event::DynLlmStream)
+            Self::Anthropic(mut model) => {
+                model.transport = http;
+                (*model).erase()
             }
-        })
+        }
     }
 }
 
-// ── LlmFactory ──────────────────────────────────────────────────────────────
-
-/// Factory that pre-builds all configured providers at construction time,
-/// then dispatches `provider_id` / `model_id` via O(1) cache lookup.
-pub struct LlmFactory {
-    cache: HashMap<String, ArcLlm>,
-    build_errors: HashMap<String, String>,
+/// The upstream configuration family used to construct an independent session model.
+#[derive(Clone)]
+enum Definition {
+    Openai(Box<openai::OpenAIConfig>),
+    Anthropic(Box<anthropic::AnthropicConfig>),
 }
 
-/// Strict dynamic provider resolution failures.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum LlmFactoryError {
-    /// The requested provider/model pair was absent from immutable configuration.
-    #[error("provider model '{provider_id}/{model_id}' is not configured")]
-    NotConfigured {
-        /// Requested provider identifier.
-        provider_id: String,
-        /// Requested model identifier.
-        model_id: String,
-    },
-    /// The configured provider/model pair failed client construction.
-    #[error(
-        "provider model '{provider_id}/{model_id}' failed to build: {reason}"
-    )]
-    BuildFailed {
-        /// Configured provider identifier.
-        provider_id: String,
-        /// Configured model identifier.
-        model_id: String,
-        /// Safe construction failure summary.
-        reason: String,
-    },
+/// A shared definition owns no conversation history or request middleware.
+#[derive(typed_builder::TypedBuilder)]
+pub struct ConfiguredModel {
+    profile: protocol::ModelProfile,
+    upstream_id: String,
+    definition: Definition,
+    parameters: Value,
+    http: DynHttpClient,
+    #[builder(default)]
+    auth: Option<Authenticator>,
+    #[builder(default)]
+    timeout_ms: Option<u64>,
 }
 
-impl LlmFactory {
-    /// Build all providers and models from the active configuration into a
-    /// shared cache. Entries that fail to construct (unsupported protocol,
-    /// missing env var, etc.) are logged and skipped.
-    pub fn new(config: config::ConfigHandle) -> Self {
-        let cfg = config.current();
-        let mut cache = HashMap::new();
-        let mut build_errors = HashMap::new();
+impl std::fmt::Debug for ConfiguredModel {
+    /// Prints only public model identity, never keys, parameters, or auth state.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfiguredModel")
+            .field("profile", &self.profile)
+            .finish_non_exhaustive()
+    }
+}
 
-        for provider in &cfg.providers {
-            for model in &provider.models {
-                let key = Self::cache_key(provider.id.as_str(), &model.id);
-                if cache.contains_key(&key) {
-                    continue;
-                }
-                match Self::build_one(provider, model) {
-                    Ok(llm) => {
-                        cache.insert(key, llm);
+impl ConfiguredModel {
+    /// Validates one explicit model and binds the upstream dialect without sending a request.
+    fn new(
+        provider: &LlmProvider,
+        model: &LlmModel,
+        retry: &ProviderRetryConfig,
+        http: DynHttpClient,
+    ) -> Result<Self, String> {
+        provider
+            .validate_auth_source()
+            .map_err(|error| error.to_string())?;
+        let profile = model
+            .to_profile(provider)
+            .map_err(|error| error.to_string())?;
+        let key = provider
+            .api_key
+            .as_ref()
+            .map(config::ApiKeyConfig::resolve)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        let definition = match provider.provider_type {
+            ProviderType::Responses | ProviderType::OpenaiCompletions => {
+                let dialect = match (&provider.id, provider.provider_type) {
+                    (ProviderId::Openai | ProviderId::Other(_), _) => {
+                        &openai::wire::OPENAI
                     }
-                    Err(e) => {
-                        build_errors.insert(key, e.to_string());
-                        tracing::warn!(
-                            target: protocol::ProductIdentity::TRACING_FACTORY_TARGET,
-                            "skip provider={} model={}: {}",
-                            provider.id.as_str(),
-                            model.id,
-                            e
+                    (ProviderId::Chatgpt, ProviderType::Responses) => {
+                        &chatgpt::DIALECT
+                    }
+                    (ProviderId::Deepseek, ProviderType::OpenaiCompletions) => {
+                        &openai::wire::DEEPSEEK
+                    }
+                    (ProviderId::Moonshot, ProviderType::OpenaiCompletions) => {
+                        &openai::wire::MOONSHOT
+                    }
+                    (ProviderId::Minimax, ProviderType::OpenaiCompletions) => {
+                        &openai::wire::MINIMAX
+                    }
+                    (
+                        ProviderId::Xiaomimimo,
+                        ProviderType::OpenaiCompletions,
+                    ) => &openai::wire::XIAOMIMIMO,
+                    _ => {
+                        return Err(
+                            "provider does not support the configured protocol"
+                                .to_owned(),
                         );
                     }
+                };
+                let route = if provider.provider_type == ProviderType::Responses
+                {
+                    openai::wire::Route::Responses
+                } else {
+                    openai::wire::Route::Chat
+                };
+                Definition::Openai(Box::new(
+                    openai::OpenAIConfig::with_key(dialect, key)
+                        .with_base_url(&provider.base_url)
+                        .with_route(route),
+                ))
+            }
+            ProviderType::Anthropic => {
+                let dialect =
+                    match &provider.id {
+                        ProviderId::Anthropic | ProviderId::Other(_) => {
+                            &anthropic::wire::ANTHROPIC
+                        }
+                        ProviderId::Moonshot => &anthropic::wire::MOONSHOT,
+                        ProviderId::Minimax => &anthropic::wire::MINIMAX,
+                        ProviderId::Xiaomimimo => &anthropic::wire::XIAOMIMIMO,
+                        _ => return Err(
+                            "provider does not support the configured protocol"
+                                .to_owned(),
+                        ),
+                    };
+                Definition::Anthropic(Box::new(
+                    anthropic::AnthropicConfig::with_key(dialect, key)
+                        .with_base_url(&provider.base_url),
+                ))
+            }
+        };
+        Ok(Self::builder()
+            .profile(profile)
+            .upstream_id(
+                model
+                    .upstream_id
+                    .clone()
+                    .unwrap_or_else(|| model.id.clone()),
+            )
+            .definition(definition)
+            .parameters(model.extra_param.clone())
+            .http(http)
+            .auth(provider.auth.as_ref().map(Self::authenticator))
+            .timeout_ms(retry.timeout_ms)
+            .build())
+    }
+
+    /// Returns the immutable project identity and upstream-compatible input capabilities.
+    pub fn profile(&self) -> &protocol::ModelProfile {
+        &self.profile
+    }
+
+    /// Clones the shared connection pool without attaching request state.
+    pub fn http_client(&self) -> DynHttpClient {
+        self.http.clone()
+    }
+
+    /// Resolves the shared upstream authenticator before any session cache lock is taken.
+    pub async fn auth_context(
+        &self,
+    ) -> Result<Option<AuthContext>, ProviderConnectError> {
+        match &self.auth {
+            Some(auth) => Ok(Some(
+                auth.auth_context(&self.http).await.map_err(|error| {
+                    ProviderConnectError::Authentication(Box::new(error))
+                })?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Builds fresh Prepared state for a new session or a changed credential.
+    pub fn build_model(
+        &self,
+        auth: Option<&AuthContext>,
+    ) -> Result<ProviderCompletion, ProviderConnectError> {
+        if self.auth.is_some() && auth.is_none() {
+            return Err(ProviderConnectError::MissingAuthentication);
+        }
+        let timeout = self
+            .timeout_ms
+            .map(|ms| (ms > 0).then(|| Duration::from_millis(ms)));
+        Ok(match self.definition.clone() {
+            Definition::Openai(mut config) => {
+                if let Some(auth) = auth {
+                    config.api_key = auth.api_key.clone();
+                    config.account_id.clone_from(&auth.account_id);
+                    if let Some(base) = &auth.api_base {
+                        config.base_url.clone_from(base);
+                    }
+                }
+                let model = config
+                    .connect(self.http.clone())
+                    .completion(&self.upstream_id);
+                ProviderCompletion::Openai(Box::new(match timeout {
+                    Some(timeout) => model.with_idle_timeout(timeout),
+                    None => model,
+                }))
+            }
+            Definition::Anthropic(config) => {
+                let model = config
+                    .connect(self.http.clone())
+                    .completion(&self.upstream_id);
+                ProviderCompletion::Anthropic(Box::new(match timeout {
+                    Some(timeout) => model.with_idle_timeout(timeout),
+                    None => model,
+                }))
+            }
+        })
+    }
+
+    /// Preserves nested project defaults; upstream additional_params merges only top-level keys.
+    pub fn prepare(&self, mut request: CompletionRequest) -> CompletionRequest {
+        // Explicit models must work even when upstream has no catalog output limit.
+        request
+            .max_tokens
+            .get_or_insert(self.profile.max_output_tokens);
+        request.additional_params = match request.additional_params.take() {
+            Some(overrides) => {
+                let mut parameters = self.parameters.clone();
+                Self::overlay(&mut parameters, overrides);
+                Some(parameters)
+            }
+            None => {
+                (!self.parameters.is_null()).then(|| self.parameters.clone())
+            }
+        };
+        request
+    }
+
+    /// Overlays request keys recursively without changing provider wire conversion.
+    fn overlay(defaults: &mut Value, overrides: Value) {
+        match (defaults, overrides) {
+            (Value::Object(defaults), Value::Object(overrides)) => {
+                for (key, value) in overrides {
+                    Self::overlay(
+                        defaults.entry(key).or_insert(Value::Null),
+                        value,
+                    );
+                }
+            }
+            (defaults, overrides) => *defaults = overrides,
+        }
+    }
+}
+
+/// Shared provider definitions contain only configuration, authentication, and transport.
+pub struct ProviderFactory {
+    models: HashMap<String, Arc<ConfiguredModel>>,
+    failures: HashMap<String, String>,
+}
+
+impl ProviderFactory {
+    /// Builds all explicit definitions once, retaining safe failures for strict lookups.
+    pub fn new(config: config::ConfigHandle) -> Self {
+        let config = config.current();
+        let http = rig_reqwest::shared();
+        let mut models = HashMap::new();
+        let mut failures = HashMap::new();
+        for provider in &config.providers {
+            for model in &provider.models {
+                let key = format!("{}/{}", provider.id.as_str(), model.id);
+                if models.contains_key(&key) || failures.contains_key(&key) {
+                    continue;
+                }
+                match ConfiguredModel::new(
+                    provider,
+                    model,
+                    &config.retry.provider,
+                    http.clone(),
+                ) {
+                    Ok(model) => {
+                        models.insert(key, Arc::new(model));
+                    }
+                    Err(reason) => {
+                        failures.insert(key, reason);
+                    }
                 }
             }
         }
-
-        Self {
-            cache,
-            build_errors,
-        }
+        Self { models, failures }
     }
 
-    /// Look up a pre-built LLM handle by provider and model id.
-    ///
-    /// Returns `None` when the combination was not found in configuration
-    /// or failed to build at construction time.
-    pub fn get(&self, provider_id: &str, model_id: &str) -> Option<ArcLlm> {
-        self.cache
-            .get(&Self::cache_key(provider_id, model_id))
-            .map(Arc::clone)
-    }
-
-    /// Resolves a configured provider/model pair or returns its retained build failure.
+    /// Resolves a shared definition without creating a global model-history cache.
     pub fn resolve(
         &self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> Result<ArcLlm, LlmFactoryError> {
-        let key = Self::cache_key(provider_id, model_id);
-        if let Some(llm) = self.cache.get(&key) {
-            return Ok(Arc::clone(llm));
+        provider: &str,
+        model: &str,
+    ) -> Result<Arc<ConfiguredModel>, ProviderBuildError> {
+        let key = format!("{provider}/{model}");
+        if let Some(model) = self.models.get(&key) {
+            return Ok(Arc::clone(model));
         }
-        if let Some(reason) = self.build_errors.get(&key) {
-            return Err(LlmFactoryError::BuildFailed {
-                provider_id: provider_id.to_string(),
-                model_id: model_id.to_string(),
+        if let Some(reason) = self.failures.get(&key) {
+            return Err(ProviderBuildError::Invalid {
+                model: key,
                 reason: reason.clone(),
             });
         }
-
-        Err(LlmFactoryError::NotConfigured {
-            provider_id: provider_id.to_string(),
-            model_id: model_id.to_string(),
-        })
-    }
-
-    /// Cache key combining provider and model identifiers.
-    fn cache_key(provider_id: &str, model_id: &str) -> String {
-        format!("{}/{}", provider_id, model_id)
-    }
-
-    /// Build a single client for the given provider and model.
-    fn build_one(
-        provider: &LlmProvider,
-        model: &config::LlmModel,
-    ) -> Result<ArcLlm, BuildError> {
-        let model_id = model.id.as_str();
-        let upstream_id = model.upstream_id.as_deref().unwrap_or(model_id);
-        let pid = provider.id.as_str();
-        let api_key = provider
-            .api_key
-            .as_ref()
-            .map(|api_key| {
-                api_key
-                    .resolve()
-                    .map_err(|source| BuildError::ApiKeyResolve {
-                        provider_id: pid.to_string(),
-                        source,
-                    })
-            })
-            .transpose()?;
-
-        let codex_auth_file = provider.auth.as_ref().map(
-            |ProviderAuthConfig::Codex { auth_file }| {
-                resolve_codex_auth_file(auth_file)
-            },
-        );
-        let base_url = provider.base_url.clone();
-        let missing_api_key = || BuildError::MissingApiKey {
-            provider_id: pid.to_string(),
-            provider_type: provider.provider_type,
-        };
-
-        match provider.provider_type {
-            #[cfg(not(target_arch = "wasm32"))]
-            ProviderType::Responses => match &provider.id {
-                ProviderId::Openai => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::openai;
-                    let client = openai::Client::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Chatgpt => {
-                    use crate::providers::chatgpt;
-                    let client = if let Some(auth_file) = &codex_auth_file {
-                        chatgpt::Client::builder()
-                            .oauth()
-                            .auth_file(auth_file)
-                            .base_url(base_url.clone())
-                            .build()
-                            .map_err(|e| {
-                                BuildError::ClientBuild(e.to_string())
-                            })?
-                    } else {
-                        chatgpt::Client::builder()
-                            .api_key(
-                                api_key.clone().ok_or_else(missing_api_key)?,
-                            )
-                            .base_url(base_url.clone())
-                            .build()
-                            .map_err(|e| {
-                                BuildError::ClientBuild(e.to_string())
-                            })?
-                    };
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Other(_) => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::openai;
-                    let client = openai::Client::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                _ => Err(BuildError::UnsupportedProtocol {
-                    provider_id: pid.to_string(),
-                    provider_type: ProviderType::Responses,
-                }),
-            },
-            #[cfg(not(target_arch = "wasm32"))]
-            ProviderType::OpenaiCompletions => match &provider.id {
-                ProviderId::Openai => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::openai;
-                    let client = openai::CompletionsClient::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Deepseek => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::deepseek;
-                    let client = deepseek::Client::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Moonshot => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::moonshot;
-                    let client = moonshot::Client::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Minimax => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::minimax;
-                    let client = minimax::Client::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Xiaomimimo => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::xiaomimimo;
-                    let client = xiaomimimo::Client::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Other(_) => {
-                    use crate::client::BearerAuth;
-                    use crate::providers::openai;
-                    let client = openai::CompletionsClient::builder()
-                        .api_key(BearerAuth::from(
-                            api_key.clone().ok_or_else(missing_api_key)?,
-                        ))
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                _ => Err(BuildError::UnsupportedProtocol {
-                    provider_id: pid.to_string(),
-                    provider_type: ProviderType::OpenaiCompletions,
-                }),
-            },
-            #[cfg(not(target_arch = "wasm32"))]
-            ProviderType::Anthropic => match &provider.id {
-                ProviderId::Anthropic => {
-                    use crate::providers::anthropic;
-                    let client = anthropic::Client::builder()
-                        .api_key(api_key.clone().ok_or_else(missing_api_key)?)
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Moonshot => {
-                    use crate::providers::moonshot;
-                    let client = moonshot::AnthropicClient::builder()
-                        .api_key(api_key.clone().ok_or_else(missing_api_key)?)
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Minimax => {
-                    use crate::providers::minimax;
-                    let client = minimax::AnthropicClient::builder()
-                        .api_key(api_key.clone().ok_or_else(missing_api_key)?)
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Xiaomimimo => {
-                    use crate::providers::xiaomimimo;
-                    let client = xiaomimimo::AnthropicClient::builder()
-                        .api_key(api_key.clone().ok_or_else(missing_api_key)?)
-                        .base_url(base_url.clone())
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                ProviderId::Other(_) => {
-                    use crate::providers::anthropic;
-                    let client = anthropic::Client::builder()
-                        .api_key(api_key.clone().ok_or_else(missing_api_key)?)
-                        .base_url(base_url)
-                        .build()
-                        .map_err(|e| BuildError::ClientBuild(e.to_string()))?;
-                    Ok(wrap(
-                        pid,
-                        model_id,
-                        model.extra_param.clone(),
-                        client.completion_model(upstream_id),
-                    ))
-                }
-                _ => Err(BuildError::UnsupportedProtocol {
-                    provider_id: pid.to_string(),
-                    provider_type: ProviderType::Anthropic,
-                }),
-            },
-        }
-    }
-}
-
-// ── Per-provider client construction ────────────────────────────────────────
-
-/// Internal error type for per-entry build failures.
-#[derive(Debug, thiserror::Error)]
-enum BuildError {
-    #[error("client build error: {0}")]
-    ClientBuild(String),
-    #[error("api key resolve error for provider `{provider_id}`: {source}")]
-    ApiKeyResolve {
-        provider_id: String,
-        #[source]
-        source: std::env::VarError,
-    },
-    #[error(
-        "missing api key for provider `{provider_id}` and provider type `{provider_type:?}`"
-    )]
-    MissingApiKey {
-        provider_id: String,
-        provider_type: ProviderType,
-    },
-    #[error(
-        "unsupported provider type `{provider_type:?}` for provider `{provider_id}`"
-    )]
-    UnsupportedProtocol {
-        provider_id: String,
-        provider_type: ProviderType,
-    },
-}
-
-/// Resolve a ChatGPT auth.json path from explicit config, then default paths.
-fn resolve_codex_auth_file(auth_file: &Option<String>) -> PathBuf {
-    auth_file
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("CODEX_HOME")
-                .map(PathBuf::from)
-                .map(|path| path.join("auth.json"))
-        })
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".codex").join("auth.json"))
-        })
-        .unwrap_or_else(|| PathBuf::from("auth.json"))
-}
-
-/// Wrap a concrete completion model in an [`ArcLlm`] adapter.
-fn wrap<M>(
-    provider_id: &str,
-    model_id: &str,
-    model_extra_params: Value,
-    model: M,
-) -> ArcLlm
-where
-    M: CompletionModel + WasmCompatSend + WasmCompatSync + 'static,
-    M::Response: Serialize,
-    M::StreamingResponse: GetFinishReason + GetTokenUsage + Serialize,
-{
-    Arc::new(ProviderBackedLlm::new(
-        provider_id.to_string(),
-        model_id.to_string(),
-        model_extra_params,
-        model,
-    ))
-}
-
-/// Merge model-level additional parameters with request-level parameters.
-///
-/// Values in `request` override values in `defaults` when both are objects.
-fn merge_additional_params(
-    defaults: &Value,
-    request: Option<Value>,
-) -> Option<Value> {
-    match request {
-        Some(request) => {
-            if !defaults.is_null()
-                && defaults.is_object()
-                && request.is_object()
-            {
-                Some(crate::json_utils::merge(defaults.clone(), request))
-            } else {
-                Some(request)
-            }
-        }
-        None => {
-            if defaults.is_null() {
-                None
-            } else {
-                Some(defaults.clone())
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use config::AppConfig;
-    use serde_json::{Value, json};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    /// get returns None for unknown provider ids.
-    #[test]
-    fn get_returns_none_for_unknown_provider() {
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(
-            AppConfig::default(),
-        ));
-        assert!(factory.get("nonexistent", "gpt-5").is_none());
-    }
-
-    /// get returns None when the model id is not in configuration.
-    #[test]
-    fn get_returns_none_for_unknown_model() {
-        let toml = r#"
-[[providers]]
-id = "openai"
-display_name = "OpenAI"
-base_url = "https://api.openai.com/v1"
-api_key = "sk-test"
-"#;
-        let cfg: AppConfig = toml::from_str(toml).unwrap();
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
-        assert!(factory.get("openai", "nonexistent").is_none());
-    }
-
-    /// An unsupported provider_type / id combo is skipped at build time.
-    #[test]
-    fn unsupported_protocol_is_skipped() {
-        let toml = r#"
-[[providers]]
-id = "openai"
-display_name = "OpenAI"
-provider_type = "anthropic"
-base_url = "https://api.openai.com/v1"
-api_key = "sk-test"
-
-[[providers.models]]
-id = "gpt-5"
-"#;
-        let cfg: AppConfig = toml::from_str(toml).unwrap();
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
-        assert!(factory.get("openai", "gpt-5").is_none());
-    }
-
-    /// DeepSeek under openai-completions type is built and cached.
-    #[test]
-    fn deepseek_is_cached_under_openai_completions_type() {
-        let toml = r#"
-[[providers]]
-id = "deepseek"
-display_name = "DeepSeek"
-provider_type = "openai-completions"
-base_url = "https://api.deepseek.com"
-api_key = "sk-test"
-
-[[providers.models]]
-id = "deepseek-v4-flash"
-"#;
-        let cfg: AppConfig = toml::from_str(toml).unwrap();
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
-        let llm = factory.get("deepseek", "deepseek-v4-flash").unwrap();
-        assert_eq!(llm.provider_id(), "deepseek");
-        assert_eq!(llm.model_id(), "deepseek-v4-flash");
-    }
-
-    /// API keys from environment references are resolved at build time.
-    #[test]
-    fn api_key_from_env_is_resolved() {
-        #[allow(clippy::result_large_err)]
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("DEEPSEEK_API_KEY", "sk-env");
-            let toml = r#"
-[[providers]]
-id = "deepseek"
-display_name = "DeepSeek"
-provider_type = "openai-completions"
-base_url = "https://api.deepseek.com"
-
-[providers.api_key]
-env = "DEEPSEEK_API_KEY"
-
-[[providers.models]]
-id = "deepseek-v4-flash"
-"#;
-            let cfg: AppConfig = toml::from_str(toml).unwrap();
-            let factory =
-                LlmFactory::new(config::ConfigHandle::from_config(cfg));
-            let llm = factory.get("deepseek", "deepseek-v4-flash").unwrap();
-            assert_eq!(llm.provider_id(), "deepseek");
-            Ok(())
-        });
-    }
-
-    /// Unknown provider ids fall back to the default client for each protocol.
-    #[test]
-    fn other_provider_id_falls_back_to_protocol_default() {
-        let toml = r#"
-[[providers]]
-id = "custom-openai"
-display_name = "Custom OpenAI"
-provider_type = "openai-completions"
-base_url = "https://example.com/v1"
-api_key = "sk-test"
-
-[[providers.models]]
-id = "custom-model"
-"#;
-        let cfg: AppConfig = toml::from_str(toml).unwrap();
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
-        let llm = factory.get("custom-openai", "custom-model").unwrap();
-        assert_eq!(llm.provider_id(), "custom-openai");
-        assert_eq!(llm.model_id(), "custom-model");
-    }
-
-    /// Factory lookup retains the local id while the HTTP payload uses upstream_id.
-    #[tokio::test]
-    async fn configured_upstream_id_reaches_provider_request()
-    -> anyhow::Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await?;
-            let mut request = Vec::new();
-            loop {
-                let mut chunk = [0_u8; 4096];
-                let read = socket.read(&mut chunk).await?;
-                anyhow::ensure!(
-                    read > 0,
-                    "provider request ended before its body"
-                );
-                request.extend_from_slice(&chunk[..read]);
-                let Some(header_end) =
-                    request.windows(4).position(|window| window == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let headers = std::str::from_utf8(&request[..header_end])?;
-                let content_length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>())
-                    })
-                    .transpose()?
-                    .ok_or_else(|| anyhow::anyhow!("missing content-length"))?;
-                if request.len() >= header_end + 4 + content_length {
-                    break;
-                }
-            }
-            let header_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .ok_or_else(|| anyhow::anyhow!("missing header terminator"))?;
-            let payload: Value =
-                serde_json::from_slice(&request[header_end + 4..])?;
-            let upstream_model = payload["model"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing model"))?
-                .to_string();
-            let body = serde_json::json!({
-                "id": "completion-upstream-id",
-                "object": "chat.completion",
-                "created": 0,
-                "model": upstream_model,
-                "system_fingerprint": null,
-                "choices": [{
-                    "index": 0,
-                    "message": { "role": "assistant", "content": "ok" },
-                    "logprobs": null,
-                    "finish_reason": "stop"
-                }],
-                "usage": { "prompt_tokens": 1, "total_tokens": 2 }
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            socket.write_all(response.as_bytes()).await?;
-            anyhow::Ok(upstream_model)
-        });
-        let document = format!(
-            r#"
-[[providers]]
-id = "custom-openai"
-display_name = "Custom OpenAI"
-provider_type = "openai-completions"
-base_url = "http://{address}"
-api_key = "sk-test"
-
-[[providers.models]]
-id = "kimi-k3"
-upstream_id = "moonshotai/kimi-k3"
-"#
-        );
-        let config: AppConfig = toml::from_str(&document)?;
-        let factory =
-            LlmFactory::new(config::ConfigHandle::from_config(config));
-        let llm = factory
-            .get("custom-openai", "kimi-k3")
-            .ok_or_else(|| anyhow::anyhow!("local model lookup failed"))?;
-
-        llm.completion(
-            CompletionRequest::builder()
-                .chat_history(crate::OneOrMany::one("describe".into()))
-                .build(),
-        )
-        .await?;
-        let upstream_model = server.await??;
-
-        anyhow::ensure!(llm.model_id() == "kimi-k3");
-        anyhow::ensure!(upstream_model == "moonshotai/kimi-k3");
-        Ok(())
-    }
-
-    /// chatgpt with `auth.type = \"codex\"` builds without a local API key.
-    #[test]
-    fn chatgpt_with_codex_auth_is_built_without_api_key() {
-        let toml = r#"
-[[providers]]
-id = "chatgpt"
-display_name = "ChatGPT"
-provider_type = "responses"
-base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "codex", auth_file = "/tmp/chatgpt-codex-auth.json" }
-
-[[providers.models]]
-id = "gpt-5.4"
-"#;
-        let cfg: AppConfig = toml::from_str(toml).unwrap();
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
-        let llm = factory.get("chatgpt", "gpt-5.4").unwrap();
-        assert_eq!(llm.provider_id(), "chatgpt");
-        assert_eq!(llm.model_id(), "gpt-5.4");
-    }
-
-    /// provider without API key is not built unless auth mode is explicitly configured.
-    #[test]
-    fn non_chatgpt_provider_without_api_key_is_skipped() {
-        let toml = r#"
-[[providers]]
-id = "openai"
-display_name = "OpenAI"
-provider_type = "responses"
-base_url = "https://api.openai.com/v1"
-
-[[providers.models]]
-id = "gpt-5"
-"#;
-        let cfg: AppConfig = toml::from_str(toml).unwrap();
-        let factory = LlmFactory::new(config::ConfigHandle::from_config(cfg));
-        assert!(factory.get("openai", "gpt-5").is_none());
-    }
-
-    /// model defaults and request params are merged when both are JSON objects.
-    #[test]
-    fn merge_additional_params_merges_json_objects() {
-        let defaults = json!({
-            "reasoning": {
-                "type": "enabled",
-            },
-            "seed": 42,
-        });
-        let request = json!({
-            "seed": 100,
-            "temperature": 0.2,
-        });
-        let merged = merge_additional_params(&defaults, Some(request))
-            .expect("merged params should be present");
-        assert_eq!(merged["reasoning"]["type"], json!("enabled"));
-        assert_eq!(merged["seed"], json!(100));
-        assert_eq!(merged["temperature"], json!(0.2));
-    }
-
-    /// request-level additional params override model defaults when keys conflict.
-    #[test]
-    fn merge_additional_params_requests_override_defaults() {
-        let defaults = json!({
-            "nested": {
-                "enabled": true,
-            },
-        });
-        let request = json!({
-            "nested": false,
-        });
-        let merged = merge_additional_params(&defaults, Some(request))
-            .expect("merged params should be present");
-        assert_eq!(merged["nested"], json!(false));
-    }
-
-    /// request-only additional params are passed through without defaults.
-    #[test]
-    fn merge_additional_params_request_only() {
-        let defaults = Value::Null;
-        let request = json!({
-            "temperature": 0.2,
-        });
-        let merged =
-            merge_additional_params(&defaults, Some(request.clone())).unwrap();
-        assert_eq!(merged, request);
+        Err(ProviderBuildError::NotConfigured(key))
     }
 }

@@ -20,21 +20,32 @@ pub enum AcpMappingError {
     /// A typed runtime payload could not be represented as JSON extension data.
     #[error("ACP event serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    /// A serialized internal event lost the accounting slot required for safe projection.
+    #[error("ACP event is missing its usage projection slot")]
+    UsageProjection,
 }
 
 /// Maps kernel events to native ACP v2 updates or reserved extension updates.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AcpEventMapper;
+pub struct AcpEventMapper<'a> {
+    event: &'a AgentEvent,
+    metadata: wire::Meta,
+}
 
-impl AcpEventMapper {
+impl<'a> AcpEventMapper<'a> {
     /// Converts one correlated kernel event into one or more ordered ACP updates.
     pub fn map(
         event: AgentEvent,
     ) -> Result<Vec<wire::SessionUpdate>, AcpMappingError> {
-        let metadata = Self::metadata(&event)?;
+        AcpEventMapper::new(&event)?.updates()
+    }
+
+    /// Projects all updates while borrowing one event and its correlated metadata.
+    pub fn updates(&self) -> Result<Vec<wire::SessionUpdate>, AcpMappingError> {
+        let event = self.event;
+        let metadata = self.metadata.clone();
         let updates = match &event.payload {
             AgentEventPayload::QueueChanged { .. } => {
-                vec![Self::extension_update(&event)?]
+                vec![self.extension_update()?]
             }
             AgentEventPayload::MessageTextDelta { message_id, delta } => {
                 vec![wire::SessionUpdate::AgentMessageChunk(
@@ -93,18 +104,18 @@ impl AcpEventMapper {
                                 | ContentBlock::ToolCall { .. } => None,
                             })
                             .collect::<Vec<_>>();
-                        if !reasoning.is_empty() {
-                            updates.push(wire::SessionUpdate::AgentThought(
-                                wire::AgentThought::new(message_id)
-                                    .content(reasoning)
-                                    .meta(metadata.clone()),
-                            ));
-                        }
+                        // A full thought snapshot must also clear previously streamed reasoning.
+                        updates.push(wire::SessionUpdate::AgentThought(
+                            wire::AgentThought::new(message_id)
+                                .content(reasoning)
+                                .meta(metadata.clone()),
+                        ));
                         updates.extend(blocks.iter().filter_map(|block| {
                             let ContentBlock::ToolCall {
                                 tool_call_id,
                                 name,
                                 arguments,
+                                ..
                             } = block
                             else {
                                 return None;
@@ -235,7 +246,7 @@ impl AcpEventMapper {
                     MessageContent::System { .. }
                     | MessageContent::Extension { .. }
                     | MessageContent::CompactionSummary { .. } => {
-                        vec![Self::extension_update(&event)?]
+                        vec![self.extension_update()?]
                     }
                     MessageContent::SlashCommand { message: command } => {
                         match command {
@@ -386,16 +397,16 @@ impl AcpEventMapper {
                 )]
             }
             AgentEventPayload::RunStart { .. } => vec![
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 wire::SessionUpdate::StateUpdate(wire::StateUpdate::Running(
                     wire::RunningStateUpdate::new().meta(metadata),
                 )),
             ],
             AgentEventPayload::RunEnd { .. } => {
-                vec![Self::extension_update(&event)?]
+                vec![self.extension_update()?]
             }
             AgentEventPayload::SlashCommandStart { .. } => vec![
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 wire::SessionUpdate::StateUpdate(wire::StateUpdate::Running(
                     wire::RunningStateUpdate::new().meta(metadata),
                 )),
@@ -419,7 +430,7 @@ impl AcpEventMapper {
                     }
                 };
                 vec![
-                    Self::extension_update(&event)?,
+                    self.extension_update()?,
                     wire::SessionUpdate::StateUpdate(wire::StateUpdate::Idle(
                         wire::IdleStateUpdate::new()
                             .stop_reason(wire::StopReason::from(StopReasonOf(
@@ -472,21 +483,25 @@ impl AcpEventMapper {
                     wire::AvailableCommandsUpdate::new(commands).meta(metadata),
                 )]
             }
+            // Context usage follows Kernel fallback; metadata still preserves reported counters.
             AgentEventPayload::UsageUpdated {
                 usage,
                 context_window,
-            } => vec![wire::SessionUpdate::UsageUpdate(
-                wire::UsageUpdate::new(usage.total_tokens, *context_window)
-                    .meta(metadata),
-            )],
+            } => match usage.as_ref().context_tokens() {
+                Some(used) => vec![wire::SessionUpdate::UsageUpdate(
+                    wire::UsageUpdate::new(used, *context_window)
+                        .meta(metadata),
+                )],
+                None => vec![self.extension_update()?],
+            },
             AgentEventPayload::AgentSettled { outcome, usage, .. } => vec![
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 wire::SessionUpdate::StateUpdate(wire::StateUpdate::Idle(
                     wire::IdleStateUpdate::new()
                         .stop_reason(wire::StopReason::from(StopReasonOf(
                             outcome,
                         )))
-                        .usage(wire::Usage::from(UsageOf(usage)))
+                        .usage(UsageOf(usage).to_acp_usage())
                         .meta(metadata),
                 )),
             ],
@@ -521,7 +536,7 @@ impl AcpEventMapper {
             } => vec![
                 // The lifecycle event keeps this group non-empty once replay
                 // drops its state update, so recovery still sees the start.
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 wire::SessionUpdate::StateUpdate(wire::StateUpdate::Running(
                     wire::RunningStateUpdate::new().meta(metadata.clone()),
                 )),
@@ -566,7 +581,7 @@ impl AcpEventMapper {
             } => {
                 // Like AgentSettled, the lifecycle event carries the end boundary
                 // through replay after the idle state is dropped.
-                let mut updates = vec![Self::extension_update(&event)?];
+                let mut updates = vec![self.extension_update()?];
                 if !result_emitted {
                     // No result message closed the terminal and tool; close them
                     // here without inventing an exit code or signal.
@@ -604,7 +619,7 @@ impl AcpEventMapper {
                 updates
             }
             AgentEventPayload::CompactionStart { run_id, .. } => vec![
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 wire::SessionUpdate::CompactionUpdate(
                     wire::CompactionUpdate::new(
                         CompactionIdOf(run_id).to_string(),
@@ -645,7 +660,7 @@ impl AcpEventMapper {
                     }
                 };
                 vec![
-                    Self::extension_update(&event)?,
+                    self.extension_update()?,
                     wire::SessionUpdate::CompactionUpdate(
                         update.meta(metadata),
                     ),
@@ -656,7 +671,7 @@ impl AcpEventMapper {
                 point,
                 message,
             } => vec![
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 Self::warning_notice(
                     "Extension handler failed",
                     format!("{extension_id} ({point}): {message}"),
@@ -664,7 +679,7 @@ impl AcpEventMapper {
                 ),
             ],
             AgentEventPayload::SkillDiagnostic { diagnostic } => vec![
-                Self::extension_update(&event)?,
+                self.extension_update()?,
                 Self::warning_notice(
                     "Skill expansion failed",
                     diagnostic.message.clone(),
@@ -673,7 +688,7 @@ impl AcpEventMapper {
             ],
             AgentEventPayload::McpElicitationRequested { .. }
             | AgentEventPayload::McpElicitationResolved { .. } => {
-                vec![Self::extension_update(&event)?]
+                vec![self.extension_update()?]
             }
             AgentEventPayload::TurnStart { .. }
             | AgentEventPayload::MessageStart { .. }
@@ -683,14 +698,14 @@ impl AcpEventMapper {
             | AgentEventPayload::TurnEnd { .. } => {
                 // Lifecycle events without a lossless native ACP v2 shape stay
                 // available through the reserved extension update.
-                vec![Self::extension_update(&event)?]
+                vec![self.extension_update()?]
             }
         };
         Ok(updates)
     }
 
-    /// Builds namespaced ACP metadata with precision-safe Turn timing fields.
-    pub fn metadata(event: &AgentEvent) -> Result<wire::Meta, AcpMappingError> {
+    /// Captures precision-safe metadata once for every projection of this borrowed event.
+    pub fn new(event: &'a AgentEvent) -> Result<Self, AcpMappingError> {
         let mut product = serde_json::Map::from_iter([
             (
                 "turnId".to_string(),
@@ -714,10 +729,12 @@ impl AcpEventMapper {
                 if let MessageContent::Assistant { metadata, .. } =
                     &message.content
                 {
-                    product.insert(
-                        "assistant".to_string(),
-                        serde_json::to_value(metadata)?,
-                    );
+                    let mut assistant = serde_json::to_value(metadata)?;
+                    *assistant
+                        .get_mut("usage")
+                        .ok_or(AcpMappingError::UsageProjection)? =
+                        UsageOf(&metadata.usage).metadata();
+                    product.insert("assistant".to_string(), assistant);
                 }
                 match &message.content {
                     MessageContent::ExpandedUser { expansion } => {
@@ -770,9 +787,18 @@ impl AcpEventMapper {
                     | MessageContent::CompactionSummary { .. } => {}
                 }
             }
-            AgentEventPayload::UsageUpdated { usage, .. } => {
-                product
-                    .insert("usage".to_string(), serde_json::to_value(usage)?);
+            AgentEventPayload::UsageUpdated {
+                usage,
+                context_window,
+            } => {
+                product.insert("usage".to_string(), UsageOf(usage).metadata());
+                product.insert(
+                    "contextWindow".to_string(),
+                    context_window.to_string().into(),
+                );
+            }
+            AgentEventPayload::AgentSettled { usage, .. } => {
+                product.insert("usage".to_string(), UsageOf(usage).metadata());
             }
             AgentEventPayload::QueueChanged { .. }
             | AgentEventPayload::RunStart { .. }
@@ -799,8 +825,7 @@ impl AcpEventMapper {
             | AgentEventPayload::UserBashFinished { .. }
             | AgentEventPayload::UserBashOutput { .. }
             | AgentEventPayload::ActionRequired { .. }
-            | AgentEventPayload::ActionResolved { .. }
-            | AgentEventPayload::AgentSettled { .. } => {}
+            | AgentEventPayload::ActionResolved { .. } => {}
             AgentEventPayload::CompactionStart { reason, .. } => {
                 product.insert(
                     ProductIdentity::ACP_COMPACTION_METADATA.to_string(),
@@ -817,6 +842,12 @@ impl AcpEventMapper {
                         let mut value = serde_json::to_value(result)?;
                         if let serde_json::Value::Object(fields) = &mut value {
                             fields.remove("summary");
+                            if let Some(usage) = &result.usage {
+                                fields.insert(
+                                    "usage".into(),
+                                    UsageOf(usage).metadata(),
+                                );
+                            }
                         }
                         Some(value)
                     }
@@ -841,10 +872,18 @@ impl AcpEventMapper {
                 );
             }
         }
-        Ok(wire::Meta::from_iter([(
-            ProductIdentity::ACP_NAMESPACE.to_string(),
-            serde_json::Value::Object(product),
-        )]))
+        Ok(Self {
+            event,
+            metadata: wire::Meta::from_iter([(
+                ProductIdentity::ACP_NAMESPACE.to_string(),
+                serde_json::Value::Object(product),
+            )]),
+        })
+    }
+
+    /// Clones only the transport metadata required by a separate ACP update owner.
+    pub fn metadata(&self) -> wire::Meta {
+        self.metadata.clone()
     }
 
     /// Builds a live-only warning notice from an already sanitized diagnostic.
@@ -963,16 +1002,33 @@ impl AcpEventMapper {
     }
 
     /// Preserves pi-only lifecycle data through ACP v2's custom update variant.
-    fn extension_update(
-        event: &AgentEvent,
-    ) -> Result<wire::SessionUpdate, AcpMappingError> {
-        let payload = serde_json::to_value(&event.payload)?;
+    fn extension_update(&self) -> Result<wire::SessionUpdate, AcpMappingError> {
+        let event = self.event;
+        let mut payload = serde_json::to_value(&event.payload)?;
+        // Storage envelopes never become browser accounting payloads.
+        let usage_projection = match &event.payload {
+            AgentEventPayload::UsageUpdated { usage, .. }
+            | AgentEventPayload::AgentSettled { usage, .. } => {
+                Some(("/usage", usage))
+            }
+            AgentEventPayload::CompactionEnd {
+                outcome: CompactionOutcome::Completed { result },
+                ..
+            } => result
+                .usage
+                .as_ref()
+                .map(|usage| ("/outcome/result/usage", usage)),
+            _ => None,
+        };
+        if let Some((path, usage)) = usage_projection {
+            *payload
+                .pointer_mut(path)
+                .ok_or(AcpMappingError::UsageProjection)? =
+                UsageOf(usage).metadata();
+        }
         let fields = BTreeMap::from([
             ("payload".to_string(), payload),
-            (
-                "_meta".to_string(),
-                serde_json::to_value(Self::metadata(event)?)?,
-            ),
+            ("_meta".to_string(), serde_json::to_value(&self.metadata)?),
         ]);
         Ok(wire::SessionUpdate::Other(wire::OtherSessionUpdate::new(
             ProductIdentity::ACP_EVENT_UPDATE,
@@ -1043,14 +1099,40 @@ impl From<StopReasonOf<'_>> for wire::StopReason {
 /// Borrows a run's accumulated model usage for the ACP idle state.
 pub(crate) struct UsageOf<'a>(pub(crate) &'a ModelUsage);
 
-impl From<UsageOf<'_>> for wire::Usage {
-    /// Renames Kernel token fields to ACP's; unknown reasoning stays omitted.
-    fn from(usage: UsageOf<'_>) -> Self {
-        let usage = usage.0;
-        Self::new(usage.total_tokens, usage.input_tokens, usage.output_tokens)
+impl UsageOf<'_> {
+    /// Standard ACP usage is absent when any required counter was not reported.
+    pub(crate) fn to_acp_usage(&self) -> Option<wire::Usage> {
+        let usage = self.0.as_ref();
+        Some(
+            wire::Usage::new(
+                usage.total_tokens?,
+                usage.input_tokens?,
+                usage.output_tokens?,
+            )
             .thought_tokens(usage.reasoning_tokens)
-            .cached_read_tokens(usage.cache_read_tokens)
-            .cached_write_tokens(usage.cache_write_tokens)
+            .cached_read_tokens(usage.cached_input_tokens)
+            .cached_write_tokens(usage.cache_creation_input_tokens),
+        )
+    }
+
+    /// Preserves unknown counters and integers beyond JavaScript's safe numeric range.
+    pub(crate) fn metadata(&self) -> serde_json::Value {
+        let usage = self.0.as_ref();
+        serde_json::Value::Object(
+            [
+                ("input_tokens", usage.input_tokens),
+                ("output_tokens", usage.output_tokens),
+                ("cache_read_tokens", usage.cached_input_tokens),
+                ("cache_write_tokens", usage.cache_creation_input_tokens),
+                ("reasoning_tokens", usage.reasoning_tokens),
+                ("total_tokens", usage.total_tokens),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| {
+                value.map(|value| (name.to_owned(), value.to_string().into()))
+            })
+            .collect(),
+        )
     }
 }
 
@@ -1061,5 +1143,120 @@ impl std::fmt::Display for CompactionIdOf<'_> {
     /// Derives a Session-unique id from the compaction's own operation id.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "compaction-{}", self.0)
+    }
+}
+
+/// Owns a disposable tree snapshot so hidden history can be removed before serialization.
+pub(crate) struct SessionTreeOf(pub(crate) protocol::SessionTreeSnapshot);
+
+impl SessionTreeOf {
+    /// Consumes only the snapshot, preserving stored history and unrelated user JSON.
+    pub(crate) fn into_value(
+        mut self,
+    ) -> Result<serde_json::Value, AcpMappingError> {
+        // Strip private payloads in place; serializing first would copy all discarded bytes.
+        for entry in &mut self.0.entries {
+            let usage_path = match entry.kind.as_str() {
+                "message"
+                    if entry
+                        .payload
+                        .pointer("/content/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("assistant") =>
+                {
+                    if let Some(content) = entry
+                        .payload
+                        .get_mut("content")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        content.remove("model_message");
+                    }
+                    "/content/metadata/usage"
+                }
+                "compaction" => {
+                    // The retained tail restores model context and duplicates private native messages.
+                    if let Some(payload) = entry.payload.as_object_mut() {
+                        payload.remove("retainedTail");
+                    }
+                    "/usage"
+                }
+                _ => continue,
+            };
+            if let Some(slot) = entry
+                .payload
+                .pointer_mut(usage_path)
+                .filter(|slot| !slot.is_null())
+            {
+                let usage: ModelUsage = serde_json::from_value(slot.take())?;
+                *slot = UsageOf(&usage).metadata();
+            }
+        }
+        Ok(serde_json::to_value(self.0)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Tree inspection must not expose native replay or round token counts through JSON numbers.
+    #[test]
+    fn tree_projection_hides_native_without_rewriting_user_json() {
+        let usage = serde_json::to_value(ModelUsage::from(
+            protocol::Usage::new()
+                .input_tokens(0)
+                .total_tokens(9007199254740993),
+        ))
+        .expect("usage");
+        let arbitrary = json!({"model_message":"user-owned","retainedTail":["user-owned"],"usage":{"number":123}});
+        let entries=[
+            ("message",json!({"content":{"type":"assistant","blocks":[{"type":"text","text":"answer"}],"model_message":{"cipher":"sensitive-native"},"metadata":{"usage":usage.clone()}}})),
+            ("compaction",json!({"summary":"summary","usage":usage,"retainedTail":[{"content":{"model_message":{"cipher":"sensitive-native"}}}]})),
+            ("message",json!({"content":{"type":"tool_result","details":arbitrary}})),
+        ].into_iter().enumerate().map(|(index,(kind,payload))|protocol::SessionTreeEntry::builder().entry_id(protocol::EntryId::try_from(format!("entry-{index}")).expect("entry ID")).kind(kind.into()).timestamp_ms(protocol::TimestampMs::from(1)).payload(payload).build()).collect();
+        let tree = protocol::SessionTreeSnapshot::builder()
+            .session_id(protocol::SessionId::try_from("s").expect("session ID"))
+            .lane(protocol::LaneId::try_from("main").expect("lane"))
+            .entries(entries)
+            .build();
+        let before = serde_json::to_value(&tree).expect("source");
+        // Only the independently owned response snapshot is consumed, never the stored source.
+        let projected = SessionTreeOf(tree.clone())
+            .into_value()
+            .expect("projection");
+        assert!(!projected.to_string().contains("sensitive-native"));
+        assert_eq!(
+            projected["entries"][0]["payload"]["content"]["metadata"]["usage"]
+                ["total_tokens"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            projected["entries"][1]["payload"]["usage"]["total_tokens"],
+            "9007199254740993"
+        );
+        // Consuming usage must retain reported zero and must not fabricate absent counters.
+        assert_eq!(
+            projected["entries"][1]["payload"]["usage"]["input_tokens"],
+            "0"
+        );
+        assert!(
+            projected["entries"][1]["payload"]["usage"]
+                .get("output_tokens")
+                .is_none()
+        );
+        assert!(
+            projected["entries"][1]["payload"]
+                .get("retainedTail")
+                .is_none()
+        );
+        assert_eq!(
+            projected["entries"][2]["payload"]["content"]["details"],
+            arbitrary
+        );
+        assert_eq!(
+            serde_json::to_value(&tree).expect("unchanged source"),
+            before
+        );
     }
 }

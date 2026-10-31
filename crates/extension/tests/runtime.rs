@@ -279,12 +279,14 @@ async fn runtime_applies_typed_composition_rules() {
         .emit_tool_call(
             ToolCallEvent {
                 metadata: None,
-                call: ToolCall {
-                    tool_call_id: ToolCallId::try_from("tool-call-1")
-                        .expect("tool call id"),
-                    name: "read".to_string(),
-                    arguments: serde_json::json!({ "path": "README.md" }),
-                },
+                call: ToolCall::builder()
+                    .tool_call_id(
+                        ToolCallId::try_from("tool-call-1")
+                            .expect("tool call id"),
+                    )
+                    .name("read".to_string())
+                    .arguments(serde_json::json!({ "path": "README.md" }))
+                    .build(),
             },
             &context,
         )
@@ -364,12 +366,13 @@ async fn runtime_does_not_serialize_parallel_tool_updates_globally() {
         Arc::new(RecordingDiagnostics::default()),
     );
     let context = extension_context();
-    let call = ToolCall {
-        tool_call_id: ToolCallId::try_from("tool-call-concurrent")
-            .expect("tool call id"),
-        name: "read".to_string(),
-        arguments: serde_json::json!({ "path": "README.md" }),
-    };
+    let call = ToolCall::builder()
+        .tool_call_id(
+            ToolCallId::try_from("tool-call-concurrent").expect("tool call id"),
+        )
+        .name("read".to_string())
+        .arguments(serde_json::json!({ "path": "README.md" }))
+        .build();
     let event = ToolExecutionUpdateEvent {
         call,
         partial_result: ToolResult::builder()
@@ -421,9 +424,6 @@ fn public_point_catalog_contains_only_pi_non_ui_hooks() {
             "message_update",
             "message_end",
             "context",
-            "before_provider_request",
-            "before_provider_headers",
-            "after_provider_response",
             "model_select",
             "thinking_level_select",
             "tool_execution_start",

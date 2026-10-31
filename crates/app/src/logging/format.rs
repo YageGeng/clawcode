@@ -13,6 +13,7 @@ use tracing_subscriber::fmt::format::{
 use tracing_subscriber::fmt::time::{ChronoLocal, FormatTime};
 use tracing_subscriber::registry::LookupSpan;
 
+use super::telemetry::RigSpan;
 use super::trace::TraceContext;
 
 const LOCAL_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -51,6 +52,21 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
+        // CLOSE events retain span metadata; ordinary spans stay silent.
+        let telemetry = if event.metadata().is_span() {
+            if !RigSpan::accepts(event.metadata()) {
+                return Ok(());
+            }
+            let Some(span) = context.parent_span() else {
+                return Ok(());
+            };
+            if span.extensions().get::<RigSpan>().is_none() {
+                return Ok(());
+            }
+            Some(span)
+        } else {
+            None
+        };
         self.timer.format_time(&mut writer)?;
         // A custom formatter must consume the ANSI capability exposed by the
         // layer; `with_ansi` does not style custom event output automatically.
@@ -77,7 +93,11 @@ where
             None => write!(writer, "-")?,
         }
         write!(writer, "] {} | ", EventSource::from(event.metadata()))?;
-        if event.metadata().target() == ACP_INCOMING_ACTOR_TARGET {
+        if let Some(span) = telemetry {
+            if let Some(record) = span.extensions().get::<RigSpan>() {
+                write!(writer, "{record}")?;
+            }
+        } else if event.metadata().target() == ACP_INCOMING_ACTOR_TARGET {
             // The ACP SDK recursively Debug-formats its handler chain, so the
             // final field can grow into an unreadable wall of escaped slashes.
             let mut fields = AcpFields {

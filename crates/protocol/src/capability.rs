@@ -352,13 +352,7 @@ pub struct CompactionData {
 
 /// Persisted identity and exact interval for one completed compaction.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    typed_builder::TypedBuilder,
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionResult {
@@ -382,13 +376,14 @@ pub struct CompactionResult {
 }
 
 /// Typed terminal state for every started compaction operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CompactionOutcome {
     /// Summary generation and persistence completed successfully.
     Completed {
         /// Complete persisted result used by live and replay clients.
-        result: CompactionResult,
+        // Completed summaries should not inflate failed/cancelled events.
+        result: Box<CompactionResult>,
     },
     /// Compaction failed with a stable client-facing message.
     Failed {
@@ -483,13 +478,7 @@ pub enum CompactionUsageCause {
 
 /// Complete payload of compaction provider usage accounting.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    typed_builder::TypedBuilder,
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionUsageRecord {

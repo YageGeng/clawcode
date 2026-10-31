@@ -887,7 +887,8 @@ impl EventSink for ProjectionSink {
         } else {
             Vec::new()
         };
-        let metadata = AcpEventMapper::metadata(&event).map_err(|error| {
+        // Reuse one metadata projection for the group and its individual updates.
+        let mapper = AcpEventMapper::new(&event).map_err(|error| {
             tracing::error!(
                 "failed to map ACP metadata for Session {}: {}",
                 self.session_id,
@@ -924,7 +925,8 @@ impl EventSink for ProjectionSink {
             }),
             _ => None,
         };
-        let updates = AcpEventMapper::map(event).map_err(|error| {
+        let metadata = mapper.metadata();
+        let updates = mapper.updates().map_err(|error| {
             tracing::error!(
                 "failed to map ACP updates for Session {} at sequence {}: {}",
                 self.session_id,
@@ -933,6 +935,9 @@ impl EventSink for ProjectionSink {
             );
             SinkError::Consumer(error.to_string())
         })?;
+        // Release native event payloads before publishing or waiting for downstream capacity.
+        drop(mapper);
+        drop(event);
         let builder = EventGroup::builder()
             .sequence(sequence)
             .metadata(metadata)
@@ -1013,8 +1018,8 @@ mod tests {
     use protocol::{
         AgentEvent, AgentEventPayload, AgentOutcome, CompactionOutcome,
         CompactionReason, EventMetadata, MessageId, ModelFinal, ModelProfile,
-        ModelRequest, ModelStreamEvent, ModelUsage, RunId, Sequence, SessionId,
-        StopReason, TimestampMs, TurnId,
+        ModelRequest, ModelStreamEvent, RunId, Sequence, SessionId, StopReason,
+        TimestampMs, TurnId,
     };
     use store::{JsonlStoreFactory, SessionCreateOptions, SystemClock};
     use tokio_util::sync::CancellationToken;
@@ -1050,17 +1055,18 @@ mod tests {
             _cancellation: CancellationToken,
         ) -> Result<ModelStream, ModelError> {
             Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-                ModelFinal {
-                    stop_reason: StopReason::EndTurn,
-                    raw_stop_reason: None,
-                    usage: ModelUsage::builder()
-                        .input_tokens(0)
-                        .output_tokens(0)
-                        .cache_read_tokens(0)
-                        .cache_write_tokens(0)
-                        .total_tokens(0)
-                        .build(),
-                },
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(0)
+                            .output_tokens(0)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(0),
+                    ))
+                    .build(),
             ))])))
         }
     }

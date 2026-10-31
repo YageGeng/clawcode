@@ -111,10 +111,7 @@ async fn concurrent_same_name_spawn_survives_cooperative_yield() {
             if request.messages.last().is_some_and(|message| {
                 text(&message.content) == "delegate twice"
             }) {
-                let mut events = ["one", "two"].into_iter().map(|id| ModelStreamEvent::ToolCall(ToolCall {
-                tool_call_id: ToolCallId::try_from(id).expect("id"), name: "background_subagent".into(),
-                arguments: serde_json::json!({"action":"spawn","name":"reader","message":"answer"}),
-            })).collect::<Vec<_>>();
+                let mut events = ["one", "two"].into_iter().map(|id| ModelStreamEvent::ToolCall(ToolCall::builder().tool_call_id(ToolCallId::try_from(id).expect("id")).name("background_subagent".into()).arguments(serde_json::json!({"action":"spawn","name":"reader","message":"answer"})).build())).collect::<Vec<_>>();
                 events.push(finished(StopReason::ToolUse));
                 Route::Events(events)
             } else {
@@ -199,12 +196,16 @@ fn background_test(
         let input = text(&message.content);
         if let Some(json) = input.strip_prefix("bg:") {
             Route::Events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("background-call")
-                        .expect("id"),
-                    name: "background_subagent".into(),
-                    arguments: serde_json::from_str(json).expect("args"),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("background-call")
+                                .expect("id"),
+                        )
+                        .name("background_subagent".into())
+                        .arguments(serde_json::from_str(json).expect("args"))
+                        .build(),
+                ),
                 finished(StopReason::ToolUse),
             ])
         } else if matches!(message.content, MessageContent::ToolResult { .. })

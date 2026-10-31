@@ -1,45 +1,27 @@
-//! Minimal factory example.
-//!
-//! Run with:
-//! `cargo run -p provider --example factory_say_hi -- <provider_id> <model_id>`
+//! Uses the active configured model through upstream rig-core.
 
-use provider::completion::CompletionRequest;
-use provider::factory::LlmFactory;
-use provider::message::Message;
+use provider::ProviderFactory;
+use rig_core::completion::CompletionRequest;
 
-/// Loads the default app config, builds the factory cache, selects one provider/model,
-/// and asks the model to say hi.
+/// Resolves authentication and performs one explicit example request.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provider_id = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "deepseek".to_string());
-    let model_id = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "deepseek-v4-flash".to_string());
-
     let config = config::load()?;
-    let factory = LlmFactory::new(config);
-    let llm = factory.get(&provider_id, &model_id).ok_or_else(|| {
-        format!("provider/model not found or failed to build: {provider_id}/{model_id}")
-    })?;
-
-    // Build a minimal provider-agnostic request with one user message.
-    let request = CompletionRequest::builder()
-        .chat_history(provider::OneOrMany::one(Message::user(
-            "Say hi in one short sentence.",
-        )))
-        .build();
-
-    let response = llm.completion(request).await?;
-    println!(
-        "provider={} model={} message_id={:?}",
-        llm.provider_id(),
-        llm.model_id(),
-        response.message_id
-    );
-
-    println!("{}", serde_json::to_string(&response.choice)?);
-
+    let active = config.current().active_model.clone();
+    let (provider, model) =
+        active.split_once('/').ok_or("invalid active model")?;
+    let factory = ProviderFactory::new(config);
+    let configured = factory.resolve(provider, model)?;
+    let auth = configured.auth_context().await?;
+    let model = configured
+        .build_model(auth.as_ref())?
+        .with_transport(configured.http_client());
+    let response =
+        model
+            .call(configured.prepare(CompletionRequest::new(
+                "Say hi in one short sentence.",
+            )))
+            .await?;
+    println!("{}", response.text());
     Ok(())
 }

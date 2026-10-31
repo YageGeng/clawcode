@@ -39,7 +39,7 @@ impl CompactionLifecycle<'_> {
                     run_id: self.run_id.clone(),
                     reason: self.reason,
                     outcome: protocol::CompactionOutcome::Completed {
-                        result: result.clone(),
+                        result: Box::new(result.clone()),
                     },
                 },
             )

@@ -4,7 +4,7 @@ use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, CompactionOutcome,
     CompactionReason, CompactionResult, CompactionSummaryMessage, ContentBlock,
     EntryId, EventMetadata, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelUsage, RunId, Sequence, SlashCommandAliasKind,
+    MessageTiming, RunId, Sequence, SlashCommandAliasKind,
     SlashCommandDefinition, SlashCommandSource, TimestampMs, ToolCall,
     ToolCallId, ToolResult, TurnId,
 };
@@ -47,12 +47,13 @@ fn lifecycle_events_share_turn_and_timestamp_metadata() {
         },
         payload: AgentEventPayload::ToolExecutionStart {
             run_id: RunId::try_from("run-1").expect("valid run id"),
-            call: ToolCall {
-                tool_call_id: ToolCallId::try_from("call-1")
-                    .expect("valid tool call id"),
-                name: "read".to_string(),
-                arguments: serde_json::json!({ "path": "README.md" }),
-            },
+            call: ToolCall::builder()
+                .tool_call_id(
+                    ToolCallId::try_from("call-1").expect("valid tool call id"),
+                )
+                .name("read".to_string())
+                .arguments(serde_json::json!({ "path": "README.md" }))
+                .build(),
             cwd: "/work".into(),
             locations: Vec::new(),
         },
@@ -161,13 +162,14 @@ fn compaction_summary_message_round_trips_as_typed_content() {
 /// Compaction terminal events distinguish success, failure, and cancellation.
 #[test]
 fn compaction_end_round_trips_typed_outcomes() {
-    let usage = ModelUsage::builder()
-        .input_tokens(100)
-        .output_tokens(20)
-        .cache_read_tokens(5)
-        .cache_write_tokens(0)
-        .total_tokens(125)
-        .build();
+    let usage = protocol::ModelUsage::from(
+        protocol::Usage::new()
+            .input_tokens(100)
+            .output_tokens(20)
+            .cached_input_tokens(5)
+            .cache_creation_input_tokens(0)
+            .total_tokens(125),
+    );
     let completed = AgentEvent {
         metadata: EventMetadata {
             turn_id: TurnId::try_from("turn-compaction").expect("turn id"),
@@ -191,7 +193,8 @@ fn compaction_end_round_trips_typed_outcomes() {
                     .usage(Some(usage))
                     .started_at_ms(TimestampMs::from(1_725_000_001_003))
                     .ended_at_ms(TimestampMs::from(1_725_000_001_004))
-                    .build(),
+                    .build()
+                    .into(),
             },
         },
     };
@@ -211,7 +214,10 @@ fn compaction_end_round_trips_typed_outcomes() {
     let value = serde_json::to_value(&completed).expect("serialize completed");
     assert_eq!(value["outcome"]["status"], "completed");
     assert_eq!(value["outcome"]["result"]["tokensBefore"], "42000");
-    assert_eq!(value["outcome"]["result"]["usage"]["total_tokens"], "125");
+    assert_eq!(
+        value["outcome"]["result"]["usage"]["usage"]["total_tokens"],
+        125
+    );
     let decoded: AgentEvent =
         serde_json::from_value(value).expect("decode completed");
     assert_eq!(decoded, completed);
@@ -231,14 +237,15 @@ fn usage_with_reasoning(
     total: u64,
     reasoning: Option<u64>,
 ) -> protocol::ModelUsage {
-    protocol::ModelUsage::builder()
-        .input_tokens(total)
-        .output_tokens(0)
-        .cache_read_tokens(0)
-        .cache_write_tokens(0)
-        .reasoning_tokens(reasoning)
-        .total_tokens(total)
-        .build()
+    protocol::ModelUsage::from(
+        protocol::Usage::new()
+            .input_tokens(total)
+            .output_tokens(0)
+            .cached_input_tokens(0)
+            .cache_creation_input_tokens(0)
+            .reasoning_tokens(reasoning)
+            .total_tokens(total),
+    )
 }
 
 /// Unknown reasoning counts stay unknown unless at least one attempt reports a value.
@@ -247,14 +254,14 @@ fn reasoning_usage_preserves_none_and_sums_known_values() {
     let mut unknown = protocol::ModelUsage::default();
     unknown += &usage_with_reasoning(1, None);
     unknown += &usage_with_reasoning(2, None);
-    assert_eq!(unknown.reasoning_tokens, None);
-    assert_eq!(unknown.total_tokens, 3);
+    assert_eq!(unknown.as_ref().reasoning_tokens, None);
+    assert_eq!(unknown.as_ref().total_tokens, Some(3));
 
     let mut known = protocol::ModelUsage::default();
     for reasoning in [None, Some(3), Some(4)] {
         known += &usage_with_reasoning(1, reasoning);
     }
-    assert_eq!(known.reasoning_tokens, Some(7));
+    assert_eq!(known.as_ref().reasoning_tokens, Some(7));
 }
 
 /// Queue snapshots use the product event discriminant and preserve camel-case lane names.

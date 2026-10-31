@@ -20,6 +20,25 @@ pub struct ExtensionRegistrar {
 }
 
 impl ExtensionRegistrar {
+    /// Registers native HTTP behavior transactionally under the current extension owner.
+    pub fn register_http_middleware<F, M>(
+        &mut self,
+        factory: F,
+    ) -> Result<(), ExtensionError>
+    where
+        F: Fn(crate::ExtensionContext) -> M + Send + Sync + 'static,
+        M: rig_core::http_client::middleware::HttpMiddleware + 'static,
+    {
+        let owner = self
+            .current_extension
+            .clone()
+            .ok_or(ExtensionError::MissingModule)?;
+        self.registry.http_middleware.push(
+            crate::middleware::RegisteredHttpMiddleware::new(owner, factory),
+        );
+        Ok(())
+    }
+
     /// Creates an empty typed extension registrar.
     #[must_use]
     pub fn new() -> Self {

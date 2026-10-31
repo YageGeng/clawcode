@@ -30,6 +30,11 @@ export class AcpRequestError extends Error {
     this.name = "AcpRequestError";
     this.rpc = rpc;
   }
+
+  /** Matches the server's exact missing-session payload, never a generic internal or network error. */
+  isSessionNotFound(sessionId: string): boolean {
+    return this.rpc.code === -32603 && this.rpc.data === `session not found: ${sessionId}`;
+  }
 }
 
 export class AcpConnection {

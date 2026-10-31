@@ -1,14 +1,17 @@
 //! Process-wide tracing subscriber construction.
 
 mod format;
+mod telemetry;
 mod trace;
 
 use config::LoggingConfig;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 
 use self::format::CompactEventFormat;
+use self::telemetry::RigTelemetryLayer;
 use self::trace::TraceContextLayer;
 
 const RUST_LOG_ENV: &str = "RUST_LOG";
@@ -68,12 +71,16 @@ impl LoggingFactory {
     {
         let Self { filter, color } = self;
         let formatter = tracing_subscriber::fmt::layer()
+            // The custom formatter owns timestamps; avoid timing every span enter/exit.
+            .without_time()
+            .with_span_events(FmtSpan::CLOSE)
             .event_format(CompactEventFormat::default())
             .with_writer(writer)
             .with_ansi(color);
         tracing_subscriber::registry()
             .with(filter)
             .with(TraceContextLayer)
+            .with(RigTelemetryLayer)
             .with(formatter)
     }
 

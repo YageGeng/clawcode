@@ -70,6 +70,7 @@ impl UsageHistory {
             timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
                 .expect("message timing"),
             content: MessageContent::Assistant {
+                model_message: None,
                 blocks: vec![ContentBlock::Text {
                     text: "answer".to_string(),
                 }],
@@ -77,15 +78,14 @@ impl UsageHistory {
                     .provider_id("fixture".to_string())
                     .model_id("compaction".to_string())
                     .stop_reason(StopReason::EndTurn)
-                    .usage(
-                        ModelUsage::builder()
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
                             .input_tokens(total_tokens)
                             .output_tokens(0)
-                            .cache_read_tokens(0)
-                            .cache_write_tokens(0)
-                            .total_tokens(total_tokens)
-                            .build(),
-                    )
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(total_tokens),
+                    ))
                     .build(),
             },
         });
@@ -158,27 +158,35 @@ struct ScriptedModel {
 impl ScriptedModel {
     /// Builds a successful terminal event with explicit test usage.
     fn finished(stop_reason: StopReason) -> ModelStreamEvent {
-        ModelStreamEvent::Finished(ModelFinal {
-            stop_reason,
-            raw_stop_reason: None,
-            usage: ModelUsage::builder()
-                .input_tokens(10)
-                .output_tokens(5)
-                .cache_read_tokens(0)
-                .cache_write_tokens(0)
-                .total_tokens(15)
+        ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(stop_reason)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(10)
+                        .output_tokens(5)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(15),
+                ))
                 .build(),
-        })
+        )
     }
 
     /// Builds the explicit provider failure used to exercise overflow recovery.
     fn context_overflow() -> ModelError {
-        ModelError::Request(ModelFailure {
-            summary: "Your input exceeds the context window of this model"
-                .to_string(),
-            status: Some(400),
-            retry_disposition: ModelRetryDisposition::NonRetryable,
-        })
+        ModelError::Request(
+            ModelFailure::builder()
+                .summary(
+                    "Your input exceeds the context window of this model"
+                        .to_string(),
+                )
+                .status(Some(400))
+                .context_overflow(true)
+                .retry_disposition(ModelRetryDisposition::NonRetryable)
+                .build(),
+        )
     }
 }
 
@@ -207,11 +215,13 @@ impl Model for ScriptedModel {
             .expect("response lock")
             .pop_front()
             .ok_or_else(|| {
-                ModelError::Request(ModelFailure {
-                    summary: "missing response".to_string(),
-                    status: None,
-                    retry_disposition: ModelRetryDisposition::NonRetryable,
-                })
+                ModelError::Request(
+                    ModelFailure::builder()
+                        .summary("missing response".to_string())
+                        .status(None)
+                        .retry_disposition(ModelRetryDisposition::NonRetryable)
+                        .build(),
+                )
             })??;
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
@@ -448,11 +458,13 @@ impl CompactionFixture {
     /// Creates history followed by a model request failure during compaction.
     async fn with_failing_model() -> Self {
         Self::new(
-            [Err(ModelError::Request(ModelFailure {
-                summary: "summary failed".to_string(),
-                status: None,
-                retry_disposition: ModelRetryDisposition::NonRetryable,
-            }))],
+            [Err(ModelError::Request(
+                ModelFailure::builder()
+                    .summary("summary failed".to_string())
+                    .status(None)
+                    .retry_disposition(ModelRetryDisposition::NonRetryable)
+                    .build(),
+            ))],
             true,
         )
         .await
@@ -736,8 +748,8 @@ async fn compact_streams_summary_and_persists_pi_v4_payload() {
     assert_eq!(entry.payload["summary"], "summary text");
     assert!(entry.payload["retainedTail"].is_array());
     assert!(entry.payload["tokensBefore"].is_string());
-    assert_eq!(entry.payload["usage"]["input_tokens"], "10");
-    assert_eq!(entry.payload["usage"]["output_tokens"], "5");
+    assert_eq!(entry.payload["usage"]["usage"]["input_tokens"], 10);
+    assert_eq!(entry.payload["usage"]["usage"]["output_tokens"], 5);
     assert_eq!(entry.payload["details"]["turnId"], result.turn_id.as_str());
     assert_eq!(entry.payload["details"]["reason"], "manual");
     assert_eq!(entry.payload["details"]["readFiles"], serde_json::json!([]));
@@ -747,8 +759,13 @@ async fn compact_streams_summary_and_persists_pi_v4_payload() {
     );
     assert_eq!(result.summary, "summary text");
     assert_eq!(
-        result.usage.as_ref().expect("summary usage").total_tokens,
-        15
+        result
+            .usage
+            .as_ref()
+            .expect("summary usage")
+            .as_ref()
+            .total_tokens,
+        Some(15)
     );
     let mutations = std::fs::read_to_string(&fixture.session_path)
         .expect("session JSONL")
@@ -799,6 +816,38 @@ async fn compact_streams_summary_and_persists_pi_v4_payload() {
     );
 }
 
+/// Summary generation also treats the final native answer as authoritative over deltas.
+#[tokio::test]
+async fn compaction_uses_corrected_native_summary() {
+    let native = rig_core::message::AssistantMessage::new(vec![
+        rig_core::message::AssistantContent::text("authoritative summary"),
+    ])
+    .with_stop(rig_core::message::StopReason::Stop);
+    let fixture = CompactionFixture::new(
+        [Ok(vec![
+            ModelStreamEvent::TextDelta("draft summary".into()),
+            ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .usage(ModelUsage::default())
+                    .model_message(Some(Box::new(native)))
+                    .build(),
+            ),
+        ])],
+        true,
+    )
+    .await;
+    let result = fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact");
+    assert_eq!(result.summary, "authoritative summary");
+}
+
 /// Compaction lifecycle logs retain operation correlation without summary content.
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_lifecycle_is_logged_without_summary_content() {
@@ -844,33 +893,45 @@ async fn compaction_preserves_cumulative_file_operations() {
     let fixture = CompactionFixture::new_with_scripted_history(
         [
             Ok(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("read-call")
-                        .expect("read call id"),
-                    name: "read".to_string(),
-                    arguments: serde_json::json!({ "path": "input.txt" }),
-                }),
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("write-call")
-                        .expect("write call id"),
-                    name: "write".to_string(),
-                    arguments: serde_json::json!({
-                        "path": "output.txt",
-                        "content": "output"
-                    }),
-                }),
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("edit-call")
-                        .expect("edit call id"),
-                    name: "edit".to_string(),
-                    arguments: serde_json::json!({
-                        "path": "input.txt",
-                        "edits": [{
-                            "oldText": "input",
-                            "newText": "changed"
-                        }]
-                    }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("read-call")
+                                .expect("read call id"),
+                        )
+                        .name("read".to_string())
+                        .arguments(serde_json::json!({ "path": "input.txt" }))
+                        .build(),
+                ),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("write-call")
+                                .expect("write call id"),
+                        )
+                        .name("write".to_string())
+                        .arguments(serde_json::json!({
+                            "path": "output.txt",
+                            "content": "output"
+                        }))
+                        .build(),
+                ),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("edit-call")
+                                .expect("edit call id"),
+                        )
+                        .name("edit".to_string())
+                        .arguments(serde_json::json!({
+                            "path": "input.txt",
+                            "edits": [{
+                                "oldText": "input",
+                                "newText": "changed"
+                            }]
+                        }))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             Ok(vec![
@@ -966,17 +1027,20 @@ async fn retained_assistant_does_not_repeat_overflow_compaction() {
             ModelStreamEvent::TextDelta(
                 "silent over-window answer".to_string(),
             ),
-            ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(101_000)
-                    .output_tokens(10)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(101_010)
+            ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(101_000)
+                            .output_tokens(10)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(101_010),
+                    ))
                     .build(),
-            }),
+            ),
         ])],
         [
             Ok(vec![
@@ -1105,11 +1169,13 @@ async fn session_replay_includes_persisted_compaction_boundary() {
 async fn compaction_summary_retries_transient_model_failure() {
     let fixture = CompactionFixture::new(
         [
-            Err(ModelError::Stream(ModelFailure {
-                summary: "connection terminated".to_string(),
-                status: None,
-                retry_disposition: ModelRetryDisposition::Retryable,
-            })),
+            Err(ModelError::Stream(
+                ModelFailure::builder()
+                    .summary("connection terminated".to_string())
+                    .status(None)
+                    .retry_disposition(ModelRetryDisposition::Retryable)
+                    .build(),
+            )),
             Ok(vec![
                 ModelStreamEvent::TextDelta("summary after retry".to_string()),
                 ScriptedModel::finished(StopReason::EndTurn),
@@ -1525,17 +1591,20 @@ async fn threshold_usage_compacts_without_repeating_assistant_call() {
         responses: Mutex::new(VecDeque::from([
             Ok(vec![
                 ModelStreamEvent::TextDelta("large answer".to_string()),
-                ModelStreamEvent::Finished(ModelFinal {
-                    stop_reason: StopReason::EndTurn,
-                    raw_stop_reason: None,
-                    usage: ModelUsage::builder()
-                        .input_tokens(83_000)
-                        .output_tokens(1_000)
-                        .cache_read_tokens(0)
-                        .cache_write_tokens(0)
-                        .total_tokens(84_000)
+                ModelStreamEvent::Finished(
+                    ModelFinal::builder()
+                        .stop_reason(StopReason::EndTurn)
+                        .raw_stop_reason(None)
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
+                                .input_tokens(83_000)
+                                .output_tokens(1_000)
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(84_000),
+                        ))
                         .build(),
-                }),
+                ),
             ]),
             Ok(vec![
                 ModelStreamEvent::TextDelta("threshold summary".to_string()),
@@ -1807,17 +1876,20 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
     let first_model: Arc<dyn Model> = Arc::new(ScriptedModel {
         responses: Mutex::new(VecDeque::from([Ok(vec![
             ModelStreamEvent::TextDelta("large answer".to_string()),
-            ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(83_000)
-                    .output_tokens(1_000)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(84_000)
+            ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(83_000)
+                            .output_tokens(1_000)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(84_000),
+                    ))
                     .build(),
-            }),
+            ),
         ])])),
         requests: Mutex::new(Vec::new()),
     });

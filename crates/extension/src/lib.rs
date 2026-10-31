@@ -7,6 +7,7 @@ mod error;
 mod factory;
 mod handler;
 mod host;
+mod middleware;
 mod point;
 mod registrar;
 mod registry;
@@ -26,6 +27,7 @@ pub use factory::{
 };
 pub use handler::{ExtensionCommandHandler, ExtensionHandler};
 pub use host::{ExtensionHost, ExtensionHostError, UnsupportedExtensionHost};
+pub use middleware::ProviderMiddleware;
 pub use point::*;
 pub use registrar::ExtensionRegistrar;
 pub use registry::{

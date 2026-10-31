@@ -155,16 +155,18 @@ impl AcpExtensionDispatcher {
         &self,
         request: AcpExtensionRequest,
     ) -> Result<AcpExtensionResponse, agent_client_protocol::Error> {
+        // Tree projections consume detached Kernel snapshots, never the stored history itself.
         let result = match request.method {
             AcpExtensionMethod::Tree => {
                 let input: AcpSessionParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                serde_json::to_value(
+                crate::mapping::SessionTreeOf(
                     self.kernel.session_tree(&input.session_id).map_err(
                         agent_client_protocol::Error::into_internal_error,
                     )?,
                 )
+                .into_value()
                 .map_err(agent_client_protocol::Error::into_internal_error)?
             }
             AcpExtensionMethod::Navigate => {
@@ -173,7 +175,7 @@ impl AcpExtensionDispatcher {
                         .map_err(invalid_parameters)?;
                 let session_id = input.session_id;
                 let target = input.entry_id;
-                serde_json::to_value(
+                crate::mapping::SessionTreeOf(
                     self.kernel
                         .navigate_session(&session_id, target)
                         .await
@@ -181,6 +183,7 @@ impl AcpExtensionDispatcher {
                             agent_client_protocol::Error::into_internal_error,
                         )?,
                 )
+                .into_value()
                 .map_err(agent_client_protocol::Error::into_internal_error)?
             }
             AcpExtensionMethod::Branch => {
@@ -189,7 +192,7 @@ impl AcpExtensionDispatcher {
                         .map_err(invalid_parameters)?;
                 let session_id = input.session_id;
                 let target = input.entry_id;
-                serde_json::to_value(
+                crate::mapping::SessionTreeOf(
                     self.kernel
                         .navigate_session(&session_id, target)
                         .await
@@ -197,6 +200,7 @@ impl AcpExtensionDispatcher {
                             agent_client_protocol::Error::into_internal_error,
                         )?,
                 )
+                .into_value()
                 .map_err(agent_client_protocol::Error::into_internal_error)?
             }
             AcpExtensionMethod::Fork => {
@@ -265,9 +269,19 @@ impl AcpExtensionDispatcher {
                     .map_err(
                         agent_client_protocol::Error::into_internal_error,
                     )?;
-                serde_json::to_value(result).map_err(
+                let mut projected = serde_json::to_value(&result).map_err(
                     agent_client_protocol::Error::into_internal_error,
-                )?
+                )?;
+                // Direct method replies use the same precision-safe accounting as notifications.
+                if let Some(usage) = &result.usage {
+                    let slot = projected.get_mut("usage").ok_or_else(|| {
+                        agent_client_protocol::Error::into_internal_error(
+                            crate::mapping::AcpMappingError::UsageProjection,
+                        )
+                    })?;
+                    *slot = crate::mapping::UsageOf(usage).metadata();
+                }
+                projected
             }
             AcpExtensionMethod::PendingMessages => {
                 let input: AcpSessionParameters =

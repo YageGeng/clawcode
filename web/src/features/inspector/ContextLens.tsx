@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 
 import type { EntryId, MessageId, ToolCallId } from "../../acp/protocol";
 import type { MessageEntity, ToolCallEntity } from "../../domain/model";
+import { ModelUsages } from "../../domain/model";
 import { MarkdownContent } from "../conversation/MarkdownContent";
 import { ToolCallCard } from "../conversation/ToolCallCard";
 
@@ -32,7 +33,7 @@ export function ContextLens({ selection, message, tool, onClose }: ContextLensPr
         <dt>TurnId</dt><dd>{message.turnId}</dd>
         <dt>TimestampMs</dt><dd>{message.timestampMs}</dd>
         {message.sequenceRange === undefined ? null : <><dt>SequenceRange</dt><dd>{message.sequenceRange.start}–{message.sequenceRange.end}</dd></>}
-        {message.assistant === undefined ? null : <><dt>Model</dt><dd>{message.assistant.providerId}/{message.assistant.modelId}</dd><dt>Tokens</dt><dd>{message.assistant.usage.totalTokens}</dd></>}
+        {message.assistant === undefined ? null : <><dt>Model</dt><dd>{message.assistant.providerId}/{message.assistant.modelId}</dd><dt>Tokens</dt><dd>{ModelUsages.formatTokens(message.assistant.usage.totalTokens)}</dd></>}
       </dl>
       {message.text.length === 0 ? null : <div className="context-lens__preview"><MarkdownContent text={message.text} /></div>}
     </>}

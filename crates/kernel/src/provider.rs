@@ -1,36 +1,48 @@
 mod content;
 
-use std::sync::Arc;
-use std::time::Instant;
-
 use async_trait::async_trait;
 use futures::StreamExt;
 use protocol::{
     AgentMessage, ContentBlock, MessageContent, ModelFailure, ModelFinal,
-    ModelProfile, ModelRequest, ModelRetryDisposition, ModelStreamEvent,
-    ModelUsage, Role, StopReason, ToolCall as AgentToolCall, ToolCallId,
+    ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage, Role, StopReason,
+    ToolCall as AgentToolCall,
 };
-use provider::OneOrMany;
-use provider::completion::{
-    CompletionError, CompletionRequest, RetryDisposition,
-    ToolDefinition as ProviderToolDefinition,
+use provider::{
+    ConfiguredModel, ProviderCompletion, ProviderConnectError, ProviderFactory,
 };
-use provider::factory::{
-    ArcLlm, LlmFactory, LlmStreamEvent, ProviderFinal, ProviderFinishReason,
+use rig_core::{
+    completion::{CompletionRequest, ToolDefinition},
+    http_client::DynHttpClient,
+    message::{
+        AssistantContent, AssistantMessage, CallId, ImageMediaType, Message,
+        MimeType, Reasoning, ToolFunction, ToolName, ToolResult,
+        ToolResultContent, UserContent,
+    },
+    streaming::{Item, StreamEvent},
 };
-use provider::message::{
-    AssistantContent, ImageMediaType, Message, MimeType, ReasoningContent,
-    ToolResult as ProviderToolResult, ToolResultContent, UserContent,
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
+pub(crate) use content::AssistantProjection;
 use content::ProviderContentProjection;
-use tokio_util::sync::CancellationToken;
+
+/// Frozen contributed definitions share transports and authentication without sharing history.
+struct ContributedDefinitions {
+    registration: Vec<protocol::ExtensionProviderRegistration>,
+    providers: Arc<ProviderFactory>,
+}
 
 /// Resolves the configured active model through the retained provider factory.
 pub struct ProviderModelFactory {
     config: config::ConfigHandle,
-    providers: Arc<LlmFactory>,
+    providers: Arc<ProviderFactory>,
+    contributed: std::sync::Mutex<Option<ContributedDefinitions>>,
 }
 
 impl ProviderModelFactory {
@@ -38,15 +50,19 @@ impl ProviderModelFactory {
     #[must_use]
     pub fn new(
         config: config::ConfigHandle,
-        providers: Arc<LlmFactory>,
+        providers: Arc<ProviderFactory>,
     ) -> Self {
-        Self { config, providers }
+        Self {
+            config,
+            providers,
+            contributed: std::sync::Mutex::new(None),
+        }
     }
 
     /// Constructs the retained provider cache from the immutable TOML config.
     #[must_use]
     pub fn from_config(config: config::ConfigHandle) -> Self {
-        let providers = Arc::new(LlmFactory::new(config.clone()));
+        let providers = Arc::new(ProviderFactory::new(config.clone()));
         Self::new(config, providers)
     }
 }
@@ -62,11 +78,7 @@ impl ModelFactory for ProviderModelFactory {
             .providers
             .resolve(&profile.provider_id, &profile.model_id)
             .map_err(|error| ModelError::Unavailable(error.to_string()))?;
-        Ok(Arc::new(ProviderModel::new(
-            profile,
-            llm,
-            config.retry.provider.clone(),
-        )))
+        Ok(Arc::new(ProviderModel::new(llm)))
     }
 
     /// Builds all configured and statically contributed models into one catalog.
@@ -122,14 +134,30 @@ impl ModelFactory for ProviderModelFactory {
             .validate()
             .map_err(|error| ModelError::Unavailable(error.to_string()))?;
 
-        // Rebuild only when static providers exist; otherwise retain the mature
-        // provider cache supplied by the embedding application.
+        // Configuration/authentication are shared, but every catalog below owns fresh session models.
         let providers = if registration.providers.is_empty() {
             Arc::clone(&self.providers)
         } else {
-            Arc::new(LlmFactory::new(config::ConfigHandle::from_config(
-                merged.clone(),
-            )))
+            let mut retained = self.contributed.lock().map_err(|_error| {
+                ModelError::Unavailable(
+                    "provider definition cache poisoned".into(),
+                )
+            })?;
+            if let Some(cached) = retained
+                .as_ref()
+                .filter(|cached| cached.registration == registration.providers)
+            {
+                Arc::clone(&cached.providers)
+            } else {
+                let providers = Arc::new(ProviderFactory::new(
+                    config::ConfigHandle::from_config(merged.clone()),
+                ));
+                *retained = Some(ContributedDefinitions {
+                    registration: registration.providers.clone(),
+                    providers: Arc::clone(&providers),
+                });
+                providers
+            }
         };
         let mut models = Vec::new();
         for provider in &merged.providers {
@@ -142,11 +170,8 @@ impl ModelFactory for ProviderModelFactory {
                     .map_err(|error| {
                         ModelError::Unavailable(error.to_string())
                     })?;
-                models.push(Arc::new(ProviderModel::new(
-                    profile,
-                    llm,
-                    merged.retry.provider.clone(),
-                )) as Arc<dyn Model>);
+                models
+                    .push(Arc::new(ProviderModel::new(llm)) as Arc<dyn Model>);
             }
         }
         let (active_provider_id, active_model_id) =
@@ -160,166 +185,186 @@ impl ModelFactory for ProviderModelFactory {
     }
 }
 
-/// Production model adapter over one immutable dynamic provider handle.
+/// One session/model binding owns its upstream Prepared state and current credential.
 pub struct ProviderModel {
-    profile: ModelProfile,
-    llm: ArcLlm,
-    retry: config::ProviderRetryConfig,
+    configured: Arc<ConfiguredModel>,
+    cached: Mutex<Option<CachedCompletion>>,
+}
+
+/// The credential under which one concrete session model was prepared.
+struct CachedCompletion {
+    auth: Option<rig_core::providers::chatgpt::auth::AuthContext>,
+    model: Arc<ProviderCompletion>,
 }
 
 impl ProviderModel {
-    /// Creates a model adapter with immutable profile and request retry policy.
-    #[must_use]
-    pub fn new(
-        profile: ModelProfile,
-        llm: ArcLlm,
-        retry: config::ProviderRetryConfig,
-    ) -> Self {
+    /// Starts an independent session binding over the shared provider definition.
+    pub fn new(configured: Arc<ConfiguredModel>) -> Self {
         Self {
-            profile,
-            llm,
-            retry,
+            configured,
+            cached: Mutex::new(None),
         }
     }
 
-    /// Converts and starts one provider request with request-local hooks attached.
+    /// Resolves credentials before taking the short session-cache lock.
+    async fn connect(
+        &self,
+        http: DynHttpClient,
+    ) -> Result<rig_core::DynModel<rig_core::operation::Completion>, ModelError>
+    {
+        let auth = self.configured.auth_context().await.map_err(|error| {
+            self.connection_failure("authentication", error)
+        })?;
+        let model = {
+            let mut cache = self.cached.lock().map_err(|_error| {
+                tracing::warn!("Provider {}/{} connection failed: session model cache poisoned", self.profile().provider_id, self.profile().model_id);
+                ModelError::Unavailable("session model cache poisoned".into())
+            })?;
+            if let Some(cached) =
+                cache.as_ref().filter(|cached| cached.auth == auth)
+            {
+                Arc::clone(&cached.model)
+            } else {
+                let model = Arc::new(
+                    self.configured.build_model(auth.as_ref()).map_err(
+                        |error| {
+                            self.connection_failure("model construction", error)
+                        },
+                    )?,
+                );
+                *cache = Some(CachedCompletion {
+                    auth,
+                    model: Arc::clone(&model),
+                });
+                model
+            }
+        };
+        Ok(model.as_ref().clone().with_transport(http))
+    }
+
+    /// Logs safe connection categories with the model and failing phase before returning them.
+    fn connection_failure(
+        &self,
+        phase: &str,
+        error: ProviderConnectError,
+    ) -> ModelError {
+        let summary = format!(
+            "provider {}/{} {phase} failed: {error}",
+            self.profile().provider_id,
+            self.profile().model_id
+        );
+        tracing::warn!("{}", summary);
+        ModelError::Unavailable(summary)
+    }
+
+    /// Opens a lazy upstream stream; cancellation also covers authentication and idle reads.
     async fn stream_request(
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
-        hooks: Option<Arc<dyn protocol::ModelRequestHooks>>,
+        middleware: Option<extension::ProviderMiddleware>,
     ) -> Result<ModelStream, ModelError> {
-        let provider_name =
-            format!("{}/{}", self.profile.provider_id, self.profile.model_id);
-        let provider_span = tracing::info_span!("provider_request");
-        provider_span.in_scope(|| {
-            tracing::info!("started Provider request {}", provider_name);
-        });
-        let started_at = Instant::now();
-        let mut provider_request = ProviderRequest::try_from(request)?.0;
-        provider_request.hooks = hooks;
-        let options = ProviderRequestOptions::from((
-            self.retry.clone(),
-            cancellation.clone(),
-        ));
-        // The Provider span is attached to both acquisition and returned stream
-        // polling so detached streaming work keeps the operation Trace.
-        let acquisition = tracing::Instrument::instrument(
-            options.acquire(&self.llm, provider_request),
-            provider_span.clone(),
-        )
-        .await;
-        let mut provider_stream = match acquisition {
-            Ok(stream) => stream,
-            Err(error) => {
-                provider_span.in_scope(|| {
-                    tracing::warn!(
-                        "failed to start Provider request {} in {} ms",
-                        provider_name,
-                        started_at.elapsed().as_millis()
-                    );
-                });
-                return Err(error);
-            }
+        let request = self
+            .configured
+            .prepare(ProviderRequest::try_from(request)?.0);
+        let base = self.configured.http_client();
+        let http = match middleware {
+            Some(middleware) => middleware.apply(base),
+            None => base,
         };
+        let model = tokio::select! {
+            () = cancellation.cancelled() => return Err(ModelError::Cancelled),
+            model = self.connect(http) => model?,
+        };
+        let identity = format!(
+            "{}/{}",
+            self.profile().provider_id,
+            self.profile().model_id
+        );
+        let mut upstream = model.stream(request).map_err(|error| {
+            let failure = ModelFailure::from(error);
+            tracing::warn!(
+                "Provider request {} preparation failed: {}",
+                identity,
+                failure.summary
+            );
+            ModelError::Request(failure)
+        })?;
+        let span = tracing::info_span!("provider_request");
         let stream = async_stream::try_stream! {
-            let mut received_final = false;
-            while let Some(event) = provider_stream.next().await {
-                if cancellation.is_cancelled() {
-                    tracing::warn!(
-                        "cancelled Provider request {} after {} ms",
-                        provider_name,
-                        started_at.elapsed().as_millis()
-                    );
-                    Err(ModelError::Cancelled)?;
-                }
-                if received_final {
-                    tracing::warn!(
-                        "Provider request {} emitted data after its terminal event",
-                        provider_name
-                    );
-                    Err(ModelError::Protocol(
-                        "provider emitted data after Final".to_string(),
-                    ))?;
-                }
-                match event.map_err(|error| {
-                    tracing::warn!(
-                        "Provider request {} stream failed after {} ms",
-                        provider_name,
-                        started_at.elapsed().as_millis()
-                    );
-                    ModelError::Stream(error.model_failure())
-                })? {
-                    LlmStreamEvent::Text(text) => {
-                        yield ModelStreamEvent::TextDelta(text.text);
+            let started = Instant::now();
+            tracing::info!("started Provider request {}", identity);
+            loop {
+                let event = tokio::select! {
+                    () = cancellation.cancelled() => {
+                        tracing::info!("cancelled Provider request {}", identity);
+                        Err(ModelError::Cancelled)
                     }
-                    LlmStreamEvent::ToolCall { tool_call, .. } => {
-                        let id = ToolCallId::try_from(tool_call.id)
-                            .map_err(|error| ModelError::Protocol(error.to_string()))?;
-                        yield ModelStreamEvent::ToolCall(AgentToolCall {
-                            tool_call_id: id,
-                            name: tool_call.function.name,
-                            arguments: tool_call.function.arguments,
-                        });
+                    event = upstream.next() => Ok(event),
+                }?;
+                let Some(event) = event else { break; };
+                let event = event.map_err(|error| {
+                    let failure = ModelFailure::from(error);
+                    tracing::warn!("Provider request {} stream failed: {}", identity, failure.summary);
+                    ModelError::Stream(failure)
+                })?;
+                match event {
+                    Item::Event(StreamEvent::Text { text, .. }) => yield ModelStreamEvent::TextDelta(text),
+                    Item::Event(StreamEvent::Reasoning { text, .. }) => yield ModelStreamEvent::ReasoningDelta(text),
+                    Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(call), .. }) => {
+                        yield ModelStreamEvent::ToolCall(AgentToolCall::try_from(&call)?);
                     }
-                    LlmStreamEvent::Reasoning(reasoning) => {
-                        let text = reasoning.display_text();
-                        if !text.is_empty() {
-                            yield ModelStreamEvent::ReasoningDelta(text);
-                        }
-                    }
-                    LlmStreamEvent::ReasoningDelta { reasoning, .. } => {
-                        yield ModelStreamEvent::ReasoningDelta(reasoning);
-                    }
-                    LlmStreamEvent::ToolCallDelta { .. } => {}
-                    LlmStreamEvent::Final(final_) => {
-                        received_final = true;
-                        tracing::info!(
-                            "completed Provider request {} in {} ms",
-                            provider_name,
-                            started_at.elapsed().as_millis()
-                        );
-                        yield ModelStreamEvent::Finished(
-                            final_.into_model_final(),
-                        );
-                    }
+                    _ => {}
                 }
             }
-            if !received_final {
-                tracing::warn!(
-                    "Provider request {} ended without a terminal event after {} ms",
-                    provider_name,
-                    started_at.elapsed().as_millis()
-                );
-                Err(ModelError::Stream(ModelFailure {
-                    summary: "provider stream ended without Final".to_string(),
-                    status: None,
-                    retry_disposition: ModelRetryDisposition::Retryable,
-                }))?;
+            // EOF alone cannot prove success; finish checks the provider's terminal frame.
+            let response = upstream.finish().await.map_err(|error| {
+                let failure = ModelFailure::from(error);
+                tracing::warn!("Provider request {} finalization failed: {}", identity, failure.summary);
+                ModelError::Stream(failure)
+            })?;
+            if let Some(failure) = ModelFailure::from_response(&response) {
+                tracing::warn!("Provider request {} terminal response failed: {}", identity, failure.summary);
+                Err(ModelError::Stream(failure))?;
             }
+            let native = match response.message() {
+                Some(Message::Assistant(message)) => message,
+                _ => Err(ModelError::Protocol("provider returned no assistant message".into()))?,
+            };
+            let stop_reason = AssistantProjection::from(&native).stop_reason();
+            let raw_stop_reason = response.finish_reason().map(|reason| match reason {
+                rig_core::completion::FinishReason::Stop => "stop".to_owned(),
+                rig_core::completion::FinishReason::Length => "length".to_owned(),
+                rig_core::completion::FinishReason::ToolCalls => "tool_calls".to_owned(),
+                rig_core::completion::FinishReason::ContentFilter => "content_filter".to_owned(),
+                rig_core::completion::FinishReason::Other(reason) => reason,
+                // Preserve future upstream variants in stored diagnostics, not ordinary logs.
+                reason => format!("{reason:?}"),
+            });
+            tracing::info!("completed Provider request {} in {} ms", identity, started.elapsed().as_millis());
+            yield ModelStreamEvent::Finished(ModelFinal::builder().stop_reason(stop_reason)
+                .raw_stop_reason(raw_stop_reason).usage(ModelUsage::from(response.usage))
+                .model_message(Some(Box::new(native))).build());
         };
         Ok(Box::pin(tracing_futures::Instrument::instrument(
-            stream,
-            provider_span,
+            stream, span,
         )))
     }
 }
 
 #[async_trait]
 impl Model for ProviderModel {
-    /// Returns the immutable provider/model profile resolved at construction.
+    /// Returns shared immutable configuration without duplicating the profile.
     fn profile(&self) -> &ModelProfile {
-        &self.profile
+        self.configured.profile()
     }
 
-    /// Verifies the already-constructed provider handle without inference.
+    /// Readiness checks never start a paid request or an interactive login.
     async fn preflight(&self) -> Result<(), ModelError> {
-        self.llm
-            .preflight()
-            .map_err(|error| ModelError::Preflight(error.model_failure()))
+        Ok(())
     }
 
-    /// Converts runtime transcript data at the provider boundary and streams it back.
+    /// Streams without extension middleware for non-extension callers.
     async fn stream(
         &self,
         request: ModelRequest,
@@ -328,267 +373,125 @@ impl Model for ProviderModel {
         self.stream_request(request, cancellation, None).await
     }
 
-    /// Attaches extension-composed provider hooks to the concrete request.
-    async fn stream_with_hooks(
+    /// Attaches request-local native middleware while retaining the session model cache.
+    async fn stream_with_middleware(
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
-        hooks: Option<Arc<dyn protocol::ModelRequestHooks>>,
+        middleware: Option<extension::ProviderMiddleware>,
     ) -> Result<ModelStream, ModelError> {
-        self.stream_request(request, cancellation, hooks).await
+        self.stream_request(request, cancellation, middleware).await
     }
 }
 
-/// Converts retained provider terminal data into the shared model protocol.
-trait IntoModelFinal {
-    /// Consumes provider data and returns its provider-neutral representation.
-    fn into_model_final(self) -> ModelFinal;
-}
-
-impl IntoModelFinal for ProviderFinal {
-    /// Converts a provider terminal result into the shared model domain type.
-    fn into_model_final(self) -> ModelFinal {
-        let stop_reason = match self.finish_reason {
-            ProviderFinishReason::Stop => StopReason::EndTurn,
-            ProviderFinishReason::ToolUse => StopReason::ToolUse,
-            ProviderFinishReason::Length => StopReason::MaxTokens,
-            ProviderFinishReason::Refusal => StopReason::Refusal,
-            ProviderFinishReason::Other(_) => StopReason::EndTurn,
-        };
-        let usage = self.usage.unwrap_or_default();
-        ModelFinal {
-            stop_reason,
-            raw_stop_reason: self.raw_finish_reason,
-            usage: ModelUsage::builder()
-                .input_tokens(usage.input_tokens)
-                .output_tokens(usage.output_tokens)
-                .cache_read_tokens(usage.cached_input_tokens)
-                .cache_write_tokens(usage.cache_creation_input_tokens)
-                .reasoning_tokens(usage.reasoning_tokens)
-                .total_tokens(usage.total_tokens)
-                .build(),
-        }
-    }
-}
-
-/// Converts retained provider failures into safe shared failure details.
-trait CompletionFailure {
-    /// Returns provider-neutral failure data without credentials or headers.
-    fn model_failure(&self) -> ModelFailure;
-}
-
-impl CompletionFailure for CompletionError {
-    /// Converts a provider error into safe structured model failure data.
-    fn model_failure(&self) -> ModelFailure {
-        ModelFailure {
-            summary: self.to_string(),
-            status: self.status_code(),
-            retry_disposition: match self.retry_disposition() {
-                RetryDisposition::Retryable { .. } => {
-                    ModelRetryDisposition::Retryable
-                }
-                RetryDisposition::NonRetryable => {
-                    ModelRetryDisposition::NonRetryable
-                }
-            },
-        }
-    }
-}
-
-#[derive(typed_builder::TypedBuilder)]
-struct ProviderRequestOptions {
-    timeout_ms: Option<u64>,
-    max_retries: u32,
-    max_retry_delay_ms: u64,
-    cancellation: CancellationToken,
-}
-
-impl From<(config::ProviderRetryConfig, CancellationToken)>
-    for ProviderRequestOptions
-{
-    /// Builds per-request retry options from immutable config and cancellation.
-    fn from(
-        (config, cancellation): (
-            config::ProviderRetryConfig,
-            CancellationToken,
-        ),
-    ) -> Self {
-        Self::builder()
-            .timeout_ms(config.timeout_ms)
-            .max_retries(config.max_retries.unwrap_or(0))
-            .max_retry_delay_ms(config.max_retry_delay_ms)
-            .cancellation(cancellation)
-            .build()
-    }
-}
-
-impl ProviderRequestOptions {
-    /// Acquires a provider stream with cancellable timeout and request retries.
-    async fn acquire(
-        &self,
-        llm: &ArcLlm,
-        request: CompletionRequest,
-    ) -> Result<provider::factory::DynLlmStream, ModelError> {
-        let mut retry_index = 0_u32;
-        loop {
-            if self.cancellation.is_cancelled() {
-                return Err(ModelError::Cancelled);
-            }
-            let acquisition = tokio::select! {
-                () = self.cancellation.cancelled() => {
-                    return Err(ModelError::Cancelled);
-                }
-                result = async {
-                    match self.timeout_ms {
-                        Some(timeout_ms) if timeout_ms > 0 => {
-                            tokio::time::timeout(
-                                std::time::Duration::from_millis(timeout_ms),
-                                llm.stream(request.clone()),
-                            )
-                            .await
-                            .map_err(|_elapsed| None)
-                            .and_then(|result| result.map_err(Some))
-                        }
-                        _ => llm.stream(request.clone()).await.map_err(Some),
-                    }
-                } => result,
-            };
-
-            let error = match acquisition {
-                Ok(stream) => return Ok(stream),
-                Err(error) => error,
-            };
-            let (failure, retry_after_ms) = match error {
-                Some(error) => {
-                    let retry_after_ms = match error.retry_disposition() {
-                        RetryDisposition::Retryable { retry_after_ms } => {
-                            retry_after_ms
-                        }
-                        RetryDisposition::NonRetryable => {
-                            return Err(ModelError::Request(
-                                error.model_failure(),
-                            ));
-                        }
-                    };
-                    (error.model_failure(), retry_after_ms)
-                }
-                None => (
-                    ModelFailure {
-                        summary: "provider request timed out".to_string(),
-                        status: None,
-                        retry_disposition: ModelRetryDisposition::Retryable,
-                    },
-                    None,
-                ),
-            };
-            if retry_index >= self.max_retries {
-                return Err(ModelError::Request(failure));
-            }
-
-            let delay_ms = if let Some(delay_ms) = retry_after_ms {
-                if self.max_retry_delay_ms > 0
-                    && delay_ms > self.max_retry_delay_ms
-                {
-                    return Err(ModelError::Request(ModelFailure {
-                        summary: format!(
-                            "provider requested {delay_ms}ms retry delay, exceeding {}ms limit",
-                            self.max_retry_delay_ms
-                        ),
-                        status: failure.status,
-                        retry_disposition: ModelRetryDisposition::NonRetryable,
-                    }));
-                }
-                delay_ms
-            } else {
-                let base_delay = 500_u64
-                    .saturating_mul(2_u64.saturating_pow(retry_index))
-                    .min(8_000);
-                // Integer permille jitter avoids precision-loss casts while
-                // preserving the original 75%-100% retry range.
-                let jitter_permille = fastrand::u64(750..=1_000);
-                base_delay.saturating_mul(jitter_permille) / 1_000
-            };
-            retry_index += 1;
-            match failure.status {
-                Some(status) => tracing::warn!(
-                    "retrying Provider request after attempt {} in {} ms following HTTP status {}",
-                    retry_index,
-                    delay_ms,
-                    status
-                ),
-                None => tracing::warn!(
-                    "retrying Provider request after attempt {} in {} ms without an HTTP status",
-                    retry_index,
-                    delay_ms
-                ),
-            }
-            tokio::select! {
-                () = self.cancellation.cancelled() => {
-                    return Err(ModelError::Cancelled);
-                }
-                () = tokio::time::sleep(
-                    std::time::Duration::from_millis(delay_ms),
-                ) => {}
-            }
-        }
-    }
-}
-
+/// Request conversion owns the transient call-correlation index for exactly one history.
 struct ProviderRequest(CompletionRequest);
 
 impl TryFrom<ModelRequest> for ProviderRequest {
     type Error = ModelError;
 
-    /// Converts the model-visible runtime transcript and tool schema to provider types.
+    /// Converts active history in order and retains the final message as the prompt.
     fn try_from(request: ModelRequest) -> Result<Self, Self::Error> {
-        let messages = request
-            .messages
-            .into_iter()
-            .filter_map(ProviderMessage::try_from_agent)
-            .collect::<Result<Vec<_>, _>>()?;
-        let chat_history =
-            OneOrMany::many(messages.into_iter().map(|message| message.0))
-                .map_err(|error| ModelError::Protocol(error.to_string()))?;
+        let mut projection = ProviderMessage {
+            calls: HashMap::new(),
+        };
+        let mut messages = Vec::new();
+        for message in request.messages {
+            if let Some(message) = projection.convert(message)? {
+                messages.push(message);
+            }
+        }
+        let prompt = messages.pop().ok_or_else(|| {
+            ModelError::Protocol("model history is empty".into())
+        })?;
         let tools = request
             .tools
             .into_iter()
-            .map(|tool| ProviderToolDefinition {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
+            .map(|tool| {
+                Ok(ToolDefinition::new(
+                    ToolName::try_from(tool.name).map_err(|error| {
+                        ModelError::Protocol(error.to_string())
+                    })?,
+                    tool.description,
+                    tool.parameters,
+                ))
             })
-            .collect();
-        let options = request.options;
+            .collect::<Result<Vec<_>, ModelError>>()?;
         Ok(Self(
-            CompletionRequest::builder()
-                .chat_history(chat_history)
+            CompletionRequest::new(prompt)
+                .messages(messages)
                 .tools(tools)
-                .temperature(options.temperature)
-                .max_tokens(options.max_tokens)
-                .build(),
+                .temperature(request.options.temperature)
+                .max_tokens(request.options.max_tokens),
         ))
     }
 }
 
-struct ProviderMessage(Message);
+/// Correlates results with canonical or native call identities as history is traversed.
+struct ProviderMessage {
+    calls: HashMap<String, (CallId, ToolName)>,
+}
 
 impl ProviderMessage {
-    /// Converts one runtime message, omitting opaque extension messages without a model mapping.
-    fn try_from_agent(
+    /// Projects one project message without inventing provider provenance or tool names.
+    fn convert(
+        &mut self,
         message: AgentMessage,
-    ) -> Option<Result<Self, ModelError>> {
-        match message.content {
+    ) -> Result<Option<Message>, ModelError> {
+        let message = match message.content {
             MessageContent::System { blocks } => {
-                Some(Self::try_from_role(Role::System, blocks))
+                Self::role(Role::System, blocks)?
             }
-            MessageContent::User { blocks } => {
-                Some(Self::try_from_role(Role::User, blocks))
-            }
+            MessageContent::User { blocks } => Self::role(Role::User, blocks)?,
             MessageContent::ExpandedUser { expansion } => {
-                Some(Self::try_from_role(Role::User, expansion.model_blocks))
+                Self::role(Role::User, expansion.model_blocks)?
             }
-            MessageContent::Assistant { blocks, .. } => {
-                Some(Self::try_from_role(Role::Assistant, blocks))
+            MessageContent::Assistant {
+                blocks,
+                metadata,
+                model_message,
+                ..
+            } => {
+                let retained = match model_message {
+                    Some(native)
+                        if AssistantProjection::from(native.as_ref())
+                            .matches(&blocks, metadata.stop_reason)? =>
+                    {
+                        Some(native)
+                    }
+                    _ => None,
+                };
+                if let Some(native) = retained {
+                    Message::Assistant(*native)
+                } else {
+                    let Message::Assistant(mut assistant) =
+                        Self::role(Role::Assistant, blocks)?
+                    else {
+                        return Err(ModelError::Protocol(
+                            "assistant role was not preserved".into(),
+                        ));
+                    };
+                    assistant.stop = Some(match metadata.stop_reason {
+                        StopReason::EndTurn => {
+                            rig_core::message::StopReason::Stop
+                        }
+                        StopReason::ToolUse => {
+                            rig_core::message::StopReason::ToolUse
+                        }
+                        StopReason::MaxTokens => {
+                            rig_core::message::StopReason::Length
+                        }
+                        StopReason::Cancelled => {
+                            rig_core::message::StopReason::Aborted(
+                                "cancelled".into(),
+                            )
+                        }
+                        _ => rig_core::message::StopReason::Error(
+                            "failed attempt".into(),
+                        ),
+                    });
+                    Message::Assistant(assistant)
+                }
             }
             MessageContent::ToolResult {
                 tool_call_id,
@@ -596,232 +499,247 @@ impl ProviderMessage {
                 is_error,
                 ..
             } => {
-                Some(Self::try_from_tool_result(tool_call_id, blocks, is_error))
+                // A result with no retained call is orphaned in this stateless history.
+                let Some((call, name)) =
+                    self.calls.get(tool_call_id.as_str()).cloned()
+                else {
+                    return Ok(None);
+                };
+                let mut content = blocks.into_iter().map(|block| match block {
+                    ContentBlock::Text { text } => Ok(ToolResultContent::text(text)),
+                    ContentBlock::Image { data, mime_type } => Ok(ToolResultContent::image_base64(data, Some(Self::image_type(&mime_type)?), None)),
+                    ContentBlock::Reasoning { .. } | ContentBlock::ToolCall { .. } => Err(ModelError::Protocol("tool results cannot contain reasoning or tool calls".into())),
+                    block => Ok(ToolResultContent::text(block.into_provider_text()?)),
+                }).collect::<Result<Vec<_>,ModelError>>()?;
+                if content.is_empty() {
+                    content.push(ToolResultContent::text(if is_error {
+                        "Tool failed without returning content."
+                    } else {
+                        ""
+                    }));
+                }
+                Message::User {
+                    content: vec![UserContent::ToolResult(ToolResult {
+                        call,
+                        name,
+                        content,
+                        is_error,
+                    })],
+                }
             }
             MessageContent::BashExecution { bash }
                 if !bash.exclude_from_context =>
             {
-                Some(Self::try_from_role(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: bash.model_text(),
-                    }],
-                ))
+                Message::from(bash.model_text())
             }
-            MessageContent::BashExecution { .. } => None,
             MessageContent::Extension { extension }
                 if extension.include_in_context =>
             {
-                Some(Self::try_from_role(Role::User, extension.blocks))
+                Self::role(Role::User, extension.blocks)?
             }
-            MessageContent::Extension { .. } => None,
-            MessageContent::SlashCommand { .. } => None,
             MessageContent::CompactionSummary { compaction } => {
-                Some(Self::try_from_role(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        // Preserve the checkpoint's exact context size so a resumed
-                        // model receives the same compaction metadata as storage and UI.
-                        text: compaction.model_text(),
-                    }],
-                ))
+                Message::from(compaction.model_text())
+            }
+            MessageContent::BashExecution { .. }
+            | MessageContent::Extension { .. }
+            | MessageContent::SlashCommand { .. } => return Ok(None),
+        };
+        if let Message::Assistant(assistant) = &message {
+            for call in assistant.tool_calls() {
+                self.calls.insert(
+                    call.id.wire().into_owned(),
+                    (call.id.clone(), call.function.name.clone()),
+                );
             }
         }
+        Ok(Some(message))
     }
 
-    /// Converts role content while rejecting blocks unsupported for that role.
-    fn try_from_role(
+    /// Validates media types once at the boundary shared by every role.
+    fn image_type(mime: &str) -> Result<ImageMediaType, ModelError> {
+        ImageMediaType::from_mime_type(mime).ok_or_else(|| {
+            ModelError::Protocol(format!("unsupported image MIME type: {mime}"))
+        })
+    }
+
+    /// Converts canonical role content when no unchanged native message is available.
+    fn role(
         role: Role,
         blocks: Vec<ContentBlock>,
-    ) -> Result<Self, ModelError> {
+    ) -> Result<Message, ModelError> {
         match role {
-            Role::System => Ok(Self(Message::System {
-                content: Self::join_text_blocks(blocks)?,
-            })),
-            Role::User => {
-                let content = blocks
-                    .into_iter()
-                    .map(|block| match block {
-                        ContentBlock::Text { text } => Ok(UserContent::text(text)),
-                        ContentBlock::Image { data, mime_type } => {
-                            let media_type = ImageMediaType::from_mime_type(
-                                &mime_type,
-                            )
-                            .ok_or_else(|| {
-                                ModelError::Protocol(format!(
-                                    "unsupported user image MIME type: {mime_type}"
-                                ))
-                            })?;
-                            Ok(UserContent::image_base64(
-                                data,
-                                Some(media_type),
-                                None,
-                            ))
-                        }
-                        ContentBlock::Reasoning { .. }
-                        | ContentBlock::ToolCall { .. } => Err(ModelError::Protocol(
-                            "user messages cannot contain reasoning or tool calls".to_string(),
-                        )),
-                        block @ (ContentBlock::Audio { .. }
-                        | ContentBlock::EmbeddedResource { .. }
-                        | ContentBlock::ResourceLink { .. }
-                        | ContentBlock::Structured { .. }) => {
-                            Ok(UserContent::text(block.into_provider_text()?))
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Self(Message::User {
-                    content: OneOrMany::many(content).map_err(|error| {
-                        ModelError::Protocol(error.to_string())
-                    })?,
-                }))
-            }
-            Role::Assistant => {
-                let content = blocks
-                    .into_iter()
-                    .map(|block| match block {
-                        ContentBlock::Text { text } => {
-                            Ok(AssistantContent::text(text))
-                        }
-                        ContentBlock::Reasoning { text } => {
-                            Ok(AssistantContent::Reasoning(
-                                provider::message::Reasoning {
-                                    id: None,
-                                    content: vec![ReasoningContent::Text {
-                                        text,
-                                        signature: None,
-                                    }],
-                                },
-                            ))
-                        }
-                        ContentBlock::Image { data, mime_type } => {
-                            let media_type = ImageMediaType::from_mime_type(
-                                &mime_type,
-                            )
-                            .ok_or_else(|| {
-                                ModelError::Protocol(format!(
-                                    "unsupported assistant image MIME type: {mime_type}"
-                                ))
-                            })?;
-                            Ok(AssistantContent::image_base64(
-                                data,
-                                Some(media_type),
-                                None,
-                            ))
-                        }
-                        ContentBlock::ToolCall {
-                            tool_call_id,
-                            name,
-                            arguments,
-                        } => Ok(AssistantContent::ToolCall(
-                            provider::message::ToolCall::new(
-                                tool_call_id.to_string(),
-                                provider::message::ToolFunction::new(
-                                    name, arguments,
-                                ),
-                            ),
-                        )),
-                        block @ (ContentBlock::Audio { .. }
-                        | ContentBlock::EmbeddedResource { .. }
-                        | ContentBlock::ResourceLink { .. }
-                        | ContentBlock::Structured { .. }) => Ok(
-                            AssistantContent::text(block.into_provider_text()?),
-                        ),
-                    })
-                    .collect::<Result<Vec<_>, ModelError>>()?;
-                Ok(Self(Message::Assistant {
-                    id: None,
-                    content: OneOrMany::many(content).map_err(|error| {
-                        ModelError::Protocol(error.to_string())
-                    })?,
-                }))
-            }
+            Role::System => Ok(Message::system(blocks.into_iter().map(|block| match block {
+                ContentBlock::Text { text } | ContentBlock::Reasoning { text } => Ok(text),
+                ContentBlock::Image { .. } | ContentBlock::ToolCall { .. } => Err(ModelError::Protocol("system messages cannot contain images or calls".into())),
+                block => block.into_provider_text(),
+            }).collect::<Result<Vec<_>,_>>()?.join("\n"))),
+            Role::User => Ok(Message::User { content: blocks.into_iter().map(|block| match block {
+                ContentBlock::Text { text } => Ok(UserContent::text(text)),
+                ContentBlock::Image { data, mime_type } => Ok(UserContent::image_base64(data, Some(Self::image_type(&mime_type)?), None)),
+                ContentBlock::Reasoning { .. } | ContentBlock::ToolCall { .. } => Err(ModelError::Protocol("user messages cannot contain reasoning or calls".into())),
+                block => Ok(UserContent::text(block.into_provider_text()?)),
+            }).collect::<Result<Vec<_>,ModelError>>()? }),
+            Role::Assistant => Ok(Message::Assistant(AssistantMessage::new(blocks.into_iter().map(|block| match block {
+                ContentBlock::Text { text } => Ok(AssistantContent::text(text)),
+                ContentBlock::Reasoning { text } => Ok(AssistantContent::Reasoning(Reasoning::new(text))),
+                ContentBlock::Image { data, mime_type } => Ok(AssistantContent::image_base64(data, Some(Self::image_type(&mime_type)?), None)),
+                ContentBlock::ToolCall { tool_call_id, name, arguments, invalid_arguments , .. } => {
+                    let name = ToolName::try_from(name).map_err(|error| ModelError::Protocol(error.to_string()))?;
+                    let arguments = invalid_arguments.map_or(arguments, Value::String);
+                    Ok(AssistantContent::ToolCall(rig_core::message::ToolCall::new(CallId::from_wire(tool_call_id.to_string()), ToolFunction::new(name, arguments))))
+                }
+                block => Ok(AssistantContent::text(block.into_provider_text()?)),
+            }).collect::<Result<Vec<_>,ModelError>>()?))),
         }
     }
+}
 
-    /// Converts one tool result into provider user-content correlation.
-    fn try_from_tool_result(
-        tool_call_id: ToolCallId,
-        blocks: Vec<ContentBlock>,
-        is_error: bool,
-    ) -> Result<Self, ModelError> {
-        let content = blocks
-            .into_iter()
-            .map(|block| match block {
-                ContentBlock::Text { text } => {
-                    Ok(ToolResultContent::text(text))
-                }
-                ContentBlock::Image { data, mime_type } => {
-                    let media_type = ImageMediaType::from_mime_type(&mime_type)
-                        .ok_or_else(|| {
-                            ModelError::Protocol(format!(
-                                "unsupported tool-result image MIME type: {mime_type}"
-                            ))
-                        })?;
-                    Ok(ToolResultContent::image_base64(
-                        data,
-                        Some(media_type),
-                        None,
-                    ))
-                }
-                ContentBlock::Reasoning { .. }
-                | ContentBlock::ToolCall { .. } => Err(ModelError::Protocol(
-                    "tool results currently support text and image blocks only"
-                        .to_string(),
-                )),
-                block @ (ContentBlock::Audio { .. }
-                | ContentBlock::EmbeddedResource { .. }
-                | ContentBlock::ResourceLink { .. }
-                | ContentBlock::Structured { .. }) => {
-                    Ok(ToolResultContent::text(block.into_provider_text()?))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self(Message::User {
-            content: OneOrMany::one(UserContent::ToolResult(
-                ProviderToolResult {
-                    id: tool_call_id.to_string(),
-                    call_id: None,
-                    // Empty successes still need a block; empty failures must remain visible to text-only providers.
-                    content: OneOrMany::many(content).unwrap_or_else(
-                        |_empty| {
-                            OneOrMany::one(ToolResultContent::text(
-                                if is_error {
-                                    "Tool failed without returning content."
-                                } else {
-                                    ""
-                                },
-                            ))
-                        },
-                    ),
-                },
-            )),
-        }))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Repeated requests retain only their session's concrete upstream model.
+    #[tokio::test]
+    async fn session_caches_share_definitions_but_not_prepared_owners() {
+        let config: config::AppConfig = toml::from_str(
+            r#"
+active_model="openai/audit"
+[[providers]]
+id="openai"
+display_name="audit"
+provider_type="responses"
+base_url="https://provider.invalid"
+api_key="synthetic-key"
+[[providers.models]]
+id="audit"
+context_tokens=32768
+max_output_tokens=128
+"#,
+        )
+        .unwrap();
+        let factory =
+            ProviderFactory::new(config::ConfigHandle::from_config(config));
+        let definition = factory.resolve("openai", "audit").unwrap();
+        let first = ProviderModel::new(Arc::clone(&definition));
+        let second = ProviderModel::new(Arc::clone(&definition));
+        drop(first.connect(definition.http_client()).await.unwrap());
+        let first_cached =
+            Arc::clone(&first.cached.lock().unwrap().as_ref().unwrap().model);
+        drop(second.connect(definition.http_client()).await.unwrap());
+        let second_cached =
+            Arc::clone(&second.cached.lock().unwrap().as_ref().unwrap().model);
+        drop(first.connect(definition.http_client()).await.unwrap());
+        assert!(Arc::ptr_eq(
+            &first_cached,
+            &first.cached.lock().unwrap().as_ref().unwrap().model
+        ));
+        assert!(!Arc::ptr_eq(&first_cached, &second_cached));
+        let weak = Arc::downgrade(&first_cached);
+        drop(first_cached);
+        drop(first);
+        assert!(weak.upgrade().is_none());
+        assert!(Arc::ptr_eq(
+            &second_cached,
+            &second.cached.lock().unwrap().as_ref().unwrap().model
+        ));
     }
-
-    /// Joins system text and reasoning blocks without inventing tool-call syntax.
-    fn join_text_blocks(
-        blocks: Vec<ContentBlock>,
-    ) -> Result<String, ModelError> {
-        blocks
-            .into_iter()
-            .map(|block| match block {
-                ContentBlock::Text { text }
-                | ContentBlock::Reasoning { text } => Ok(text),
-                ContentBlock::Image { .. } | ContentBlock::ToolCall { .. } => {
-                    Err(ModelError::Protocol(
-                        "system messages cannot contain images or tool calls"
-                            .to_string(),
-                    ))
-                }
-                block @ (ContentBlock::Audio { .. }
-                | ContentBlock::EmbeddedResource { .. }
-                | ContentBlock::ResourceLink { .. }
-                | ContentBlock::Structured { .. }) => {
-                    block.into_provider_text()
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(|parts| parts.join("\n"))
+    /// A credential refresh invalidates only the requesting session's prepared model.
+    #[tokio::test]
+    async fn changed_credentials_replace_only_the_local_cache() {
+        use rig_core::providers::chatgpt::auth::{FileTokenStore, TokenStore};
+        let directory = tempfile::tempdir().expect("isolated credentials");
+        FileTokenStore::new(directory.path()).save("chatgpt",&serde_json::json!({
+            "access_token":"fresh-synthetic","account_id":"account","expires_at":i64::MAX
+        }).to_string()).await.expect("seed upstream credential");
+        let config: config::AppConfig = toml::from_str(&format!(
+            r#"
+active_model="chatgpt/audit"
+[[providers]]
+id="chatgpt"
+display_name="audit"
+provider_type="responses"
+base_url="https://provider.invalid"
+auth={{type="chatgpt",token_store_dir={path:?}}}
+[[providers.models]]
+id="audit"
+context_tokens=32768
+max_output_tokens=128
+"#,
+            path = directory.path().to_str().expect("store path")
+        ))
+        .expect("config");
+        let factory =
+            ProviderFactory::new(config::ConfigHandle::from_config(config));
+        let definition =
+            factory.resolve("chatgpt", "audit").expect("definition");
+        let first = ProviderModel::new(Arc::clone(&definition));
+        let second = ProviderModel::new(Arc::clone(&definition));
+        drop(
+            first
+                .connect(definition.http_client())
+                .await
+                .expect("first model"),
+        );
+        drop(
+            second
+                .connect(definition.http_client())
+                .await
+                .expect("second model"),
+        );
+        let first_model = Arc::clone(
+            &first
+                .cached
+                .lock()
+                .expect("cache")
+                .as_ref()
+                .expect("cached model")
+                .model,
+        );
+        let second_model = Arc::clone(
+            &second
+                .cached
+                .lock()
+                .expect("cache")
+                .as_ref()
+                .expect("cached model")
+                .model,
+        );
+        // Simulate the old credential on an existing binding after shared auth has refreshed.
+        first
+            .cached
+            .lock()
+            .expect("cache")
+            .as_mut()
+            .expect("cached model")
+            .auth
+            .as_mut()
+            .expect("OAuth context")
+            .api_key = "expired-synthetic".into();
+        drop(
+            first
+                .connect(definition.http_client())
+                .await
+                .expect("refreshed model"),
+        );
+        assert!(!Arc::ptr_eq(
+            &first_model,
+            &first
+                .cached
+                .lock()
+                .expect("cache")
+                .as_ref()
+                .expect("cached model")
+                .model
+        ));
+        assert!(Arc::ptr_eq(
+            &second_model,
+            &second
+                .cached
+                .lock()
+                .expect("cache")
+                .as_ref()
+                .expect("cached model")
+                .model
+        ));
     }
 }

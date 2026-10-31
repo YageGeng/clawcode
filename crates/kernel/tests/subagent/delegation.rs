@@ -150,14 +150,16 @@ async fn foreground_answer_respects_tool_budget() {
     let test = TestKernel::new(|r| {
         match r.messages.last().map(|m| text(&m.content)).as_deref() {
             Some("delegate") => Route::Events(vec![
-                protocol::ModelStreamEvent::ToolCall(protocol::ToolCall {
-                    tool_call_id: protocol::ToolCallId::try_from(
-                        "delegate-call",
-                    )
-                    .expect("id"),
-                    name: "subagent".into(),
-                    arguments: serde_json::json!({"task":"long answer"}),
-                }),
+                protocol::ModelStreamEvent::ToolCall(
+                    protocol::ToolCall::builder()
+                        .tool_call_id(
+                            protocol::ToolCallId::try_from("delegate-call")
+                                .expect("id"),
+                        )
+                        .name("subagent".into())
+                        .arguments(serde_json::json!({"task":"long answer"}))
+                        .build(),
+                ),
                 finished(StopReason::ToolUse),
             ]),
             Some("long answer") => Route::answer(&"x".repeat(30 * 1024)),

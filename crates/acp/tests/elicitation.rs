@@ -27,8 +27,7 @@ use protocol::{
     McpPromptResult, McpProtocolVersion, McpResourceRequest, McpResourceResult,
     McpServerCapabilities, McpServerId, McpServerImplementation, McpToolInfo,
     McpToolRef, McpToolRequest, McpToolResult, MessageContent, ModelFinal,
-    ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage, SessionId,
-    StopReason,
+    ModelProfile, ModelRequest, ModelStreamEvent, SessionId, StopReason,
 };
 use store::{JsonlStoreFactory, SystemClock};
 use tokio::sync::mpsc;
@@ -57,17 +56,20 @@ struct ElicitingModel {
 
 /// Finishes one scripted model attempt.
 fn finished(stop_reason: StopReason) -> ModelStreamEvent {
-    ModelStreamEvent::Finished(ModelFinal {
-        stop_reason,
-        raw_stop_reason: None,
-        usage: ModelUsage::builder()
-            .input_tokens(1)
-            .output_tokens(1)
-            .cache_read_tokens(0)
-            .cache_write_tokens(0)
-            .total_tokens(2)
+    ModelStreamEvent::Finished(
+        ModelFinal::builder()
+            .stop_reason(stop_reason)
+            .raw_stop_reason(None)
+            .usage(protocol::ModelUsage::from(
+                protocol::Usage::new()
+                    .input_tokens(1)
+                    .output_tokens(1)
+                    .cached_input_tokens(0)
+                    .cache_creation_input_tokens(0)
+                    .total_tokens(2),
+            ))
             .build(),
-    })
+    )
 }
 
 #[async_trait]
@@ -114,12 +116,16 @@ impl Model for ElicitingModel {
             }
         };
         Ok(Box::pin(stream::iter([
-            Ok(ModelStreamEvent::ToolCall(protocol::ToolCall {
-                tool_call_id: protocol::ToolCallId::try_from("elicit-call")
-                    .expect("tool call id"),
-                name: "mcp__elicit__ask".to_string(),
-                arguments,
-            })),
+            Ok(ModelStreamEvent::ToolCall(
+                protocol::ToolCall::builder()
+                    .tool_call_id(
+                        protocol::ToolCallId::try_from("elicit-call")
+                            .expect("tool call id"),
+                    )
+                    .name("mcp__elicit__ask".to_string())
+                    .arguments(arguments)
+                    .build(),
+            )),
             Ok(finished(StopReason::ToolUse)),
         ])))
     }

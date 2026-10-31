@@ -198,11 +198,11 @@ async fn adapter(
 fn invocation(
     arguments: serde_json::Value,
 ) -> (ToolCall, ToolExecutionContext) {
-    let call = ToolCall {
-        tool_call_id: ToolCallId::try_from("call-1").expect("Tool call id"),
-        name: tool_info().public_name,
-        arguments,
-    };
+    let call = ToolCall::builder()
+        .tool_call_id(ToolCallId::try_from("call-1").expect("Tool call id"))
+        .name(tool_info().public_name)
+        .arguments(arguments)
+        .build();
     let context = ToolExecutionContext::builder()
         .session_id(SessionId::try_from("session-1").expect("Session id"))
         .turn_id(TurnId::try_from("turn-1").expect("Turn id"))

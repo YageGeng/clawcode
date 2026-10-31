@@ -29,11 +29,11 @@ fn tool_definition_preserves_its_input_schema() {
 #[test]
 fn tool_result_roundtrips_call_correlation() {
     let call_id = ToolCallId::try_from("call-1").expect("valid call id");
-    let call = ToolCall {
-        tool_call_id: call_id.clone(),
-        name: "read".to_string(),
-        arguments: serde_json::json!({ "path": "README.md" }),
-    };
+    let call = ToolCall::builder()
+        .tool_call_id(call_id.clone())
+        .name("read".to_string())
+        .arguments(serde_json::json!({ "path": "README.md" }))
+        .build();
     let result = ToolResult::builder()
         .tool_call_id(call_id)
         .blocks(vec![ContentBlock::Text {

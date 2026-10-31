@@ -4,7 +4,6 @@ mod acp;
 mod capability;
 mod event;
 mod extension;
-pub mod hooks;
 mod id;
 mod identity;
 mod mcp;
@@ -37,19 +36,17 @@ pub use capability::{
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
-    AfterProviderResponseEvent, AgentEndEvent, AgentSettledEvent,
-    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartResult,
-    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, ContextEvent,
-    ContextResult, ExtensionCommandDefinition, ExtensionDescriptor,
-    ExtensionEntryData, ExtensionEventData, ExtensionExecRequest,
-    ExtensionExecResult, ExtensionFlagDefinition, ExtensionFlagKind,
-    ExtensionInvocation, ExtensionMessageDraft, ExtensionProviderRegistration,
-    ExtensionSnapshot, ExtensionUserMessage, HeaderMutation, HeaderPatch,
-    InputEvent, InputResult, InputSource, InputStreamingBehavior,
-    MessageEndEvent, MessageStartEvent, MessageUpdate, MessageUpdateEvent,
-    ModelSelectEvent, ModelSelectSource, ProjectTrustDecision,
-    ProjectTrustEvent, ProjectTrustResult, ResourcesDiscoverEvent,
-    ResourcesDiscoverReason, ResourcesDiscoverResult,
+    AgentEndEvent, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
+    BeforeAgentStartResult, ContextEvent, ContextResult,
+    ExtensionCommandDefinition, ExtensionDescriptor, ExtensionEntryData,
+    ExtensionEventData, ExtensionExecRequest, ExtensionExecResult,
+    ExtensionFlagDefinition, ExtensionFlagKind, ExtensionInvocation,
+    ExtensionMessageDraft, ExtensionProviderRegistration, ExtensionSnapshot,
+    ExtensionUserMessage, InputEvent, InputResult, InputSource,
+    InputStreamingBehavior, MessageEndEvent, MessageStartEvent, MessageUpdate,
+    MessageUpdateEvent, ModelSelectEvent, ModelSelectSource,
+    ProjectTrustDecision, ProjectTrustEvent, ProjectTrustResult,
+    ResourcesDiscoverEvent, ResourcesDiscoverReason, ResourcesDiscoverResult,
     SessionBeforeCompactEvent, SessionBeforeCompactResult,
     SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCancelResult,
@@ -62,9 +59,7 @@ pub use extension::{
     ToolResultPatch, TreeSummary, TurnEndEvent, TurnStartEvent,
     UserBashDisposition, UserBashEvent, UserBashResult,
 };
-pub use hooks::model::{
-    ModelHeaders, ModelHookError, ModelRequestHooks, ModelResponseMetadata,
-};
+
 pub use id::{IdGenerator, IdKind};
 pub use identity::{
     AcpExtensionMethod, ConfigOverridePath, ConfigOverridePathError,
@@ -94,7 +89,7 @@ pub use message::{
     AgentMessage, AssistantMetadata, BashExecutionMessage,
     CompactionSummaryMessage, ContentBlock, EmbeddedResourceContent,
     ExtensionMessage, MessageContent, MessageIdentity, MessageTiming,
-    MessageTimingError, ModelUsage, Role,
+    MessageTimingError, Role,
 };
 pub use model::{
     ModelFailure, ModelFinal, ModelRequest, ModelRequestOptions,
@@ -138,3 +133,6 @@ pub use turn::{
     StopReason, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
     TurnTimingError,
 };
+
+pub mod usage;
+pub use usage::{ModelUsage, Usage};

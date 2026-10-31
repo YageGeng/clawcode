@@ -13,6 +13,6 @@ pub use provider::{ProviderModel, ProviderModelFactory};
 pub use runtime::{
     AdmissionTicket, AnswerOutcome, ContextUsageEstimate, InsertionNotice,
     InsertionReceiver, Kernel, KernelError, KernelFactory, PromptOutcome,
-    PromptRequest, RetryClassifier, SubmissionAnswer, SubmitRequest, WhenBusy,
+    PromptRequest, SubmissionAnswer, SubmitRequest, WhenBusy,
 };
 pub use sink::{ChannelEventSink, EventSink, SessionEventSinks, SinkError};

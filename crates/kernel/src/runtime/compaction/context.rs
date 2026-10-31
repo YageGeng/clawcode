@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use protocol::{
     AgentMessage, AssistantMetadata, CompactionPolicy, ContentBlock,
-    MessageContent, ModelProfile, ModelUsage, StopReason,
+    MessageContent, ModelProfile, StopReason,
 };
 
 /// Provides kernel-specific overflow classification for shared compaction policy data.
@@ -29,67 +29,28 @@ impl CompactionPolicyExt for CompactionPolicy {
             return None;
         }
 
-        let input_tokens = metadata
-            .usage
-            .input_tokens
-            .saturating_add(metadata.usage.cache_read_tokens);
+        // Input already includes cached reads and writes in the upstream contract.
+        let usage = metadata.usage.as_ref();
         if metadata.stop_reason == StopReason::EndTurn
-            && input_tokens > profile.context_tokens
+            && usage
+                .input_tokens
+                .is_some_and(|input| input > profile.context_tokens)
         {
             return Some(OverflowRecovery::CompactOnly);
         }
         if metadata.stop_reason == StopReason::MaxTokens
-            && (metadata.usage.output_tokens < profile.max_output_tokens
-                || input_tokens.saturating_mul(100)
-                    >= profile.context_tokens.saturating_mul(99))
+            && (usage
+                .output_tokens
+                .is_some_and(|output| output < profile.max_output_tokens)
+                || usage.input_tokens.is_some_and(|input| {
+                    input.saturating_mul(100)
+                        >= profile.context_tokens.saturating_mul(99)
+                }))
         {
             return Some(OverflowRecovery::CompactAndRetry);
         }
-        if metadata.stop_reason != StopReason::Error {
-            return None;
-        }
-
-        let error = metadata.error.as_deref()?.to_ascii_lowercase();
-        if [
-            "throttling error:",
-            "service unavailable:",
-            "rate limit",
-            "too many requests",
-        ]
-        .iter()
-        .any(|pattern| error.contains(pattern))
-        {
-            return None;
-        }
-        [
-            "prompt is too long",
-            "request_too_large",
-            "input is too long for requested model",
-            "exceeds the context window",
-            "maximum context length",
-            "input token count",
-            "maximum prompt length",
-            "reduce the length of the messages",
-            "maximum allowed input length",
-            "exceeds the available context size",
-            "greater than the context length",
-            "context window exceeds limit",
-            "exceeded model token limit",
-            "too large for model with",
-            "configured context size",
-            "model_context_window_exceeded",
-            "prompt too long",
-            "range of input length should be",
-            "context_length_exceeded",
-            "context length exceeded",
-            "too many tokens",
-            "token limit exceeded",
-            "400 status code (no body)",
-            "413 status code (no body)",
-        ]
-        .iter()
-        .any(|pattern| error.contains(pattern))
-        .then_some(OverflowRecovery::CompactAndRetry)
+        (metadata.stop_reason == StopReason::Error && metadata.context_overflow)
+            .then_some(OverflowRecovery::CompactAndRetry)
     }
 }
 
@@ -103,7 +64,7 @@ pub(in crate::runtime) enum OverflowRecovery {
 }
 
 /// Provider-grounded estimate of the current active context size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, typed_builder::TypedBuilder)]
 pub struct ContextUsageEstimate {
     /// Estimated complete context tokens.
     pub tokens: u64,
@@ -112,6 +73,7 @@ pub struct ContextUsageEstimate {
     /// Estimated tokens after the usage-providing Assistant.
     pub trailing_tokens: u64,
     /// Message index that supplied usage, or `None` when no valid usage exists.
+    #[builder(default, setter(strip_option))]
     pub last_usage_index: Option<usize>,
 }
 
@@ -133,14 +95,15 @@ impl ContextUsageEstimate {
                         if !matches!(
                             metadata.stop_reason,
                             StopReason::Error | StopReason::Cancelled
-                        ) && metadata.usage.context_tokens() > 0
-                            && compaction_timestamp.is_none_or(
-                                |boundary| {
-                                    message.timing.timestamp_ms > boundary
-                                },
-                            ) =>
+                        ) && compaction_timestamp.is_none_or(
+                            |boundary| message.timing.timestamp_ms > boundary,
+                        ) =>
                     {
-                        Some((index, metadata.usage.context_tokens()))
+                        metadata
+                            .usage
+                            .as_ref()
+                            .context_tokens()
+                            .map(|tokens| (index, tokens))
                     }
                     MessageContent::System { .. }
                     | MessageContent::User { .. }
@@ -161,23 +124,22 @@ impl ContextUsageEstimate {
                 .fold(0_u64, |total, message| {
                     total.saturating_add(message.estimated_tokens())
                 });
-            return Self {
-                tokens: usage_tokens.saturating_add(trailing_tokens),
-                usage_tokens,
-                trailing_tokens,
-                last_usage_index: Some(index),
-            };
+            return Self::builder()
+                .tokens(usage_tokens.saturating_add(trailing_tokens))
+                .usage_tokens(usage_tokens)
+                .trailing_tokens(trailing_tokens)
+                .last_usage_index(index)
+                .build();
         }
 
         let estimated = history.iter().fold(0_u64, |total, message| {
             total.saturating_add(message.estimated_tokens())
         });
-        Self {
-            tokens: estimated,
-            usage_tokens: 0,
-            trailing_tokens: estimated,
-            last_usage_index: None,
-        }
+        Self::builder()
+            .tokens(estimated)
+            .usage_tokens(0)
+            .trailing_tokens(estimated)
+            .build()
     }
 
     /// Returns whether usage crossed the configured context reserve threshold.
@@ -227,6 +189,7 @@ impl CompactionPreparation {
         let compactable = previous_boundary
             .and_then(|index| history.get(index.saturating_add(1)..))
             .unwrap_or(history);
+        // Native provenance does not change the assistant role or its lifecycle.
         let valid_cut_points = compactable
             .iter()
             .enumerate()
@@ -375,25 +338,6 @@ impl From<&AgentMessage> for CompactionFileOperations {
         Self {
             read: compaction.read_files.iter().cloned().collect(),
             modified: compaction.modified_files.iter().cloned().collect(),
-        }
-    }
-}
-
-/// Token-accounting projection for provider usage.
-trait ContextTokens {
-    /// Returns provider total tokens or a checked component fallback.
-    fn context_tokens(&self) -> u64;
-}
-
-impl ContextTokens for ModelUsage {
-    fn context_tokens(&self) -> u64 {
-        if self.total_tokens > 0 {
-            self.total_tokens
-        } else {
-            self.input_tokens
-                .saturating_add(self.output_tokens)
-                .saturating_add(self.cache_read_tokens)
-                .saturating_add(self.cache_write_tokens)
         }
     }
 }

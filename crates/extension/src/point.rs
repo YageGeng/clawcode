@@ -178,27 +178,7 @@ define_point!(
     "context",
     "Model-context transformation point."
 );
-define_point!(
-    BeforeProviderRequestPoint,
-    BeforeProviderRequestEvent,
-    serde_json::Value,
-    "before_provider_request",
-    "Provider payload replacement point."
-);
-define_point!(
-    BeforeProviderHeadersPoint,
-    BeforeProviderHeadersEvent,
-    HeaderPatch,
-    "before_provider_headers",
-    "Provider header mutation point."
-);
-define_point!(
-    AfterProviderResponsePoint,
-    AfterProviderResponseEvent,
-    (),
-    "after_provider_response",
-    "Provider response metadata observer point."
-);
+
 define_point!(
     ModelSelectPoint,
     ModelSelectEvent,
@@ -257,7 +237,7 @@ define_point!(
 );
 
 /// Ordered catalog of Pi's current non-UI extension hook names.
-pub const NON_UI_EXTENSION_POINT_NAMES: [&str; 33] = [
+pub const NON_UI_EXTENSION_POINT_NAMES: [&str; 30] = [
     ProjectTrustPoint::NAME,
     ResourcesDiscoverPoint::NAME,
     SessionStartPoint::NAME,
@@ -280,9 +260,6 @@ pub const NON_UI_EXTENSION_POINT_NAMES: [&str; 33] = [
     MessageUpdatePoint::NAME,
     MessageEndPoint::NAME,
     ContextPoint::NAME,
-    BeforeProviderRequestPoint::NAME,
-    BeforeProviderHeadersPoint::NAME,
-    AfterProviderResponsePoint::NAME,
     ModelSelectPoint::NAME,
     ThinkingLevelSelectPoint::NAME,
     ToolExecutionStartPoint::NAME,

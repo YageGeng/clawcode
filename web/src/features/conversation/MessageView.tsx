@@ -1,6 +1,7 @@
 import { memo } from "react";
 
 import type { MessageEntity, SessionTreeEntry } from "../../domain/model";
+import { ModelUsages } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandMessageCard } from "./CommandMessageCard";
 import { MarkdownContent } from "./MarkdownContent";
@@ -81,7 +82,7 @@ export const MessageView = memo(function MessageView({ message, entry, cwd, runn
             <dt>Provider</dt><dd>{assistant.providerId}</dd>
             <dt>Model</dt><dd>{assistant.modelId}</dd>
             <dt>StopReason</dt><dd>{assistant.stopReason}{assistant.rawStopReason === undefined ? "" : ` (${assistant.rawStopReason})`}</dd>
-            <dt>Usage</dt><dd>in {assistant.usage.inputTokens} · out {assistant.usage.outputTokens} · cache read {assistant.usage.cacheReadTokens} · cache write {assistant.usage.cacheWriteTokens} · total {assistant.usage.totalTokens}</dd>
+          <dt>Usage</dt><dd>in {ModelUsages.formatTokens(assistant.usage.inputTokens)} · out {ModelUsages.formatTokens(assistant.usage.outputTokens)} · cache read {ModelUsages.formatTokens(assistant.usage.cacheReadTokens)} · cache write {ModelUsages.formatTokens(assistant.usage.cacheWriteTokens)} · total {ModelUsages.formatTokens(assistant.usage.totalTokens)}</dd>
             {assistant.error === undefined ? null : <><dt>Error</dt><dd>{assistant.error}</dd></>}
           </>}
         </dl>

@@ -1,28 +1,15 @@
-use std::collections::VecDeque;
-use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
 use futures::StreamExt;
-use kernel::{
-    Model, ModelError, ModelFactory, ProviderModel, ProviderModelFactory,
-};
-use protocol::{
-    AgentMessage, BashExecutionMessage, CompactionSummaryMessage, ContentBlock,
-    EmbeddedResourceContent, EntryId, MessageContent, MessageId,
-    MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
-    ModelRequestOptions, ModelStreamEvent, StaticExtensionRegistration,
-    StopReason, TimestampMs, TurnId, UserBashResult,
-};
-use provider::completion::{CompletionError, CompletionRequest, Usage};
-use provider::factory::{
-    DynLlmStream, Llm, LlmCompletion, LlmStreamEvent, ProviderFinal,
-    ProviderFinishReason,
-};
-use provider::wasm_compat::WasmBoxedFuture;
+use kernel::{ModelFactory, ProviderModelFactory};
+use protocol::{ContentBlock, MessageContent, ModelStreamEvent, StopReason};
+use serde_json::json;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-/// Serializes Provider stream tests around tracing's process-wide callsite cache.
+#[path = "support/provider_server.rs"]
+mod provider_server;
+use provider_server::Server;
+
 static PROVIDER_STREAM_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
@@ -65,772 +52,277 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
     }
 }
 
-/// Scripted dynamic provider that exposes request acquisition counts.
-#[derive(Debug)]
-struct FixtureLlm {
-    acquisitions: Mutex<VecDeque<Result<Vec<LlmStreamEvent>, CompletionError>>>,
-    acquisition_count: AtomicUsize,
-    requests: Mutex<Vec<CompletionRequest>>,
-}
-
-impl FixtureLlm {
-    /// Creates a scripted provider from ordered acquisition outcomes.
-    fn new(
-        acquisitions: Vec<Result<Vec<LlmStreamEvent>, CompletionError>>,
-    ) -> Self {
-        Self {
-            acquisitions: Mutex::new(acquisitions.into()),
-            acquisition_count: AtomicUsize::new(0),
-            requests: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Returns how many provider stream acquisitions were attempted.
-    fn acquisition_count(&self) -> usize {
-        self.acquisition_count.load(Ordering::SeqCst)
-    }
-
-    /// Returns the newest provider request captured by this fixture.
-    fn last_request(&self) -> Option<CompletionRequest> {
-        self.requests
-            .lock()
-            .expect("fixture request lock")
-            .last()
-            .cloned()
-    }
-
-    /// Returns a successful provider Final used after retry acquisition.
-    fn successful_final() -> Vec<LlmStreamEvent> {
-        vec![LlmStreamEvent::Final(ProviderFinal {
-            finish_reason: ProviderFinishReason::Stop,
-            raw_finish_reason: Some("stop".to_string()),
-            usage: Some(
-                Usage::builder()
-                    .input_tokens(4)
-                    .output_tokens(1)
-                    .total_tokens(5)
-                    .cached_input_tokens(0)
-                    .cache_creation_input_tokens(0)
-                    .build(),
-            ),
-        })]
-    }
-}
-
-impl Llm for FixtureLlm {
-    /// Returns the deterministic fixture provider identifier.
-    fn provider_id(&self) -> &str {
-        "fixture"
-    }
-
-    /// Returns the deterministic fixture model identifier.
-    fn model_id(&self) -> &str {
-        "fixture-model"
-    }
-
-    /// Rejects the unused non-streaming path in this fixture.
-    fn completion(
-        &self,
-        _request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<LlmCompletion, CompletionError>> {
-        Box::pin(async {
-            Err(CompletionError::ProviderError(
-                "fixture completion is unsupported".to_string(),
-            ))
-        })
-    }
-
-    /// Returns the next scripted provider stream acquisition result.
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> WasmBoxedFuture<'_, Result<DynLlmStream, CompletionError>> {
-        self.acquisition_count.fetch_add(1, Ordering::SeqCst);
-        self.requests
-            .lock()
-            .expect("fixture request lock")
-            .push(request);
-        Box::pin(async {
-            let events = self
-                .acquisitions
-                .lock()
-                .expect("fixture acquisition lock")
-                .pop_front()
-                .expect("scripted acquisition");
-            events.map(|events| {
-                Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
-                    as DynLlmStream
-            })
-        })
-    }
-}
-
-/// Builds a complete user request accepted by the provider conversion boundary.
-fn sample_request() -> ModelRequest {
-    let timestamp = TimestampMs::from(100);
-    ModelRequest {
-        messages: vec![AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from("message-1")
-                    .expect("message id"),
-                turn_id: TurnId::try_from("turn-1").expect("turn id"),
-            },
-            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
-                .expect("message timing"),
-            content: MessageContent::User {
-                blocks: vec![ContentBlock::Text {
-                    text: "hello".to_string(),
-                }],
-            },
-        }],
-        tools: Vec::new(),
-        options: Default::default(),
-    }
-}
-
-/// Builds the stable model profile used by provider adapter tests.
-fn sample_profile() -> ModelProfile {
-    ModelProfile::builder()
-        .provider_id("fixture".to_string())
-        .model_id("fixture-model".to_string())
-        .display_name("Fixture Model".to_string())
-        .context_tokens(128_000)
-        .max_output_tokens(8_000)
-        .build()
-}
-
-/// Provider Final preserves a length stop and complete usage accounting.
+/// Limits and normalized token usage survive the real upstream stream boundary.
 #[tokio::test]
 async fn provider_final_preserves_usage_and_length_stop() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm = Arc::new(FixtureLlm::new(vec![Ok(vec![LlmStreamEvent::Final(
-        ProviderFinal {
-            finish_reason: ProviderFinishReason::Length,
-            raw_finish_reason: Some("length".to_string()),
-            usage: Some(
-                Usage::builder()
-                    .input_tokens(90)
-                    .output_tokens(10)
-                    .total_tokens(100)
-                    .cached_input_tokens(3)
-                    .cache_creation_input_tokens(2)
-                    .build(),
-            ),
-        },
-    )])]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-    let mut stream = model
-        .stream(sample_request(), CancellationToken::new())
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let body = "data: {\"id\":\"r\",\"object\":\"chat.completion.chunk\",\"model\":\"audit\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":10,\"total_tokens\":40,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\ndata: [DONE]\n\n";
+    let server = Server::start(vec![(200, body.into())]).await;
+    let model = server.factory(false).create().unwrap();
+    let events = model
+        .stream(Server::request("hi"), CancellationToken::new())
         .await
-        .expect("provider stream");
-    let mut events = Vec::new();
-    while let Some(event) = stream.next().await {
-        events.push(event.expect("model event"));
-    }
-
-    assert!(
-        matches!(events.last(), Some(ModelStreamEvent::Finished(final_))
-        if final_.stop_reason == StopReason::MaxTokens
-            && final_.usage.input_tokens == 90
-            && final_.usage.cache_read_tokens == 3
-            && final_.usage.cache_write_tokens == 2
-            && final_.usage.total_tokens == 100)
-    );
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let final_ = events
+        .into_iter()
+        .find_map(|event| match event.unwrap() {
+            ModelStreamEvent::Finished(result) => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(final_.stop_reason, StopReason::MaxTokens);
+    assert_eq!(final_.raw_stop_reason.as_deref(), Some("length"));
+    assert_eq!(final_.usage.as_ref().input_tokens, Some(30));
+    assert_eq!(final_.usage.as_ref().cached_input_tokens, Some(5));
+    assert_eq!(final_.usage.as_ref().total_tokens, Some(40));
 }
 
-/// Request-local Sampling limits reach the mature provider request unchanged.
+/// Generation options and compaction metadata reach the actual serialized request.
 #[tokio::test]
-async fn model_request_options_reach_provider_request() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm =
-        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-    let mut request = sample_request();
-    request.options = ModelRequestOptions {
-        max_tokens: Some(64),
+async fn model_options_and_compaction_summary_reach_provider() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let model = server.factory(false).create().unwrap();
+    let mut request = Server::request("hi");
+    request.options = protocol::ModelRequestOptions {
         temperature: Some(0.25),
+        max_tokens: Some(32),
     };
-
-    let _stream = model
+    request.messages[0].content = MessageContent::CompactionSummary {
+        compaction: protocol::CompactionSummaryMessage::builder()
+            .entry_id(protocol::EntryId::try_from("entry").unwrap())
+            .summary("checkpoint body".into())
+            .tokens_before(42000)
+            .build(),
+    };
+    for event in model
         .stream(request, CancellationToken::new())
         .await
-        .expect("provider stream");
-
-    let captured = llm.last_request().expect("captured provider request");
-    assert_eq!(captured.max_tokens, Some(64));
-    assert_eq!(captured.temperature, Some(0.25));
-}
-
-/// Compaction checkpoints retain their exact pre-compaction size at the provider boundary.
-#[tokio::test]
-async fn compaction_summary_reaches_provider_as_user_context() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm =
-        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-    let timestamp = TimestampMs::from(150);
-    let request = ModelRequest {
-        messages: vec![AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from("message-summary")
-                    .expect("message id"),
-                turn_id: TurnId::try_from("turn-summary").expect("turn id"),
-            },
-            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
-                .expect("message timing"),
-            content: MessageContent::CompactionSummary {
-                compaction: CompactionSummaryMessage::builder()
-                    .entry_id(
-                        EntryId::try_from("entry-summary").expect("entry id"),
-                    )
-                    .summary("checkpoint body".to_string())
-                    .tokens_before(42_000)
-                    .build(),
-            },
-        }],
-        tools: Vec::new(),
-        options: Default::default(),
-    };
-
-    let _stream = model
-        .stream(request, CancellationToken::new())
+        .unwrap()
+        .collect::<Vec<_>>()
         .await
-        .expect("provider stream");
-    let value = serde_json::to_value(
-        llm.last_request().expect("captured provider request"),
-    )
-    .expect("serialize provider request");
-    let history = &value["chat_history"][0];
-
-    assert_eq!(history["role"], "user");
-    assert_eq!(
-        history["content"][0]["text"],
-        "The conversation history before this point was compacted from 42000 tokens into the following summary:\n\n<summary>\ncheckpoint body\n</summary>"
+    {
+        event.unwrap();
+    }
+    let requests = server.requests();
+    assert_eq!(requests[0]["temperature"], 0.25);
+    assert_eq!(requests[0]["max_tokens"], 32);
+    assert!(requests[0]["messages"].to_string().contains("42000 tokens"));
+    assert!(
+        requests[0]["messages"]
+            .to_string()
+            .contains("checkpoint body")
     );
 }
 
-/// Provider EOF without an explicit Final becomes a stream protocol failure.
+/// EOF without a provider terminal cannot be reported as successful completion.
 #[tokio::test]
 async fn stream_eof_without_final_is_a_protocol_failure() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm = Arc::new(FixtureLlm::new(vec![Ok(Vec::new())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        llm as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-    let mut stream = model
-        .stream(sample_request(), CancellationToken::new())
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server=Server::start(vec![(200,"data: {\"id\":\"r\",\"object\":\"chat.completion.chunk\",\"model\":\"audit\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n".into())]).await;
+    let model = server.factory(false).create().unwrap();
+    let events = model
+        .stream(Server::request("hi"), CancellationToken::new())
         .await
-        .expect("provider stream acquisition");
-
-    assert!(matches!(
-        stream.next().await,
-        Some(Err(ModelError::Stream(_)))
-    ));
-}
-
-/// Preflight validates the constructed provider without issuing a paid request.
-#[tokio::test]
-async fn preflight_does_not_acquire_a_provider_stream() {
-    let llm = Arc::new(FixtureLlm::new(Vec::new()));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-
-    model.preflight().await.expect("preflight");
-    assert_eq!(llm.acquisition_count(), 0);
-}
-
-/// A retryable 503 reacquires the provider stream once after backoff.
-#[tokio::test(start_paused = true)]
-async fn retryable_provider_failure_reacquires_the_stream() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let llm = Arc::new(FixtureLlm::new(vec![
-        Err(CompletionError::HttpError(
-            provider::http_client::Error::InvalidStatusCode(
-                http::StatusCode::SERVICE_UNAVAILABLE,
-            ),
-        )),
-        Ok(FixtureLlm::successful_final()),
-    ]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig {
-            timeout_ms: None,
-            max_retries: Some(1),
-            max_retry_delay_ms: 60_000,
-        },
-    );
-    let cancellation = CancellationToken::new();
-    let task = tokio::spawn(tracing_futures::WithSubscriber::with_subscriber(
-        async move { model.stream(sample_request(), cancellation).await },
-        dispatch,
-    ));
-
-    tokio::task::yield_now().await;
-    assert_eq!(llm.acquisition_count(), 1);
-    tokio::time::advance(std::time::Duration::from_secs(1)).await;
-    let result = task.await.expect("retry task");
-    let _stream = result.expect("retry should acquire a stream");
-    assert_eq!(llm.acquisition_count(), 2);
-    let output = logs.content();
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(Result::is_err));
     assert!(
-        output.contains("retrying Provider request after attempt 1"),
-        "captured logs: {output:?}"
+        !events
+            .iter()
+            .any(|event| matches!(event, Ok(ModelStreamEvent::Finished(_))))
     );
 }
 
-/// Static provider declarations participate in the immutable model catalog.
-#[test]
-fn provider_model_factory_builds_static_extension_providers() {
-    let base_provider = config::LlmProvider {
-        id: config::ProviderId::Other("base".to_string()),
-        display_name: "Base".to_string(),
-        provider_type: config::ProviderType::OpenaiCompletions,
-        base_url: "https://example.com/v1".to_string(),
-        api_key: Some(config::ApiKeyConfig::Plaintext("sk-test".to_string())),
-        auth: None,
-        models: vec![
-            config::LlmModel::builder()
-                .id("base-model".to_string())
-                .context_tokens(Some(128_000))
-                .max_output_tokens(Some(8_000))
-                .build(),
-        ],
-    };
-    let config = config::ConfigHandle::from_config(config::AppConfig {
-        providers: vec![base_provider],
-        active_model: "base/base-model".to_string(),
-        ..config::AppConfig::default()
-    });
-    let registration = StaticExtensionRegistration::builder()
-        .providers(vec![protocol::ExtensionProviderRegistration {
-            name: "extension-provider".to_string(),
-            config: serde_json::json!({
-                "display_name": "Extension Provider",
-                "provider_type": "openai-completions",
-                "base_url": "https://example.com/v1",
-                "api_key": "sk-test",
-                "models": [{
-                    "id": "extension-model",
-                    "context_tokens": 64000,
-                    "max_output_tokens": 4096
-                }]
-            }),
-        }])
-        .build();
-
-    let catalog = ProviderModelFactory::from_config(config)
-        .create_catalog(&registration)
-        .expect("extension model catalog");
-
-    assert_eq!(catalog.profiles().len(), 2);
-    assert_eq!(
-        catalog
-            .resolve("extension-provider", "extension-model")
-            .expect("extension model")
-            .profile()
-            .display_name,
-        "extension-model"
-    );
-    assert_eq!(catalog.active().profile().model_id, "base-model");
+/// Only Kernel owns retries; one failed provider stream sends exactly one HTTP request.
+#[tokio::test]
+async fn provider_boundary_does_not_nest_request_retries() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(429, "rate limit".into())]).await;
+    let model = server.factory(false).create().unwrap();
+    let events = model
+        .stream(Server::request("hi"), CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(Result::is_err));
+    assert_eq!(server.requests().len(), 1);
 }
 
-/// Cancellation interrupts an active provider backoff before another request.
-#[tokio::test(start_paused = true)]
-async fn cancellation_interrupts_provider_retry_backoff() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm = Arc::new(FixtureLlm::new(vec![Err(CompletionError::HttpError(
-        provider::http_client::Error::InvalidStatusCode(
-            http::StatusCode::SERVICE_UNAVAILABLE,
-        ),
-    ))]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig {
-            timeout_ms: None,
-            max_retries: Some(1),
-            max_retry_delay_ms: 60_000,
-        },
-    );
-    let cancellation = CancellationToken::new();
-    let task_cancellation = cancellation.clone();
-    let task = tokio::spawn(async move {
-        model.stream(sample_request(), task_cancellation).await
-    });
-
-    tokio::task::yield_now().await;
-    assert_eq!(llm.acquisition_count(), 1);
-    cancellation.cancel();
-
-    let error = match task.await.expect("cancelled retry task") {
-        Ok(_) => panic!("cancelled acquisition unexpectedly succeeded"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, ModelError::Cancelled));
-    assert_eq!(llm.acquisition_count(), 1);
-}
-
-/// Tool-result images cross the kernel/provider boundary as typed base64 image content.
+/// Supported image results remain available through upstream's user-image fallback.
 #[tokio::test]
 async fn tool_result_image_is_preserved_in_provider_request() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm =
-        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let model = server.factory(false).create().unwrap();
+    let request = Server::tool_request(
+        vec![
+            ContentBlock::Text {
+                text: "image follows".into(),
+            },
+            ContentBlock::Image {
+                data: "aW1hZ2U=".into(),
+                mime_type: "image/png".into(),
+            },
+        ],
+        false,
     );
-    let timestamp = TimestampMs::from(200);
-    let request = ModelRequest {
-        messages: vec![AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from("message-image")
-                    .expect("message id"),
-                turn_id: TurnId::try_from("turn-image").expect("turn id"),
-            },
-            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
-                .expect("message timing"),
-            content: MessageContent::ToolResult {
-                cancelled: false,
-                output: None,
-                tool_call_id: protocol::ToolCallId::try_from("tool-image")
-                    .expect("tool id"),
-                blocks: vec![ContentBlock::Image {
-                    data: "aW1hZ2U=".to_string(),
-                    mime_type: "image/png".to_string(),
-                }],
-                is_error: false,
-                details: None,
-            },
-        }],
-        tools: Vec::new(),
-        options: Default::default(),
-    };
-
-    let _stream = model
+    for event in model
         .stream(request, CancellationToken::new())
         .await
-        .expect("provider stream");
-    let value = serde_json::to_value(
-        llm.last_request().expect("captured provider request"),
-    )
-    .expect("serialize provider request");
-
-    assert_eq!(
-        value["chat_history"][0]["content"][0]["content"][0]["type"],
-        "image"
-    );
-    assert_eq!(
-        value["chat_history"][0]["content"][0]["content"][0]["media_type"],
-        "png"
-    );
-    assert_eq!(
-        value["chat_history"][0]["content"][0]["content"][0]["data"]["value"],
-        "aW1hZ2U="
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+    {
+        event.unwrap();
+    }
+    assert!(
+        server.requests()[0]["messages"]
+            .to_string()
+            .contains("data:image/png;base64,aW1hZ2U=")
     );
 }
 
-/// Provider projection describes unsupported MCP blocks while the transcript retains typed data.
+/// MCP resource text and metadata stay visible while binary bodies never become model text.
 #[tokio::test]
 async fn mcp_tool_result_content_has_stable_provider_projection() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm =
-        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let model = server.factory(false).create().unwrap();
+    let request = Server::tool_request(
+        vec![
+            ContentBlock::Audio {
+                data: "private-audio".into(),
+                mime_type: "audio/wav".into(),
+            },
+            ContentBlock::EmbeddedResource {
+                uri: "file:///readme".into(),
+                mime_type: Some("text/markdown".into()),
+                content: protocol::EmbeddedResourceContent::Text {
+                    text: "# Readme".into(),
+                },
+            },
+            ContentBlock::EmbeddedResource {
+                uri: "file:///binary".into(),
+                mime_type: None,
+                content: protocol::EmbeddedResourceContent::Blob {
+                    data: "private-binary".into(),
+                },
+            },
+            ContentBlock::Structured {
+                value: json!({"count":2}),
+            },
+        ],
+        false,
     );
-    let timestamp = TimestampMs::from(250);
-    let request = ModelRequest {
-        messages: vec![AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from("message-mcp")
-                    .expect("message id"),
-                turn_id: TurnId::try_from("turn-mcp").expect("turn id"),
-            },
-            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
-                .expect("message timing"),
-            content: MessageContent::ToolResult {
-                cancelled: false,
-                output: None,
-                tool_call_id: protocol::ToolCallId::try_from("tool-mcp")
-                    .expect("tool id"),
-                blocks: vec![
-                    ContentBlock::Audio {
-                        data: "must-not-enter-provider-request".to_string(),
-                        mime_type: "audio/wav".to_string(),
-                    },
-                    ContentBlock::EmbeddedResource {
-                        uri: "file:///workspace/readme.md".to_string(),
-                        mime_type: Some("text/markdown".to_string()),
-                        content: EmbeddedResourceContent::Text {
-                            text: "# Readme".to_string(),
-                        },
-                    },
-                    ContentBlock::EmbeddedResource {
-                        uri: "file:///workspace/archive.bin".to_string(),
-                        mime_type: Some("application/octet-stream".to_string()),
-                        content: EmbeddedResourceContent::Blob {
-                            data: "binary-must-not-enter-provider-request"
-                                .to_string(),
-                        },
-                    },
-                    ContentBlock::ResourceLink {
-                        server_id: None,
-                        uri: "file:///workspace/report.pdf".to_string(),
-                        name: "report".to_string(),
-                        title: Some("Report".to_string()),
-                        description: Some("Generated report".to_string()),
-                        mime_type: Some("application/pdf".to_string()),
-                        size: Some(4_096),
-                    },
-                    ContentBlock::Structured {
-                        value: serde_json::json!({ "count": 2 }),
-                    },
-                ],
-                is_error: false,
-                details: None,
-            },
-        }],
-        tools: Vec::new(),
-        options: Default::default(),
-    };
-
-    let _stream = model
+    for event in model
         .stream(request, CancellationToken::new())
         .await
-        .expect("provider stream");
-    let serialized = serde_json::to_string_pretty(
-        &llm.last_request().expect("captured provider request"),
-    )
-    .expect("serialize provider request");
-
-    for expected in [
-        "[Audio content: audio/wav]",
-        "[Embedded resource: file:///workspace/readme.md (text/markdown)]",
-        "# Readme",
-        "[Embedded binary resource: file:///workspace/archive.bin (application/octet-stream)]",
-        "[Resource link: report — file:///workspace/report.pdf (application/pdf)]",
-        "Generated report",
-        "[Structured content]",
-        "\\\"count\\\": 2",
-    ] {
-        assert!(serialized.contains(expected), "request: {serialized}");
-    }
-    assert!(!serialized.contains("must-not-enter-provider-request"));
-    assert!(!serialized.contains("binary-must-not-enter-provider-request"));
-}
-
-/// Provider conversion includes `!` output and omits `!!` output from model context.
-#[tokio::test]
-async fn user_bash_context_projection_matches_pi_prefix_semantics() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let llm =
-        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        Arc::clone(&llm) as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-    let timestamp = TimestampMs::from(300);
-    let messages = [("visible", false), ("private", true)]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (output, exclude_from_context))| AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from(format!("bash-{index}"))
-                    .expect("message id"),
-                turn_id: TurnId::try_from(format!("turn-bash-{index}"))
-                    .expect("turn id"),
-            },
-            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
-                .expect("message timing"),
-            content: MessageContent::BashExecution {
-                bash: BashExecutionMessage::builder()
-                    .command(format!("printf '{output}'"))
-                    .result(
-                        UserBashResult::builder()
-                            .disposition(
-                                protocol::UserBashDisposition::Completed,
-                            )
-                            .output(output.to_string())
-                            .exit_code(Some(0))
-                            .cancelled(false)
-                            .truncated(false)
-                            .build(),
-                    )
-                    .exclude_from_context(exclude_from_context)
-                    .build(),
-            },
-        })
-        .collect();
-
-    let _stream = model
-        .stream(
-            ModelRequest {
-                messages,
-                tools: Vec::new(),
-                options: Default::default(),
-            },
-            CancellationToken::new(),
-        )
+        .unwrap()
+        .collect::<Vec<_>>()
         .await
-        .expect("provider stream");
-    let serialized = serde_json::to_string(
-        &llm.last_request().expect("captured provider request"),
-    )
-    .expect("serialize provider request");
-
-    assert!(serialized.contains("visible"));
-    assert!(!serialized.contains("private"));
-}
-
-/// Provider acquisition and stream settlement retain the parent operation Trace.
-#[tokio::test]
-async fn provider_stream_lifecycle_is_logged_without_message_content() {
-    let _stream_test_guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let llm =
-        Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-    let model = ProviderModel::new(
-        sample_profile(),
-        llm as Arc<dyn Llm>,
-        config::ProviderRetryConfig::default(),
-    );
-    tracing_futures::WithSubscriber::with_subscriber(
-        async move {
-            let root = tracing::info_span!(
-                "acp_operation",
-                trace_id = "trace-provider-test"
-            );
-            tracing::Instrument::instrument(
-                async move {
-                    let mut stream = model
-                        .stream(sample_request(), CancellationToken::new())
-                        .await
-                        .expect("provider stream");
-                    while let Some(event) = stream.next().await {
-                        event.expect("provider event");
-                    }
-                },
-                root,
-            )
-            .await;
-        },
-        dispatch,
-    )
-    .await;
-
-    let output = logs.content();
-    for lifecycle in ["started Provider request", "completed Provider request"]
     {
-        let line = output
-            .lines()
-            .find(|line| line.contains(lifecycle))
-            .unwrap_or_else(|| {
-                panic!("missing {lifecycle} log line in {output:?}")
-            });
-        assert!(line.contains("trace_id=\"trace-provider-test\""));
-        assert!(line.contains("fixture/fixture-model"));
+        event.unwrap();
     }
-    assert!(!output.contains("hello"));
+    let payload = server.requests()[0]["messages"].to_string();
+    assert!(payload.contains("# Readme") && payload.contains("count"));
+    assert!(
+        !payload.contains("private-audio")
+            && !payload.contains("private-binary")
+    );
 }
 
-/// A successful remote operation may validly return no content and still need a follow-up model turn.
+/// Empty tool results preserve correlation and failures retain an explicit visible explanation.
 #[tokio::test]
 async fn empty_mcp_result_reaches_provider() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
     for is_error in [false, true] {
-        let llm =
-            Arc::new(FixtureLlm::new(vec![Ok(FixtureLlm::successful_final())]));
-        let model = ProviderModel::new(
-            sample_profile(),
-            Arc::clone(&llm) as Arc<dyn Llm>,
-            config::ProviderRetryConfig::default(),
-        );
-        let mut request = sample_request();
-        let mut result = protocol::ToolResult::builder()
-            .tool_call_id(protocol::ToolCallId::try_from("empty").expect("id"))
-            .blocks(Vec::new())
-            .is_error(is_error)
-            .build();
-        let directory = tempfile::tempdir().expect("dir");
-        tools::ToolResultProjection::new(
-            &mut result,
-            protocol::ToolOutputPolicy::Bounded,
-            &CancellationToken::new(),
-            directory.path(),
-        )
-        .apply()
-        .expect("project");
-        let mut message = request.messages[0].clone();
-        message.identity.message_id =
-            MessageId::try_from("empty-result").expect("id");
-        message.content = MessageContent::ToolResult {
-            cancelled: false,
-            tool_call_id: result.tool_call_id,
-            blocks: result.blocks,
-            is_error,
-            details: None,
-            output: result.output,
-        };
-        request.messages.push(message);
-        let stream = model.stream(request, CancellationToken::new()).await;
-        let _stream =
-            stream.expect("empty MCP content must not abort the next turn");
-        let value =
-            serde_json::to_value(llm.last_request().expect("provider request"))
-                .expect("JSON");
-        assert_eq!(
-            value["chat_history"][1]["content"][0]["content"][0]["text"],
-            if is_error {
-                "Tool failed without returning content."
-            } else {
-                ""
-            }
-        );
+        let server = Server::start(vec![(200, Server::completion())]).await;
+        let model = server.factory(false).create().unwrap();
+        for event in model
+            .stream(
+                Server::tool_request(Vec::new(), is_error),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+        {
+            event.unwrap();
+        }
+        let requests = server.requests();
+        let message = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap();
+        assert_eq!(message["tool_call_id"], "call-1");
+        if is_error {
+            assert!(
+                message["content"].as_str().unwrap().contains("Tool failed")
+            );
+        } else {
+            assert_eq!(message["content"], "(no tool output)");
+        }
     }
 }
 
-/// Counts the actual provider wire text after the production result projector.
-#[test]
-fn bounded_output_includes_provider_separators() {
-    let directory = tempfile::tempdir().expect("dir");
-    for (text, count) in [("x", 20_480), ("", 35_000)] {
+/// Shell-history exclusion remains a project policy before the upstream history adapter.
+#[tokio::test]
+async fn user_bash_context_projection_matches_pi_prefix_semantics() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let model = server.factory(false).create().unwrap();
+    let mut request = Server::request("visible user input");
+    for (output, excluded) in
+        [("visible-shell", false), ("private-shell", true)]
+    {
+        let mut message = request.messages[0].clone();
+        message.content = MessageContent::BashExecution {
+            bash: protocol::BashExecutionMessage::builder()
+                .command("printf sample".into())
+                .result(
+                    protocol::UserBashResult::builder()
+                        .disposition(protocol::UserBashDisposition::Completed)
+                        .output(output.into())
+                        .exit_code(Some(0))
+                        .cancelled(false)
+                        .truncated(false)
+                        .build(),
+                )
+                .exclude_from_context(excluded)
+                .build(),
+        };
+        request.messages.push(message);
+    }
+    for event in model
+        .stream(request, CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+    {
+        event.unwrap();
+    }
+    let payload = server.requests()[0]["messages"].to_string();
+    assert!(payload.contains("visible-shell"));
+    assert!(!payload.contains("private-shell"));
+}
+
+/// Output budgets include the separators that the upstream Chat wire actually writes.
+#[tokio::test]
+async fn bounded_output_includes_provider_separators() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    for (text, count) in [("x", 20480), ("", 35000)] {
         let mut result = protocol::ToolResult::builder()
-            .tool_call_id(protocol::ToolCallId::try_from("blocks").expect("id"))
+            .tool_call_id(protocol::ToolCallId::try_from("call-1").unwrap())
             .blocks(
                 (0..count)
                     .map(|_| ContentBlock::Text { text: text.into() })
@@ -845,33 +337,219 @@ fn bounded_output_includes_provider_separators() {
             directory.path(),
         )
         .apply()
-        .expect("projection");
-        let content =
-            provider::OneOrMany::many(result.blocks.into_iter().map(|block| {
-                let ContentBlock::Text { text } = block else {
-                    panic!("text")
-                };
-                provider::message::ToolResultContent::text(text)
-            }))
-            .expect("content");
-        let wire = provider::providers::openai::completion::Message::try_from(
-            provider::message::ToolResult {
-                id: "blocks".into(),
-                call_id: None,
-                content,
-            },
-        )
-        .expect("wire");
-        let json = serde_json::to_value(wire).expect("json");
-        let bytes = json["content"].as_str().expect("text").len();
+        .unwrap();
+        let expected = result.output.as_ref().unwrap().visible_text_bytes;
+        let server = Server::start(vec![(200, Server::completion())]).await;
+        let model = server.factory(false).create().unwrap();
+        for event in model
+            .stream(
+                Server::tool_request(result.blocks, false),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+        {
+            event.unwrap();
+        }
+        let requests = server.requests();
+        let message = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap();
+        let bytes = message["content"].as_str().unwrap().len();
         assert!(bytes <= 20480);
-        assert_eq!(
-            result
-                .output
-                .as_ref()
-                .expect("budget diagnostics")
-                .visible_text_bytes,
-            bytes
-        );
+        assert_eq!(bytes, expected);
     }
+}
+
+/// Native provider logging retains the trace while omitting request and response text.
+#[tokio::test]
+async fn provider_stream_lifecycle_is_logged_without_message_content() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let model = server.factory(false).create().unwrap();
+    tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            tracing::Instrument::instrument(
+                async {
+                    for event in model
+                        .stream(
+                            Server::request("private-prompt-sentinel"),
+                            CancellationToken::new(),
+                        )
+                        .await
+                        .unwrap()
+                        .collect::<Vec<_>>()
+                        .await
+                    {
+                        event.unwrap();
+                    }
+                },
+                tracing::info_span!(
+                    "acp_operation",
+                    trace_id = "trace-provider-test"
+                ),
+            )
+            .await;
+        },
+        tracing::Dispatch::new(subscriber),
+    )
+    .await;
+    let output = logs.content();
+    assert!(
+        output.contains("started Provider request")
+            && output.contains("completed Provider request")
+    );
+    assert!(output.contains("trace-provider-test"));
+    assert!(
+        !output.contains("private-prompt-sentinel")
+            && !output.contains("synthetic-key")
+    );
+}
+
+/// Static contributions are shared definitions while every catalog gets independent handles.
+#[test]
+fn provider_model_factory_builds_static_extension_providers() {
+    let config: config::AppConfig = toml::from_str(
+        r#"
+active_model="openai/audit"
+[[providers]]
+id="openai"
+display_name="audit"
+provider_type="openai-completions"
+base_url="https://provider.invalid"
+api_key="synthetic-key"
+[[providers.models]]
+id="audit"
+context_tokens=32768
+max_output_tokens=128
+"#,
+    )
+    .unwrap();
+    let registration=protocol::StaticExtensionRegistration::builder().providers(vec![protocol::ExtensionProviderRegistration{
+        name:"extra".into(),config:json!({"display_name":"extra","provider_type":"anthropic","base_url":"https://provider.invalid","api_key":"synthetic-key","models":[{"id":"extra-model","context_tokens":32768,"max_output_tokens":128}]})
+    }]).build();
+    let factory = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    );
+    let first = factory.create_catalog(&registration).unwrap();
+    let second = factory.create_catalog(&registration).unwrap();
+    assert_eq!(first.profiles().len(), 2);
+    assert!(!Arc::ptr_eq(
+        &first.resolve("extra", "extra-model").unwrap(),
+        &second.resolve("extra", "extra-model").unwrap()
+    ));
+}
+/// Failed requests log typed status and model identity without copying response bodies.
+#[tokio::test]
+async fn provider_failure_logs_safe_diagnostics() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let server = Server::start(vec![(
+        401,
+        json!({"error":{"message":"PRIVATE_ERROR_SENTINEL"}}).to_string(),
+    )])
+    .await;
+    let model = server.factory(false).create().unwrap();
+    let events = tracing_futures::WithSubscriber::with_subscriber(
+        async {
+            model
+                .stream(
+                    Server::request("PRIVATE_PROMPT_SENTINEL"),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await
+        },
+        tracing::Dispatch::new(subscriber),
+    )
+    .await;
+    let failure = events
+        .into_iter()
+        .find_map(Result::err)
+        .expect("request failed");
+    assert!(failure.to_string().contains("HTTP 401"));
+    let output = logs.content();
+    assert!(
+        output.contains("WARN")
+            && output.contains("openai/audit")
+            && output.contains("HTTP 401"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("PRIVATE_ERROR_SENTINEL")
+            && !output.contains("PRIVATE_PROMPT_SENTINEL")
+            && !output.contains("synthetic-key")
+    );
+}
+
+/// Corrupt stored OAuth data fails locally with a safe category in both diagnostics and logs.
+#[tokio::test]
+async fn provider_auth_failure_is_classified_and_logged() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("chatgpt.json"),
+        json!({"access_token":42,"account_id":"PRIVATE_AUTH_SENTINEL"})
+            .to_string(),
+    )
+    .unwrap();
+    let config = serde_json::from_value(json!({
+        "active_model":"chatgpt/audit",
+        "providers":[{"id":"chatgpt","display_name":"audit","provider_type":"responses","base_url":"https://provider.invalid",
+            "auth":{"type":"chatgpt","token_store_dir":directory.path()},
+            "models":[{"id":"audit","context_tokens":32768,"max_output_tokens":128}]}]
+    })).unwrap();
+    let model = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    )
+    .create()
+    .unwrap();
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let result = tracing_futures::WithSubscriber::with_subscriber(
+        model.stream(
+            Server::request("PRIVATE_PROMPT_SENTINEL"),
+            CancellationToken::new(),
+        ),
+        tracing::Dispatch::new(subscriber),
+    )
+    .await;
+    let error = result.err().expect("invalid auth record").to_string();
+    assert!(
+        error.contains("chatgpt/audit") && error.contains("JSON"),
+        "{error}"
+    );
+    let output = logs.content();
+    assert!(
+        output.contains("WARN")
+            && output.contains("chatgpt/audit")
+            && output.contains("JSON"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("PRIVATE_AUTH_SENTINEL")
+            && !output.contains("PRIVATE_PROMPT_SENTINEL")
+    );
 }

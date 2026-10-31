@@ -16,7 +16,7 @@ use kernel::{
 use prompt::FilesystemPromptFactory;
 use protocol::{
     IdGenerator, IdKind, ModelFinal, ModelProfile, ModelRequest,
-    ModelStreamEvent, ModelUsage, StopReason,
+    ModelStreamEvent, StopReason,
 };
 use store::{JsonlStoreFactory, SystemClock};
 use tokio::sync::Notify;
@@ -101,17 +101,18 @@ impl Model for TracedModel {
         tracing::info!("fixture provider received request");
         self.reached.notify_one();
         Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-            ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: Some("stop".to_string()),
-                usage: ModelUsage::builder()
-                    .input_tokens(0)
-                    .output_tokens(0)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(0)
-                    .build(),
-            },
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(Some("stop".to_string()))
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(0)
+                        .output_tokens(0)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(0),
+                ))
+                .build(),
         ))])))
     }
 }

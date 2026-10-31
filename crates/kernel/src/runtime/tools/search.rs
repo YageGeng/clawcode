@@ -517,12 +517,13 @@ mod tests {
             ("query".into(), serde_json::json!(1.5), false),
             ("query".into(), serde_json::json!(21), false),
         ] {
-            let call = ToolCall {
-                tool_call_id: protocol::ToolCallId::try_from("search")
-                    .expect("id"),
-                name: "tool_search".into(),
-                arguments: serde_json::json!({"query":query,"limit":limit}),
-            };
+            let call = ToolCall::builder()
+                .tool_call_id(
+                    protocol::ToolCallId::try_from("search").expect("id"),
+                )
+                .name("tool_search".into())
+                .arguments(serde_json::json!({"query":query,"limit":limit}))
+                .build();
             match ToolSearchArguments::try_from(&call) {
                 Ok(_) => assert!(valid),
                 Err(_) => assert!(!valid),

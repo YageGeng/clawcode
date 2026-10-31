@@ -55,12 +55,12 @@ export const EventOrdering = {
 } as const;
 
 export type ModelUsage = Readonly<{
-  inputTokens: string;
-  outputTokens: string;
-  cacheReadTokens: string;
-  cacheWriteTokens: string;
+  inputTokens?: string;
+  outputTokens?: string;
+  cacheReadTokens?: string;
+  cacheWriteTokens?: string;
   reasoningTokens?: string;
-  totalTokens: string;
+  totalTokens?: string;
 }>;
 
 export type AgentRunUsage = Readonly<{
@@ -69,34 +69,42 @@ export type AgentRunUsage = Readonly<{
 }>;
 
 export const ModelUsages = {
-  /** Aggregates exact per-attempt token counters without losing integer precision. */
+  /** Formats reported counts consistently, keeping unknown values visible. */
+  formatTokens(value: string | undefined): string {
+    if (value === undefined) return "未知";
+    try {
+      return BigInt(value).toLocaleString();
+    } catch {
+      // Preserve malformed diagnostics instead of crashing the transcript.
+      return value;
+    }
+  },
+
+  /** Mirrors upstream context_tokens without inventing a reported billing total. */
+  contextTokens(usage: ModelUsage): string | undefined {
+    if (usage.totalTokens !== undefined) return usage.totalTokens;
+    if (usage.inputTokens === undefined) return undefined;
+    const tokens = BigInt(usage.inputTokens) + BigInt(usage.outputTokens ?? "0");
+    // Upstream uses u64 saturating addition; Number would also lose precision.
+    return (tokens > 18446744073709551615n ? 18446744073709551615n : tokens).toString();
+  },
+
+  /** Sums only reported counters, preserving unknown values and integer precision. */
   sum(usages: readonly ModelUsage[]): ModelUsage {
-    let inputTokens = 0n;
-    let outputTokens = 0n;
-    let cacheReadTokens = 0n;
-    let cacheWriteTokens = 0n;
-    let reasoningTokens = 0n;
-    let hasReasoningTokens = false;
-    let totalTokens = 0n;
+    const fields = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "totalTokens"] as const;
+    const totals: Partial<Record<keyof ModelUsage, bigint>> = {};
     for (const usage of usages) {
-      inputTokens += BigInt(usage.inputTokens);
-      outputTokens += BigInt(usage.outputTokens);
-      cacheReadTokens += BigInt(usage.cacheReadTokens);
-      cacheWriteTokens += BigInt(usage.cacheWriteTokens);
-      totalTokens += BigInt(usage.totalTokens);
-      if (usage.reasoningTokens !== undefined) {
-        reasoningTokens += BigInt(usage.reasoningTokens);
-        hasReasoningTokens = true;
+      for (const field of fields) {
+        const value = usage[field];
+        if (value !== undefined) totals[field] = (totals[field] ?? 0n) + BigInt(value);
       }
     }
-    return {
-      inputTokens: inputTokens.toString(),
-      outputTokens: outputTokens.toString(),
-      cacheReadTokens: cacheReadTokens.toString(),
-      cacheWriteTokens: cacheWriteTokens.toString(),
-      ...(hasReasoningTokens ? { reasoningTokens: reasoningTokens.toString() } : {}),
-      totalTokens: totalTokens.toString()
-    };
+    const result: Partial<Record<keyof ModelUsage, string>> = {};
+    for (const field of fields) {
+      const value = totals[field];
+      if (value !== undefined) result[field] = value.toString();
+    }
+    return result;
   }
 } as const;
 
@@ -110,8 +118,8 @@ export type AssistantDiagnostics = Readonly<{
 }>;
 
 export type ContextUsage = Readonly<{
-  used: number;
-  size: number;
+  used?: string;
+  size: string;
   exact: ModelUsage;
   updatedAtMs: TimestampMs;
 }>;

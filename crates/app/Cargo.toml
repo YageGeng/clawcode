@@ -49,6 +49,9 @@ dirs = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]
+# model providers
+rig-core = { workspace = true, features = ["test-utils"] }
+
 # async
 async-trait = { workspace = true }
 futures = { workspace = true }

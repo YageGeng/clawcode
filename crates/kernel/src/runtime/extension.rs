@@ -29,11 +29,6 @@ impl SessionExtensions {
         &self.runtime
     }
 
-    /// Returns an explicit Arc clone for request hooks that outlive a borrow.
-    pub(super) fn runtime(&self) -> Arc<ExtensionRuntime> {
-        Arc::clone(&self.runtime)
-    }
-
     /// Returns the current immutable dynamic command registry snapshot.
     pub(super) fn command_snapshot(
         &self,

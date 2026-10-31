@@ -18,12 +18,15 @@ skill = { workspace = true }
 store = { workspace = true }
 tools = { workspace = true }
 
+# model providers
+rig-core = { workspace = true }
+
 # error
 thiserror = { workspace = true }
 
 # tracing & log
 tracing = { workspace = true }
-tracing-futures = { workspace = true }
+tracing-futures = { workspace = true, features = ["futures-03"] }
 
 # async
 async-stream = { workspace = true }
@@ -47,6 +50,9 @@ fastrand = { workspace = true }
 nanoid = { workspace = true }
 
 [dev-dependencies]
+# model providers
+rig-core = { workspace = true, features = ["test-utils"] }
+
 # async
 tokio = { workspace = true, features = ["sync", "time", "test-util"] }
 
@@ -58,3 +64,4 @@ http = { workspace = true }
 
 # fs
 tempfile = { workspace = true }
+toml = { workspace = true }

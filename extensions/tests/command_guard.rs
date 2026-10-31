@@ -70,12 +70,13 @@ fn context() -> ExtensionContext {
 fn bash_call(command: &str) -> ToolCallEvent {
     ToolCallEvent {
         metadata: None,
-        call: ToolCall {
-            tool_call_id: ToolCallId::try_from("call-guard")
-                .expect("tool call id"),
-            name: "bash".to_string(),
-            arguments: serde_json::json!({ "command": command }),
-        },
+        call: ToolCall::builder()
+            .tool_call_id(
+                ToolCallId::try_from("call-guard").expect("tool call id"),
+            )
+            .name("bash".to_string())
+            .arguments(serde_json::json!({ "command": command }))
+            .build(),
     }
 }
 

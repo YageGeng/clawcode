@@ -47,24 +47,36 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
+    /// Combines the historical request override with the one runtime retry budget.
+    #[must_use]
+    pub fn model_policy(&self) -> RetryPolicy {
+        let mut policy = self.agent;
+        if let Some(max_retries) = self.provider.max_retries {
+            policy.max_retries = max_retries;
+        }
+        policy
+    }
+
     /// Checks whether the configured exponential backoff fits in milliseconds.
     pub(crate) fn has_valid_backoff(&self) -> bool {
-        if !self.agent.enabled
-            || self.agent.max_retries == 0
-            || self.agent.base_delay_ms == 0
+        // Provider overrides change the effective budget, including validation.
+        let policy = self.model_policy();
+        if !policy.enabled
+            || policy.max_retries == 0
+            || policy.base_delay_ms == 0
         {
             return true;
         }
 
         // A positive cap bounds every scheduled delay to a safe finite value.
-        if self.agent.max_retry_delay_ms > 0 {
+        if policy.max_retry_delay_ms > 0 {
             return true;
         }
 
         // Without a cap the multiplicative backoff must still fit in milliseconds.
         1_u64
-            .checked_shl(self.agent.max_retries - 1)
-            .and_then(|factor| self.agent.base_delay_ms.checked_mul(factor))
+            .checked_shl(policy.max_retries - 1)
+            .and_then(|factor| policy.base_delay_ms.checked_mul(factor))
             .is_some()
     }
 }
@@ -76,5 +88,22 @@ impl Default for RetryConfig {
             agent: RetryPolicy::default(),
             provider: ProviderRetryConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Validation must use the same override budget that the Kernel will consume.
+    #[test]
+    fn backoff_validation_uses_the_effective_retry_budget() {
+        let mut config = RetryConfig::default();
+        config.agent.max_retry_delay_ms = 0;
+        config.provider.max_retries = Some(100);
+        assert!(!config.has_valid_backoff());
+        config.agent.max_retries = 100;
+        config.provider.max_retries = Some(0);
+        assert!(config.has_valid_backoff());
     }
 }

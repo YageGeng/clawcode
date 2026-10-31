@@ -125,6 +125,7 @@ impl SubmissionAnswer {
 impl From<(&AgentOutcome, &[AgentMessage])> for SubmissionAnswer {
     /// Uses the final Run outcome and its own messages, never the Session's newest history.
     fn from((outcome, messages): (&AgentOutcome, &[AgentMessage])) -> Self {
+        // Native provenance does not change the assistant role or its lifecycle.
         let message = messages.iter().rev().find(|message| {
             matches!(message.content, MessageContent::Assistant { .. })
         });

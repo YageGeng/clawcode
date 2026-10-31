@@ -4,8 +4,8 @@ use protocol::{
     AgentMessage, AssistantMetadata, ContentBlock, ExtensionDescriptor,
     ExtensionId, ExtensionInvocation, ExtensionMessage, ExtensionMessageDraft,
     MessageContent, MessageId, MessageIdentity, MessageTiming, MessageUpdate,
-    MessageUpdateEvent, ModelUsage, SessionId, StopReason, TimestampMs,
-    ToolBlock, ToolCall, ToolCallId, ToolCallResult, TurnId,
+    MessageUpdateEvent, SessionId, StopReason, TimestampMs, ToolBlock,
+    ToolCall, ToolCallId, ToolCallResult, TurnId,
 };
 
 /// Extension invocations preserve millisecond timestamps beyond JavaScript's safe integer range.
@@ -107,28 +107,28 @@ fn message_update_represents_tool_calls_with_the_shared_type() {
         timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
             .expect("message timing"),
         content: MessageContent::Assistant {
+            model_message: None,
             blocks: Vec::new(),
             metadata: AssistantMetadata::builder()
                 .provider_id("provider".to_string())
                 .model_id("model".to_string())
                 .stop_reason(StopReason::ToolUse)
-                .usage(
-                    ModelUsage::builder()
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
                         .input_tokens(0)
                         .output_tokens(0)
-                        .cache_read_tokens(0)
-                        .cache_write_tokens(0)
-                        .total_tokens(0)
-                        .build(),
-                )
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(0),
+                ))
                 .build(),
         },
     };
-    let call = ToolCall {
-        tool_call_id: ToolCallId::try_from("call-1").expect("tool call id"),
-        name: "read".to_string(),
-        arguments: serde_json::json!({ "path": "README.md" }),
-    };
+    let call = ToolCall::builder()
+        .tool_call_id(ToolCallId::try_from("call-1").expect("tool call id"))
+        .name("read".to_string())
+        .arguments(serde_json::json!({ "path": "README.md" }))
+        .build();
     let event = MessageUpdateEvent {
         message,
         update: MessageUpdate::ToolCall { call: call.clone() },

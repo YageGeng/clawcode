@@ -20,8 +20,8 @@ use protocol::{
     ExtensionId, ExtensionMessageDraft, ExtensionUserMessage, IdGenerator,
     IdKind, MessageContent, ModelFinal, ModelInputModalities,
     ModelInputModality, ModelProfile, ModelRequest, ModelStreamEvent,
-    ModelUsage, QueueKind, RunInput, RunRequest, SessionId,
-    SlashCommandMessage, SlashCommandStatus, StopReason, TimestampMs,
+    QueueKind, RunInput, RunRequest, SessionId, SlashCommandMessage,
+    SlashCommandStatus, StopReason, TimestampMs,
 };
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
 use tokio_util::sync::CancellationToken;
@@ -133,17 +133,20 @@ impl Model for CaptureModel {
             .lock()
             .expect("model request lock")
             .push(request);
-        let final_event = ModelStreamEvent::Finished(ModelFinal {
-            stop_reason: StopReason::EndTurn,
-            raw_stop_reason: None,
-            usage: ModelUsage::builder()
-                .input_tokens(10)
-                .output_tokens(1)
-                .cache_read_tokens(0)
-                .cache_write_tokens(0)
-                .total_tokens(11)
+        let final_event = ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(10)
+                        .output_tokens(1)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(11),
+                ))
                 .build(),
-        });
+        );
         let events = if is_compaction {
             vec![
                 Ok(ModelStreamEvent::TextDelta(

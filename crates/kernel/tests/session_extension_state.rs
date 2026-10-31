@@ -15,8 +15,8 @@ use prompt::FilesystemPromptFactory;
 use protocol::{
     ExtensionCommandDefinition, ExtensionDescriptor, ExtensionId,
     ExtensionSnapshot, ModelFinal, ModelProfile, ModelRequest,
-    ModelStreamEvent, ModelUsage, SessionId, StaticExtensionRegistration,
-    StopReason, ThinkingLevel,
+    ModelStreamEvent, SessionId, StaticExtensionRegistration, StopReason,
+    ThinkingLevel,
 };
 use store::{JsonlStoreFactory, SessionCreateOptions, SystemClock};
 use tokio_util::sync::CancellationToken;
@@ -49,17 +49,18 @@ impl Model for StateModel {
         ModelError,
     > {
         Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-            ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(0)
-                    .output_tokens(0)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(0)
-                    .build(),
-            },
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(0)
+                        .output_tokens(0)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(0),
+                ))
+                .build(),
         ))])))
     }
 }

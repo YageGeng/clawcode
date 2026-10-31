@@ -6,7 +6,7 @@
 use protocol::{
     AgentMessage, AssistantMetadata, ContentBlock, EmbeddedResourceContent,
     McpRequestContext, McpServerId, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, ModelUsage, Role, StopReason, TimestampMs, ToolCallId,
+    MessageTiming, Role, StopReason, TimestampMs, ToolCallId,
 };
 use rmcp::model::{self as wire, ResourceContents};
 
@@ -137,6 +137,7 @@ impl IntoProtocolSamplingMessage for wire::SamplingMessage {
                 }
                 wire::SamplingMessageContentBlock::ToolUse(content) => {
                     Ok(ContentBlock::ToolCall {
+                        invalid_arguments: None,
                         tool_call_id: ToolCallId::try_from(content.id)
                             .map_err(|error| {
                                 McpError::Host(error.to_string())
@@ -159,20 +160,20 @@ impl IntoProtocolSamplingMessage for wire::SamplingMessage {
         let content = match self.role.into_protocol() {
             Role::User => MessageContent::User { blocks },
             Role::Assistant => MessageContent::Assistant {
+                model_message: None,
                 blocks,
                 metadata: AssistantMetadata::builder()
                     .provider_id("mcp-host-request".to_string())
                     .model_id("server-supplied".to_string())
                     .stop_reason(StopReason::EndTurn)
-                    .usage(
-                        ModelUsage::builder()
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
                             .input_tokens(0)
                             .output_tokens(0)
-                            .cache_read_tokens(0)
-                            .cache_write_tokens(0)
-                            .total_tokens(0)
-                            .build(),
-                    )
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(0),
+                    ))
                     .build(),
             },
             Role::System => unreachable!("wire Sampling has no System role"),
@@ -222,7 +223,14 @@ impl IntoWireSamplingContent for ContentBlock {
                 tool_call_id,
                 name,
                 arguments,
+                invalid_arguments,
             } => {
+                // Sampling clients must not execute malformed provider JSON as an empty object.
+                if invalid_arguments.is_some() {
+                    return Err(McpError::Host(
+                        "Sampling Tool call arguments are invalid JSON".into(),
+                    ));
+                }
                 let input =
                     arguments.as_object().cloned().ok_or_else(|| {
                         McpError::Host(

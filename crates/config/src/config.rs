@@ -137,6 +137,14 @@ pub enum ConfigValidationError {
         /// Provider missing authentication configuration.
         provider_id: String,
     },
+    /// Authentication paths and protocol selections must be explicit before startup.
+    #[error("provider '{provider_id}' has invalid authentication: {reason}")]
+    InvalidAuthentication {
+        /// Configured provider whose authentication is invalid.
+        provider_id: String,
+        /// Configuration-only diagnostic, never credential contents.
+        reason: String,
+    },
     /// A configured API key source could not be resolved safely.
     #[error(
         "provider '{provider_id}' could not resolve API key source '{key_source}'"

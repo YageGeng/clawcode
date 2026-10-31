@@ -24,11 +24,15 @@ fn long_tool(request: &ModelRequest) -> Route {
         .is_some_and(|message| text(&message.content) == "run tool")
     {
         Route::Events(vec![
-            ModelStreamEvent::ToolCall(ToolCall {
-                tool_call_id: ToolCallId::try_from("bash-call").expect("id"),
-                name: "bash".to_string(),
-                arguments: serde_json::json!({ "command": "sleep 5" }),
-            }),
+            ModelStreamEvent::ToolCall(
+                ToolCall::builder()
+                    .tool_call_id(
+                        ToolCallId::try_from("bash-call").expect("id"),
+                    )
+                    .name("bash".to_string())
+                    .arguments(serde_json::json!({ "command": "sleep 5" }))
+                    .build(),
+            ),
             finished(StopReason::ToolUse),
         ])
     } else {
@@ -185,12 +189,15 @@ async fn tool_start_reports_resolved_location() {
             .is_some_and(|message| text(&message.content) == "read page")
         {
             Route::Events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("read-call")
-                        .expect("id"),
-                    name: "read".to_string(),
-                    arguments: serde_json::json!({ "path": "@page.txt" }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("read-call").expect("id"),
+                        )
+                        .name("read".to_string())
+                        .arguments(serde_json::json!({ "path": "@page.txt" }))
+                        .build(),
+                ),
                 finished(StopReason::ToolUse),
             ])
         } else {

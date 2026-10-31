@@ -24,7 +24,7 @@ use protocol::{
     ExtensionCommandDefinition, ExtensionDescriptor, ExtensionId,
     ExtensionUserMessage, InputEvent, InputResult, InputSource, LaneId,
     MessageContent, MessageEndEvent, ModelFinal, ModelProfile, ModelRequest,
-    ModelStreamEvent, ModelUsage, QueueKind, ResourcesDiscoverEvent,
+    ModelStreamEvent, QueueKind, ResourcesDiscoverEvent,
     ResourcesDiscoverResult, RunRequest, SessionId, SessionTitle,
     SessionTreeEvent, StaticExtensionRegistration, StopReason, UserBashRequest,
 };
@@ -72,17 +72,20 @@ impl Model for LifecycleModel {
     > {
         Ok(Box::pin(stream::iter([
             Ok(ModelStreamEvent::TextDelta("ok".to_string())),
-            Ok(ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(1)
-                    .output_tokens(1)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(2)
+            Ok(ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(1)
+                            .output_tokens(1)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(2),
+                    ))
                     .build(),
-            })),
+            )),
         ])))
     }
 }
@@ -425,17 +428,18 @@ impl Model for BlockingModel {
         self.started.notify_one();
         self.release.notified().await;
         Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-            ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(1)
-                    .output_tokens(0)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(1)
-                    .build(),
-            },
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(1)
+                        .output_tokens(0)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(1),
+                ))
+                .build(),
         ))])))
     }
 }

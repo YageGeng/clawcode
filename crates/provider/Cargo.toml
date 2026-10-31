@@ -6,117 +6,41 @@ version.workspace = true
 [lints]
 workspace = true
 
-[lib]
-doctest = true
-
 [dependencies]
 # workspace crates
 config = { workspace = true }
 protocol = { workspace = true }
+
+# model providers
+rig-core = { workspace = true, features = ["reqwest", "rustls"] }
+rig-reqwest = { workspace = true, features = ["rustls"] }
 
 # error
 thiserror = { workspace = true }
 
 # tracing & log
 tracing = { workspace = true }
-tracing-futures = { workspace = true, features = ["futures-03"] }
-
-# async
-async-trait = { workspace = true }
-async-stream = { workspace = true }
-futures = { workspace = true }
-futures-timer = { workspace = true }
-pin-project-lite = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
-
-# http
-bytes = { workspace = true }
-eventsource-stream = { workspace = true }
-http = { workspace = true }
-httpdate = { workspace = true }
-mime = { workspace = true }
-mime_guess = { workspace = true }
-reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
-reqwest-middleware = { workspace = true, optional = true, features = [
-  "json",
-  "multipart",
-  "charset",
-  "http2",
-] }
-url = { workspace = true }
 
 # serde
-schemars = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 # builder
 typed-builder = { workspace = true }
 
-# wasm
-getrandom = { workspace = true, optional = true }
-wasm-bindgen-futures = { workspace = true, optional = true }
-
-# misc
-base64 = { workspace = true }
-fastrand = { workspace = true }
-nanoid = { workspace = true }
-
-# Native-only dependency for OpenAI Responses websocket mode.
-# Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio-tungstenite = { workspace = true, optional = true }
-
 [dev-dependencies]
-# error
-anyhow = { workspace = true }
-
-# tracing & log
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# model providers
+rig-core = { workspace = true, features = ["test-utils"] }
 
 # async
+futures = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tokio-test = { workspace = true }
+
+# http
+http = { workspace = true }
 
 # serde
-figment = { workspace = true, features = ["test"] }
-serde_path_to_error = { workspace = true }
+serde_json = { workspace = true }
 
 # fs
+tempfile = { workspace = true }
 toml = { workspace = true }
-
-# misc
-base64 = { workspace = true }
-
-[features]
-default = ["reqwest", "rustls"]
-all = ["image"]
-image = []
-wasm = [
-  "dep:getrandom",
-  "dep:wasm-bindgen-futures",
-  "futures-timer/wasm-bindgen",
-  # getrandom 0.4 renamed the JavaScript wasm backend feature from `js` to `wasm_js`.
-  "getrandom/wasm_js",
-]
-reqwest = [
-  "reqwest/charset",
-  "reqwest/http2",
-  "reqwest/system-proxy",
-]
-websocket = ["websocket-rustls"]
-websocket-rustls = [
-  "dep:tokio-tungstenite",
-  "tokio-tungstenite/connect",
-  "rustls",
-]
-websocket-native-tls = [
-  "dep:tokio-tungstenite",
-  "tokio-tungstenite/connect",
-  "native-tls",
-]
-rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
-native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
-reqwest-middleware = ["reqwest-middleware-rustls"]
-reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
-reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]

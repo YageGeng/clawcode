@@ -251,7 +251,9 @@ pub struct ToolLocation {
 }
 
 /// One tool invocation requested by the model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
 pub struct ToolCall {
     /// Stable call identifier shared with its result.
     pub tool_call_id: ToolCallId,
@@ -261,6 +263,28 @@ pub struct ToolCall {
 
     /// JSON arguments supplied by the model.
     pub arguments: serde_json::Value,
+    /// Raw malformed arguments must never be executed as an empty object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub invalid_arguments: Option<String>,
+}
+
+impl TryFrom<&rig_core::message::ToolCall> for ToolCall {
+    type Error = crate::ScalarError;
+
+    /// Projects a complete upstream call while retaining invalid raw argument diagnostics.
+    fn try_from(
+        call: &rig_core::message::ToolCall,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self::builder()
+            .tool_call_id(ToolCallId::try_from(call.id.wire().into_owned())?)
+            .name(call.function.name.to_string())
+            .arguments(serde_json::Value::Object(
+                call.function.arguments.clone(),
+            ))
+            .invalid_arguments(call.function.invalid_arguments.clone())
+            .build())
+    }
 }
 
 /// Complete result returned for one tool invocation.

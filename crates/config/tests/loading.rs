@@ -365,9 +365,9 @@ fn model_input_defaults_to_text() {
     assert!(!profile.input.supports(ModelInputModality::Image));
 }
 
-/// Explicit image input is retained in the stable runtime profile.
+/// The upstream DeepSeek protocol overrides obsolete image capability declarations.
 #[test]
-fn model_input_accepts_text_and_image() {
+fn deepseek_image_declaration_is_downgraded() {
     let document = ConfigFixture::valid().replace(
         "display_name = \"DeepSeek V4 Flash\"",
         "display_name = \"DeepSeek V4 Flash\"\ninput = [\"text\", \"image\"]",
@@ -377,7 +377,7 @@ fn model_input_accepts_text_and_image() {
 
     let profile = config.model_profile().expect("model profile");
     assert!(profile.input.supports(ModelInputModality::Text));
-    assert!(profile.input.supports(ModelInputModality::Image));
+    assert!(!profile.input.supports(ModelInputModality::Image));
 }
 
 /// Empty, image-only, and duplicate input lists fail model validation.

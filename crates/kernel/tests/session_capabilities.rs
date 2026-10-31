@@ -28,9 +28,8 @@ use protocol::{
     ExtensionId, IdGenerator, IdKind, McpServerId, McpServerState,
     MessageContent, ModelFailure, ModelFinal, ModelInputModalities,
     ModelInputModality, ModelProfile, ModelRequest, ModelRetryDisposition,
-    ModelStreamEvent, ModelUsage, QueueKind, RunInput, RunRequest, SessionId,
-    SessionTitle, SkillDiagnosticCode, SlashCommandSource, StopReason,
-    TimestampMs,
+    ModelStreamEvent, QueueKind, RunInput, RunRequest, SessionId, SessionTitle,
+    SkillDiagnosticCode, SlashCommandSource, StopReason, TimestampMs,
 };
 use skill::FilesystemSkillFactory;
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
@@ -225,17 +224,20 @@ struct ScriptedModel {
 impl ScriptedModel {
     /// Builds a successful terminal event with explicit deterministic usage.
     fn finished(stop_reason: StopReason) -> ModelStreamEvent {
-        ModelStreamEvent::Finished(ModelFinal {
-            stop_reason,
-            raw_stop_reason: None,
-            usage: ModelUsage::builder()
-                .input_tokens(10)
-                .output_tokens(5)
-                .cache_read_tokens(0)
-                .cache_write_tokens(0)
-                .total_tokens(15)
+        ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(stop_reason)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(10)
+                        .output_tokens(5)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(15),
+                ))
                 .build(),
-        })
+        )
     }
 }
 
@@ -300,11 +302,13 @@ impl Model for ScriptedModel {
             .expect("script lock")
             .pop_front()
             .ok_or_else(|| {
-                ModelError::Request(ModelFailure {
-                    summary: "missing script".to_string(),
-                    status: None,
-                    retry_disposition: ModelRetryDisposition::NonRetryable,
-                })
+                ModelError::Request(
+                    ModelFailure::builder()
+                        .summary("missing script".to_string())
+                        .status(None)
+                        .retry_disposition(ModelRetryDisposition::NonRetryable)
+                        .build(),
+                )
             })?;
         Ok(Box::pin(stream::iter(script.into_iter().map(Ok))))
     }

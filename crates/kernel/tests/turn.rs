@@ -18,9 +18,9 @@ use protocol::{
     AssistantMetadata, ContentBlock, EntryId, ExtensionDescriptor, ExtensionId,
     IdGenerator, IdKind, LaneId, MessageContent, MessageId, MessageIdentity,
     MessageTiming, ModelFailure, ModelFinal, ModelProfile, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, RunInput, RunRequest,
-    SessionId, SessionTitle, StopReason, TimestampMs, ToolBlock, ToolCall,
-    ToolCallId, ToolCallResult, ToolDefinition, ToolResult, TraceId, TurnId,
+    ModelRetryDisposition, ModelStreamEvent, RunInput, RunRequest, SessionId,
+    SessionTitle, StopReason, TimestampMs, ToolBlock, ToolCall, ToolCallId,
+    ToolCallResult, ToolDefinition, ToolResult, TraceId, TurnId,
 };
 use store::{
     Clock, EntryKind, JsonlStoreFactory, NewEntry, SessionCreateOptions,
@@ -96,17 +96,20 @@ impl ScriptedResponse {
 impl ScriptedModel {
     /// Builds a successful terminal event with explicit deterministic usage.
     fn finished(stop_reason: StopReason) -> ModelStreamEvent {
-        ModelStreamEvent::Finished(ModelFinal {
-            stop_reason,
-            raw_stop_reason: None,
-            usage: ModelUsage::builder()
-                .input_tokens(10)
-                .output_tokens(5)
-                .cache_read_tokens(0)
-                .cache_write_tokens(0)
-                .total_tokens(15)
+        ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(stop_reason)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(10)
+                        .output_tokens(5)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(15),
+                ))
                 .build(),
-        })
+        )
     }
 }
 
@@ -134,11 +137,13 @@ impl Model for ScriptedModel {
             .expect("script lock")
             .pop_front()
             .ok_or_else(|| {
-                ModelError::Request(ModelFailure {
-                    summary: "missing script".to_string(),
-                    status: None,
-                    retry_disposition: ModelRetryDisposition::NonRetryable,
-                })
+                ModelError::Request(
+                    ModelFailure::builder()
+                        .summary("missing script".to_string())
+                        .status(None)
+                        .retry_disposition(ModelRetryDisposition::NonRetryable)
+                        .build(),
+                )
             })?;
         match response {
             ScriptedResponse::Stream(events) => {
@@ -406,11 +411,15 @@ async fn bounds_hook_expanded_result() {
     let model = Arc::new(SystemPromptCaptureModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("bounded").expect("id"),
-                    name: "streaming".into(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("bounded").expect("id"),
+                        )
+                        .name("streaming".into())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![ScriptedModel::finished(
@@ -593,24 +602,36 @@ async fn deferred_search_loads_only_the_next_request() {
     let model = Arc::new(SystemPromptCaptureModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("search").expect("id"),
-                    name: "tool_search".into(),
-                    arguments: serde_json::json!({"query":"deferred_echo"}),
-                }),
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("sibling").expect("id"),
-                    name: "deferred_echo".into(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("search").expect("id"),
+                        )
+                        .name("tool_search".into())
+                        .arguments(serde_json::json!({"query":"deferred_echo"}))
+                        .build(),
+                ),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("sibling").expect("id"),
+                        )
+                        .name("deferred_echo".into())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("loaded").expect("id"),
-                    name: "deferred_echo".into(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("loaded").expect("id"),
+                        )
+                        .name("deferred_echo".into())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![ScriptedModel::finished(
@@ -1009,11 +1030,13 @@ impl Model for FailingPreflightModel {
 
     /// Reproduces a provider readiness failure before the first model Turn.
     async fn preflight(&self) -> Result<(), ModelError> {
-        Err(ModelError::Preflight(ModelFailure {
-            summary: "provider unavailable".to_string(),
-            status: None,
-            retry_disposition: ModelRetryDisposition::NonRetryable,
-        }))
+        Err(ModelError::Preflight(
+            ModelFailure::builder()
+                .summary("provider unavailable".to_string())
+                .status(None)
+                .retry_disposition(ModelRetryDisposition::NonRetryable)
+                .build(),
+        ))
     }
 
     /// Rejects streaming because preflight must stop the run first.
@@ -1022,11 +1045,13 @@ impl Model for FailingPreflightModel {
         _request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> Result<TestModelStream, ModelError> {
-        Err(ModelError::Request(ModelFailure {
-            summary: "stream must not be called".to_string(),
-            status: None,
-            retry_disposition: ModelRetryDisposition::NonRetryable,
-        }))
+        Err(ModelError::Request(
+            ModelFailure::builder()
+                .summary("stream must not be called".to_string())
+                .status(None)
+                .retry_disposition(ModelRetryDisposition::NonRetryable)
+                .build(),
+        ))
     }
 }
 
@@ -1164,7 +1189,9 @@ async fn streamed_response_produces_one_timed_turn() {
     let assistant = result.messages.last().expect("assistant message");
     assert_eq!(assistant.identity.turn_id, result.turns[0].identity.turn_id);
     assert!(assistant.timing.ended_at_ms > assistant.timing.started_at_ms);
-    let MessageContent::Assistant { blocks, metadata } = &assistant.content
+    let MessageContent::Assistant {
+        blocks, metadata, ..
+    } = &assistant.content
     else {
         panic!("assistant message expected");
     };
@@ -1176,7 +1203,7 @@ async fn streamed_response_produces_one_timed_turn() {
     );
     assert_eq!(metadata.provider_id, "fixture");
     assert_eq!(metadata.model_id, "scripted");
-    assert_eq!(metadata.usage.total_tokens, 15);
+    assert_eq!(metadata.usage.as_ref().total_tokens, Some(15));
 
     let events = sink.0.lock().expect("sink lock");
     assert!(events.iter().all(|event| {
@@ -1213,14 +1240,16 @@ async fn default_turn_limit_is_unlimited() {
     let mut scripts = VecDeque::new();
     for turn in 0..65 {
         scripts.push_back(ScriptedResponse::events(vec![
-            ModelStreamEvent::ToolCall(ToolCall {
-                tool_call_id: ToolCallId::try_from(format!(
-                    "unlimited-call-{turn}"
-                ))
-                .expect("tool call id"),
-                name: "capture_trace".to_string(),
-                arguments: serde_json::json!({}),
-            }),
+            ModelStreamEvent::ToolCall(
+                ToolCall::builder()
+                    .tool_call_id(
+                        ToolCallId::try_from(format!("unlimited-call-{turn}"))
+                            .expect("tool call id"),
+                    )
+                    .name("capture_trace".to_string())
+                    .arguments(serde_json::json!({}))
+                    .build(),
+            ),
             ScriptedModel::finished(StopReason::ToolUse),
         ]));
     }
@@ -1283,21 +1312,29 @@ async fn limited_turn_limit_stops_at_configured_bound() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("limited-call-1")
-                        .expect("tool call id"),
-                    name: "capture_trace".to_string(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("limited-call-1")
+                                .expect("tool call id"),
+                        )
+                        .name("capture_trace".to_string())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("limited-call-2")
-                        .expect("tool call id"),
-                    name: "capture_trace".to_string(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("limited-call-2")
+                                .expect("tool call id"),
+                        )
+                        .name("capture_trace".to_string())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![ScriptedModel::finished(
@@ -1440,14 +1477,18 @@ async fn traced_run_propagates_trace_to_tools() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("trace-call")
-                        .expect("tool call id"),
-                    name: "capture_trace".to_string(),
-                    arguments: serde_json::json!({
-                        "secret": "sensitive-tool-argument"
-                    }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("trace-call")
+                                .expect("tool call id"),
+                        )
+                        .name("capture_trace".to_string())
+                        .arguments(serde_json::json!({
+                            "secret": "sensitive-tool-argument"
+                        }))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![ScriptedModel::finished(
@@ -1534,15 +1575,19 @@ async fn system_prompt_override_is_scoped_to_the_complete_run() {
     let model = Arc::new(SystemPromptCaptureModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("override-tool")
-                        .expect("tool id"),
-                    name: "delayed_text".to_string(),
-                    arguments: serde_json::json!({
-                        "delay_ms": 0,
-                        "text": "tool result"
-                    }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("override-tool")
+                                .expect("tool id"),
+                        )
+                        .name("delayed_text".to_string())
+                        .arguments(serde_json::json!({
+                            "delay_ms": 0,
+                            "text": "tool result"
+                        }))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
@@ -1645,17 +1690,28 @@ async fn stream_failures_persist_complete_error_assistants() {
         if let Some(text) = partial {
             events.push(Ok(ModelStreamEvent::TextDelta(text.to_string())));
         }
-        events.push(Err(ModelError::Stream(ModelFailure {
-            summary: "socket closed".to_string(),
-            status: None,
-            retry_disposition: ModelRetryDisposition::Retryable,
-        })));
+        events.push(Err(ModelError::Stream(
+            ModelFailure::builder()
+                .summary("socket closed".to_string())
+                .status(None)
+                .retry_disposition(ModelRetryDisposition::Retryable)
+                .build(),
+        )));
         let model: Arc<dyn Model> = Arc::new(ScriptedModel {
             scripts: Mutex::new(VecDeque::from([ScriptedResponse::Stream(
                 events,
             )])),
         });
         let kernel = KernelFactory::builder()
+            // This test checks terminal persistence; retry behavior has its own matrix.
+            .retry_policy(
+                protocol::RetryPolicy::builder()
+                    .enabled(false)
+                    .max_retries(0)
+                    .base_delay_ms(0)
+                    .max_retry_delay_ms(0)
+                    .build(),
+            )
             .model_factory(Arc::new(StaticModelFactory(model)))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(Arc::new(JsonlStoreFactory::new(
@@ -1701,10 +1757,18 @@ async fn stream_failures_persist_complete_error_assistants() {
             .messages
             .iter()
             .find(|message| {
-                matches!(message.content, MessageContent::Assistant { .. })
+                matches!(
+                    message.content,
+                    MessageContent::Assistant {
+                        model_message: None,
+                        ..
+                    }
+                )
             })
             .expect("assistant message");
-        let MessageContent::Assistant { blocks, metadata } = &assistant.content
+        let MessageContent::Assistant {
+            blocks, metadata, ..
+        } = &assistant.content
         else {
             unreachable!("assistant variant was selected above");
         };
@@ -1742,22 +1806,26 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: slow_id.clone(),
-                    name: "delayed_text".to_string(),
-                    arguments: serde_json::json!({
-                        "delay_ms": 20,
-                        "text": "slow"
-                    }),
-                }),
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: fast_id.clone(),
-                    name: "delayed_text".to_string(),
-                    arguments: serde_json::json!({
-                        "delay_ms": 0,
-                        "text": "fast"
-                    }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(slow_id.clone())
+                        .name("delayed_text".to_string())
+                        .arguments(serde_json::json!({
+                            "delay_ms": 20,
+                            "text": "slow"
+                        }))
+                        .build(),
+                ),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(fast_id.clone())
+                        .name("delayed_text".to_string())
+                        .arguments(serde_json::json!({
+                            "delay_ms": 0,
+                            "text": "fast"
+                        }))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
@@ -1853,15 +1921,19 @@ async fn blocked_tool_result_preserves_policy_outcome() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("blocked-call")
-                        .expect("tool id"),
-                    name: "delayed_text".to_string(),
-                    arguments: serde_json::json!({
-                        "delay_ms": 0,
-                        "text": "must not execute"
-                    }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("blocked-call")
+                                .expect("tool id"),
+                        )
+                        .name("delayed_text".to_string())
+                        .arguments(serde_json::json!({
+                            "delay_ms": 0,
+                            "text": "must not execute"
+                        }))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
@@ -1937,11 +2009,13 @@ async fn tool_partial_update_precedes_final_result() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: tool_call_id.clone(),
-                    name: "streaming".to_string(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(tool_call_id.clone())
+                        .name("streaming".to_string())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
@@ -2047,11 +2121,13 @@ async fn tool_updates_coalesce_to_the_latest_snapshot() {
     let model: Arc<dyn Model> = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             ScriptedResponse::events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: tool_call_id.clone(),
-                    name: "burst_updates".to_string(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(tool_call_id.clone())
+                        .name("burst_updates".to_string())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ]),
             ScriptedResponse::events(vec![
@@ -2199,7 +2275,13 @@ async fn cancellation_settles_pending_turn_as_cancelled() {
         .messages
         .iter()
         .find(|message| {
-            matches!(message.content, MessageContent::Assistant { .. })
+            matches!(
+                message.content,
+                MessageContent::Assistant {
+                    model_message: None,
+                    ..
+                }
+            )
         })
         .expect("cancelled assistant message");
     let MessageContent::Assistant { metadata, .. } = &assistant.content else {
@@ -2301,20 +2383,20 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
                         ))
                         .expect("message timing"),
                         content: MessageContent::Assistant {
+                            model_message: None,
                             blocks: Vec::new(),
                             metadata: AssistantMetadata::builder()
                                 .provider_id("fixture".to_string())
                                 .model_id("scripted".to_string())
                                 .stop_reason(StopReason::EndTurn)
-                                .usage(
-                                    ModelUsage::builder()
+                                .usage(protocol::ModelUsage::from(
+                                    protocol::Usage::new()
                                         .input_tokens(1)
                                         .output_tokens(1)
-                                        .cache_read_tokens(0)
-                                        .cache_write_tokens(0)
-                                        .total_tokens(2)
-                                        .build(),
-                                )
+                                        .cached_input_tokens(0)
+                                        .cache_creation_input_tokens(0)
+                                        .total_tokens(2),
+                                ))
                                 .build(),
                         },
                     })

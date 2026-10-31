@@ -18,17 +18,20 @@ use super::fixture::{Route, TestKernel, text};
 
 /// Builds a terminal event that reports `total` tokens.
 fn finished_with(stop_reason: StopReason, total: u64) -> ModelStreamEvent {
-    ModelStreamEvent::Finished(ModelFinal {
-        stop_reason,
-        raw_stop_reason: None,
-        usage: ModelUsage::builder()
-            .input_tokens(total)
-            .output_tokens(0)
-            .cache_read_tokens(0)
-            .cache_write_tokens(0)
-            .total_tokens(total)
+    ModelStreamEvent::Finished(
+        ModelFinal::builder()
+            .stop_reason(stop_reason)
+            .raw_stop_reason(None)
+            .usage(protocol::ModelUsage::from(
+                protocol::Usage::new()
+                    .input_tokens(total)
+                    .output_tokens(0)
+                    .cached_input_tokens(0)
+                    .cache_creation_input_tokens(0)
+                    .total_tokens(total),
+            ))
             .build(),
-    })
+    )
 }
 
 /// First request calls bash with `command`; every later request answers. Each attempt costs 15.
@@ -40,12 +43,15 @@ fn tool_then_answer(command: &'static str) -> impl Fn(&ModelRequest) -> Route {
             .is_some_and(|message| text(&message.content) == "use tool")
         {
             Route::Events(vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("bash-call")
-                        .expect("id"),
-                    name: "bash".to_string(),
-                    arguments: serde_json::json!({ "command": command }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("bash-call").expect("id"),
+                        )
+                        .name("bash".to_string())
+                        .arguments(serde_json::json!({ "command": command }))
+                        .build(),
+                ),
                 finished_with(StopReason::ToolUse, 15),
             ])
         } else {
@@ -99,7 +105,10 @@ async fn agent_settled_usage_sums_run_assistants() {
         .await
         .expect("join")
         .expect("run");
-    assert_eq!(settled_usage(&test, &session).await.total_tokens, 30);
+    assert_eq!(
+        settled_usage(&test, &session).await.as_ref().total_tokens,
+        Some(30)
+    );
 }
 
 /// Known usage before cancellation is retained without another accumulation pass.
@@ -124,7 +133,10 @@ async fn cancelled_run_preserves_known_usage() {
             ..
         }
     )));
-    assert_eq!(settled_usage(&test, &session).await.total_tokens, 15);
+    assert_eq!(
+        settled_usage(&test, &session).await.as_ref().total_tokens,
+        Some(15)
+    );
 }
 
 /// Replaces an assistant message's identity, which the Kernel rejects as a protocol error.
@@ -139,7 +151,13 @@ impl ExtensionHandler<MessageEndPoint> for BreakAssistantIdentity {
         event: &MessageEndEvent,
         _context: &ExtensionContext,
     ) -> Result<Option<AgentMessage>, ExtensionError> {
-        if !matches!(event.message.content, MessageContent::Assistant { .. }) {
+        if !matches!(
+            event.message.content,
+            MessageContent::Assistant {
+                model_message: None,
+                ..
+            }
+        ) {
             return Ok(None);
         }
         let mut message = event.message.clone();
@@ -206,7 +224,10 @@ async fn failed_run_preserves_usage_from_settled_assistant() {
             ..
         }
     )));
-    assert_eq!(settled_usage(&test, &session).await.total_tokens, 15);
+    assert_eq!(
+        settled_usage(&test, &session).await.as_ref().total_tokens,
+        Some(15)
+    );
 }
 
 /// No model usage yields zero tokens and no synthesized reasoning count.
@@ -227,6 +248,6 @@ async fn preflight_failure_has_zero_usage_without_reasoning_tokens() {
         .await
         .expect_err("preflight failure");
     let usage = settled_usage(&test, &session).await;
-    assert_eq!(usage.total_tokens, 0);
-    assert_eq!(usage.reasoning_tokens, None);
+    assert_eq!(usage.as_ref().total_tokens, None);
+    assert_eq!(usage.as_ref().reasoning_tokens, None);
 }

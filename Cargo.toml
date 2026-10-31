@@ -74,6 +74,11 @@ skill = { path = "crates/skill" }
 store = { path = "crates/store" }
 tools = { path = "crates/tools" }
 
+# model providers
+# Follow 0.x releases while retaining the API baseline required by this integration.
+rig-core = { version = ">=0.46.0-rc.1, <1", default-features = false }
+rig-reqwest = { version = ">=0.46.0-rc.1, <1", default-features = false }
+
 # error
 anyhow = "1"
 thiserror = "2"
@@ -84,35 +89,26 @@ tracing-futures = "0.2.5"
 tracing-subscriber = { version = "0.3", features = ["chrono", "env-filter"] }
 
 # async
-futures = "0.3"
-async-trait = "0.1"
 async-stream = "0.3"
-tokio-test = "0.4"
-tokio-util = "0.7"
-pin-project-lite = "0.2"
+async-trait = "0.1"
+futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# Match Axum's WebSocket stack to avoid compiling two Tungstenite versions.
-tokio-tungstenite = { version = "0.30", default-features = false }
+tokio-util = "0.7"
 
 # http
+axum = "0.8"
 bytes = "1"
 http = "1"
-httpdate = "1"
-axum = "0.8"
-url = "2.5"
+reqwest = { version = "0.13", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["cors", "fs"] }
-eventsource-stream = "0.2"
-reqwest = { version = "0.13", default-features = false }
-reqwest-middleware = { version = "0.5", default-features = false }
+url = "2.5"
 
 # serde
 figment = { version = "0.10", features = ["toml", "env"] }
 jsonschema = { version = "=0.51", default-features = false }
-schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_path_to_error = "0.1"
 serde_yaml_ng = "0.10"
 
 # crypto
@@ -121,13 +117,8 @@ sha2 = "0.11"
 # builder
 typed-builder = "0.23"
 
-# wasm
-wasm-bindgen-futures = "0.4"
-
 # fs
 ignore = "0.4"
-mime = "0.3.17"
-mime_guess = "2.0.5"
 tempfile = "3"
 # Match Figment's TOML major version to avoid compiling parallel parser stacks.
 toml = "=0.8"
@@ -147,8 +138,6 @@ arc-swap = "1.9"
 dirs = "7"
 base64 = "0.23"
 fastrand = "2"
-futures-timer = "3"
-getrandom = "0.4"
 nanoid = "0.5"
 rmcp = { version = "3", default-features = false }
 shlex = "2"

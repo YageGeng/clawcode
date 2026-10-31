@@ -47,11 +47,11 @@ fn bash_call(id: &str, command: &str, timeout: Option<f64>) -> ToolCall {
     if let Some(timeout) = timeout {
         arguments.insert("timeout".to_string(), serde_json::json!(timeout));
     }
-    ToolCall {
-        tool_call_id: ToolCallId::try_from(id).expect("tool call id"),
-        name: "bash".to_string(),
-        arguments: serde_json::Value::Object(arguments),
-    }
+    ToolCall::builder()
+        .tool_call_id(ToolCallId::try_from(id).expect("tool call id"))
+        .name("bash".to_string())
+        .arguments(serde_json::Value::Object(arguments))
+        .build()
 }
 
 /// Returns the default pi-compatible built-in registry.

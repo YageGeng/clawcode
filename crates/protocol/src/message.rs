@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EntryId, ExtensionId, MessageId, SlashCommandExpansion,
+    EntryId, ExtensionId, MessageId, ModelUsage, SlashCommandExpansion,
     SlashCommandMessage, StopReason, TimestampMs, ToolCallId,
     ToolResultDetails, TurnId, UserBashResult,
 };
@@ -38,22 +38,8 @@ pub(crate) mod decimal_u64 {
 }
 
 /// Serde adapter for optional precision-safe unsigned decimal token counts.
-mod optional_decimal_u64 {
-    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
-
-    /// Serializes an optional token count as a decimal string when present.
-    pub fn serialize<S>(
-        value: &Option<u64>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match value {
-            Some(value) => serializer.serialize_some(&value.to_string()),
-            None => serializer.serialize_none(),
-        }
-    }
+pub(crate) mod optional_decimal_u64 {
+    use serde::{Deserialize, Deserializer, de::Error as _};
 
     /// Deserializes an optional token count from an exact decimal string.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -152,77 +138,9 @@ pub enum Role {
     Assistant,
 }
 
-/// Complete provider token accounting for one assistant attempt.
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    typed_builder::TypedBuilder,
-)]
-pub struct ModelUsage {
-    /// Tokens supplied directly to the model.
-    #[serde(with = "decimal_u64")]
-    pub input_tokens: u64,
-    /// Tokens emitted by the model.
-    #[serde(with = "decimal_u64")]
-    pub output_tokens: u64,
-    /// Provider cache tokens read for this attempt.
-    #[serde(with = "decimal_u64")]
-    pub cache_read_tokens: u64,
-    /// Provider cache tokens written for this attempt.
-    #[serde(with = "decimal_u64")]
-    pub cache_write_tokens: u64,
-    /// Reasoning tokens reported separately by providers that expose them.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "optional_decimal_u64"
-    )]
-    #[builder(default)]
-    pub reasoning_tokens: Option<u64>,
-    /// Provider-reported total token consumption.
-    #[serde(with = "decimal_u64")]
-    pub total_tokens: u64,
-}
-
-impl std::ops::AddAssign<&ModelUsage> for ModelUsage {
-    /// Adds one attempt; reasoning stays unknown until some attempt reports it.
-    fn add_assign(&mut self, attempt: &ModelUsage) {
-        self.input_tokens =
-            self.input_tokens.saturating_add(attempt.input_tokens);
-        self.output_tokens =
-            self.output_tokens.saturating_add(attempt.output_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(attempt.cache_read_tokens);
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(attempt.cache_write_tokens);
-        self.reasoning_tokens =
-            match (self.reasoning_tokens, attempt.reasoning_tokens) {
-                (None, None) => None,
-                (known, reported) => Some(
-                    known.unwrap_or(0).saturating_add(reported.unwrap_or(0)),
-                ),
-            };
-        self.total_tokens =
-            self.total_tokens.saturating_add(attempt.total_tokens);
-    }
-}
-
 /// Complete model outcome attached only to assistant messages.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    typed_builder::TypedBuilder,
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
 )]
 pub struct AssistantMetadata {
     /// Configuration identifier of the provider that handled the attempt.
@@ -241,6 +159,10 @@ pub struct AssistantMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub error: Option<String>,
+    /// Structured overflow survives replay without provider-specific string matching.
+    #[serde(default)]
+    #[builder(default)]
+    pub context_overflow: bool,
 }
 
 /// Text or binary payload embedded by an MCP Resource content block.
@@ -345,6 +267,9 @@ pub enum ContentBlock {
 
         /// JSON arguments supplied by the model.
         arguments: serde_json::Value,
+        /// Invalid raw arguments remain an error after persistence or recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invalid_arguments: Option<String>,
     },
 }
 
@@ -508,6 +433,10 @@ pub enum MessageContent {
         blocks: Vec<ContentBlock>,
         /// Provider, stop, usage, and error details for this attempt.
         metadata: AssistantMetadata,
+        /// Provider-native replay data stays separate from the display projection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        // Box the optional native payload so unrelated message variants stay compact.
+        model_message: Option<Box<rig_core::message::AssistantMessage>>,
     },
 
     /// Result returned for a tool call.

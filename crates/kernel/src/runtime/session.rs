@@ -891,10 +891,14 @@ impl Kernel {
         let result: Result<Arc<Session>, KernelError> = async {
             let lane = LaneId::try_from("main")
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
+            // Never install global model handles: upstream Prepared belongs to this Session.
+            let session_models = Arc::new(
+                self.model_factory.create_catalog(&self.static_extensions)?,
+            );
             let settings = RestoredSessionSettings::load(
                 store.as_ref(),
                 &lane,
-                &self.models,
+                &session_models,
             )?;
             let history = Self::history_from_store(store.as_ref(), &lane)?;
             // Resume starts above both shared Store mutations and the extra
@@ -981,7 +985,7 @@ impl Kernel {
                     .extensions(extensions)
                     .tools(tools)
                     .model(SessionModelState::new(
-                        Arc::clone(&self.models),
+                        session_models,
                         settings.model,
                         settings.thinking_level,
                     ))

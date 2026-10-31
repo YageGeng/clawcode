@@ -3,7 +3,7 @@ use std::convert::TryFrom;
 use protocol::{
     AgentMessage, AssistantMetadata, ContentBlock, ExtensionMessage,
     MessageContent, MessageId, MessageIdentity, MessageTiming,
-    MessageTimingError, ModelUsage, Role, StopReason, TimestampMs, TurnId,
+    MessageTimingError, Role, StopReason, TimestampMs, TurnId,
 };
 
 /// A complete agent message exposes exact turn and timing metadata at the wire boundary.
@@ -20,6 +20,7 @@ fn agent_message_flattens_turn_and_timing_metadata() {
         timing: MessageTiming::try_from((instant, instant, instant))
             .expect("ordered message timing"),
         content: MessageContent::Assistant {
+            model_message: None,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
             }],
@@ -27,15 +28,14 @@ fn agent_message_flattens_turn_and_timing_metadata() {
                 .provider_id("test".to_string())
                 .model_id("test-model".to_string())
                 .stop_reason(StopReason::EndTurn)
-                .usage(
-                    ModelUsage::builder()
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
                         .input_tokens(1)
                         .output_tokens(1)
-                        .cache_read_tokens(0)
-                        .cache_write_tokens(0)
-                        .total_tokens(2)
-                        .build(),
-                )
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(2),
+                ))
                 .build(),
         },
     };

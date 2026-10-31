@@ -322,11 +322,13 @@ fn assistant_replay_maps_reasoning_and_tool_calls_without_loss() {
                 // Assistant metadata is mandatory so replay retains the exact
                 // provider outcome together with visible content.
                 content: MessageContent::Assistant {
+                    model_message: None,
                     blocks: vec![
                         ContentBlock::Reasoning {
                             text: "reasoning".to_string(),
                         },
                         ContentBlock::ToolCall {
+                            invalid_arguments: None,
                             tool_call_id: ToolCallId::try_from("tool-replay")
                                 .expect("tool call id"),
                             name: "read".to_string(),
@@ -337,15 +339,14 @@ fn assistant_replay_maps_reasoning_and_tool_calls_without_loss() {
                         .provider_id("provider".to_string())
                         .model_id("model".to_string())
                         .stop_reason(StopReason::ToolUse)
-                        .usage(
-                            ModelUsage::builder()
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
                                 .input_tokens(10)
                                 .output_tokens(5)
-                                .cache_read_tokens(0)
-                                .cache_write_tokens(0)
-                                .total_tokens(15)
-                                .build(),
-                        )
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(15),
+                        ))
                         .build(),
                 },
             },
@@ -389,13 +390,14 @@ fn usage_maps_to_native_acp_v2_update_with_exact_metadata() {
             sequence: Sequence::try_from(7).expect("sequence"),
         },
         payload: AgentEventPayload::UsageUpdated {
-            usage: ModelUsage::builder()
-                .input_tokens(70_000)
-                .output_tokens(10_000)
-                .cache_read_tokens(0)
-                .cache_write_tokens(0)
-                .total_tokens(80_000)
-                .build(),
+            usage: protocol::ModelUsage::from(
+                protocol::Usage::new()
+                    .input_tokens(70_000)
+                    .output_tokens(10_000)
+                    .cached_input_tokens(0)
+                    .cache_creation_input_tokens(0)
+                    .total_tokens(80_000),
+            ),
             context_window: 100_000,
         },
     };
@@ -503,7 +505,8 @@ fn completed_compaction_maps_to_product_extension_update() {
                     .usage(None)
                     .started_at_ms(TimestampMs::from(2_000))
                     .ended_at_ms(TimestampMs::from(2_050))
-                    .build(),
+                    .build()
+                    .into(),
             },
         },
     };
@@ -582,6 +585,7 @@ fn assistant_metadata_is_preserved_on_native_update() {
                 ))
                 .expect("timing"),
                 content: MessageContent::Assistant {
+                    model_message: None,
                     blocks: vec![ContentBlock::Text {
                         text: "answer".to_string(),
                     }],
@@ -589,15 +593,14 @@ fn assistant_metadata_is_preserved_on_native_update() {
                         .provider_id("provider-a".to_string())
                         .model_id("model-a".to_string())
                         .stop_reason(StopReason::MaxTokens)
-                        .usage(
-                            ModelUsage::builder()
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
                                 .input_tokens(10)
                                 .output_tokens(5)
-                                .cache_read_tokens(2)
-                                .cache_write_tokens(1)
-                                .total_tokens(18)
-                                .build(),
-                        )
+                                .cached_input_tokens(2)
+                                .cache_creation_input_tokens(1)
+                                .total_tokens(18),
+                        ))
                         .error(Some("truncated".to_string()))
                         .build(),
                 },
@@ -944,11 +947,13 @@ fn cancelled_result() -> ToolResult {
 fn tool_start_sets_name_kind_and_absolute_location() {
     let json = tool_update(AgentEventPayload::ToolExecutionStart {
         run_id: RunId::try_from("run-tool").expect("run id"),
-        call: protocol::ToolCall {
-            tool_call_id: ToolCallId::try_from("call-1").expect("id"),
-            name: "read".to_string(),
-            arguments: serde_json::json!({ "path": "src/main.rs", "offset": 10 }),
-        },
+        call: protocol::ToolCall::builder()
+            .tool_call_id(ToolCallId::try_from("call-1").expect("id"))
+            .name("read".to_string())
+            .arguments(
+                serde_json::json!({ "path": "src/main.rs", "offset": 10 }),
+            )
+            .build(),
         cwd: "/work".into(),
         locations: vec![protocol::ToolLocation {
             path: "/work/src/main.rs".into(),
@@ -1060,7 +1065,8 @@ fn compaction_maps_to_standard_entity_lifecycle() {
                 .usage(None)
                 .started_at_ms(TimestampMs::from(7_000))
                 .ended_at_ms(TimestampMs::from(7_100))
-                .build(),
+                .build()
+                .into(),
         },
     });
     assert_eq!(start["status"], "in_progress");
@@ -1148,13 +1154,14 @@ fn idle_state_carries_usage() {
         payload: AgentEventPayload::AgentSettled {
             run_id: RunId::try_from("run-usage").expect("run id"),
             outcome: AgentOutcome::Succeeded,
-            usage: ModelUsage::builder()
-                .input_tokens(20)
-                .output_tokens(10)
-                .cache_read_tokens(4)
-                .cache_write_tokens(1)
-                .total_tokens(30)
-                .build(),
+            usage: protocol::ModelUsage::from(
+                protocol::Usage::new()
+                    .input_tokens(20)
+                    .output_tokens(10)
+                    .cached_input_tokens(4)
+                    .cache_creation_input_tokens(1)
+                    .total_tokens(30),
+            ),
         },
     })
     .expect("map settlement");
@@ -1218,11 +1225,11 @@ fn bash_progress(text: &str) -> ToolResult {
 fn bash_tool_maps_to_terminal_lifecycle() {
     let start = mapped(AgentEventPayload::ToolExecutionStart {
         run_id: RunId::try_from("run-tool").expect("run id"),
-        call: protocol::ToolCall {
-            tool_call_id: ToolCallId::try_from("call-bash").expect("id"),
-            name: "bash".to_string(),
-            arguments: serde_json::json!({ "command": "ls -la" }),
-        },
+        call: protocol::ToolCall::builder()
+            .tool_call_id(ToolCallId::try_from("call-bash").expect("id"))
+            .name("bash".to_string())
+            .arguments(serde_json::json!({ "command": "ls -la" }))
+            .build(),
         cwd: "/work".into(),
         locations: Vec::new(),
     });

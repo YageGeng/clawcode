@@ -6,12 +6,11 @@ use protocol::{
 };
 
 use crate::{
-    AfterProviderResponsePoint, AgentEndPoint, AgentSettledPoint,
-    AgentStartPoint, BeforeAgentStartPoint, BeforeProviderHeadersPoint,
-    BeforeProviderRequestPoint, ContextPoint, ExtensionCommandHandler,
-    ExtensionHandler, ExtensionPoint, InputPoint, MessageEndPoint,
-    MessageStartPoint, MessageUpdatePoint, ModelSelectPoint, ProjectTrustPoint,
-    ResourcesDiscoverPoint, SessionBeforeCompactPoint, SessionBeforeForkPoint,
+    AgentEndPoint, AgentSettledPoint, AgentStartPoint, BeforeAgentStartPoint,
+    ContextPoint, ExtensionCommandHandler, ExtensionHandler, ExtensionPoint,
+    InputPoint, MessageEndPoint, MessageStartPoint, MessageUpdatePoint,
+    ModelSelectPoint, ProjectTrustPoint, ResourcesDiscoverPoint,
+    SessionBeforeCompactPoint, SessionBeforeForkPoint,
     SessionBeforeSwitchPoint, SessionBeforeTreePoint, SessionCompactPoint,
     SessionInfoChangedPoint, SessionShutdownPoint, SessionStartPoint,
     SessionTreePoint, ThinkingLevelSelectPoint, ToolCallPoint,
@@ -102,9 +101,6 @@ define_point_handlers!(
     message_update: MessageUpdatePoint,
     message_end: MessageEndPoint,
     context: ContextPoint,
-    before_provider_request: BeforeProviderRequestPoint,
-    before_provider_headers: BeforeProviderHeadersPoint,
-    after_provider_response: AfterProviderResponsePoint,
     model_select: ModelSelectPoint,
     thinking_level_select: ThinkingLevelSelectPoint,
     tool_execution_start: ToolExecutionStartPoint,
@@ -149,6 +145,9 @@ impl RegisteredCommand {
 #[derive(Default, Clone, typed_builder::TypedBuilder)]
 #[builder(builder_method(vis = ""), builder_type(vis = ""))]
 pub struct HandlerRegistry {
+    #[builder(default, setter(skip))]
+    pub(crate) http_middleware:
+        Vec<crate::middleware::RegisteredHttpMiddleware>,
     #[builder(default)]
     points: PointHandlers,
     #[builder(default)]

@@ -698,7 +698,7 @@ impl Session {
             .await
             .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
         let mut blocks = Vec::new();
-        let mut stop_reason = None;
+        let mut final_result = None;
         while let Some(event) = stream.next().await {
             match event
                 .map_err(|error| ::mcp::McpError::Host(error.to_string()))?
@@ -717,26 +717,36 @@ impl Session {
                 protocol::ModelStreamEvent::ReasoningDelta(_) => {}
                 protocol::ModelStreamEvent::ToolCall(call) => {
                     blocks.push(ContentBlock::ToolCall {
+                        invalid_arguments: call.invalid_arguments,
                         tool_call_id: call.tool_call_id,
                         name: call.name,
                         arguments: call.arguments,
                     });
                 }
                 protocol::ModelStreamEvent::Finished(final_) => {
-                    stop_reason = Some(final_.stop_reason);
+                    final_result = Some(final_);
                 }
             }
         }
-        let stop_reason = stop_reason.ok_or_else(|| {
+        let final_result = final_result.ok_or_else(|| {
             ::mcp::McpError::Host(
                 "Sampling Provider stream ended without a terminal event"
                     .to_string(),
             )
         })?;
+        if let Some(native) = final_result.model_message.as_deref() {
+            // Sampling must observe the same final correction as ordinary turns.
+            blocks = crate::provider::AssistantProjection::from(native)
+                .blocks()
+                .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
+            blocks.retain(|block| {
+                !matches!(block, ContentBlock::Reasoning { .. })
+            });
+        }
         Ok(McpSamplingResult::builder()
             .role(Role::Assistant)
             .blocks(blocks)
-            .stop_reason(stop_reason)
+            .stop_reason(final_result.stop_reason)
             .model(format!(
                 "{}/{}",
                 model.profile().provider_id,

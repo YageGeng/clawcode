@@ -210,8 +210,8 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
           <div className="runtime-status" aria-label="Agent 运行状态">
             <span className="runtime-chip" data-tone={connectionTone}><span className="runtime-chip__dot" />{connectionLabel}</span>
             {contextUsage === undefined ? null : (
-              <span className="runtime-chip" title={`输入 ${contextUsage.exact.inputTokens} · 输出 ${contextUsage.exact.outputTokens} · 缓存读取 ${contextUsage.exact.cacheReadTokens}`}>
-                Context {contextUsage.used.toLocaleString()} / {contextUsage.size.toLocaleString()}
+              <span className="runtime-chip" title={`输入 ${contextUsage.exact.inputTokens ?? "未知"} · 输出 ${contextUsage.exact.outputTokens ?? "未知"} · 缓存读取 ${contextUsage.exact.cacheReadTokens ?? "未知"}`}>
+                Context {contextUsage.used === undefined ? "未知" : BigInt(contextUsage.used).toLocaleString()} / {BigInt(contextUsage.size).toLocaleString()}
               </span>
             )}
             {retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}

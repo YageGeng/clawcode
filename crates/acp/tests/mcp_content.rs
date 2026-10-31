@@ -2,8 +2,8 @@ use acp::AcpEventMapper;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AssistantMetadata,
     ContentBlock, EmbeddedResourceContent, EventMetadata, MessageContent,
-    MessageId, MessageIdentity, MessageTiming, ModelUsage, ProductIdentity,
-    RunId, Sequence, StopReason, TimestampMs, ToolCallId, ToolResult, TurnId,
+    MessageId, MessageIdentity, MessageTiming, ProductIdentity, RunId,
+    Sequence, StopReason, TimestampMs, ToolCallId, ToolResult, TurnId,
 };
 
 /// ACP v2 uses native MCP-compatible blocks and a product extension only for structured content.
@@ -29,6 +29,7 @@ fn assistant_mcp_content_uses_native_and_extension_blocks() {
                 ))
                 .expect("message timing"),
                 content: MessageContent::Assistant {
+                    model_message: None,
                     blocks: vec![
                         ContentBlock::Audio {
                             data: "YXVkaW8=".to_string(),
@@ -58,15 +59,14 @@ fn assistant_mcp_content_uses_native_and_extension_blocks() {
                         .provider_id("provider".to_string())
                         .model_id("model".to_string())
                         .stop_reason(StopReason::EndTurn)
-                        .usage(
-                            ModelUsage::builder()
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
                                 .input_tokens(1)
                                 .output_tokens(1)
-                                .cache_read_tokens(0)
-                                .cache_write_tokens(0)
-                                .total_tokens(2)
-                                .build(),
-                        )
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(2),
+                        ))
                         .build(),
                 },
             },

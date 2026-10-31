@@ -325,12 +325,13 @@ mod tests {
             "required": ["value"]
         }))
         .await;
-        let mut call = ToolCall {
-            tool_call_id: ToolCallId::try_from("validation-call")
-                .expect("Tool call id"),
-            name: tool.info.public_name.clone(),
-            arguments: serde_json::json!({ "value": "first" }),
-        };
+        let mut call = ToolCall::builder()
+            .tool_call_id(
+                ToolCallId::try_from("validation-call").expect("Tool call id"),
+            )
+            .name(tool.info.public_name.clone())
+            .arguments(serde_json::json!({ "value": "first" }))
+            .build();
         let arguments =
             tool.validated_arguments(&call).expect("valid arguments");
         assert!(
@@ -352,11 +353,11 @@ mod tests {
         let mut tool =
             validation_tool(serde_json::json!({"type":"object"})).await;
         tool.info.metadata.exposure = protocol::ToolExposure::Hidden;
-        let call = ToolCall {
-            tool_call_id: ToolCallId::try_from("hidden").expect("id"),
-            name: tool.info.public_name.clone(),
-            arguments: serde_json::json!({}),
-        };
+        let call = ToolCall::builder()
+            .tool_call_id(ToolCallId::try_from("hidden").expect("id"))
+            .name(tool.info.public_name.clone())
+            .arguments(serde_json::json!({}))
+            .build();
         assert!(matches!(
             tool.validate(&call),
             Err(tools::ToolError::NotFound(_))
@@ -369,12 +370,14 @@ mod tests {
         let tool =
             validation_tool(serde_json::json!({ "type": "invalid-type" }))
                 .await;
-        let call = ToolCall {
-            tool_call_id: ToolCallId::try_from("invalid-schema-call")
-                .expect("Tool call id"),
-            name: tool.info.public_name.clone(),
-            arguments: serde_json::json!({}),
-        };
+        let call = ToolCall::builder()
+            .tool_call_id(
+                ToolCallId::try_from("invalid-schema-call")
+                    .expect("Tool call id"),
+            )
+            .name(tool.info.public_name.clone())
+            .arguments(serde_json::json!({}))
+            .build();
         for _ in 0..2 {
             assert!(
                 matches!(tool.validate(&call), Err(tools::ToolError::InvalidArguments { message, .. }) if message.contains("Server supplied an invalid JSON Schema"))

@@ -17,9 +17,8 @@ pub use registration::{
     StaticExtensionRegistration,
 };
 pub use result::{
-    BeforeAgentStartResult, ContextResult, HeaderMutation, HeaderPatch,
-    InputResult, ProjectTrustDecision, ProjectTrustResult,
-    ResourcesDiscoverResult, SessionBeforeCompactResult,
+    BeforeAgentStartResult, ContextResult, InputResult, ProjectTrustDecision,
+    ProjectTrustResult, ResourcesDiscoverResult, SessionBeforeCompactResult,
     SessionBeforeForkResult, SessionBeforeTreeResult, SessionCancelResult,
     ToolBlock, ToolCallResult, ToolResultPatch, TreeSummary,
     UserBashDisposition, UserBashResult,

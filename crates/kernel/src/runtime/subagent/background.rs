@@ -566,22 +566,19 @@ mod tests {
                 "Invalid subagent name: use 1-64 letters, digits, '_' or '-'.",
             ),
         ] {
-            let call = ToolCall {
-                tool_call_id: protocol::ToolCallId::try_from("test")
-                    .expect("id"),
-                name: "background_subagent".into(),
-                arguments,
-            };
+            let call = ToolCall::builder()
+                .tool_call_id(
+                    protocol::ToolCallId::try_from("test").expect("id"),
+                )
+                .name("background_subagent".into())
+                .arguments(arguments)
+                .build();
             assert_eq!(
                 BackgroundAction::try_from(&call).err().as_deref(),
                 Some(expected)
             );
         }
-        let call = ToolCall {
-            tool_call_id: protocol::ToolCallId::try_from("test").expect("id"),
-            name: "background_subagent".into(),
-            arguments: serde_json::json!({"action":"send","name":"reader","message":"next","followUp":true}),
-        };
+        let call = ToolCall::builder().tool_call_id(protocol::ToolCallId::try_from("test").expect("id")).name("background_subagent".into()).arguments(serde_json::json!({"action":"send","name":"reader","message":"next","followUp":true})).build();
         assert!(matches!(
             BackgroundAction::try_from(&call),
             Ok(BackgroundAction::Send {

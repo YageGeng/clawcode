@@ -2,21 +2,12 @@ import { Gauge } from "lucide-react";
 
 import type { RunId } from "../../acp/protocol";
 import type { ModelUsage } from "../../domain/model";
+import { ModelUsages } from "../../domain/model";
 
 export type AgentUsageProps = Readonly<{
   runId: RunId;
   usage: ModelUsage;
 }>;
-
-/** Formats precision-safe token strings without narrowing them to JavaScript numbers. */
-function formatTokens(value: string): string {
-  try {
-    return BigInt(value).toLocaleString();
-  } catch {
-    // Preserve malformed provider diagnostics instead of crashing the transcript.
-    return value;
-  }
-}
 
 /** Renders token accounting for one complete Agent Run. */
 export function AgentUsage({ runId, usage }: AgentUsageProps) {
@@ -43,7 +34,7 @@ export function AgentUsage({ runId, usage }: AgentUsageProps) {
         {metrics.map(([label, value]) => (
           <div className="agent-usage__metric" key={label}>
             <dt>{label}</dt>
-            <dd>{formatTokens(value)}</dd>
+            <dd>{ModelUsages.formatTokens(value)}</dd>
           </div>
         ))}
       </dl>

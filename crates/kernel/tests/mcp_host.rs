@@ -22,9 +22,8 @@ use protocol::{
     McpSamplingRequest, McpServerCapabilities, McpServerId,
     McpServerImplementation, McpToolInfo, McpToolRef, McpToolRequest,
     McpToolResult, MessageContent, MessageId, MessageIdentity, MessageTiming,
-    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage,
-    RunRequest, SessionId, StopReason, TimestampMs, ToolCall, ToolCallId,
-    TraceId,
+    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, RunRequest,
+    SessionId, StopReason, TimestampMs, ToolCall, ToolCallId, TraceId,
 };
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
 use tokio_util::sync::CancellationToken;
@@ -144,17 +143,20 @@ struct ScriptedModel {
 impl ScriptedModel {
     /// Builds one deterministic terminal provider event.
     fn finished(reason: StopReason) -> ModelStreamEvent {
-        ModelStreamEvent::Finished(ModelFinal {
-            stop_reason: reason,
-            raw_stop_reason: None,
-            usage: ModelUsage::builder()
-                .input_tokens(1)
-                .output_tokens(1)
-                .cache_read_tokens(0)
-                .cache_write_tokens(0)
-                .total_tokens(2)
+        ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(reason)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(1)
+                        .output_tokens(1)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(2),
+                ))
                 .build(),
-        })
+        )
     }
 }
 
@@ -202,7 +204,10 @@ struct SamplingConnector;
 
 /// Counts real factory connections while reusing the existing callback-capable client.
 #[derive(Default)]
-struct CountingConnector(std::sync::atomic::AtomicUsize);
+struct CountingConnector {
+    connections: std::sync::atomic::AtomicUsize,
+    host: Mutex<Option<Arc<dyn McpHost>>>,
+}
 
 #[async_trait]
 impl McpConnector for CountingConnector {
@@ -213,7 +218,9 @@ impl McpConnector for CountingConnector {
         session_id: &SessionId,
         host: Arc<dyn McpHost>,
     ) -> Result<Arc<dyn McpClient>, McpError> {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.connections
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.host.lock().expect("host capture") = Some(Arc::clone(&host));
         SamplingConnector.connect(server, session_id, host).await
     }
 }
@@ -303,9 +310,61 @@ impl OwnedMcpFixture {
             .expect("child")
     }
 
+    /// Samples through the real Session host captured by the connection boundary.
+    async fn sample(&self) -> protocol::McpSamplingResult {
+        let host = Arc::clone(
+            self.connector
+                .host
+                .lock()
+                .expect("host capture")
+                .as_ref()
+                .expect("connected host"),
+        );
+        let timestamp = TimestampMs::from(1000);
+        let turn_id =
+            protocol::TurnId::try_from("sampling-turn").expect("turn ID");
+        let context = protocol::McpRequestContext::builder()
+            .server_id(McpServerId::try_from("sampling").expect("server ID"))
+            .session_id(self.owner.clone())
+            .turn_id(turn_id.clone())
+            .trace_id(TraceId::try_from("sampling-trace").expect("trace ID"))
+            .requested_at_ms(timestamp)
+            .build();
+        let message = AgentMessage {
+            identity: MessageIdentity {
+                message_id: MessageId::try_from("sampling-user")
+                    .expect("message ID"),
+                turn_id,
+            },
+            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
+                .expect("timing"),
+            content: MessageContent::User {
+                blocks: vec![ContentBlock::Text {
+                    text: "sample".into(),
+                }],
+            },
+        };
+        let response = host
+            .handle(McpHostRequest::Sampling(
+                McpSamplingRequest::builder()
+                    .context(context)
+                    .messages(vec![message])
+                    .max_tokens(64)
+                    .build(),
+            ))
+            .await
+            .expect("sample response");
+        let McpHostResponse::Sampling(result) = response else {
+            unreachable!("host must answer Sampling with a sampling result")
+        };
+        result
+    }
+
     /// Reads the actual number of transport connections made by the factory.
     fn connects(&self) -> usize {
-        self.connector.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.connector
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -341,11 +400,13 @@ async fn owned_session_reuses_owner_mcp_connection() {
 async fn child_elicitation_routes_to_child_session() {
     let test = OwnedMcpFixture::new(vec![
         vec![
-            ModelStreamEvent::ToolCall(ToolCall {
-                tool_call_id: ToolCallId::try_from("elicit").expect("call"),
-                name: "mcp__sampling__sample".into(),
-                arguments: serde_json::json!({"elicit":true}),
-            }),
+            ModelStreamEvent::ToolCall(
+                ToolCall::builder()
+                    .tool_call_id(ToolCallId::try_from("elicit").expect("call"))
+                    .name("mcp__sampling__sample".into())
+                    .arguments(serde_json::json!({"elicit":true}))
+                    .build(),
+            ),
             ScriptedModel::finished(StopReason::ToolUse),
         ],
         vec![ScriptedModel::finished(StopReason::EndTurn)],
@@ -405,11 +466,13 @@ async fn child_elicitation_routes_to_child_session() {
 async fn closing_child_keeps_owner_mcp_alive() {
     let test = OwnedMcpFixture::new(vec![
         vec![
-            ModelStreamEvent::ToolCall(ToolCall {
-                tool_call_id: ToolCallId::try_from("sample").expect("call"),
-                name: "mcp__sampling__sample".into(),
-                arguments: serde_json::json!({}),
-            }),
+            ModelStreamEvent::ToolCall(
+                ToolCall::builder()
+                    .tool_call_id(ToolCallId::try_from("sample").expect("call"))
+                    .name("mcp__sampling__sample".into())
+                    .arguments(serde_json::json!({}))
+                    .build(),
+            ),
             ScriptedModel::finished(StopReason::ToolUse),
         ],
         vec![
@@ -702,21 +765,29 @@ async fn mcp_sampling_runs_through_current_session_model() {
     let model = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("discover-sampling")
-                        .expect("id"),
-                    name: "tool_search".into(),
-                    arguments: serde_json::json!({"query":"sample"}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("discover-sampling")
+                                .expect("id"),
+                        )
+                        .name("tool_search".into())
+                        .arguments(serde_json::json!({"query":"sample"}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ],
             vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("mcp-call")
-                        .expect("Tool call id"),
-                    name: "mcp__sampling__sample".to_string(),
-                    arguments: serde_json::json!({}),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("mcp-call")
+                                .expect("Tool call id"),
+                        )
+                        .name("mcp__sampling__sample".to_string())
+                        .arguments(serde_json::json!({}))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ],
             vec![
@@ -838,12 +909,16 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
     let model = Arc::new(ScriptedModel {
         scripts: Mutex::new(VecDeque::from([
             vec![
-                ModelStreamEvent::ToolCall(ToolCall {
-                    tool_call_id: ToolCallId::try_from("mcp-elicit-call")
-                        .expect("Tool call id"),
-                    name: "mcp__sampling__sample".to_string(),
-                    arguments: serde_json::json!({ "elicit": true }),
-                }),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("mcp-elicit-call")
+                                .expect("Tool call id"),
+                        )
+                        .name("mcp__sampling__sample".to_string())
+                        .arguments(serde_json::json!({ "elicit": true }))
+                        .build(),
+                ),
                 ScriptedModel::finished(StopReason::ToolUse),
             ],
             vec![
@@ -1008,4 +1083,82 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
             "action_resolved"
         ]
     );
+}
+
+/// Native final content replaces stale deltas, including final-only output, without leaking reasoning.
+#[tokio::test]
+async fn sampling_uses_final_native_content() {
+    for deltas in [false, true] {
+        let mut events = Vec::new();
+        if deltas {
+            events.push(ModelStreamEvent::TextDelta("stale".into()));
+        }
+        let native = rig_core::message::AssistantMessage::new(vec![
+            rig_core::message::AssistantContent::Reasoning(
+                rig_core::message::Reasoning::new("private"),
+            ),
+            rig_core::message::AssistantContent::text("corrected"),
+        ])
+        .with_stop(rig_core::message::StopReason::Stop);
+        events.push(ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .usage(protocol::ModelUsage::default())
+                .model_message(Some(Box::new(native)))
+                .build(),
+        ));
+        let fixture = OwnedMcpFixture::new(vec![events]).await;
+        let result = fixture.sample().await;
+        assert_eq!(
+            result.blocks,
+            vec![ContentBlock::Text {
+                text: "corrected".into()
+            }]
+        );
+    }
+}
+
+/// Both incremental-only and native final paths retain malformed arguments for MCP wire rejection.
+#[tokio::test]
+async fn sampling_preserves_invalid_tool_arguments() {
+    for native in [false, true] {
+        let call = ToolCall::builder()
+            .tool_call_id(ToolCallId::try_from("bad").expect("call ID"))
+            .name("remote_tool".into())
+            .arguments(serde_json::json!({}))
+            .invalid_arguments(Some("{".into()))
+            .build();
+        let final_message = native.then(|| {
+            Box::new(
+                rig_core::message::AssistantMessage::new(vec![
+                    rig_core::message::AssistantContent::ToolCall(
+                        rig_core::message::ToolCall::from_wire(
+                            "bad",
+                            rig_core::message::ToolFunction::new(
+                                rig_core::message::ToolName::new("remote_tool")
+                                    .expect("name"),
+                                serde_json::json!("{"),
+                            ),
+                        ),
+                    ),
+                ])
+                .with_stop(rig_core::message::StopReason::ToolUse),
+            )
+        });
+        let fixture = OwnedMcpFixture::new(vec![vec![
+            ModelStreamEvent::ToolCall(call),
+            ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::ToolUse)
+                    .usage(protocol::ModelUsage::default())
+                    .model_message(final_message)
+                    .build(),
+            ),
+        ]])
+        .await;
+        let result = fixture.sample().await;
+        assert!(
+            matches!(result.blocks.as_slice(),[ContentBlock::ToolCall {invalid_arguments:Some(raw),arguments,..}] if raw=="{" && arguments==&serde_json::json!({}))
+        );
+    }
 }

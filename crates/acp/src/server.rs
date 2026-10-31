@@ -206,10 +206,13 @@ impl AcpServer {
             .kernel
             .available_commands_event(session_id)
             .map_err(agent_client_protocol::Error::into_internal_error)?;
-        let metadata = AcpEventMapper::metadata(&event)
+        // Share the same metadata projection between the envelope and its updates.
+        let mapper = AcpEventMapper::new(&event)
             .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let metadata = mapper.metadata();
         let mut commands = Vec::new();
-        for update in AcpEventMapper::map(event)
+        for update in mapper
+            .updates()
             .map_err(agent_client_protocol::Error::into_internal_error)?
         {
             // The same snapshot also seeds the setup response.
@@ -275,7 +278,7 @@ impl AcpServer {
                                 ..
                             },
                             Some(context_window),
-                        ) => Some((metadata.usage.clone(), context_window)),
+                        ) => Some((metadata.usage, context_window)),
                         _ => None,
                     };
                     let turn_id = message.identity.turn_id.clone();
@@ -325,7 +328,7 @@ impl AcpServer {
                         run_id,
                         reason,
                         outcome: protocol::CompactionOutcome::Completed {
-                            result,
+                            result: Box::new(result),
                         },
                     },
                 )],
@@ -345,12 +348,17 @@ impl AcpServer {
                     },
                     payload,
                 };
-                let metadata = AcpEventMapper::metadata(&event).map_err(
+                // Replay uses the same borrowed mapper for metadata and native updates.
+                let mapper = AcpEventMapper::new(&event).map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )?;
-                for update in AcpEventMapper::map(event).map_err(
+                let metadata = mapper.metadata();
+                let updates = mapper.updates().map_err(
                     agent_client_protocol::Error::into_internal_error,
-                )? {
+                )?;
+                drop(mapper);
+                drop(event);
+                for update in updates {
                     // Durable replay is history; the current state follows as a snapshot.
                     if matches!(update, wire::SessionUpdate::StateUpdate(_)) {
                         continue;

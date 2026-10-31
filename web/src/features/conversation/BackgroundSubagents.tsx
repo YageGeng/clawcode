@@ -8,6 +8,7 @@ import { useWorkspaceStore } from "../../workspace/store";
 export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessionId: SessionId; controller: WorkspaceController }>) {
   const sessions = useWorkspaceStore((state) => state.sessions);
   const running = useWorkspaceStore((state) => state.runningSessionIds);
+  const connection = useWorkspaceStore((state) => state.connection.type);
   // The ownership name is persisted in the header, so it is available even before the title fact is listed.
   const children = useMemo(() => sessions.flatMap((session) => session.ownership?.kind === "background" && session.ownership.sessionId === sessionId
     ? [{ sessionId: session.sessionId, name: session.ownership.name }]
@@ -15,21 +16,22 @@ export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessio
   const ids = useMemo(() => children.map((child) => child.sessionId), [children]);
   const [error, setError] = useState<string>();
   useEffect(() => {
-    if (ids.length === 0) return;
+    if (ids.length === 0 || connection !== "ready") return;
     let stopped = false;
     let timer: number | undefined;
     /** Schedules only after completion so slow requests never overlap polling rounds. */
     const refresh = async () => {
+      let keepPolling = true;
       try {
-        await controller.refreshSessionActivity(ids);
+        keepPolling = await controller.refreshSessionActivity(ids);
         if (!stopped) setError(undefined);
       }
       catch (reason: unknown) { if (!stopped) setError(reason instanceof Error ? reason.message : String(reason)); }
-      if (!stopped) timer = window.setTimeout(() => { void refresh(); }, 2_000);
+      if (!stopped && keepPolling) timer = window.setTimeout(() => { void refresh(); }, 2_000);
     };
     void refresh();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [controller, ids]);
+  }, [connection, controller, ids]);
   if (children.length === 0) return null;
   return <section className="background-subagents" aria-label="后台子会话">
     <span className="background-subagents__label"><Bot size={13} aria-hidden="true" />后台<b>{children.length}</b></span>

@@ -68,31 +68,6 @@ pub struct BeforeAgentStartResult {
     pub system_prompt: Option<String>,
 }
 
-/// One explicit provider-header mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
-pub enum HeaderMutation {
-    /// Add or replace one header value.
-    Set {
-        /// Case-insensitive header name.
-        name: String,
-        /// Complete replacement value.
-        value: String,
-    },
-    /// Remove one header.
-    Remove {
-        /// Case-insensitive header name.
-        name: String,
-    },
-}
-
-/// Ordered provider-header changes returned by one handler.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeaderPatch {
-    /// Mutations applied in order.
-    pub mutations: Vec<HeaderMutation>,
-}
-
 /// Cancellation decision shared by simple session-before points.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,

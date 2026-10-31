@@ -20,7 +20,7 @@ use prompt::FilesystemPromptFactory;
 use protocol::{
     BeforeAgentStartEvent, BeforeAgentStartResult, ContentBlock,
     ExtensionDescriptor, ExtensionId, InputEvent, InputResult, MessageContent,
-    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage,
+    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent,
     StaticExtensionRegistration, StopReason, ThinkingLevel,
 };
 use store::{JsonlStoreFactory, SystemClock};
@@ -63,17 +63,20 @@ impl ScriptedModel {
     fn answer() -> ModelStream {
         Box::pin(stream::iter([
             Ok(ModelStreamEvent::TextDelta("answer".to_string())),
-            Ok(ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(1)
-                    .output_tokens(1)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(2)
+            Ok(ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(1)
+                            .output_tokens(1)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(2),
+                    ))
                     .build(),
-            })),
+            )),
         ]))
     }
 }
@@ -137,23 +140,30 @@ impl Model for ScriptedModel {
                 Err(ModelError::Cancelled)
             }
             "tool" => Ok(Box::pin(stream::iter([
-                Ok(ModelStreamEvent::ToolCall(protocol::ToolCall {
-                    tool_call_id: protocol::ToolCallId::try_from("bash-call")
-                        .expect("tool call id"),
-                    name: "bash".to_string(),
-                    arguments: serde_json::json!({ "command": "sleep 5" }),
-                })),
-                Ok(ModelStreamEvent::Finished(ModelFinal {
-                    stop_reason: StopReason::ToolUse,
-                    raw_stop_reason: None,
-                    usage: ModelUsage::builder()
-                        .input_tokens(1)
-                        .output_tokens(1)
-                        .cache_read_tokens(0)
-                        .cache_write_tokens(0)
-                        .total_tokens(2)
+                Ok(ModelStreamEvent::ToolCall(
+                    protocol::ToolCall::builder()
+                        .tool_call_id(
+                            protocol::ToolCallId::try_from("bash-call")
+                                .expect("tool call id"),
+                        )
+                        .name("bash".to_string())
+                        .arguments(serde_json::json!({ "command": "sleep 5" }))
                         .build(),
-                })),
+                )),
+                Ok(ModelStreamEvent::Finished(
+                    ModelFinal::builder()
+                        .stop_reason(StopReason::ToolUse)
+                        .raw_stop_reason(None)
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
+                                .input_tokens(1)
+                                .output_tokens(1)
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(2),
+                        ))
+                        .build(),
+                )),
             ]))),
             "hold" => {
                 tokio::select! {
@@ -189,17 +199,20 @@ impl Model for SecondModel {
     ) -> Result<ModelStream, ModelError> {
         Ok(Box::pin(stream::iter([
             Ok(ModelStreamEvent::TextDelta("second".to_string())),
-            Ok(ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(1)
-                    .output_tokens(1)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(2)
+            Ok(ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(1)
+                            .output_tokens(1)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(2),
+                    ))
                     .build(),
-            })),
+            )),
         ])))
     }
 }

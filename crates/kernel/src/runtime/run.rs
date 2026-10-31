@@ -9,7 +9,9 @@ impl Kernel {
         sink: Arc<dyn EventSink>,
         invocation: RunInvocation,
     ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
-        let result = self.run_until_settled(request, sink, &invocation).await;
+        // Keep the full generation state off every caller's async stack frame.
+        let result =
+            Box::pin(self.run_until_settled(request, sink, &invocation)).await;
         // Every return path before insertion rejects the prompt; the notice
         // ignores this once the user message was already inserted.
         if let (Err(error), Some(notice)) =
@@ -287,7 +289,7 @@ impl Kernel {
             let mut next_initial_input = Some(initial_message_content);
             let mut next_queued_item = None;
             let mut next_turn_id = Some(first_turn_id.clone());
-            let mut retry_state = RetryState::default();
+            let mut retry_state = RetryState::new(&self.retry_policy, self.provider_retry_delay_limit_ms);
             let mut overflow_recovery_attempted = false;
 
             loop {
@@ -601,10 +603,10 @@ impl Kernel {
                 // Provider cancellation, stream closure, and stream errors all
                 // converge into one typed Assistant settlement.
                 let settlement = match turn_model
-                    .stream_with_hooks(
+                    .stream_with_middleware(
                         request_for_model,
                         cancellation.clone(),
-                        Some(self.completion_hooks(&session, &run_id, &turn_id)?),
+                        Some(self.completion_middleware(&session, &run_id, &turn_id)?),
                     )
                     .await
                 {
@@ -708,30 +710,18 @@ impl Kernel {
                     },
                 };
                 let attempt_result = attempt.settle(settlement)?;
-                let (assistant, tool_calls, stop_reason, failure, mut cancelled) =
-                    match attempt_result {
-                        AssistantAttemptResult::Completed {
-                            message,
-                            tool_calls,
-                            stop_reason,
-                        } => (message, tool_calls, stop_reason, None, false),
-                        AssistantAttemptResult::Failed { message, failure } => (
-                            message,
-                            Vec::new(),
-                            StopReason::Error,
-                            Some(failure),
-                            false,
-                        ),
-                        AssistantAttemptResult::Cancelled { message } => {
-                            (message, Vec::new(), StopReason::Cancelled, None, true)
-                        }
-                    };
+                let (assistant, mut failure, mut cancelled) = match attempt_result {
+                    AssistantAttemptResult::Completed { message } => (message, None, false),
+                    AssistantAttemptResult::Failed { message, failure } => (message, Some(failure), false),
+                    AssistantAttemptResult::Cancelled { message } => (message, None, true),
+                };
                 // Count the settled attempt before validation or persistence can fail.
                 if let MessageContent::Assistant { metadata, .. } = &assistant.content {
                     run_usage += &metadata.usage;
                 }
+                // Native provenance does not change the assistant role or its lifecycle.
                 let original_identity = assistant.identity.clone();
-                let assistant = session.extensions.runtime_ref().emit_message_end(
+                let mut assistant = session.extensions.runtime_ref().emit_message_end(
                     protocol::MessageEndEvent { message: assistant },
                     &extension_context,
                 ).await;
@@ -742,22 +732,38 @@ impl Kernel {
                         "message_end must preserve Assistant identity and role".to_string(),
                     ));
                 }
-                let (usage, overflow_recovery) = match &assistant.content {
-                    MessageContent::Assistant { metadata, .. } => (
-                        metadata.usage.clone(),
-                        self.compaction_policy
-                            .overflow_recovery(metadata, turn_model.profile()),
-                    ),
-                    MessageContent::System { .. }
-                    | MessageContent::User { .. }
-                    | MessageContent::ExpandedUser { .. }
-                    | MessageContent::ToolResult { .. }
-                    | MessageContent::BashExecution { .. }
-                    | MessageContent::Extension { .. }
-                    | MessageContent::SlashCommand { .. }
-                    | MessageContent::CompactionSummary { .. } => unreachable!(
-                        "AssistantAttempt always produces an Assistant message"
-                    ),
+                let (usage, overflow_recovery, stop_reason, tool_calls) = match &mut assistant.content {
+                    MessageContent::Assistant { blocks, metadata, model_message } => {
+                        // Hooks may stop a successful turn, but cannot revive a failed/cancelled provider attempt.
+                        cancelled |= metadata.stop_reason == StopReason::Cancelled;
+                        if cancelled {
+                            metadata.stop_reason = StopReason::Cancelled;
+                        } else if let Some(failure) = &failure {
+                            metadata.stop_reason = StopReason::Error;
+                            metadata.error = Some(failure.summary.clone());
+                            metadata.context_overflow = failure.context_overflow;
+                        } else if matches!(metadata.stop_reason, StopReason::Error | StopReason::Refusal) {
+                            failure = Some(protocol::ModelFailure::builder()
+                                .summary(metadata.error.clone().unwrap_or_else(|| "MessageEnd ended the turn with an error".into()))
+                                .retry_disposition(protocol::ModelRetryDisposition::NonRetryable)
+                                .context_overflow(metadata.context_overflow).build());
+                        }
+                        // Compare and execute the same final snapshot; no pre-hook call list is retained.
+                        if let Some(native) = model_message.as_ref()
+                            && !crate::provider::AssistantProjection::from(native.as_ref()).matches(blocks, metadata.stop_reason)? {
+                            *model_message = None;
+                        }
+                        let calls = if failure.is_none() && !cancelled
+                            && matches!(metadata.stop_reason, StopReason::ToolUse | StopReason::MaxTokens) {
+                            blocks.iter().filter_map(|block| {
+                                let ContentBlock::ToolCall { tool_call_id, name, arguments, invalid_arguments } = block else { return None; };
+                                Some(ToolCall::builder().tool_call_id(tool_call_id.clone()).name(name.clone())
+                                    .arguments(arguments.clone()).invalid_arguments(invalid_arguments.clone()).build())
+                            }).collect()
+                        } else { Vec::new() };
+                        (metadata.usage, self.compaction_policy.overflow_recovery(metadata, turn_model.profile()), metadata.stop_reason, calls)
+                    }
+                    _ => unreachable!("AssistantAttempt always produces an Assistant message"),
                 };
                 self.persist_message(&session, &assistant)?;
                 produced_messages.push(assistant.clone());
@@ -779,6 +785,7 @@ impl Kernel {
 
                 // Tool execution is skipped after cancellation; otherwise all
                 // calls settle before their result messages are persisted.
+                let has_tool_calls = !tool_calls.is_empty();
                 let tool_batch = if cancelled {
                     ToolBatchResult::default()
                 } else {
@@ -792,7 +799,7 @@ impl Kernel {
                             .emitter(&emitter)
                             .cancellation(&cancellation)
                             .tools(Arc::clone(&turn_tools))
-                            .calls(tool_calls.clone())
+                            .calls(tool_calls)
                             .build(),
                     )
                     .await?
@@ -943,9 +950,7 @@ impl Kernel {
                 // Retryable provider failures use cancellable backoff before a
                 // newly correlated retry Turn begins.
                 if let Some(retry_failure) = failure.as_ref()
-                    && RetryClassifier::classify(retry_failure)
-                        == ModelRetryDisposition::Retryable
-                    && let Some(schedule) = retry_state.schedule(&self.retry_policy)
+                    && let Some(schedule) = retry_state.schedule(retry_failure)
                 {
                     emitter
                         .emit(
@@ -1025,7 +1030,7 @@ impl Kernel {
                             },
                         )
                         .await?;
-                    retry_state = RetryState::default();
+                    retry_state.reset();
                 } else if let Some(retry_failure) = failure.as_ref()
                     && retry_state.attempts() > 0
                 {
@@ -1061,7 +1066,7 @@ impl Kernel {
                 // Tool use and queued follow-ups are the normal reasons to
                 // continue after a successful Turn.
                 let should_continue_for_tools =
-                    !tool_terminated && !tool_calls.is_empty();
+                    !tool_terminated && has_tool_calls;
                 next_queued_item = session
                     .execution
                     .claim_next_or_close(!should_continue_for_tools)?;
@@ -1126,7 +1131,7 @@ impl Kernel {
                     .turn_id(completion.turn_id)
                     .cancellation(&cancellation)
                     .outcome(&completion.outcome)
-                    .usage(run_usage.clone())
+                    .usage(run_usage)
                     .messages(completion.result.messages.clone())
                     .auto_compaction_reason(completion.auto_compaction_reason)
                     .build()
@@ -1166,7 +1171,7 @@ impl Kernel {
                     .turn_id(first_turn_id)
                     .cancellation(&cancellation)
                     .outcome(&AgentOutcome::Cancelled)
-                    .usage(run_usage.clone())
+                    .usage(run_usage)
                     .build()
                     .settle()
                     .await?;
@@ -1192,7 +1197,7 @@ impl Kernel {
                     .turn_id(first_turn_id)
                     .cancellation(&cancellation)
                     .outcome(&outcome)
-                    .usage(run_usage.clone())
+                    .usage(run_usage)
                     .build()
                     .settle()
                     .await?;

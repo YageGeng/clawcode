@@ -281,6 +281,26 @@ For frontend development, start the Rust server on port 3000, then run
 Browser acceptance runs against the production `app` backend and the configured
 provider. It therefore requires a valid model configuration and credentials.
 
+## Logging
+
+Rig model spans write one local `Rig telemetry closed` summary to stderr when
+the span closes. Summaries inherit the request Trace ID and include elapsed
+milliseconds, provider/request/response model identities, available request IDs,
+streaming mode, and reported input/output/cache/reasoning token counters. Missing
+counters are omitted; a reported zero remains zero. Closure alone does not mean
+success: use the correlated provider completion/error/cancellation logs for outcome.
+
+The existing `[logging] filter` and overriding `RUST_LOG` control these summaries.
+For example, `info,rig::completions=off,rig::modalities=off` disables native Rig
+summaries; `warn,rig::completions=info` enables completion summaries while retaining
+warnings elsewhere. Keep the application Trace spans enabled when Trace correlation
+is needed. No OpenTelemetry collector, external exporter, or extra runtime dependency
+is installed. Prompt/response bodies, system instructions, authentication headers
+and native/encrypted payloads are excluded even if an SDK caller enables content
+telemetry. Other application spans do not gain lifecycle log lines.
+This exclusion applies to Rig summaries; existing ACP DEBUG parameter logging
+continues to follow its separate recursive credential-redaction policy.
+
 ## Storage
 
 Sessions are stored as pi v4-compatible JSONL files under cwd-encoded
@@ -288,13 +308,65 @@ directories. There is no global `index.jsonl`; listing scans v4 headers.
 Storage supports lanes, tree navigation, branch reads, branch forks, global
 name/label facts, operation records, and torn-tail recovery.
 
-Agent-level transient failures use 2/4/8-second exponential backoff capped at
-`[retry] max_retry_delay_ms`, while provider request retry is configured
-independently. A Compaction checkpoint persists its `summary`, `tokensBefore`,
+Transient failures share one Kernel retry budget. `[retry.provider] max_retries`,
+when set, overrides `[retry] max_retries`; `[retry] enabled = false` disables
+retries. Server `Retry-After` is honored in full, or rejected when it exceeds
+the provider delay cap. `timeout_ms` is the upstream stream idle timeout
+(including the first frame); zero disables it and omission uses the upstream default.
+A Compaction checkpoint persists its `summary`, `tokensBefore`,
 `readFiles`, and `modifiedFiles` alongside full timing. Threshold compaction
 does not replay a successful Assistant. Explicit overflow and recoverable length
 stops remove the failed Assistant from active context and compact-and-retry at
 most once. The former Turn-count compaction fields are not backward compatible.
+
+Provider adapters use the crates.io releases of `rig-core` and `rig-reqwest`
+with the range `>=0.46.0-rc.1, <1`. This admits later stable 0.x releases and
+newer prereleases of 0.46.0, while retaining the required API baseline.
+`Cargo.lock` records the versions validated for this application; ordinary builds
+retain them. Run `cargo update -p rig-core -p rig-reqwest` to obtain newer allowed
+releases, then run the workspace tests and Clippy. Pre-1.0 minor releases may
+require API adaptations; moving to 1.x is an explicit range change.
+DeepSeek follows the upstream
+text-only capability: configured image input is downgraded to the existing text
+placeholder. Other providers use their configured protocol and upstream dialect.
+Each session owns its model history cache; HTTP pools and authentication are shared.
+
+Usage follows upstream optional counters. Input tokens already include cache
+reads and writes; these are subsets, never additional input. Missing counts display
+as unknown, while reported zero remains zero. New JSONL usage records use the
+`rig-core-v1` envelope. Old records are interpreted conservatively on read without
+rewriting their files; older application versions cannot necessarily read new records.
+Native reasoning and provider identities are retained for replay, but are omitted
+from browser payloads. Editing assistant content invalidates its native replay data.
+
+Trusted compiled extensions register `HttpMiddleware` factories through
+`ExtensionRegistrar::register_http_middleware`. They can inspect and modify full
+headers, raw bodies and responses, including authentication headers. The former
+provider request/header/response hook points and header whitelist are removed.
+Factories receive the request's `ExtensionContext` and run on every attempt;
+authentication traffic uses the base transport.
+
+ChatGPT subscription authentication uses upstream `FileTokenStore` in a separate
+absolute directory, for example:
+
+```toml
+[[providers]]
+id = "chatgpt"
+display_name = "ChatGPT"
+provider_type = "responses"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth = { type = "chatgpt", token_store_dir = "/absolute/path/to/clawcode-chatgpt" }
+
+[[providers.models]]
+id = "your-model-id"
+context_tokens = 128000
+max_output_tokens = 16384
+```
+
+Do not combine this auth configuration with `api_key`. The old `codex`/`auth_file`
+configuration is rejected; existing Codex credentials are neither read nor moved.
+The first request requires a fresh device sign-in. Its prompt goes to stderr to
+preserve ACP stdio, and refresh/persistence are managed by upstream.
 
 ## ACP extensions
 

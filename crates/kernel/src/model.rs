@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
-use protocol::{
-    ModelFailure, ModelProfile, ModelRequest, ModelRequestHooks,
-    ModelStreamEvent,
-};
+use protocol::{ModelFailure, ModelProfile, ModelRequest, ModelStreamEvent};
 use tokio_util::sync::CancellationToken;
 
 /// Boxed model stream shared by production adapters and deterministic tests.
@@ -15,7 +12,7 @@ pub type ModelStream =
     Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ModelError>> + Send>>;
 
 /// Typed model construction and streaming failures.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ModelError {
     /// The selected model was not configured or could not be constructed.
     #[error("model unavailable: {0}")]
@@ -37,6 +34,13 @@ pub enum ModelError {
     Cancelled,
 }
 
+impl From<protocol::ScalarError> for ModelError {
+    /// Keeps invalid provider identities at the existing protocol-error boundary.
+    fn from(error: protocol::ScalarError) -> Self {
+        Self::Protocol(error.to_string())
+    }
+}
+
 /// Provider-neutral streaming model used by the kernel.
 #[async_trait]
 pub trait Model: Send + Sync {
@@ -53,12 +57,12 @@ pub trait Model: Send + Sync {
         cancellation: CancellationToken,
     ) -> Result<ModelStream, ModelError>;
 
-    /// Starts one response with optional provider-boundary request hooks.
-    async fn stream_with_hooks(
+    /// Starts one response with request-scoped native HTTP middleware.
+    async fn stream_with_middleware(
         &self,
         request: ModelRequest,
         cancellation: CancellationToken,
-        _hooks: Option<Arc<dyn ModelRequestHooks>>,
+        _middleware: Option<extension::ProviderMiddleware>,
     ) -> Result<ModelStream, ModelError> {
         self.stream(request, cancellation).await
     }

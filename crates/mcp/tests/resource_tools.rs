@@ -158,11 +158,11 @@ async fn page(
         .tool_registry()
         .expect("registry")
         .execute(
-            ToolCall {
-                tool_call_id: ToolCallId::try_from("list").expect("id"),
-                name: "list_mcp_resources".into(),
-                arguments,
-            },
+            ToolCall::builder()
+                .tool_call_id(ToolCallId::try_from("list").expect("id"))
+                .name("list_mcp_resources".into())
+                .arguments(arguments)
+                .build(),
             &context(session),
         )
         .await?;
@@ -214,11 +214,11 @@ async fn resource_pages_and_unlisted_reads() {
     let registry = session.tool_registry().expect("registry");
     registry
         .execute(
-            ToolCall {
-                tool_call_id: ToolCallId::try_from("templates").expect("id"),
-                name: "list_mcp_resource_templates".into(),
-                arguments: serde_json::json!({"cursor":cursor}),
-            },
+            ToolCall::builder()
+                .tool_call_id(ToolCallId::try_from("templates").expect("id"))
+                .name("list_mcp_resource_templates".into())
+                .arguments(serde_json::json!({"cursor":cursor}))
+                .build(),
             &context(&session),
         )
         .await
@@ -227,7 +227,7 @@ async fn resource_pages_and_unlisted_reads() {
         .await
         .expect("large page");
     assert_eq!(large["resources"].as_array().expect("array").len(), 200);
-    let result = registry.execute(ToolCall { tool_call_id: ToolCallId::try_from("read").expect("id"), name: "read_mcp_resource".into(), arguments: serde_json::json!({"server":"books","uri":"file:///opaque/template/未列出"}) }, &context(&session)).await.expect("read");
+    let result = registry.execute(ToolCall::builder().tool_call_id(ToolCallId::try_from("read").expect("id")).name("read_mcp_resource".into()).arguments(serde_json::json!({"server":"books","uri":"file:///opaque/template/未列出"})).build(), &context(&session)).await.expect("read");
     assert_eq!(
         result.blocks.first().and_then(ContentBlock::text),
         Some("file:///opaque/template/未列出")

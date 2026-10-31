@@ -12,6 +12,12 @@ workspace = true
 extension = { workspace = true }
 protocol = { workspace = true }
 
+# model providers
+rig-core = { workspace = true }
+
+# http
+http = { workspace = true }
+
 # async
 async-trait = { workspace = true }
 

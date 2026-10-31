@@ -142,14 +142,12 @@ impl ApiKeyConfig {
 
 /// Provider auth configuration for specialized auth workflows.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ProviderAuthConfig {
-    /// Use Codex auth.json (tokens field) for subscription authentication.
-    Codex {
-        /// Optional explicit auth file path, defaults to CODEX_HOME/auth.json
-        /// or ~/.codex/auth.json.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth_file: Option<String>,
+    /// Use the upstream ChatGPT authenticator and its independent token store.
+    Chatgpt {
+        /// Explicit absolute directory for upstream chatgpt.json credentials.
+        token_store_dir: std::path::PathBuf,
     },
 }
 
@@ -269,6 +267,12 @@ impl LlmModel {
                 model_id: self.id.clone(),
                 reason,
             })?;
+        // The upstream DeepSeek wire is text-only even when old configuration advertised images.
+        let input = if provider.id == ProviderId::Deepseek {
+            ModelInputModalities::default()
+        } else {
+            input
+        };
 
         Ok(ModelProfile::builder()
             .provider_id(provider_id.to_string())
@@ -309,11 +313,37 @@ impl LlmProvider {
 
     /// Validates that the provider has a resolvable authentication source.
     pub fn validate_auth_source(&self) -> Result<(), ConfigValidationError> {
+        if let Some(ProviderAuthConfig::Chatgpt { token_store_dir }) =
+            &self.auth
+        {
+            let reason = if self.id != ProviderId::Chatgpt
+                || self.provider_type != ProviderType::Responses
+            {
+                Some(
+                    "chatgpt authentication requires the ChatGPT Responses provider",
+                )
+            } else if self.api_key.is_some() {
+                Some(
+                    "choose an explicit access token or ChatGPT authentication, not both",
+                )
+            } else if !token_store_dir.is_absolute()
+                || token_store_dir.is_file()
+            {
+                Some(
+                    "token_store_dir must be an absolute directory; Codex auth.json is not imported",
+                )
+            } else {
+                None
+            };
+            return reason.map_or(Ok(()), |reason| {
+                Err(ConfigValidationError::InvalidAuthentication {
+                    provider_id: self.id.as_str().to_owned(),
+                    reason: reason.to_owned(),
+                })
+            });
+        }
         if let Some(api_key) = &self.api_key {
             return api_key.validate_source(self.id.as_str());
-        }
-        if self.auth.is_some() {
-            return Ok(());
         }
 
         Err(ConfigValidationError::MissingAuthentication {
@@ -419,7 +449,7 @@ env = "OPENAI_API_KEY"
         );
     }
 
-    /// auth = { type = "codex" } parses without an api_key.
+    /// auth = { type = "chatgpt", token_store_dir = "/tmp/clawcode-auth" } parses without an api_key.
     #[test]
     fn provider_supports_codex_auth_without_api_key() {
         let provider: LlmProvider = toml::from_str(
@@ -428,7 +458,7 @@ id = "chatgpt"
 display_name = "ChatGPT"
 provider_type = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "codex" }
+auth = { type = "chatgpt", token_store_dir = "/tmp/clawcode-auth" }
 
 [[models]]
 id = "gpt-5.4"
@@ -440,20 +470,22 @@ id = "gpt-5.4"
         assert!(provider.api_key.is_none());
         assert_eq!(
             provider.auth,
-            Some(ProviderAuthConfig::Codex { auth_file: None })
+            Some(ProviderAuthConfig::Chatgpt {
+                token_store_dir: "/tmp/clawcode-auth".into()
+            })
         );
     }
 
-    /// auth = { type = "codex", auth_file = "/tmp/custom.json" } is parsed.
+    /// An explicit upstream token-store directory is retained without Codex compatibility.
     #[test]
-    fn provider_parses_codex_auth_file_override() {
+    fn provider_parses_chatgpt_token_store_override() {
         let provider: LlmProvider = toml::from_str(
             r#"
 id = "chatgpt"
 display_name = "ChatGPT"
 provider_type = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "codex", auth_file = "/tmp/custom-auth.json" }
+auth = { type = "chatgpt", token_store_dir = "/tmp/custom-auth" }
 
 [[models]]
 id = "gpt-5.4"
@@ -463,8 +495,8 @@ id = "gpt-5.4"
 
         assert_eq!(
             provider.auth,
-            Some(ProviderAuthConfig::Codex {
-                auth_file: Some("/tmp/custom-auth.json".to_string()),
+            Some(ProviderAuthConfig::Chatgpt {
+                token_store_dir: "/tmp/custom-auth".into(),
             })
         );
     }

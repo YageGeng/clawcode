@@ -14,12 +14,13 @@ use tools::{
 
 /// Creates one correlated tool call with explicit JSON arguments.
 fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
-    ToolCall {
-        tool_call_id: ToolCallId::try_from("tool-call-1")
-            .expect("tool call id"),
-        name: name.to_string(),
-        arguments,
-    }
+    ToolCall::builder()
+        .tool_call_id(
+            ToolCallId::try_from("tool-call-1").expect("tool call id"),
+        )
+        .name(name.to_string())
+        .arguments(arguments)
+        .build()
 }
 
 /// Returns a direct execution context rooted at the process directory.

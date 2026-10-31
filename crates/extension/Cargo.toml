@@ -12,6 +12,9 @@ workspace = true
 protocol = { workspace = true }
 tools = { workspace = true }
 
+# model providers
+rig-core = { workspace = true }
+
 # error
 thiserror = { workspace = true }
 
@@ -26,5 +29,12 @@ serde_json = { workspace = true }
 typed-builder = { workspace = true }
 
 [dev-dependencies]
+# model providers
+rig-core = { workspace = true, features = ["test-utils"] }
+
+# http
+bytes = { workspace = true }
+http = { workspace = true }
+
 # async
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

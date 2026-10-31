@@ -9,14 +9,13 @@ use extension::StaticExtensionFactory;
 use futures::{Stream, stream};
 use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
-    RetryClassifier,
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, IdGenerator, IdKind, MessageContent,
     ModelFailure, ModelFinal, ModelProfile, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, QueueKind,
-    RetryPolicy, RunRequest, RunResult, SessionId, StopReason, TimestampMs,
+    ModelRetryDisposition, ModelStreamEvent, QueueKind, RetryPolicy,
+    RunRequest, RunResult, SessionId, StopReason, TimestampMs,
 };
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
 use tokio::sync::Notify;
@@ -78,17 +77,20 @@ impl ScriptedModel {
     fn text(text: &str) -> ScriptedResponse {
         ScriptedResponse::Events(vec![
             ModelStreamEvent::TextDelta(text.to_string()),
-            ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: Some("stop".to_string()),
-                usage: ModelUsage::builder()
-                    .input_tokens(20)
-                    .output_tokens(2)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(22)
+            ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(Some("stop".to_string()))
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(20)
+                            .output_tokens(2)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(22),
+                    ))
                     .build(),
-            }),
+            ),
         ])
     }
 }
@@ -271,25 +273,21 @@ impl RetryFixture {
     }
 }
 
-/// Pi's non-retryable error classes override a provider's transient hint.
+/// Explicit provider classification is authoritative even when diagnostics contain misleading words.
 #[test]
-fn classifier_rejects_auth_quota_billing_and_context_failures() {
-    for summary in [
-        "authentication failed",
-        "quota exceeded",
-        "billing is not active",
-        "context window exceeded",
-    ] {
-        let failure = ModelFailure {
-            summary: summary.to_string(),
-            status: Some(429),
-            retry_disposition: ModelRetryDisposition::Retryable,
-        };
-        assert_eq!(
-            RetryClassifier::classify(&failure),
-            ModelRetryDisposition::NonRetryable
-        );
-    }
+fn structured_failure_flags_control_retry() {
+    let failure = ModelFailure::builder()
+        .summary("arbitrary diagnostic".into())
+        .status(Some(429))
+        .retry_disposition(ModelRetryDisposition::NonRetryable)
+        .build();
+    assert!(!failure.is_retryable());
+    let failure = ModelFailure::builder()
+        .summary("arbitrary diagnostic".into())
+        .retry_disposition(ModelRetryDisposition::Retryable)
+        .context_overflow(true)
+        .build();
+    assert!(!failure.is_retryable());
 }
 
 /// Three transient failures retry after 2/4/8 seconds in distinct Turns of one run.
@@ -298,11 +296,13 @@ async fn transient_errors_retry_three_times_with_pi_backoff() {
     let failures = ["rate limited", "service unavailable", "terminated"]
         .into_iter()
         .map(|summary| {
-            ScriptedResponse::Failure(ModelFailure {
-                summary: summary.to_string(),
-                status: Some(503),
-                retry_disposition: ModelRetryDisposition::Retryable,
-            })
+            ScriptedResponse::Failure(
+                ModelFailure::builder()
+                    .summary(summary.to_string())
+                    .status(Some(503))
+                    .retry_disposition(ModelRetryDisposition::Retryable)
+                    .build(),
+            )
         });
     let fixture = RetryFixture::new(
         failures
@@ -385,11 +385,13 @@ async fn transient_errors_retry_three_times_with_pi_backoff() {
 #[tokio::test(start_paused = true)]
 async fn retry_backoff_respects_max_delay_cap() {
     let failures = (0..6).map(|_| {
-        ScriptedResponse::Failure(ModelFailure {
-            summary: "rate limited".to_string(),
-            status: Some(503),
-            retry_disposition: ModelRetryDisposition::Retryable,
-        })
+        ScriptedResponse::Failure(
+            ModelFailure::builder()
+                .summary("rate limited".to_string())
+                .status(Some(503))
+                .retry_disposition(ModelRetryDisposition::Retryable)
+                .build(),
+        )
     });
     let fixture = RetryFixture::new(
         failures
@@ -423,15 +425,17 @@ async fn retry_backoff_respects_max_delay_cap() {
     assert_eq!(fixture.model.calls.load(Ordering::Relaxed), 7);
 }
 
-/// Authentication failures settle immediately even when the provider marks them transient.
+/// A non-retryable provider classification settles without consuming another attempt.
 #[tokio::test(start_paused = true)]
 async fn non_retryable_failure_does_not_consume_retry_budget() {
     let fixture = RetryFixture::new(
-        vec![ScriptedResponse::Failure(ModelFailure {
-            summary: "authentication failed".to_string(),
-            status: Some(429),
-            retry_disposition: ModelRetryDisposition::Retryable,
-        })],
+        vec![ScriptedResponse::Failure(
+            ModelFailure::builder()
+                .summary("authentication failed".to_string())
+                .status(Some(429))
+                .retry_disposition(ModelRetryDisposition::NonRetryable)
+                .build(),
+        )],
         RetryPolicy::builder()
             .enabled(true)
             .max_retries(3)
@@ -463,11 +467,13 @@ async fn non_retryable_failure_does_not_consume_retry_budget() {
 async fn cancellation_during_backoff_settles_and_preserves_follow_up() {
     let fixture = RetryFixture::new(
         vec![
-            ScriptedResponse::Failure(ModelFailure {
-                summary: "service unavailable".to_string(),
-                status: Some(503),
-                retry_disposition: ModelRetryDisposition::Retryable,
-            }),
+            ScriptedResponse::Failure(
+                ModelFailure::builder()
+                    .summary("service unavailable".to_string())
+                    .status(Some(503))
+                    .retry_disposition(ModelRetryDisposition::Retryable)
+                    .build(),
+            ),
             ScriptedModel::text("must not run"),
         ],
         RetryPolicy::builder()
@@ -531,11 +537,13 @@ impl kernel::SessionEventSinks for SubmissionSinks {
 #[tokio::test(start_paused = true)]
 async fn submit_cancellation_during_backoff() {
     let fixture = RetryFixture::new(
-        vec![ScriptedResponse::Failure(ModelFailure {
-            summary: "service unavailable".into(),
-            status: Some(503),
-            retry_disposition: ModelRetryDisposition::Retryable,
-        })],
+        vec![ScriptedResponse::Failure(
+            ModelFailure::builder()
+                .summary("service unavailable".into())
+                .status(Some(503))
+                .retry_disposition(ModelRetryDisposition::Retryable)
+                .build(),
+        )],
         RetryPolicy::builder()
             .enabled(true)
             .max_retries(3)
@@ -586,11 +594,13 @@ async fn submit_cancellation_during_backoff() {
 async fn retry_usage_counts_each_attempt_once() {
     let fixture = RetryFixture::new(
         vec![
-            ScriptedResponse::Failure(ModelFailure {
-                summary: "service unavailable".to_string(),
-                status: Some(503),
-                retry_disposition: ModelRetryDisposition::Retryable,
-            }),
+            ScriptedResponse::Failure(
+                ModelFailure::builder()
+                    .summary("service unavailable".to_string())
+                    .status(Some(503))
+                    .retry_disposition(ModelRetryDisposition::Retryable)
+                    .build(),
+            ),
             ScriptedModel::text("ok"),
         ],
         RetryPolicy::builder()
@@ -614,5 +624,5 @@ async fn retry_usage_counts_each_attempt_once() {
             _ => None,
         })
         .expect("settled usage");
-    assert_eq!(usage.total_tokens, 22);
+    assert_eq!(usage.as_ref().total_tokens, Some(22));
 }

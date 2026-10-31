@@ -17,9 +17,8 @@ use protocol::{
     AcpExtensionMethod, AgentMessage, AssistantMetadata, CompactionData,
     CompactionDetails, CompactionReason, ContentBlock, EntryId, MessageContent,
     MessageId, MessageIdentity, MessageTiming, ModelProfile, ModelRequest,
-    ModelUsage, ProductIdentity, RecordId, RunId, SessionId, StopReason,
-    TimestampMs, ToolCallId, TurnId, TurnIdentity, TurnOutcome, TurnRecord,
-    TurnTiming,
+    ProductIdentity, RecordId, RunId, SessionId, StopReason, TimestampMs,
+    ToolCallId, TurnId, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
 };
 use skill::FilesystemSkillFactory;
 use store::{
@@ -1032,6 +1031,7 @@ async fn assistant_usage_replays_at_run_end() {
         timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
             .expect("message timing"),
         content: MessageContent::Assistant {
+            model_message: None,
             blocks: vec![ContentBlock::Text {
                 text: "persisted answer".to_string(),
             }],
@@ -1039,15 +1039,14 @@ async fn assistant_usage_replays_at_run_end() {
                 .provider_id("integration".to_string())
                 .model_id("unused".to_string())
                 .stop_reason(StopReason::EndTurn)
-                .usage(
-                    ModelUsage::builder()
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
                         .input_tokens(120)
                         .output_tokens(30)
-                        .cache_read_tokens(50)
-                        .cache_write_tokens(0)
-                        .total_tokens(200)
-                        .build(),
-                )
+                        .cached_input_tokens(50)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(200),
+                ))
                 .build(),
         },
     };
@@ -1204,7 +1203,11 @@ async fn assistant_usage_replays_at_run_end() {
                 );
             }
 
-            assert_eq!(replay.len(), 5);
+            assert_eq!(replay.len(), 6);
+            // An empty final thought explicitly clears live reasoning during replay.
+            let thought = replay.remove(1);
+            assert_eq!(thought["sessionUpdate"], "agent_thought");
+            assert_eq!(thought["content"], serde_json::json!([]));
             assert_eq!(replay[0]["sessionUpdate"], "agent_message");
             assert_eq!(replay[1]["sessionUpdate"], "usage_update");
             assert_eq!(replay[2]["sessionUpdate"], "tool_call_update");

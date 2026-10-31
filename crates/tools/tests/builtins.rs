@@ -108,12 +108,13 @@ async fn registry_rejects_unknown_tools() {
         .expect("built-ins should register");
     let error = registry
         .execute(
-            ToolCall {
-                tool_call_id: ToolCallId::try_from("call-1")
-                    .expect("valid tool call id"),
-                name: "missing".to_string(),
-                arguments: serde_json::json!({}),
-            },
+            ToolCall::builder()
+                .tool_call_id(
+                    ToolCallId::try_from("call-1").expect("valid tool call id"),
+                )
+                .name("missing".to_string())
+                .arguments(serde_json::json!({}))
+                .build(),
             &execution_context(),
         )
         .await

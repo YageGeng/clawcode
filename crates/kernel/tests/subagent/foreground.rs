@@ -96,11 +96,13 @@ async fn extension_subagent_tool_wins() {
 
 /// Emits a tool call using the actual production registry and execution pipeline.
 pub fn delegate(task: &str, call: &str) -> ModelStreamEvent {
-    ModelStreamEvent::ToolCall(ToolCall {
-        tool_call_id: ToolCallId::try_from(call).expect("call"),
-        name: "subagent".into(),
-        arguments: serde_json::json!({"task":task}),
-    })
+    ModelStreamEvent::ToolCall(
+        ToolCall::builder()
+            .tool_call_id(ToolCallId::try_from(call).expect("call"))
+            .name("subagent".into())
+            .arguments(serde_json::json!({"task":task}))
+            .build(),
+    )
 }
 
 /// Foreground delegation persists independent history, answers, ownership, and tool exclusions.

@@ -19,8 +19,8 @@ use protocol::{
     AgentEvent, ContentBlock, ExtensionCommandDefinition, ExtensionDescriptor,
     ExtensionEntryData, ExtensionEventData, ExtensionFlagDefinition,
     ExtensionFlagKind, ExtensionId, InputEvent, InputResult, MessageContent,
-    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage,
-    RunRequest, SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionId,
+    ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, RunRequest,
+    SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionId,
     SessionShutdownEvent, SessionStartEvent, StaticExtensionRegistration,
     StopReason, ToolCall, ToolDefinition, ToolResult, TreeSummary,
     UserBashDisposition, UserBashEvent, UserBashResult,
@@ -57,17 +57,18 @@ impl Model for HostModel {
         ModelError,
     > {
         Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-            ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(0)
-                    .output_tokens(0)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(0)
-                    .build(),
-            },
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(0)
+                        .output_tokens(0)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(0),
+                ))
+                .build(),
         ))])))
     }
 }
@@ -452,17 +453,18 @@ impl Model for ToolCaptureModel {
             .expect("tool request lock")
             .push(request.tools.into_iter().map(|tool| tool.name).collect());
         Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-            ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(0)
-                    .output_tokens(0)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(0)
-                    .build(),
-            },
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(0)
+                        .output_tokens(0)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(0),
+                ))
+                .build(),
         ))])))
     }
 }

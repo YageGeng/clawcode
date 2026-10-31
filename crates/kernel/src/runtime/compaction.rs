@@ -1,6 +1,6 @@
 use protocol::{
     AgentMessage, ContentBlock, MessageContent, ModelProfile,
-    ModelRequestOptions, ModelUsage, StopReason,
+    ModelRequestOptions, StopReason,
 };
 
 use super::*;
@@ -398,64 +398,14 @@ impl Kernel {
                                 summary.text.as_str()
                             });
                         let usage = history_summary.as_ref().map_or_else(
-                            || prefix_summary.usage.clone(),
+                            || prefix_summary.usage,
                             |history| {
-                                ModelUsage::builder()
-                                    .input_tokens(
-                                        history
-                                            .usage
-                                            .input_tokens
-                                            .saturating_add(
-                                                prefix_summary.usage.input_tokens,
-                                            ),
-                                    )
-                                    .output_tokens(
-                                        history
-                                            .usage
-                                            .output_tokens
-                                            .saturating_add(
-                                                prefix_summary.usage.output_tokens,
-                                            ),
-                                    )
-                                    .cache_read_tokens(
-                                        history
-                                            .usage
-                                            .cache_read_tokens
-                                            .saturating_add(
-                                                prefix_summary
-                                                    .usage
-                                                    .cache_read_tokens,
-                                            ),
-                                    )
-                                    .cache_write_tokens(
-                                        history
-                                            .usage
-                                            .cache_write_tokens
-                                            .saturating_add(
-                                                prefix_summary
-                                                    .usage
-                                                    .cache_write_tokens,
-                                            ),
-                                    )
-                                    .reasoning_tokens(match (
-                                        history.usage.reasoning_tokens,
-                                        prefix_summary.usage.reasoning_tokens,
-                                    ) {
-                                        (None, None) => None,
-                                        (left, right) => Some(
-                                            left.unwrap_or(0)
-                                                .saturating_add(right.unwrap_or(0)),
-                                        ),
-                                    })
-                                    .total_tokens(
-                                        history
-                                            .usage
-                                            .total_tokens
-                                            .saturating_add(
-                                                prefix_summary.usage.total_tokens,
-                                            ),
-                                    )
-                                    .build()
+                                {
+                                    // Upstream owns partial-counter and cost accumulation.
+                                    let mut usage = history.usage;
+                                    usage += &prefix_summary.usage;
+                                    usage
+                                }
                             },
                         );
                         Ok(GeneratedSummary {
@@ -479,7 +429,7 @@ impl Kernel {
                                 .entry_id(entry_id.clone())
                                 .attempt(1)
                                 .stop_reason(generated.stop_reason)
-                                .usage(generated.usage.clone())
+                                .usage(generated.usage)
                                 .build(),
                         )?,
                     )?;
@@ -519,7 +469,7 @@ impl Kernel {
                 .summary(summary.clone())
                 .retained_tail(retained_tail.clone())
                 .tokens_before(tokens_before)
-                .usage(summary_usage.clone())
+                .usage(summary_usage)
                 .details(Some(details.clone()))
                 .build();
             let summary_message = AgentMessage {
@@ -724,8 +674,8 @@ impl Kernel {
         } else {
             request_messages.extend(messages);
         }
-        let completion_hooks =
-            self.completion_hooks(session, run_id, turn_id)?;
+        let completion_middleware =
+            self.completion_middleware(session, run_id, turn_id)?;
         // Compaction uses one immutable model snapshot just like a normal Turn.
         let model = session.model.active()?;
         model.preflight().await?;
@@ -746,14 +696,17 @@ impl Kernel {
                 model.profile().model_id
             );
         }
-        let mut retry_state = RetryState::default();
+        let mut retry_state = RetryState::new(
+            &self.retry_policy,
+            self.provider_retry_delay_limit_ms,
+        );
         loop {
             let result: Result<GeneratedSummary, ModelError> = async {
                 let mut stream = model
-                    .stream_with_hooks(
+                    .stream_with_middleware(
                         request.clone(),
                         cancellation.clone(),
-                        Some(Arc::clone(&completion_hooks)),
+                        Some(completion_middleware.clone()),
                     )
                     .await?;
                 let mut summary = String::new();
@@ -784,18 +737,23 @@ impl Kernel {
                         }
                     }
                 }
-                let summary = summary.trim().to_string();
-                if summary.is_empty() {
-                    return Err(ModelError::Protocol(
-                        "compaction summary was empty".to_string(),
-                    ));
-                }
                 let final_result = final_result.ok_or_else(|| {
                     ModelError::Protocol(
                         "compaction model returned no terminal usage"
                             .to_string(),
                     )
                 })?;
+                // Summary calls use the same authoritative final text as ordinary turns.
+                let summary = final_result
+                    .model_message
+                    .as_ref()
+                    .map_or(summary, |message| message.text());
+                let summary = summary.trim().to_string();
+                if summary.is_empty() {
+                    return Err(ModelError::Protocol(
+                        "compaction summary was empty".to_string(),
+                    ));
+                }
                 match final_result.stop_reason {
                     StopReason::Cancelled => return Err(ModelError::Cancelled),
                     StopReason::Error | StopReason::Refusal => {
@@ -824,21 +782,13 @@ impl Kernel {
                 Ok(summary) => return Ok(summary),
                 Err(error) => error,
             };
-            let retryable = match &error {
+            let schedule = match &error {
                 ModelError::Preflight(failure)
                 | ModelError::Request(failure)
-                | ModelError::Stream(failure) => {
-                    RetryClassifier::classify(failure)
-                        == protocol::ModelRetryDisposition::Retryable
-                }
-                ModelError::Unavailable(_)
-                | ModelError::Protocol(_)
-                | ModelError::Cancelled => false,
+                | ModelError::Stream(failure) => retry_state.schedule(failure),
+                _ => None,
             };
-            let Some(schedule) = retryable
-                .then(|| retry_state.schedule(&self.retry_policy))
-                .flatten()
-            else {
+            let Some(schedule) = schedule else {
                 return Err(error.into());
             };
             let delay =

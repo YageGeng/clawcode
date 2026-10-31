@@ -54,12 +54,11 @@ use protocol::{
     CompactionReason, CompactionResult, ContentBlock, EntryId, EventMetadata,
     ExtensionFlagDefinition, IdGenerator, IdKind, LaneId, McpSessionSnapshot,
     MessageContent, MessageId, MessageIdentity, MessageTiming, ModelRequest,
-    ModelRetryDisposition, ModelStreamEvent, QueueId, RecordId, RetryPolicy,
-    RunId, RunRequest, RunResult, SessionId, SessionSummary, SessionTitle,
-    SessionTreeEntry, SessionTreeSnapshot, StopReason, ThinkingLevel,
-    TimestampMs, ToolCall, ToolResult, TraceId, TurnId, TurnIdentity,
-    TurnOutcome, TurnRecord, TurnTiming, UserBashInput, UserBashRequest,
-    UserBashResult,
+    ModelStreamEvent, QueueId, RecordId, RetryPolicy, RunId, RunRequest,
+    RunResult, SessionId, SessionSummary, SessionTitle, SessionTreeEntry,
+    SessionTreeSnapshot, StopReason, ThinkingLevel, TimestampMs, ToolCall,
+    ToolResult, TraceId, TurnId, TurnIdentity, TurnOutcome, TurnRecord,
+    TurnTiming, UserBashInput, UserBashRequest, UserBashResult,
 };
 use store::{
     Clock, EntryKind, NewEntry, NewRecord, RecordKind, SessionCreateOptions,
@@ -82,7 +81,6 @@ use compaction::{
 };
 pub use insertion::{InsertionNotice, InsertionReceiver};
 use queue::{PendingQueue, QueueCancellationReason};
-pub use retry::RetryClassifier;
 use retry::RetryState;
 use settlement::{RunCompletion, RunSettlement};
 pub use submit::{AnswerOutcome, SubmissionAnswer, SubmitRequest, WhenBusy};
@@ -255,6 +253,9 @@ pub struct KernelFactory {
     /// Controls transient Assistant retries across distinct Turns.
     #[builder(default)]
     retry_policy: RetryPolicy,
+    /// A provider cannot force an unbounded server-requested retry wait.
+    #[builder(default = config::ProviderRetryConfig::default().max_retry_delay_ms)]
+    provider_retry_delay_limit_ms: u64,
 }
 
 impl KernelFactory {
@@ -264,11 +265,11 @@ impl KernelFactory {
         // because provider contributions participate in the immutable catalog.
         let static_extensions =
             Arc::new(self.extension_factory.static_registration()?);
-        let models =
-            Arc::new(self.model_factory.create_catalog(&static_extensions)?);
+        // Validate definitions once, but runtime model bindings are owned by individual Sessions.
+        self.model_factory.create_catalog(&static_extensions)?;
         let tools = Arc::new(self.tool_factory.create()?);
         Ok(Kernel::builder()
-            .models(models)
+            .model_factory(self.model_factory)
             .static_extensions(static_extensions)
             .tools(tools)
             .store_factory(self.store_factory)
@@ -283,6 +284,7 @@ impl KernelFactory {
             .when_busy(self.when_busy)
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
+            .provider_retry_delay_limit_ms(self.provider_retry_delay_limit_ms)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
             .pending_sessions(Arc::new(Mutex::new(HashMap::new())))
             .shutdown(CancellationToken::new())
@@ -295,7 +297,8 @@ impl KernelFactory {
 pub struct Kernel {
     #[builder(default)]
     event_sinks: Arc<OnceLock<Arc<dyn crate::SessionEventSinks>>>,
-    models: Arc<ModelCatalog>,
+    /// Each Session builds independent runtime bindings over shared provider definitions.
+    model_factory: Arc<dyn ModelFactory>,
     static_extensions: Arc<protocol::StaticExtensionRegistration>,
     tools: Arc<ToolRegistry>,
     store_factory: Arc<dyn StoreFactory>,
@@ -313,6 +316,7 @@ pub struct Kernel {
     when_busy: WhenBusy,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
+    provider_retry_delay_limit_ms: u64,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
     pending_sessions:
         Arc<Mutex<HashMap<SessionId, tokio::sync::watch::Sender<()>>>>,

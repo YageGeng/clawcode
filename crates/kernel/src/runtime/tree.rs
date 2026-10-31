@@ -248,7 +248,7 @@ impl Kernel {
                         "fromId": plan.new_leaf_id.as_ref().map(EntryId::as_str).unwrap_or("root"),
                         "summary": summary,
                         "details": extension_summary.as_ref().and_then(|summary| summary.details.clone()),
-                        "usage": extension_summary.as_ref().and_then(|summary| summary.usage.clone()),
+                        "usage": extension_summary.as_ref().and_then(|summary| summary.usage),
                         "fromHook": from_extension,
                     }),
                 })

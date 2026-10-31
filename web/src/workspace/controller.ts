@@ -45,6 +45,8 @@ export class WorkspaceController {
   private reconnectAttempt = 0;
   private sessionDeleteSupported = false;
   private readonly deletingSessionIds = new Set<SessionId>();
+  // Definitive absence suppresses old snapshots until a new connection lists Sessions again.
+  private readonly missingSessionIds = new Set<SessionId>();
   private readonly attachedSessionIds = new Set<SessionId>();
   private readonly attachingSessions = new Map<SessionId, Promise<void>>();
   // Resolvers for queued elicitation dialogs, keyed like their store prompts.
@@ -86,6 +88,7 @@ export class WorkspaceController {
   /** Opens one listed Session and optionally records the selection in browser history. */
   async openSession(sessionId: SessionId, updateUrl = true): Promise<void> {
     await this.attachSession(sessionId);
+    if (!this.canRefreshSession(sessionId)) return;
     this.dispatch({ type: "session/activated", sessionId });
     if (updateUrl) this.pushSessionUrl(sessionId);
   }
@@ -108,10 +111,9 @@ export class WorkspaceController {
     if (session === undefined) throw new Error("Session is not in the current list");
     const wasLoaded = this.attachedSessionIds.has(sessionId);
     const connection = this.requireConnection();
-    const runtime = await connection.request<SessionRuntimeSnapshot>(
-      this.methods.sessionRuntime,
-      { sessionId }
-    );
+    const generation = this.connectionGeneration;
+    const runtime = await this.querySessionSnapshot<SessionRuntimeSnapshot>(this.methods.sessionRuntime, sessionId);
+    if (runtime === undefined) return;
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
 
     if (!wasLoaded || !runtime.running) {
@@ -120,16 +122,19 @@ export class WorkspaceController {
       this.updateRouter.requireFullReplay(sessionId);
       this.dispatchSession(sessionId, { type: "transcript/cleared" });
       await this.resume(connection, sessionId, { sessionId, cwd: session.cwd, replayFrom: { type: "start" } });
+      if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)) return;
       this.dispatchSession(sessionId, { type: "outcome/unknown", value: [...(this.submissions.get(sessionId)?.values() ?? [])].some((record) => record.state === "unknown") });
       this.attachedSessionIds.add(sessionId);
     }
 
     const [tree, pending, skills, mcpSnapshot] = await Promise.all([
-      connection.request<SessionTree>(this.methods.tree, { sessionId }),
-      connection.request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
-      connection.request<SkillListResult>(this.methods.skillList, { sessionId }),
-      connection.request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId })
+      this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId),
+      this.querySessionSnapshot<PendingMessages>(this.methods.pendingMessages, sessionId),
+      this.querySessionSnapshot<SkillListResult>(this.methods.skillList, sessionId),
+      this.querySessionSnapshot<McpSessionSnapshot>(this.methods.mcpStatus, sessionId)
     ]);
+    if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)
+      || tree === undefined || pending === undefined || skills === undefined || mcpSnapshot === undefined) return;
     this.dispatchSession(sessionId, { type: "tree/replaced", tree });
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
@@ -154,6 +159,8 @@ export class WorkspaceController {
   /** Permanently removes a session only after ACP v2 advertised native deletion support. */
   async deleteSession(sessionId: SessionId): Promise<void> {
     if (!this.sessionDeleteSupported) throw new Error("Agent does not support session deletion");
+    const connection = this.requireConnection();
+    const generation = this.connectionGeneration;
     // MCP shutdown publishes final revisions while deletion is in flight. Mark
     // the Session first so those notifications cannot query an already removed runtime.
     const deleting = new Set<SessionId>([sessionId]);
@@ -163,21 +170,24 @@ export class WorkspaceController {
     }
     for (const id of deleting) this.deletingSessionIds.add(id);
     try {
-      await this.requireConnection().request(AcpProtocol.methods.sessionDelete, { sessionId });
-      const active = useWorkspaceStore.getState().activeSessionId;
-      if (active !== undefined && deleting.has(active)) {
-        this.dispatch({ type: "session/deactivated" });
-        this.replaceRootUrl();
+      try {
+        await connection.request(AcpProtocol.methods.sessionDelete, { sessionId });
+      } catch (reason: unknown) {
+        if (this.isCurrentConnection(generation, connection) && reason instanceof AcpRequestError && reason.isSessionNotFound(sessionId)) {
+          this.forgetSessions(new Set([sessionId]));
+          return;
+        }
+        throw reason;
       }
-      for (const id of deleting) {
-        this.updateRouter.resetRecovery(id);
-        this.attachedSessionIds.delete(id);
-        this.submissions.delete(id);
-        const returned = this.returnedInputs.get(id);
-        if (returned !== undefined) window.clearTimeout(returned.timer);
-        this.returnedInputs.delete(id);
+      if (!this.isCurrentConnection(generation, connection)) return;
+      // A failed list refresh must not bring a successfully deleted Session back into polling.
+      this.forgetSessions(deleting);
+      try { await this.refreshSessions(true); }
+      catch (reason: unknown) {
+        if (this.isCurrentConnection(generation, connection)) {
+          this.dispatch({ type: "diagnostic/added", message: `会话已删除，但刷新列表失败：${reason instanceof Error ? reason.message : String(reason)}` });
+        }
       }
-      await this.refreshSessions(true);
     } finally {
       for (const id of deleting) this.deletingSessionIds.delete(id);
     }
@@ -585,6 +595,7 @@ export class WorkspaceController {
       const recovery = this.validateCapabilities(initialized);
       const listed = await connection.request<SessionListResult>(AcpProtocol.methods.sessionList, {});
       this.assertCurrentConnection(generation, connection);
+      this.missingSessionIds.clear();
       this.dispatch({ type: "session/listed", sessions: listed.sessions.map((session) => this.sessionSummary(session)) });
       await this.recoverSessions(connection, generation, recovery);
       this.assertCurrentConnection(generation, connection);
@@ -648,7 +659,7 @@ export class WorkspaceController {
     const promise: Promise<void> = connection.request<SessionListResult>(AcpProtocol.methods.sessionList, {}).then((result) => {
       this.assertCurrentConnection(generation, connection);
       if (this.sessionRefresh?.promise !== promise) return;
-      this.dispatch({ type: "session/listed", sessions: result.sessions.map((session) => this.sessionSummary(session)) });
+      this.dispatch({ type: "session/listed", sessions: result.sessions.map((session) => this.sessionSummary(session)).filter((session) => !this.missingSessionIds.has(session.sessionId)) });
     });
     const refresh = { connection, promise };
     this.sessionRefresh = refresh;
@@ -656,12 +667,64 @@ export class WorkspaceController {
     finally { if (this.sessionRefresh === refresh) this.sessionRefresh = undefined; }
   }
 
-  /** Polls persisted children's active-run flags without resuming idle Sessions. */
-  async refreshSessionActivity(sessionIds: readonly SessionId[]): Promise<void> {
-    await Promise.all(sessionIds.map(async (sessionId) => {
-      const runtime = await this.requireConnection().request<SessionRuntimeSnapshot>(this.methods.sessionRuntime, { sessionId });
-      this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
+  /** Polls live candidates without overlapping rounds; a false result ends an obsolete timer. */
+  async refreshSessionActivity(sessionIds: readonly SessionId[]): Promise<boolean> {
+    const results = await Promise.allSettled([...new Set(sessionIds)].map(async (sessionId) => {
+      const runtime = await this.querySessionSnapshot<SessionRuntimeSnapshot>(this.methods.sessionRuntime, sessionId);
+      if (runtime !== undefined) this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
     }));
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+    // Pending deletions remain eligible after a failure; confirmed absence does not.
+    return sessionIds.some((id) => !this.missingSessionIds.has(id) && useWorkspaceStore.getState().sessions.some((session) => session.sessionId === id));
+  }
+
+  /** Checks both request-time and reply-time eligibility using the current authoritative view. */
+  private canRefreshSession(sessionId: SessionId): boolean {
+    return !this.deletingSessionIds.has(sessionId) && !this.missingSessionIds.has(sessionId)
+      && useWorkspaceStore.getState().sessions.some((session) => session.sessionId === sessionId);
+  }
+
+  /** Reads automatic metadata without resurrecting deleted Sessions or accepting stale connections. */
+  private async querySessionSnapshot<T>(method: string, sessionId: SessionId): Promise<T | undefined> {
+    const connection = this.connection;
+    const generation = this.connectionGeneration;
+    if (connection === undefined || this.stopped || !this.canRefreshSession(sessionId)) return undefined;
+    // Tree/MCP snapshots require a live attachment; runtime queries also support persisted idle Sessions.
+    if (method !== this.methods.sessionRuntime && !this.attachedSessionIds.has(sessionId)) return undefined;
+    try {
+      const snapshot = await connection.request<T>(method, { sessionId });
+      return this.isCurrentConnection(generation, connection) && this.canRefreshSession(sessionId) ? snapshot : undefined;
+    } catch (reason: unknown) {
+      if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)) return undefined;
+      if (reason instanceof AcpRequestError && reason.isSessionNotFound(sessionId)) {
+        if (method === this.methods.sessionRuntime) {
+          this.forgetSessions(new Set([sessionId]));
+        } else {
+          // A closed runtime can still have a valid file; explicit reattachment will replay it.
+          this.attachedSessionIds.delete(sessionId);
+          this.updateRouter.requireFullReplay(sessionId);
+        }
+        return undefined;
+      }
+      throw reason;
+    }
+  }
+
+  /** Removes confirmed absent view state and recovery handles, without issuing any deletion request. */
+  private forgetSessions(sessionIds: ReadonlySet<SessionId>): void {
+    const state = useWorkspaceStore.getState();
+    for (const id of sessionIds) {
+      this.missingSessionIds.add(id);
+      this.updateRouter.resetRecovery(id);
+      this.attachedSessionIds.delete(id);
+      this.submissions.delete(id);
+      const returned = this.returnedInputs.get(id);
+      if (returned !== undefined) window.clearTimeout(returned.timer);
+      this.returnedInputs.delete(id);
+    }
+    this.dispatch({ type: "session/listed", sessions: state.sessions.filter((session) => !sessionIds.has(session.sessionId)) });
+    if (state.activeSessionId !== undefined && sessionIds.has(state.activeSessionId)) this.replaceRootUrl();
   }
 
   /** Validates optional product metadata at the ACP boundary. */
@@ -698,7 +761,7 @@ export class WorkspaceController {
     const sessions = new Map(state.sessions.map((session) => [session.sessionId, session]));
     await Promise.all([...state.sessionWorkspaces.keys()].map(async (sessionId) => {
       const session = sessions.get(sessionId);
-      if (session === undefined) {
+      if (session === undefined || !this.canRefreshSession(sessionId)) {
         this.updateRouter.resetRecovery(sessionId);
         return;
       }
@@ -764,14 +827,17 @@ export class WorkspaceController {
     generation: number,
     sessionId: SessionId
   ): Promise<void> {
+    if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)) return;
+    this.attachedSessionIds.add(sessionId);
     const [runtime, tree, pending, skills, mcpSnapshot] = await Promise.all([
-      connection.request<SessionRuntimeSnapshot>(this.methods.sessionRuntime, { sessionId }),
-      connection.request<SessionTree>(this.methods.tree, { sessionId }),
-      connection.request<PendingMessages>(this.methods.pendingMessages, { sessionId }),
-      connection.request<SkillListResult>(this.methods.skillList, { sessionId }),
-      connection.request<McpSessionSnapshot>(this.methods.mcpStatus, { sessionId })
+      this.querySessionSnapshot<SessionRuntimeSnapshot>(this.methods.sessionRuntime, sessionId),
+      this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId),
+      this.querySessionSnapshot<PendingMessages>(this.methods.pendingMessages, sessionId),
+      this.querySessionSnapshot<SkillListResult>(this.methods.skillList, sessionId),
+      this.querySessionSnapshot<McpSessionSnapshot>(this.methods.mcpStatus, sessionId)
     ]);
-    this.assertCurrentConnection(generation, connection);
+    if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)
+      || runtime === undefined || tree === undefined || pending === undefined || skills === undefined || mcpSnapshot === undefined) return;
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
     this.dispatchSession(sessionId, { type: "tree/replaced", tree });
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
@@ -801,7 +867,7 @@ export class WorkspaceController {
         );
         if (
           typeof update.sessionId === "string"
-          && !this.deletingSessionIds.has(update.sessionId as SessionId)
+          && this.canRefreshSession(update.sessionId as SessionId)
           && typeof update.revision === "number"
           && update.revision > sessionWorkspace(
             useWorkspaceStore.getState(),
@@ -819,12 +885,8 @@ export class WorkspaceController {
         });
         continue;
       }
-      sessionUpdates.push(
-        AcpProtocol.decodeRecord(
-          notification.params,
-          "session/update"
-        ) as SessionUpdateNotification
-      );
+      const update = AcpProtocol.decodeRecord(notification.params, "session/update") as SessionUpdateNotification;
+      if (!this.missingSessionIds.has(update.sessionId)) sessionUpdates.push(update);
     }
     if (sessionUpdates.length > 0) {
       const before = useWorkspaceStore.getState();
@@ -841,11 +903,8 @@ export class WorkspaceController {
   /** Reads and applies the latest atomic MCP snapshot to its owning Session. */
   private async refreshMcpSnapshot(sessionId: SessionId): Promise<void> {
     try {
-      const snapshot = await this.requireConnection().request<McpSessionSnapshot>(
-        this.methods.mcpStatus,
-        { sessionId }
-      );
-      this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
+      const snapshot = await this.querySessionSnapshot<McpSessionSnapshot>(this.methods.mcpStatus, sessionId);
+      if (snapshot !== undefined) this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
     } catch (reason: unknown) {
       this.dispatchSession(sessionId, {
         type: "diagnostic/added",
@@ -856,11 +915,20 @@ export class WorkspaceController {
 
   /** Refreshes terminal Run state plus mutable Session snapshots after settlement. */
   private async refreshSessionRuntime(sessionId: SessionId): Promise<void> {
-    await this.refreshSessions(true);
+    if (this.deletingSessionIds.has(sessionId) || this.missingSessionIds.has(sessionId)) return;
+    const generation = this.connectionGeneration;
+    // New child notifications can precede listing; deletion must also suppress late list failures.
+    try { await this.refreshSessions(true); }
+    catch (reason: unknown) {
+      if (generation !== this.connectionGeneration || !this.canRefreshSession(sessionId)) return;
+      throw reason;
+    }
+    if (generation !== this.connectionGeneration || !this.canRefreshSession(sessionId)) return;
     const [runtime, tree] = await Promise.all([
-      this.requireConnection().request<SessionRuntimeSnapshot>(this.methods.sessionRuntime, { sessionId }),
-      this.requireConnection().request<SessionTree>(this.methods.tree, { sessionId })
+      this.querySessionSnapshot<SessionRuntimeSnapshot>(this.methods.sessionRuntime, sessionId),
+      this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId)
     ]);
+    if (generation !== this.connectionGeneration || !this.canRefreshSession(sessionId) || runtime === undefined || tree === undefined) return;
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
     this.dispatchSession(sessionId, { type: "tree/replaced", tree });
   }
@@ -1043,6 +1111,8 @@ export class WorkspaceController {
 
   /** Dispatches one global workspace state transition. */
   private dispatch(action: WorkspaceAction): void {
+    // Router callbacks and old request failures must not recreate an already removed projection.
+    if (action.type === "session/updated" && this.missingSessionIds.has(action.sessionId)) return;
     useWorkspaceStore.getState().dispatch(action);
   }
 }

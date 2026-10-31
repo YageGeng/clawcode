@@ -55,18 +55,20 @@ fn sample_event_metadata(
 /// Assistant results preserve exact usage, provider identity, and output timing.
 #[test]
 fn assistant_metadata_keeps_exact_usage_and_timing() {
-    let usage = ModelUsage::builder()
-        .input_tokens(9_007_199_254_740_999)
-        .output_tokens(7)
-        .cache_read_tokens(3)
-        .cache_write_tokens(2)
-        .reasoning_tokens(Some(1))
-        .total_tokens(9_007_199_254_741_012)
-        .build();
+    let usage = protocol::ModelUsage::from(
+        protocol::Usage::new()
+            .input_tokens(9_007_199_254_740_999)
+            .output_tokens(7)
+            .cached_input_tokens(3)
+            .cache_creation_input_tokens(2)
+            .reasoning_tokens(Some(1))
+            .total_tokens(9_007_199_254_741_012),
+    );
     let message = AgentMessage {
         identity: sample_identity("assistant-1", "turn-1"),
         timing: sample_timing("100", "110", "140"),
         content: MessageContent::Assistant {
+            model_message: None,
             blocks: vec![ContentBlock::Text {
                 text: "ok".to_string(),
             }],
@@ -85,12 +87,12 @@ fn assistant_metadata_keeps_exact_usage_and_timing() {
     assert_eq!(value["content"]["type"], "assistant");
     assert_eq!(value["content"]["metadata"]["provider_id"], "deepseek");
     assert_eq!(
-        value["content"]["metadata"]["usage"]["input_tokens"],
-        "9007199254740999"
+        value["content"]["metadata"]["usage"]["usage"]["input_tokens"],
+        9_007_199_254_740_999_u64
     );
     assert_eq!(
-        value["content"]["metadata"]["usage"]["total_tokens"],
-        "9007199254741012"
+        value["content"]["metadata"]["usage"]["usage"]["total_tokens"],
+        9_007_199_254_741_012_u64
     );
 }
 
@@ -126,13 +128,14 @@ fn retry_and_usage_events_keep_turn_metadata() {
     let usage = AgentEvent {
         metadata: sample_event_metadata("turn-retry", "1700000000002", 9),
         payload: AgentEventPayload::UsageUpdated {
-            usage: ModelUsage::builder()
-                .input_tokens(10)
-                .output_tokens(2)
-                .cache_read_tokens(1)
-                .cache_write_tokens(0)
-                .total_tokens(13)
-                .build(),
+            usage: protocol::ModelUsage::from(
+                protocol::Usage::new()
+                    .input_tokens(10)
+                    .output_tokens(2)
+                    .cached_input_tokens(1)
+                    .cache_creation_input_tokens(0)
+                    .total_tokens(13),
+            ),
             context_window: 128_000,
         },
     };
@@ -145,7 +148,7 @@ fn retry_and_usage_events_keep_turn_metadata() {
 
     let usage_value = serde_json::to_value(usage).expect("usage event json");
     assert_eq!(usage_value["event"], "usage_updated");
-    assert_eq!(usage_value["usage"]["input_tokens"], "10");
+    assert_eq!(usage_value["usage"]["usage"]["input_tokens"], 10);
     assert_eq!(usage_value["context_window"], 128_000);
 }
 

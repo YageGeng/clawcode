@@ -25,11 +25,11 @@ fn execution_context(cwd: &Path) -> ToolExecutionContext {
 
 /// Builds one correlated call without hiding tool-specific argument JSON.
 fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
-    ToolCall {
-        tool_call_id: ToolCallId::try_from(id).expect("tool call id"),
-        name: name.to_string(),
-        arguments,
-    }
+    ToolCall::builder()
+        .tool_call_id(ToolCallId::try_from(id).expect("tool call id"))
+        .name(name.to_string())
+        .arguments(arguments)
+        .build()
 }
 
 /// Returns the default registry used by all filesystem behavior tests.

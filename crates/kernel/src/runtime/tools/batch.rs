@@ -145,6 +145,8 @@ impl Kernel {
                 protocol::ToolCallResult::Continue => {}
                 protocol::ToolCallResult::Replace { arguments } => {
                     call.arguments = arguments;
+                    // A trusted repair replaces the malformed wire arguments before validation.
+                    call.invalid_arguments = None;
                 }
                 protocol::ToolCallResult::Block(block) => {
                     terminate |= block.terminate;
@@ -164,6 +166,12 @@ impl Kernel {
                         block,
                     )));
                 }
+            }
+            if immediate_result.is_none() && call.invalid_arguments.is_some() {
+                immediate_result = Some(ToolResult::builder()
+                    .tool_call_id(call.tool_call_id.clone())
+                    .blocks(vec![ContentBlock::Text { text: "Tool arguments are invalid JSON; provide a complete JSON object.".into() }])
+                    .is_error(true).build());
             }
             if immediate_result.is_none()
                 && let Err(error) = batch.tools.validate(&call)

@@ -23,6 +23,7 @@ impl Kernel {
                     entry.id
                 ))
             })?;
+            // Native provenance does not change the assistant role or its lifecycle.
             if matches!(message.content, MessageContent::Assistant { .. }) {
                 // Assistant replay expands one persisted Message into
                 // MessageEnd plus a possible UsageUpdated event.

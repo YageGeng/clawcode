@@ -8,6 +8,9 @@ description = "Shared domain protocol for the agent runtime"
 workspace = true
 
 [dependencies]
+# model providers
+rig-core = { workspace = true }
+
 # error
 thiserror = { workspace = true }
 
@@ -23,3 +26,7 @@ sha2 = { workspace = true }
 
 # builder
 typed-builder = { workspace = true }
+
+[dev-dependencies]
+# http
+http = { workspace = true }

@@ -108,8 +108,8 @@ mod tests {
     use async_trait::async_trait;
     use futures::{Stream, stream};
     use protocol::{
-        ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage,
-        StopReason, ThinkingLevel,
+        ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent, StopReason,
+        ThinkingLevel,
     };
     use tokio_util::sync::CancellationToken;
 
@@ -146,17 +146,18 @@ mod tests {
             ModelError,
         > {
             Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-                ModelFinal {
-                    stop_reason: StopReason::EndTurn,
-                    raw_stop_reason: None,
-                    usage: ModelUsage::builder()
-                        .input_tokens(0)
-                        .output_tokens(0)
-                        .cache_read_tokens(0)
-                        .cache_write_tokens(0)
-                        .total_tokens(0)
-                        .build(),
-                },
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(0)
+                            .output_tokens(0)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(0),
+                    ))
+                    .build(),
             ))])))
         }
     }
@@ -200,5 +201,85 @@ mod tests {
 
         assert_eq!(selected.profile().model_id, "secondary");
         assert_eq!(level, ThinkingLevel::High);
+    }
+    /// Real Session creation never installs a model handle from another Session's catalog.
+    #[tokio::test]
+    async fn sessions_own_distinct_model_catalogs_and_release_them_on_close() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config: config::AppConfig = toml::from_str(
+            r#"
+active_model="openai/audit"
+[[providers]]
+id="openai"
+display_name="audit"
+provider_type="responses"
+base_url="https://provider.invalid"
+api_key="synthetic-key"
+[[providers.models]]
+id="audit"
+context_tokens=32768
+max_output_tokens=128
+[[providers.models]]
+id="other"
+context_tokens=32768
+max_output_tokens=128
+"#,
+        )
+        .unwrap();
+        let clock: Arc<dyn store::Clock> = Arc::new(store::SystemClock);
+        let kernel = crate::KernelFactory::builder()
+            .model_factory(Arc::new(crate::ProviderModelFactory::from_config(
+                config::ConfigHandle::from_config(config),
+            )))
+            .tool_factory(Arc::new(tools::BuiltinToolFactory::new()))
+            .store_factory(Arc::new(store::JsonlStoreFactory::new(
+                temporary.path(),
+                Arc::clone(&clock),
+            )))
+            .extension_factory(Arc::new(
+                extension::StaticExtensionFactory::default(),
+            ))
+            .prompt_factory(Arc::new(prompt::FilesystemPromptFactory::new(
+                temporary.path().join("config"),
+                protocol::PromptPolicy::default(),
+            )))
+            .clock(clock)
+            .id_generator(Arc::new(crate::NanoidIdGenerator))
+            .build()
+            .build()
+            .unwrap();
+        let a = protocol::SessionId::try_from("a").unwrap();
+        let b = protocol::SessionId::try_from("b").unwrap();
+        for id in [&a, &b] {
+            kernel
+                .create_session(store::SessionCreateOptions {
+                    session_id: id.clone(),
+                    cwd: temporary.path().into(),
+                    parent_session_id: None,
+                })
+                .await
+                .unwrap();
+        }
+        let first = kernel.session(&a).unwrap().model.active().unwrap();
+        let second = kernel.session(&b).unwrap().model.active().unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        let session = kernel.session(&a).unwrap();
+        let other = session.model.resolve("openai", "other").unwrap();
+        session.model.replace_model(other).unwrap();
+        session
+            .model
+            .replace_model(session.model.resolve("openai", "audit").unwrap())
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &session.model.active().unwrap()));
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        drop(session);
+        kernel.close_session(&a).await.unwrap();
+        assert!(weak.upgrade().is_none());
+        assert!(Arc::ptr_eq(
+            &second,
+            &kernel.session(&b).unwrap().model.active().unwrap()
+        ));
+        kernel.close_session(&b).await.unwrap();
     }
 }

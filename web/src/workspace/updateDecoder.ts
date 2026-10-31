@@ -1,10 +1,12 @@
 import { AcpProtocol } from "../acp/protocol";
-import type { EntryId, ImageContentBlock, MessageId, RunId, SessionId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
+import { ModelUsages } from "../domain/model";
+import type { EntryId, EventMeta, ImageContentBlock, MessageId, RunId, SessionId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
   AssistantDiagnostics,
   CompactionEntity,
   CompactionReason,
+  ContextUsage,
   EventOrder,
   MessageEntity,
   ModelUsage,
@@ -198,11 +200,9 @@ export class SessionUpdateDecoder {
         ...(meta === undefined ? (previous?.meta === undefined ? {} : { meta: previous.meta }) : { meta })
       };
       actions.push({ type: "tool/upserted", tool, order });
-    } else if (kind === "usage_update" && typeof update.used === "number" && typeof update.size === "number" && meta !== undefined) {
-      const exact = this.decodeModelUsage(productMeta?.usage);
-      if (exact !== undefined && update.used > 0) {
-        actions.push({ type: "usage/changed", usage: { used: update.used, size: update.size, exact, updatedAtMs: meta.timestampMs } });
-      }
+    } else if (kind === "usage_update" && meta !== undefined) {
+      const usage = this.decodeContextUsage(productMeta?.usage, productMeta?.contextWindow ?? update.size, meta);
+      if (usage !== undefined) actions.push({ type: "usage/changed", usage });
     } else if (kind === "terminal_update" || kind === "terminal_output_chunk") {
       const previous = typeof update.terminalId === "string" ? state.terminals.get(update.terminalId) : undefined;
       const terminal = kind === "terminal_update" ? this.terminals.update(previous, update) : this.terminals.chunk(previous, update);
@@ -218,7 +218,11 @@ export class SessionUpdateDecoder {
       const payload = typeof update.payload === "object" && update.payload !== null && !Array.isArray(update.payload) ? update.payload as Record<string, unknown> : undefined;
       if (payload !== undefined) {
         const event = payload.event;
-        if (event === "queue_changed") {
+        if (event === "usage_updated" && meta !== undefined) {
+          // Unknown provider totals still replace the previous context snapshot.
+          const usage = this.decodeContextUsage(payload.usage, productMeta?.contextWindow ?? payload.context_window, meta);
+          if (usage !== undefined) actions.push({ type: "usage/changed", usage });
+        } else if (event === "queue_changed") {
           const pending = payload.pending;
           if (typeof pending === "object" && pending !== null && "steering" in pending && "followUp" in pending
             && Array.isArray(pending.steering) && Array.isArray(pending.followUp)
@@ -368,8 +372,25 @@ export class SessionUpdateDecoder {
   private decodeModelUsage(value: unknown): ModelUsage | undefined {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
     const usage = value as Record<string, unknown>;
-    if (typeof usage.input_tokens !== "string" || typeof usage.output_tokens !== "string" || typeof usage.cache_read_tokens !== "string" || typeof usage.cache_write_tokens !== "string" || typeof usage.total_tokens !== "string" || (usage.reasoning_tokens !== undefined && typeof usage.reasoning_tokens !== "string")) return undefined;
-    return { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, cacheReadTokens: usage.cache_read_tokens, cacheWriteTokens: usage.cache_write_tokens, ...(typeof usage.reasoning_tokens === "string" ? { reasoningTokens: usage.reasoning_tokens } : {}), totalTokens: usage.total_tokens };
+    const fields = { input_tokens: "inputTokens", output_tokens: "outputTokens", cache_read_tokens: "cacheReadTokens", cache_write_tokens: "cacheWriteTokens", reasoning_tokens: "reasoningTokens", total_tokens: "totalTokens" } as const;
+    const result: Partial<Record<keyof ModelUsage, string>> = {};
+    for (const [wire, domain] of Object.entries(fields)) {
+      const count = usage[wire];
+      if (count === undefined) continue;
+      if (typeof count !== "string" || !/^\d{1,20}$/.test(count) || BigInt(count) > 18446744073709551615n) return undefined;
+      result[domain] = count;
+    }
+    return result;
+  }
+
+  /** Uses exact project metadata instead of rounded standard ACP numbers. */
+  private decodeContextUsage(value: unknown, size: unknown, meta: EventMeta): ContextUsage | undefined {
+    const exact = this.decodeModelUsage(value);
+    const window = typeof size === "string" ? size : typeof size === "number" && Number.isSafeInteger(size) && size >= 0 ? String(size) : undefined;
+    if (exact === undefined || window === undefined || !/^\d{1,20}$/.test(window) || BigInt(window) > 18446744073709551615n) return undefined;
+    // Context fallback is derived separately so exact usage remains provider-reported.
+    const used = ModelUsages.contextTokens(exact);
+    return { ...(used === undefined ? {} : { used }), size: window, exact, updatedAtMs: meta.timestampMs };
   }
 
   /** Restores precision-safe persisted message timing during ACP replay. */

@@ -11,7 +11,7 @@ use prompt::FilesystemPromptFactory;
 use protocol::{
     AgentEvent, AgentEventPayload, ContentBlock, IdGenerator, IdKind,
     MessageContent, ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent,
-    ModelUsage, SessionId, SessionSummary, StopReason, TimestampMs,
+    SessionId, SessionSummary, StopReason, TimestampMs,
 };
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
 use tokio::sync::Notify;
@@ -46,17 +46,20 @@ impl Route {
 
 /// Builds one terminal provider event with deterministic usage.
 pub fn finished(stop_reason: StopReason) -> ModelStreamEvent {
-    ModelStreamEvent::Finished(ModelFinal {
-        stop_reason,
-        raw_stop_reason: None,
-        usage: ModelUsage::builder()
-            .input_tokens(0)
-            .output_tokens(0)
-            .cache_read_tokens(0)
-            .cache_write_tokens(0)
-            .total_tokens(0)
+    ModelStreamEvent::Finished(
+        ModelFinal::builder()
+            .stop_reason(stop_reason)
+            .raw_stop_reason(None)
+            .usage(protocol::ModelUsage::from(
+                protocol::Usage::new()
+                    .input_tokens(0)
+                    .output_tokens(0)
+                    .cached_input_tokens(0)
+                    .cache_creation_input_tokens(0)
+                    .total_tokens(0),
+            ))
             .build(),
-    })
+    )
 }
 
 /// Reads visible text without relying on a provider-specific message shape.

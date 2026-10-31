@@ -14,7 +14,7 @@ use protocol::{
     McpPromptResult, McpProtocolVersion, McpResourceRequest, McpResourceResult,
     McpServerCapabilities, McpServerId, McpServerImplementation, McpToolInfo,
     McpToolRef, McpToolRequest, McpToolResult, ModelFinal, ModelProfile,
-    ModelRequest, ModelStreamEvent, ModelUsage, SessionId, StopReason,
+    ModelRequest, ModelStreamEvent, SessionId, StopReason,
 };
 use store::SessionCreateOptions;
 use tokio::sync::broadcast;
@@ -251,17 +251,20 @@ impl kernel::Model for RecordingModel {
             .expect("requests")
             .push(r.tools.into_iter().map(|tool| tool.name).collect());
         Ok(Box::pin(futures::stream::iter([Ok(
-            ModelStreamEvent::Finished(ModelFinal {
-                stop_reason: StopReason::EndTurn,
-                raw_stop_reason: None,
-                usage: ModelUsage::builder()
-                    .input_tokens(0)
-                    .output_tokens(0)
-                    .cache_read_tokens(0)
-                    .cache_write_tokens(0)
-                    .total_tokens(0)
+            ModelStreamEvent::Finished(
+                ModelFinal::builder()
+                    .stop_reason(StopReason::EndTurn)
+                    .raw_stop_reason(None)
+                    .usage(protocol::ModelUsage::from(
+                        protocol::Usage::new()
+                            .input_tokens(0)
+                            .output_tokens(0)
+                            .cached_input_tokens(0)
+                            .cache_creation_input_tokens(0)
+                            .total_tokens(0),
+                    ))
                     .build(),
-            }),
+            ),
         )])))
     }
 }
