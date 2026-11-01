@@ -265,8 +265,37 @@ impl KernelFactory {
         // because provider contributions participate in the immutable catalog.
         let static_extensions =
             Arc::new(self.extension_factory.static_registration()?);
-        // Validate definitions once, but runtime model bindings are owned by individual Sessions.
-        self.model_factory.create_catalog(&static_extensions)?;
+        // Validate definitions once; every Session builds its own catalog later.
+        let catalog = self.model_factory.create_catalog(&static_extensions)?;
+        // Limits may come from the rig catalog, so this kernel's own reserve is checked
+        // against the resolved active model here rather than at configuration load.
+        let active = catalog.active();
+        let profile = active.profile();
+        let reserve_tokens = self.compaction_policy.reserve_tokens;
+        if reserve_tokens >= profile.context_tokens {
+            return Err(ModelError::Unavailable(
+                config::ConfigValidationError::CompactionReserveOverflow {
+                    reserve_tokens,
+                    context_tokens: profile.context_tokens,
+                }
+                .to_string(),
+            )
+            .into());
+        }
+        // The budget default comes from the configuration's reserve; the invariant
+        // input + output <= window holds only against the reserve compaction really uses.
+        if profile.request_max_tokens > reserve_tokens {
+            return Err(ModelError::Unavailable(
+                config::ConfigValidationError::RequestBudgetExceedsReserve {
+                    provider_id: profile.provider_id.clone(),
+                    model_id: profile.model_id.clone(),
+                    request_max_tokens: profile.request_max_tokens,
+                    reserve_tokens,
+                }
+                .to_string(),
+            )
+            .into());
+        }
         let tools = Arc::new(self.tool_factory.create()?);
         Ok(Kernel::builder()
             .model_factory(self.model_factory)

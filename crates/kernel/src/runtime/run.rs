@@ -326,7 +326,7 @@ impl Kernel {
                 );
                 // Model selection is snapshotted once so host changes made during
                 // this Turn apply only to the next Turn.
-                let turn_model = session.model.active()?;
+                let (turn_model, thinking_level) = session.model.snapshot()?;
                 turn_model.preflight().await?;
                 session
                     .execution
@@ -548,7 +548,10 @@ impl Kernel {
                 let mut request_for_model = ModelRequest {
                     messages: history,
                     tools: turn_tools.definitions(),
-                    options: Default::default(),
+                    options: protocol::ModelRequestOptions {
+                        thinking_level,
+                        ..Default::default()
+                    },
                 };
                 if let Some(messages) = session
                     .extensions

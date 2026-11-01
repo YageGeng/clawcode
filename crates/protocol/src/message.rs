@@ -63,6 +63,36 @@ pub(crate) mod optional_decimal_u64 {
     }
 }
 
+/// Serde adapter that never lets a stored upstream-native payload reject its message.
+pub(crate) mod lenient_native {
+    use serde::{Deserialize, Deserializer};
+
+    /// Deserializes a native assistant message, or `None` when its shape is unreadable.
+    ///
+    /// The payload uses the upstream crate's serde shape, which may change across
+    /// upgrades. A missing native message already means canonical replay from
+    /// `blocks`, so an unreadable one degrades the same way instead of failing
+    /// the whole session load.
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<Box<rig_core::message::AssistantMessage>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(value.and_then(|value| match serde_json::from_value(value) {
+            Ok(message) => Some(message),
+            Err(_error) => {
+                // The serde error can quote stored reasoning, so only the fact is logged.
+                tracing::debug!(
+                    "dropped an unreadable native assistant message; replaying canonical blocks"
+                );
+                None
+            }
+        }))
+    }
+}
+
 /// Identifies a message and the turn that owns it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageIdentity {
@@ -434,7 +464,11 @@ pub enum MessageContent {
         /// Provider, stop, usage, and error details for this attempt.
         metadata: AssistantMetadata,
         /// Provider-native replay data stays separate from the display projection.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "lenient_native::deserialize",
+            skip_serializing_if = "Option::is_none"
+        )]
         // Box the optional native payload so unrelated message variants stay compact.
         model_message: Option<Box<rig_core::message::AssistantMessage>>,
     },

@@ -21,7 +21,24 @@ impl AgentTool for SubagentTool {
 
     /// Advertises isolated foreground delegation with the agreed model-facing contract.
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition { name: "subagent".into(), description: "Delegate a self-contained task to a subagent with the same tools and get its answer back. Give it everything it needs to know; it does not see this conversation.".into(), parameters: serde_json::json!({"type":"object","properties":{"task":{"type":"string","description":"What the subagent should do"}},"required":["task"]}) }
+        ToolDefinition {
+            name: "subagent".into(),
+            description: "Delegate a self-contained task to a subagent with the same tools and get its answer back. Give it everything it needs to know; it does not see this conversation.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "What the subagent should do"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional configured model as provider/model; defaults to your current model"
+                    }
+                },
+                "required": ["task"]
+            }),
+        }
     }
 
     /// Publishes the child immediately, then waits for its answering run and cancellation cleanup.
@@ -45,10 +62,21 @@ impl AgentTool for SubagentTool {
                 .is_error(false)
                 .build());
         }
-        let _session = self
+        let session = self
             .session
             .upgrade()
             .ok_or(SubagentError::SessionGone { tool: "subagent" })?;
+        // An unknown model is a correctable argument error, reported before any child exists.
+        let model = call
+            .arguments
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(|reference| session.model.resolve_reference(reference))
+            .transpose()
+            .map_err(|message| ToolError::InvalidArguments {
+                tool: call.name.clone(),
+                message,
+            })?;
         let title = SessionTitle::try_from(format!(
             "subagent: {}",
             task.chars().take(60).collect::<String>()
@@ -65,6 +93,7 @@ impl AgentTool for SubagentTool {
                     tool_call_id: call.tool_call_id.clone(),
                 },
                 title,
+                model,
             )
             .await
             .map_err(|source| SubagentError::Kernel {

@@ -1997,7 +1997,7 @@ async fn session_new_returns_model_and_thinking_options() {
         assert_eq!(options[0]["options"].as_array().expect("models").len(), 2);
         assert_eq!(options[1]["configId"], "thinking_level");
         assert_eq!(options[1]["category"], "thought_level");
-        assert_eq!(options[1]["currentValue"], "off");
+        assert_eq!(options[1]["currentValue"], "medium");
         Ok(())
     })
     .await;
@@ -2124,13 +2124,13 @@ async fn unchanged_config_does_not_wait_for_new_event() {
             drain(updates).await;
             let response = tokio::time::timeout(
                 WAIT,
-                set_config(connection, &session_id, "thinking_level", "off"),
+                set_config(connection, &session_id, "thinking_level", "medium"),
             )
             .await
             .expect("unchanged value answers promptly")?;
             assert_eq!(
                 current(&response["configOptions"], "thinking_level"),
-                "off"
+                "medium"
             );
             assert!(drain(updates).await.iter().all(
                 |update| update["sessionUpdate"] != "config_option_update"

@@ -7,3 +7,11 @@ repos:
       - id: clippy
         name: "Rust (clippy)"
         args: ["--tests", "--examples", "--", "-Dwarnings"]
+  - repo: local
+    hooks:
+      - id: rig-boundary
+        name: "rig-core dependency boundary"
+        entry: scripts/check-rig-boundary.py
+        language: system
+        pass_filenames: false
+        files: '(Cargo\.toml|\.rs)$'

@@ -14,6 +14,9 @@ rig-core = { workspace = true }
 # error
 thiserror = { workspace = true }
 
+# tracing & log
+tracing = { workspace = true }
+
 # async
 async-trait = { workspace = true }
 

@@ -89,6 +89,7 @@ async fn model_options_and_compaction_summary_reach_provider() {
     request.options = protocol::ModelRequestOptions {
         temperature: Some(0.25),
         max_tokens: Some(32),
+        ..Default::default()
     };
     request.messages[0].content = MessageContent::CompactionSummary {
         compaction: protocol::CompactionSummaryMessage::builder()
@@ -552,4 +553,330 @@ async fn provider_auth_failure_is_classified_and_logged() {
         !output.contains("PRIVATE_AUTH_SENTINEL")
             && !output.contains("PRIVATE_PROMPT_SENTINEL")
     );
+}
+
+/// Streams one DeepSeek request at `level` and returns the captured body and whether it finished.
+async fn deepseek_request_at(
+    level: protocol::ThinkingLevel,
+    extra_param: serde_json::Value,
+) -> (serde_json::Value, bool) {
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let mut config = server.configuration("deepseek", "openai-completions");
+    config
+        .providers
+        .first_mut()
+        .and_then(|provider| provider.models.first_mut())
+        .expect("synthetic model")
+        .extra_param = extra_param;
+    let model = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    )
+    .create()
+    .expect("provider model");
+    let mut request = Server::request("hi");
+    request.options.thinking_level = level;
+    let finished = model
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("provider stream")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Finished(_))));
+    (server.requests().remove(0), finished)
+}
+
+/// A supported level reaches DeepSeek as its native thinking parameters.
+#[tokio::test]
+async fn deepseek_high_thinking_sends_reasoning_effort() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let (body, finished) =
+        deepseek_request_at(protocol::ThinkingLevel::High, json!(null)).await;
+    assert!(finished);
+    assert_eq!(body["reasoning_effort"], "high");
+    assert_eq!(body["thinking"]["type"], "enabled");
+}
+
+/// Off, and a level DeepSeek rejects on a model the rig catalog does not list (so no
+/// tier snapping applies), leave the provider default in place.
+#[tokio::test]
+async fn off_and_rejected_level_on_unlisted_model_send_no_reasoning() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    for level in [
+        protocol::ThinkingLevel::Off,
+        protocol::ThinkingLevel::Medium,
+    ] {
+        let (body, finished) = deepseek_request_at(level, json!(null)).await;
+        assert!(finished, "{level:?}");
+        assert!(body.get("reasoning_effort").is_none(), "{level:?}: {body}");
+        assert!(body.get("thinking").is_none(), "{level:?}: {body}");
+    }
+}
+
+/// Configured model parameters win over the mapped reasoning level.
+#[tokio::test]
+async fn extra_param_overrides_mapped_reasoning() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let (body, _) = deepseek_request_at(
+        protocol::ThinkingLevel::High,
+        json!({"reasoning_effort": "low"}),
+    )
+    .await;
+    assert_eq!(body["reasoning_effort"], "low");
+}
+
+/// Returns the first configured model of a synthetic configuration for editing.
+fn first_model(config: &mut config::AppConfig) -> &mut config::LlmModel {
+    config
+        .providers
+        .first_mut()
+        .and_then(|provider| provider.models.first_mut())
+        .expect("synthetic model")
+}
+
+/// Streams the active model once and reports whether the server saw a request.
+async fn send_once(server: &Server, config: config::AppConfig) {
+    let model = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    )
+    .create()
+    .expect("provider model");
+    if let Ok(stream) = model
+        .stream(Server::request("hi"), CancellationToken::new())
+        .await
+    {
+        // Replies may not match the protocol; only the outgoing request matters.
+        drop(stream.collect::<Vec<_>>().await);
+    }
+    assert_eq!(server.requests().len(), 1);
+}
+
+/// Gemini and OpenRouter entries send real requests to their configured endpoints.
+#[tokio::test]
+async fn gemini_and_openrouter_reach_local_server() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let gemini = Server::start(vec![(200, Server::completion())]).await;
+    send_once(&gemini, gemini.configuration("gemini", "gemini")).await;
+    // GenerateContent bodies carry `contents`, not OpenAI `messages`.
+    let gemini_body = gemini.requests().into_iter().next().expect("request");
+    assert!(gemini_body.get("contents").is_some(), "{gemini_body}");
+    assert!(gemini_body.get("messages").is_none(), "{gemini_body}");
+
+    let openrouter = Server::start(vec![(200, Server::completion())]).await;
+    let mut config =
+        openrouter.configuration("openrouter", "openai-completions");
+    config.active_model = "openrouter/aion-labs/aion-2.0".into();
+    let model = first_model(&mut config);
+    model.id = "aion-labs/aion-2.0".into();
+    model.context_tokens = None;
+    model.max_output_tokens = None;
+    send_once(&openrouter, config).await;
+    assert_eq!(
+        openrouter.requests().first().expect("request")["model"],
+        "aion-labs/aion-2.0"
+    );
+}
+
+/// Extension providers may name a rig preset instead of a base URL and limits.
+#[test]
+fn extension_provider_uses_rig_preset() {
+    let config: config::AppConfig = toml::from_str(
+        r#"
+active_model="openai/audit"
+[[providers]]
+id="openai"
+display_name="audit"
+provider_type="openai-completions"
+base_url="https://provider.invalid"
+api_key="synthetic-key"
+[[providers.models]]
+id="audit"
+context_tokens=32768
+max_output_tokens=128
+"#,
+    )
+    .expect("config");
+    let registration = protocol::StaticExtensionRegistration::builder()
+        .providers(vec![protocol::ExtensionProviderRegistration {
+            name: "ds".into(),
+            config: json!({"display_name":"ds","preset":"deepseek","api_key":"synthetic-key","models":[{"id":"deepseek-flash"}]}),
+        }])
+        .build();
+    let catalog = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    )
+    .create_catalog(&registration)
+    .expect("preset preset");
+    assert!(catalog.resolve("ds", "deepseek-flash").is_some());
+}
+
+/// The kernel's own compaction policy is checked against the resolved active profile.
+#[test]
+fn compaction_reserve_checked_against_resolved_profile() {
+    let config: config::AppConfig = toml::from_str(
+        r#"
+active_model="deepseek/deepseek-flash"
+[[providers]]
+id="deepseek"
+display_name="DeepSeek"
+api_key="synthetic-key"
+[[providers.models]]
+id="deepseek-flash"
+"#,
+    )
+    .expect("config");
+    let factory = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    );
+    let context_tokens =
+        factory.create().expect("model").profile().context_tokens;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn store::Clock> = Arc::new(store::SystemClock);
+    // Only the kernel policy carries the oversized reserve; the config keeps its default.
+    let error = kernel::KernelFactory::builder()
+        .model_factory(Arc::new(factory))
+        .compaction_policy(
+            protocol::CompactionPolicy::builder()
+                .enabled(true)
+                .reserve_tokens(context_tokens)
+                .keep_recent_tokens(20_000)
+                .build(),
+        )
+        .tool_factory(Arc::new(tools::BuiltinToolFactory::new()))
+        .store_factory(Arc::new(store::JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(
+            extension::StaticExtensionFactory::default(),
+        ))
+        .prompt_factory(Arc::new(prompt::FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(kernel::NanoidIdGenerator))
+        .build()
+        .build()
+        .err()
+        .expect("reserve must stay below the context window")
+        .to_string();
+    assert!(error.contains(&context_tokens.to_string()), "{error}");
+    assert!(error.contains("reserve_tokens"), "{error}");
+}
+
+/// Each Turn sends the configured request budget as max_tokens.
+#[tokio::test]
+async fn turn_request_sends_configured_budget() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let mut config = server.configuration("openai", "openai-completions");
+    first_model(&mut config).request_max_tokens = Some(100);
+    send_once(&server, config).await;
+    assert_eq!(server.requests()[0]["max_tokens"], 100);
+}
+
+/// Falling back to a generic dialect for a preset rig knows is logged; a custom gateway is not.
+#[test]
+fn generic_dialect_fallback_for_known_preset_is_logged() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(logs.clone())
+        .finish();
+    let config: config::AppConfig = toml::from_str(
+        r#"
+active_model="deepseek/m"
+[[providers]]
+id="deepseek"
+display_name="d"
+provider_type="anthropic"
+base_url="https://proxy.invalid"
+api_key="synthetic-key"
+[[providers.models]]
+id="m"
+context_tokens=32768
+max_output_tokens=128
+[[providers]]
+id="corp"
+display_name="c"
+provider_type="openai-completions"
+base_url="https://corp.invalid"
+api_key="synthetic-key"
+[[providers.models]]
+id="m"
+context_tokens=32768
+max_output_tokens=128
+"#,
+    )
+    .expect("config");
+    tracing::subscriber::with_default(subscriber, || {
+        drop(ProviderModelFactory::from_config(
+            config::ConfigHandle::from_config(config),
+        ));
+    });
+    let content = logs.content();
+    assert!(content.contains("generic"), "{content}");
+    assert!(content.contains("'deepseek'"), "{content}");
+    assert!(content.contains("'anthropic'"), "{content}");
+    assert!(!content.contains("'corp'"), "{content}");
+}
+
+/// A model's request budget must fit inside the kernel's own compaction reserve.
+#[test]
+fn request_budget_checked_against_kernel_reserve() {
+    let config: config::AppConfig = toml::from_str(
+        r#"
+active_model="deepseek/deepseek-flash"
+[[providers]]
+id="deepseek"
+display_name="DeepSeek"
+api_key="synthetic-key"
+[[providers.models]]
+id="deepseek-flash"
+"#,
+    )
+    .expect("config");
+    let factory = ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    );
+    // The budget defaults from the config reserve (16384); the kernel keeps less room.
+    let budget = factory
+        .create()
+        .expect("model")
+        .profile()
+        .request_max_tokens;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn store::Clock> = Arc::new(store::SystemClock);
+    let error = kernel::KernelFactory::builder()
+        .model_factory(Arc::new(factory))
+        .compaction_policy(
+            protocol::CompactionPolicy::builder()
+                .enabled(true)
+                .reserve_tokens(budget / 2)
+                .keep_recent_tokens(20_000)
+                .build(),
+        )
+        .tool_factory(Arc::new(tools::BuiltinToolFactory::new()))
+        .store_factory(Arc::new(store::JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .extension_factory(Arc::new(
+            extension::StaticExtensionFactory::default(),
+        ))
+        .prompt_factory(Arc::new(prompt::FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .clock(clock)
+        .id_generator(Arc::new(kernel::NanoidIdGenerator))
+        .build()
+        .build()
+        .err()
+        .expect("budget must fit inside the kernel reserve")
+        .to_string();
+    assert!(error.contains("request_max_tokens"), "{error}");
+    assert!(error.contains(&budget.to_string()), "{error}");
 }

@@ -684,6 +684,8 @@ impl Session {
             options: ModelRequestOptions {
                 max_tokens: Some(request.max_tokens),
                 temperature: request.temperature,
+                // MCP sampling never reasons; the session level applies to Turns only.
+                thinking_level: protocol::ThinkingLevel::Off,
             },
         };
         if model_request.adapt_input(model.profile()) {

@@ -1,12 +1,11 @@
 //! Request-scoped provider behavior implemented with the upstream HTTP contract.
 
-use extension::{ExtensionContext, ExtensionError, ExtensionRegistrar};
-use rig_core::{
+use extension::{
+    ExtensionContext, ExtensionError, ExtensionRegistrar, WasmBoxedFuture,
     http_client::{
         self,
         middleware::{Exchange, HttpMiddleware},
     },
-    wasm_compat::WasmBoxedFuture,
 };
 
 struct ProviderPolicy {

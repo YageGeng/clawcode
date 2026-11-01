@@ -71,6 +71,9 @@ struct OwnedSessionSpawn<'a> {
     owner: &'a Arc<Session>,
     ownership: SessionOwnership,
     title: SessionTitle,
+    /// A configured model replacing the inherited one, resolved by the caller.
+    #[builder(default)]
+    model: Option<Arc<dyn Model>>,
 }
 
 impl OwnedSessionSpawn<'_> {
@@ -80,8 +83,11 @@ impl OwnedSessionSpawn<'_> {
         // children finish registration before the cascading child snapshot is taken.
         let _creation_guard = self.owner.owned_creation.read().await;
         self.owner.ensure_active()?;
-        let snapshot = AgentSnapshot::try_from(self.owner.as_ref())?
+        let mut snapshot = AgentSnapshot::try_from(self.owner.as_ref())?
             .without_tools(&SUBAGENT_TOOL_NAMES);
+        if let Some(model) = &self.model {
+            snapshot.model = Arc::clone(model);
+        }
         let child =
             SessionId::try_from(self.kernel.id_generator.next(IdKind::Session))
                 .map_err(|e| KernelError::Protocol(e.to_string()))?;
@@ -289,10 +295,12 @@ impl Kernel {
     }
 
     /// Creates an isolated child with copied agent settings and a persistent owner edge.
+    /// `model` replaces the inherited model; thinking level and tools stay inherited.
     pub async fn create_owned_session(
         &self,
         ownership: SessionOwnership,
         title: SessionTitle,
+        model: Option<Arc<dyn Model>>,
     ) -> Result<SessionId, KernelError> {
         let owner = self.session(ownership.owner()).map_err(
             |error| match error {
@@ -311,6 +319,7 @@ impl Kernel {
             .owner(&owner)
             .ownership(ownership)
             .title(title)
+            .model(model)
             .build()
             .create()
             .await

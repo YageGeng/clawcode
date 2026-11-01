@@ -18,9 +18,6 @@ skill = { workspace = true }
 store = { workspace = true }
 tools = { workspace = true }
 
-# model providers
-rig-core = { workspace = true }
-
 # error
 thiserror = { workspace = true }
 

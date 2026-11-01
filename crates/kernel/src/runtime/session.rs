@@ -33,7 +33,8 @@ impl RestoredSessionSettings {
     ) -> Result<Self, KernelError> {
         let mut settings = Self {
             model: models.active(),
-            thinking_level: ThinkingLevel::Off,
+            // Sessions without a persisted choice use the product default level.
+            thinking_level: ThinkingLevel::default(),
         };
         let Some(leaf) = store.lane(lane) else {
             return Ok(settings);
@@ -50,9 +51,17 @@ impl RestoredSessionSettings {
                     provider,
                     model_id,
                 } => {
-                    settings.model = models.resolve(&provider, &model_id).ok_or_else(|| {
-                        ModelError::Unavailable(format!("persisted model is not configured: {provider}/{model_id}"))
-                    })?;
+                    // A removed provider must not make the session unopenable.
+                    match models.resolve(&provider, &model_id) {
+                        Some(model) => settings.model = model,
+                        None => tracing::warn!(
+                            "persisted model {}/{} is no longer configured; keeping {}/{}",
+                            provider,
+                            model_id,
+                            settings.model.profile().provider_id,
+                            settings.model.profile().model_id
+                        ),
+                    }
                 }
                 super::settings::SettingChange::ThinkingLevel(level) => {
                     settings.thinking_level = level
@@ -763,7 +772,8 @@ impl Kernel {
                 .emit_thinking_level_select(
                     &protocol::ThinkingLevelSelectEvent {
                         level: restored_thinking_level,
-                        previous_level: protocol::ThinkingLevel::Off,
+                        // A session without a persisted choice starts here, so it is no change.
+                        previous_level: protocol::ThinkingLevel::default(),
                     },
                     &context,
                 )
@@ -891,7 +901,7 @@ impl Kernel {
         let result: Result<Arc<Session>, KernelError> = async {
             let lane = LaneId::try_from("main")
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
-            // Never install global model handles: upstream Prepared belongs to this Session.
+            // Each Session builds its own catalog so model selection stays Session-local.
             let session_models = Arc::new(
                 self.model_factory.create_catalog(&self.static_extensions)?,
             );

@@ -281,6 +281,10 @@ async fn user_errors_are_plain_replies() {
             "spawn needs a message.",
         ),
         (
+            serde_json::json!({"action":"send", "name":"reader", "message":"x", "model":"fixture/secondary"}),
+            "model only applies to spawn.",
+        ),
+        (
             serde_json::json!({"action":"spawn", "name":"has space", "message":"x"}),
             "Invalid subagent name: use 1-64 letters, digits, '_' or '-'.",
         ),
@@ -588,5 +592,21 @@ async fn closing_owner_with_reporter_in_delivery_does_not_hang() {
             .iter()
             .any(|t| t.starts_with("[subagent "))
     );
+    test.kernel.close_session(&owner).await.expect("close");
+}
+
+/// A spawned subagent runs on the configured model it names.
+#[tokio::test]
+async fn background_spawn_runs_on_requested_model() {
+    let test = background_test(|_| Route::answer("primary answer"));
+    let owner = test.create("owner").await;
+    assert_eq!(invoke(&test, &owner, serde_json::json!({"action":"spawn","name":"reader","message":"Summarize.","model":"fixture/secondary"})).await, "Started reader.");
+    test.wait_until(|| {
+        test.user_texts(&owner).contains(
+            &"[subagent reader answered, no reply needed] secondary answer"
+                .into(),
+        )
+    })
+    .await;
     test.kernel.close_session(&owner).await.expect("close");
 }

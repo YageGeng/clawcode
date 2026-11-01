@@ -131,7 +131,7 @@ impl ModelFactory for TracedModelFactory {
                 .provider_id("fixture".to_string())
                 .model_id("trace".to_string())
                 .display_name("Trace fixture".to_string())
-                .context_tokens(8_192)
+                .context_tokens(32_768)
                 .max_output_tokens(1_024)
                 .build(),
         }))

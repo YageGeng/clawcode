@@ -2494,3 +2494,68 @@ async fn resume_rejects_assistant_without_metadata_as_invalid_session() {
         kernel::KernelError::Store(store::StoreError::InvalidSession(_))
     ));
 }
+
+/// A Turn sends the session thinking level taken with its model snapshot.
+#[tokio::test]
+async fn turn_requests_carry_session_thinking_level() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(Mutex::new(1_100)));
+    let model = Arc::new(SystemPromptCaptureModel {
+        scripts: Mutex::new(VecDeque::from([ScriptedResponse::events(vec![
+            ScriptedModel::finished(StopReason::EndTurn),
+        ])])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(&model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            temporary.path(),
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            temporary.path().join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(Mutex::new(0))))
+        .build()
+        .build()
+        .expect("build kernel");
+    let session_id =
+        SessionId::try_from("session-thinking-level").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: temporary.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .set_session_thinking_level(&session_id, protocol::ThinkingLevel::High)
+        .await
+        .expect("set thinking level");
+
+    kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: RunInput::Blocks(vec![ContentBlock::Text {
+                    text: "hi".into(),
+                }]),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("run prompt");
+
+    let requests = model.requests.lock().expect("request lock");
+    assert_eq!(
+        requests[0].options.thinking_level,
+        protocol::ThinkingLevel::High
+    );
+}

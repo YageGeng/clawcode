@@ -18,6 +18,8 @@ pub struct ModelRequestOptions {
     pub max_tokens: Option<u64>,
     /// Sampling temperature requested by the caller.
     pub temperature: Option<f64>,
+    /// Session reasoning level; Off sends no reasoning option.
+    pub thinking_level: crate::ThinkingLevel,
 }
 
 /// Complete model input assembled for one pi-compatible Turn.

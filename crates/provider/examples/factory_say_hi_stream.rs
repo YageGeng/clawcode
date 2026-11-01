@@ -16,10 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         active.split_once('/').ok_or("invalid active model")?;
     let factory = ProviderFactory::new(config);
     let configured = factory.resolve(provider, model)?;
-    let auth = configured.auth_context().await?;
-    let model = configured
-        .build_model(auth.as_ref())?
-        .with_transport(configured.http_client());
+    let model = configured.connect(configured.http_client()).await?;
     let mut stream = model
         .stream(configured.prepare(CompletionRequest::new(
             "Say hi in one short sentence.",

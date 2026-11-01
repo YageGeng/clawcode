@@ -325,3 +325,99 @@ async fn cancellation_case(action: &str) {
     );
     test.kernel.close_session(&owner).await.expect("close");
 }
+
+/// Emits a subagent call that names the configured model to run on.
+fn delegate_on(task: &str, model: &str, call: &str) -> ModelStreamEvent {
+    ModelStreamEvent::ToolCall(
+        ToolCall::builder()
+            .tool_call_id(ToolCallId::try_from(call).expect("call"))
+            .name("subagent".into())
+            .arguments(serde_json::json!({"task":task,"model":model}))
+            .build(),
+    )
+}
+
+/// Returns the text of the owner's first tool result.
+fn first_tool_result(test: &TestKernel, owner: &protocol::SessionId) -> String {
+    test.kernel
+        .session_transcript(owner)
+        .expect("transcript")
+        .iter()
+        .find_map(|m| match &m.content {
+            MessageContent::ToolResult { .. } => m.content.text_content(),
+            _ => None,
+        })
+        .expect("tool result")
+}
+
+/// A subagent runs on the configured model its call names.
+#[tokio::test]
+async fn subagent_runs_on_requested_model() {
+    let test = TestKernel::new(|r| {
+        match r.messages.last().map(|m| text(&m.content)).as_deref() {
+            Some("delegate") => Route::Events(vec![
+                delegate_on(
+                    "Name three primes.",
+                    "fixture/secondary",
+                    "call-1",
+                ),
+                finished(StopReason::ToolUse),
+            ]),
+            _ => Route::answer("done"),
+        }
+    });
+    let owner = test.create("owner").await;
+    test.kernel
+        .submit(request(&owner, "delegate", WhenBusy::FollowUp))
+        .await
+        .expect("submit");
+    assert_eq!(first_tool_result(&test, &owner), "secondary answer");
+    // The chosen model is persisted with the child and survives close and resume.
+    let child = test
+        .owned_children(&owner)
+        .first()
+        .expect("child")
+        .session_id
+        .clone();
+    test.kernel
+        .close_session(&child)
+        .await
+        .expect("close child");
+    test.kernel
+        .resume_session(child.clone(), test.root.path().into())
+        .await
+        .expect("resume child");
+    assert_eq!(
+        test.kernel
+            .session_settings(&child)
+            .expect("settings")
+            .model
+            .model_id,
+        "secondary"
+    );
+    test.kernel.close_session(&owner).await.expect("close");
+}
+
+/// An unknown model is reported with the configured choices and allocates no child.
+#[tokio::test]
+async fn subagent_rejects_unconfigured_model() {
+    let test = TestKernel::new(|r| {
+        match r.messages.last().map(|m| text(&m.content)).as_deref() {
+            Some("delegate") => Route::Events(vec![
+                delegate_on("Name three primes.", "fixture/missing", "call-1"),
+                finished(StopReason::ToolUse),
+            ]),
+            _ => Route::answer("done"),
+        }
+    });
+    let owner = test.create("owner").await;
+    test.kernel
+        .submit(request(&owner, "delegate", WhenBusy::FollowUp))
+        .await
+        .expect("submit");
+    assert!(test.owned_children(&owner).is_empty());
+    let result = first_tool_result(&test, &owner);
+    assert!(result.contains("fixture/primary"), "{result}");
+    assert!(result.contains("fixture/secondary"), "{result}");
+    test.kernel.close_session(&owner).await.expect("close");
+}

@@ -14,7 +14,7 @@ use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
 use crate::tools::ToolsConfig;
 pub use protocol::CompactionPolicy as CompactionConfig;
-use protocol::{ModelInputModalitiesError, ModelProfile};
+use protocol::ModelInputModalitiesError;
 
 /// File-backed session persistence settings.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -67,17 +67,31 @@ pub enum ConfigValidationError {
         /// Duplicated model identifier.
         model_id: String,
     },
-    /// A model omitted a limit required by the runtime.
+    /// A provider `id` or `preset` is empty, padded, or contains `/`.
     #[error(
-        "model '{provider_id}/{model_id}' is missing required limit '{field}'"
+        "provider '{provider_id}' {field} {value:?} must be a non-empty name without surrounding whitespace or '/'"
     )]
-    MissingModelLimit {
+    InvalidProviderName {
+        /// Provider identifier as configured.
+        provider_id: String,
+        /// The offending field, `id` or `preset`.
+        field: &'static str,
+        /// The value as configured.
+        value: String,
+    },
+    /// A model's request budget exceeds the room compaction keeps free for a response.
+    #[error(
+        "model '{provider_id}/{model_id}' request_max_tokens={request_max_tokens} must not exceed compaction reserve_tokens={reserve_tokens}"
+    )]
+    RequestBudgetExceedsReserve {
         /// Provider identifier containing the model.
         provider_id: String,
-        /// Model missing the required limit.
+        /// Model whose budget is too large.
         model_id: String,
-        /// Name of the missing limit field.
-        field: &'static str,
+        /// Configured per-request output budget.
+        request_max_tokens: u64,
+        /// Configured compaction reserve.
+        reserve_tokens: u64,
     },
     /// A required model limit was explicitly configured as zero.
     #[error(
@@ -288,12 +302,6 @@ impl AppConfig {
         Ok((provider, model))
     }
 
-    /// Builds the stable runtime profile for the configured active model.
-    pub fn model_profile(&self) -> Result<ModelProfile, ConfigValidationError> {
-        let (provider, model) = self.resolve_active_model()?;
-        model.to_profile(provider)
-    }
-
     /// Return the enhanced approval policy after applying legacy compatibility.
     #[must_use]
     pub fn effective_approval_policy(&self) -> AskForApproval {
@@ -304,21 +312,35 @@ impl AppConfig {
     /// Validate cross-field invariants that serde cannot express directly.
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         for provider in &self.providers {
+            provider.validate_names()?;
             provider.validate_models()?;
             provider.validate_auth_source()?;
+            // Compaction keeps input below the window minus the reserve, so a budget
+            // within the reserve keeps input plus output inside the window.
+            for model in &provider.models {
+                if let Some(budget) = model
+                    .request_max_tokens
+                    .filter(|budget| *budget > self.compaction.reserve_tokens)
+                {
+                    return Err(
+                        ConfigValidationError::RequestBudgetExceedsReserve {
+                            provider_id: provider.id.as_str().to_owned(),
+                            model_id: model.id.clone(),
+                            request_max_tokens: budget,
+                            reserve_tokens: self.compaction.reserve_tokens,
+                        },
+                    );
+                }
+            }
         }
 
-        let profile = self.model_profile()?;
+        // Context limits may come from the rig catalog, so the compaction reserve is
+        // checked when the provider layer resolves the active model.
+        self.resolve_active_model()?;
         if !self.retry.has_valid_backoff() {
             return Err(ConfigValidationError::InvalidRetryDuration {
                 base_delay_ms: self.retry.agent.base_delay_ms,
                 max_retries: self.retry.agent.max_retries,
-            });
-        }
-        if self.compaction.reserve_tokens >= profile.context_tokens {
-            return Err(ConfigValidationError::CompactionReserveOverflow {
-                reserve_tokens: self.compaction.reserve_tokens,
-                context_tokens: profile.context_tokens,
             });
         }
 

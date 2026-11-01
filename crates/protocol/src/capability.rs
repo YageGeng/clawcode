@@ -214,8 +214,11 @@ pub struct ModelProfile {
     pub display_name: String,
     /// Maximum model context size in tokens.
     pub context_tokens: u64,
-    /// Maximum tokens the model may emit for one request.
+    /// Maximum tokens the model may emit for one request (capability metadata).
     pub max_output_tokens: u64,
+    /// Output tokens requested per response and sent as `max_tokens`; at most `max_output_tokens`.
+    #[builder(default = *max_output_tokens)]
+    pub request_max_tokens: u64,
     /// Validated input modalities accepted by this model.
     #[serde(default)]
     #[builder(default)]

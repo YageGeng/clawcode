@@ -2,17 +2,8 @@ mod content;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use protocol::{
-    AgentMessage, ContentBlock, MessageContent, ModelFailure, ModelFinal,
-    ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage, Role, StopReason,
-    ToolCall as AgentToolCall,
-};
-use provider::{
-    ConfiguredModel, ProviderCompletion, ProviderConnectError, ProviderFactory,
-};
-use rig_core::{
+use protocol::llm::{
     completion::{CompletionRequest, ToolDefinition},
-    http_client::DynHttpClient,
     message::{
         AssistantContent, AssistantMessage, CallId, ImageMediaType, Message,
         MimeType, Reasoning, ToolFunction, ToolName, ToolResult,
@@ -20,19 +11,21 @@ use rig_core::{
     },
     streaming::{Item, StreamEvent},
 };
-use serde_json::Value;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Instant,
+use protocol::{
+    AgentMessage, ContentBlock, MessageContent, ModelFailure, ModelFinal,
+    ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage, Role, StopReason,
+    ToolCall as AgentToolCall,
 };
+use provider::{ConfiguredModel, ProviderConnectError, ProviderFactory};
+use serde_json::Value;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
 pub(crate) use content::AssistantProjection;
 use content::ProviderContentProjection;
 
-/// Frozen contributed definitions share transports and authentication without sharing history.
+/// Provider definitions built once per extension registration and shared by every session.
 struct ContributedDefinitions {
     registration: Vec<protocol::ExtensionProviderRegistration>,
     providers: Arc<ProviderFactory>,
@@ -71,12 +64,12 @@ impl ModelFactory for ProviderModelFactory {
     /// Resolves `provider/model` once so one kernel lifecycle has a stable model.
     fn create(&self) -> Result<Arc<dyn Model>, ModelError> {
         let config = self.config.current();
-        let profile = config
-            .model_profile()
+        let (provider, model) = config
+            .resolve_active_model()
             .map_err(|error| ModelError::Unavailable(error.to_string()))?;
         let llm = self
             .providers
-            .resolve(&profile.provider_id, &profile.model_id)
+            .resolve(provider.id.as_str(), &model.id)
             .map_err(|error| ModelError::Unavailable(error.to_string()))?;
         Ok(Arc::new(ProviderModel::new(llm)))
     }
@@ -134,7 +127,7 @@ impl ModelFactory for ProviderModelFactory {
             .validate()
             .map_err(|error| ModelError::Unavailable(error.to_string()))?;
 
-        // Configuration/authentication are shared, but every catalog below owns fresh session models.
+        // Definitions are shared; each catalog wraps them in its own stateless handles.
         let providers = if registration.providers.is_empty() {
             Arc::clone(&self.providers)
         } else {
@@ -162,11 +155,8 @@ impl ModelFactory for ProviderModelFactory {
         let mut models = Vec::new();
         for provider in &merged.providers {
             for model in &provider.models {
-                let profile = model.to_profile(provider).map_err(|error| {
-                    ModelError::Unavailable(error.to_string())
-                })?;
                 let llm = providers
-                    .resolve(&profile.provider_id, &profile.model_id)
+                    .resolve(provider.id.as_str(), &model.id)
                     .map_err(|error| {
                         ModelError::Unavailable(error.to_string())
                     })?;
@@ -185,61 +175,15 @@ impl ModelFactory for ProviderModelFactory {
     }
 }
 
-/// One session/model binding owns its upstream Prepared state and current credential.
+/// A stateless model handle; each request builds its upstream model inside the provider.
 pub struct ProviderModel {
     configured: Arc<ConfiguredModel>,
-    cached: Mutex<Option<CachedCompletion>>,
-}
-
-/// The credential under which one concrete session model was prepared.
-struct CachedCompletion {
-    auth: Option<rig_core::providers::chatgpt::auth::AuthContext>,
-    model: Arc<ProviderCompletion>,
 }
 
 impl ProviderModel {
-    /// Starts an independent session binding over the shared provider definition.
+    /// Wraps a shared provider definition; the handle may serve any number of sessions.
     pub fn new(configured: Arc<ConfiguredModel>) -> Self {
-        Self {
-            configured,
-            cached: Mutex::new(None),
-        }
-    }
-
-    /// Resolves credentials before taking the short session-cache lock.
-    async fn connect(
-        &self,
-        http: DynHttpClient,
-    ) -> Result<rig_core::DynModel<rig_core::operation::Completion>, ModelError>
-    {
-        let auth = self.configured.auth_context().await.map_err(|error| {
-            self.connection_failure("authentication", error)
-        })?;
-        let model = {
-            let mut cache = self.cached.lock().map_err(|_error| {
-                tracing::warn!("Provider {}/{} connection failed: session model cache poisoned", self.profile().provider_id, self.profile().model_id);
-                ModelError::Unavailable("session model cache poisoned".into())
-            })?;
-            if let Some(cached) =
-                cache.as_ref().filter(|cached| cached.auth == auth)
-            {
-                Arc::clone(&cached.model)
-            } else {
-                let model = Arc::new(
-                    self.configured.build_model(auth.as_ref()).map_err(
-                        |error| {
-                            self.connection_failure("model construction", error)
-                        },
-                    )?,
-                );
-                *cache = Some(CachedCompletion {
-                    auth,
-                    model: Arc::clone(&model),
-                });
-                model
-            }
-        };
-        Ok(model.as_ref().clone().with_transport(http))
+        Self { configured }
     }
 
     /// Logs safe connection categories with the model and failing phase before returning them.
@@ -272,9 +216,12 @@ impl ProviderModel {
             Some(middleware) => middleware.apply(base),
             None => base,
         };
+        // Credentials are resolved inside the provider; cancellation also covers login waits.
         let model = tokio::select! {
             () = cancellation.cancelled() => return Err(ModelError::Cancelled),
-            model = self.connect(http) => model?,
+            model = self.configured.connect(http) => model.map_err(|error| {
+                self.connection_failure("authentication", error)
+            })?,
         };
         let identity = format!(
             "{}/{}",
@@ -333,11 +280,11 @@ impl ProviderModel {
             };
             let stop_reason = AssistantProjection::from(&native).stop_reason();
             let raw_stop_reason = response.finish_reason().map(|reason| match reason {
-                rig_core::completion::FinishReason::Stop => "stop".to_owned(),
-                rig_core::completion::FinishReason::Length => "length".to_owned(),
-                rig_core::completion::FinishReason::ToolCalls => "tool_calls".to_owned(),
-                rig_core::completion::FinishReason::ContentFilter => "content_filter".to_owned(),
-                rig_core::completion::FinishReason::Other(reason) => reason,
+                protocol::llm::completion::FinishReason::Stop => "stop".to_owned(),
+                protocol::llm::completion::FinishReason::Length => "length".to_owned(),
+                protocol::llm::completion::FinishReason::ToolCalls => "tool_calls".to_owned(),
+                protocol::llm::completion::FinishReason::ContentFilter => "content_filter".to_owned(),
+                protocol::llm::completion::FinishReason::Other(reason) => reason,
                 // Preserve future upstream variants in stored diagnostics, not ordinary logs.
                 reason => format!("{reason:?}"),
             });
@@ -373,7 +320,7 @@ impl Model for ProviderModel {
         self.stream_request(request, cancellation, None).await
     }
 
-    /// Attaches request-local native middleware while retaining the session model cache.
+    /// Attaches request-local native middleware to this request's transport only.
     async fn stream_with_middleware(
         &self,
         request: ModelRequest,
@@ -417,12 +364,17 @@ impl TryFrom<ModelRequest> for ProviderRequest {
                 ))
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
+        let completion = CompletionRequest::new(prompt)
+            .messages(messages)
+            .tools(tools)
+            .temperature(request.options.temperature)
+            .max_tokens(request.options.max_tokens);
+        // Off leaves reasoning to the model default and configured parameters.
         Ok(Self(
-            CompletionRequest::new(prompt)
-                .messages(messages)
-                .tools(tools)
-                .temperature(request.options.temperature)
-                .max_tokens(request.options.max_tokens),
+            match request.options.thinking_level.generation_options() {
+                Some(options) => completion.options(options),
+                None => completion,
+            },
         ))
     }
 }
@@ -473,20 +425,20 @@ impl ProviderMessage {
                     };
                     assistant.stop = Some(match metadata.stop_reason {
                         StopReason::EndTurn => {
-                            rig_core::message::StopReason::Stop
+                            protocol::llm::message::StopReason::Stop
                         }
                         StopReason::ToolUse => {
-                            rig_core::message::StopReason::ToolUse
+                            protocol::llm::message::StopReason::ToolUse
                         }
                         StopReason::MaxTokens => {
-                            rig_core::message::StopReason::Length
+                            protocol::llm::message::StopReason::Length
                         }
                         StopReason::Cancelled => {
-                            rig_core::message::StopReason::Aborted(
+                            protocol::llm::message::StopReason::Aborted(
                                 "cancelled".into(),
                             )
                         }
-                        _ => rig_core::message::StopReason::Error(
+                        _ => protocol::llm::message::StopReason::Error(
                             "failed attempt".into(),
                         ),
                     });
@@ -586,160 +538,10 @@ impl ProviderMessage {
                 ContentBlock::ToolCall { tool_call_id, name, arguments, invalid_arguments , .. } => {
                     let name = ToolName::try_from(name).map_err(|error| ModelError::Protocol(error.to_string()))?;
                     let arguments = invalid_arguments.map_or(arguments, Value::String);
-                    Ok(AssistantContent::ToolCall(rig_core::message::ToolCall::new(CallId::from_wire(tool_call_id.to_string()), ToolFunction::new(name, arguments))))
+                    Ok(AssistantContent::ToolCall(protocol::llm::message::ToolCall::new(CallId::from_wire(tool_call_id.to_string()), ToolFunction::new(name, arguments))))
                 }
                 block => Ok(AssistantContent::text(block.into_provider_text()?)),
             }).collect::<Result<Vec<_>,ModelError>>()?))),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Repeated requests retain only their session's concrete upstream model.
-    #[tokio::test]
-    async fn session_caches_share_definitions_but_not_prepared_owners() {
-        let config: config::AppConfig = toml::from_str(
-            r#"
-active_model="openai/audit"
-[[providers]]
-id="openai"
-display_name="audit"
-provider_type="responses"
-base_url="https://provider.invalid"
-api_key="synthetic-key"
-[[providers.models]]
-id="audit"
-context_tokens=32768
-max_output_tokens=128
-"#,
-        )
-        .unwrap();
-        let factory =
-            ProviderFactory::new(config::ConfigHandle::from_config(config));
-        let definition = factory.resolve("openai", "audit").unwrap();
-        let first = ProviderModel::new(Arc::clone(&definition));
-        let second = ProviderModel::new(Arc::clone(&definition));
-        drop(first.connect(definition.http_client()).await.unwrap());
-        let first_cached =
-            Arc::clone(&first.cached.lock().unwrap().as_ref().unwrap().model);
-        drop(second.connect(definition.http_client()).await.unwrap());
-        let second_cached =
-            Arc::clone(&second.cached.lock().unwrap().as_ref().unwrap().model);
-        drop(first.connect(definition.http_client()).await.unwrap());
-        assert!(Arc::ptr_eq(
-            &first_cached,
-            &first.cached.lock().unwrap().as_ref().unwrap().model
-        ));
-        assert!(!Arc::ptr_eq(&first_cached, &second_cached));
-        let weak = Arc::downgrade(&first_cached);
-        drop(first_cached);
-        drop(first);
-        assert!(weak.upgrade().is_none());
-        assert!(Arc::ptr_eq(
-            &second_cached,
-            &second.cached.lock().unwrap().as_ref().unwrap().model
-        ));
-    }
-    /// A credential refresh invalidates only the requesting session's prepared model.
-    #[tokio::test]
-    async fn changed_credentials_replace_only_the_local_cache() {
-        use rig_core::providers::chatgpt::auth::{FileTokenStore, TokenStore};
-        let directory = tempfile::tempdir().expect("isolated credentials");
-        FileTokenStore::new(directory.path()).save("chatgpt",&serde_json::json!({
-            "access_token":"fresh-synthetic","account_id":"account","expires_at":i64::MAX
-        }).to_string()).await.expect("seed upstream credential");
-        let config: config::AppConfig = toml::from_str(&format!(
-            r#"
-active_model="chatgpt/audit"
-[[providers]]
-id="chatgpt"
-display_name="audit"
-provider_type="responses"
-base_url="https://provider.invalid"
-auth={{type="chatgpt",token_store_dir={path:?}}}
-[[providers.models]]
-id="audit"
-context_tokens=32768
-max_output_tokens=128
-"#,
-            path = directory.path().to_str().expect("store path")
-        ))
-        .expect("config");
-        let factory =
-            ProviderFactory::new(config::ConfigHandle::from_config(config));
-        let definition =
-            factory.resolve("chatgpt", "audit").expect("definition");
-        let first = ProviderModel::new(Arc::clone(&definition));
-        let second = ProviderModel::new(Arc::clone(&definition));
-        drop(
-            first
-                .connect(definition.http_client())
-                .await
-                .expect("first model"),
-        );
-        drop(
-            second
-                .connect(definition.http_client())
-                .await
-                .expect("second model"),
-        );
-        let first_model = Arc::clone(
-            &first
-                .cached
-                .lock()
-                .expect("cache")
-                .as_ref()
-                .expect("cached model")
-                .model,
-        );
-        let second_model = Arc::clone(
-            &second
-                .cached
-                .lock()
-                .expect("cache")
-                .as_ref()
-                .expect("cached model")
-                .model,
-        );
-        // Simulate the old credential on an existing binding after shared auth has refreshed.
-        first
-            .cached
-            .lock()
-            .expect("cache")
-            .as_mut()
-            .expect("cached model")
-            .auth
-            .as_mut()
-            .expect("OAuth context")
-            .api_key = "expired-synthetic".into();
-        drop(
-            first
-                .connect(definition.http_client())
-                .await
-                .expect("refreshed model"),
-        );
-        assert!(!Arc::ptr_eq(
-            &first_model,
-            &first
-                .cached
-                .lock()
-                .expect("cache")
-                .as_ref()
-                .expect("cached model")
-                .model
-        ));
-        assert!(Arc::ptr_eq(
-            &second_model,
-            &second
-                .cached
-                .lock()
-                .expect("cache")
-                .as_ref()
-                .expect("cached model")
-                .model
-        ));
     }
 }

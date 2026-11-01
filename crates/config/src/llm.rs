@@ -3,98 +3,58 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigValidationError;
-use protocol::{ModelInputModalities, ModelInputModality, ModelProfile};
+use protocol::{ModelInputModalities, ModelInputModality};
 
-/// Stable provider identifier used by configuration.
+/// Local provider identifier chosen in configuration and used in `provider/model` selections.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(from = "String", into = "String")]
-pub enum ProviderId {
-    /// OpenAI-hosted models.
-    Openai,
-    /// ChatGPT access-token backed endpoint.
-    Chatgpt,
-    /// DeepSeek provider.
-    Deepseek,
-    /// Moonshot provider.
-    Moonshot,
-    /// MiniMax provider.
-    Minimax,
-    /// Xiaomi Mimo provider.
-    Xiaomimimo,
-    /// Anthropic provider.
-    Anthropic,
-    /// Catch-all for providers not modeled yet.
-    Other(String),
-}
+#[serde(transparent)]
+pub struct ProviderId(String);
 
 impl ProviderId {
-    /// Returns the provider identifier as a string slice.
+    /// Returns the identifier as written in configuration.
     pub fn as_str(&self) -> &str {
-        match self {
-            Self::Openai => "openai",
-            Self::Chatgpt => "chatgpt",
-            Self::Deepseek => "deepseek",
-            Self::Moonshot => "moonshot",
-            Self::Minimax => "minimax",
-            Self::Xiaomimimo => "xiaomimimo",
-            Self::Anthropic => "anthropic",
-            Self::Other(id) => id.as_str(),
-        }
+        &self.0
     }
 }
 
 impl From<String> for ProviderId {
-    /// Parses a provider identifier from its string form.
+    /// Wraps a configured identifier; `LlmProvider::validate_names` checks its shape.
     fn from(value: String) -> Self {
-        match value.as_str() {
-            "openai" => Self::Openai,
-            "chatgpt" => Self::Chatgpt,
-            "deepseek" => Self::Deepseek,
-            "moonshot" => Self::Moonshot,
-            "minimax" => Self::Minimax,
-            "xiaomimimo" => Self::Xiaomimimo,
-            "anthropic" => Self::Anthropic,
-            _ => Self::Other(value),
-        }
+        Self(value)
     }
 }
 
 impl From<&str> for ProviderId {
-    /// Parses a provider identifier from a borrowed string slice.
+    /// Wraps a borrowed configured identifier.
     fn from(value: &str) -> Self {
-        Self::from(value.to_string())
-    }
-}
-
-impl From<ProviderId> for String {
-    /// Serializes a provider identifier back into its string form.
-    fn from(value: ProviderId) -> Self {
-        match value {
-            ProviderId::Openai => "openai".to_string(),
-            ProviderId::Chatgpt => "chatgpt".to_string(),
-            ProviderId::Deepseek => "deepseek".to_string(),
-            ProviderId::Moonshot => "moonshot".to_string(),
-            ProviderId::Minimax => "minimax".to_string(),
-            ProviderId::Xiaomimimo => "xiaomimimo".to_string(),
-            ProviderId::Anthropic => "anthropic".to_string(),
-            ProviderId::Other(id) => id,
-        }
+        Self(value.to_owned())
     }
 }
 
 /// Identifies the API protocol used by a provider.
-#[derive(
-    Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq,
-)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderType {
     /// OpenAI Responses API.
-    #[default]
     Responses,
     /// OpenAI Chat Completions API (or compatible).
     OpenaiCompletions,
     /// Anthropic Messages API (or compatible).
     Anthropic,
+    /// Gemini GenerateContent API (or compatible).
+    Gemini,
+}
+
+impl ProviderType {
+    /// Returns the configuration spelling of this protocol.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::OpenaiCompletions => "openai-completions",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
+        }
+    }
 }
 
 /// API key source used by a configured provider.
@@ -174,13 +134,18 @@ pub struct LlmModel {
     /// Optional context window size in tokens.
     #[builder(default)]
     pub context_tokens: Option<u64>,
-    /// Optional maximum output size in tokens.
+    /// Optional maximum output size in tokens; capability metadata, never sent by itself.
     #[builder(default)]
     pub max_output_tokens: Option<u64>,
-    /// Ordered input modalities accepted by this model.
-    #[serde(default = "LlmModel::default_input")]
-    #[builder(default = Self::default_input())]
-    pub input: Vec<ModelInputModality>,
+    /// Output tokens requested per response; at most `compaction.reserve_tokens` and
+    /// `max_output_tokens`. Omitted uses the smaller of those two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub request_max_tokens: Option<u64>,
+    /// Ordered input modalities accepted by this model; omitted uses the rig catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub input: Option<Vec<ModelInputModality>>,
     /// Provider-specific parameters merged into every request for this model.
     /// For DeepSeek thinking mode: `{ "thinking": {"type": "enabled"}, "reasoning_effort": "high" }`.
     #[serde(default)]
@@ -189,39 +154,52 @@ pub struct LlmModel {
 }
 
 /// Provider metadata plus auth/model information used to build a completion model.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    typed_builder::TypedBuilder,
+)]
 pub struct LlmProvider {
-    /// Stable provider identifier used by configuration (e.g. "deepseek").
+    /// Stable local provider identifier used in `provider/model` selections.
     pub id: ProviderId,
+    /// rig preset name that selects dialect details and catalog metadata; defaults to `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub preset: Option<String>,
     /// Human-readable provider name.
     pub display_name: String,
-    /// API protocol used by this provider entry.
-    #[serde(default)]
-    pub provider_type: ProviderType,
-    /// Base URL used for provider requests (no trailing slash).
-    pub base_url: String,
+    /// API protocol; omitted uses the preset's rig default, or Responses for unknown presets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub provider_type: Option<ProviderType>,
+    /// Base URL for provider requests; omitted uses the rig preset's endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub base_url: Option<String>,
     /// API key source. This can be a plaintext string or `{ env = "NAME" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
     pub api_key: Option<ApiKeyConfig>,
     /// Provider-level auth strategy for non-API-key flows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
     pub auth: Option<ProviderAuthConfig>,
     /// Models available through this provider.
     #[serde(default)]
+    #[builder(default)]
     pub models: Vec<LlmModel>,
 }
 
 impl LlmModel {
-    /// Returns the backward-compatible text-only model input default.
-    fn default_input() -> Vec<ModelInputModality> {
-        vec![ModelInputModality::Text]
-    }
-
-    /// Converts validated model metadata into the stable runtime profile.
-    pub fn to_profile(
+    /// Validates the values this model sets; omitted metadata is resolved later from the rig catalog.
+    pub fn validate(
         &self,
         provider: &LlmProvider,
-    ) -> Result<ModelProfile, ConfigValidationError> {
+    ) -> Result<(), ConfigValidationError> {
         let provider_id = provider.id.as_str();
         if self
             .upstream_id
@@ -233,69 +211,71 @@ impl LlmModel {
                 model_id: self.id.clone(),
             });
         }
-        let context_tokens = self.context_tokens.ok_or_else(|| {
-            ConfigValidationError::MissingModelLimit {
-                provider_id: provider_id.to_string(),
-                model_id: self.id.clone(),
-                field: "context_tokens",
+        for (field, value) in [
+            ("context_tokens", self.context_tokens),
+            ("max_output_tokens", self.max_output_tokens),
+            ("request_max_tokens", self.request_max_tokens),
+        ] {
+            if value == Some(0) {
+                return Err(ConfigValidationError::ZeroModelLimit {
+                    provider_id: provider_id.to_string(),
+                    model_id: self.id.clone(),
+                    field,
+                });
             }
-        })?;
-        if context_tokens == 0 {
-            return Err(ConfigValidationError::ZeroModelLimit {
-                provider_id: provider_id.to_string(),
-                model_id: self.id.clone(),
-                field: "context_tokens",
-            });
         }
-        let max_output_tokens = self.max_output_tokens.ok_or_else(|| {
-            ConfigValidationError::MissingModelLimit {
-                provider_id: provider_id.to_string(),
-                model_id: self.id.clone(),
-                field: "max_output_tokens",
-            }
-        })?;
-        if max_output_tokens == 0 {
-            return Err(ConfigValidationError::ZeroModelLimit {
-                provider_id: provider_id.to_string(),
-                model_id: self.id.clone(),
-                field: "max_output_tokens",
-            });
+        if let Some(input) = &self.input {
+            ModelInputModalities::try_from(input.clone()).map_err(
+                |reason| ConfigValidationError::InvalidModelInput {
+                    provider_id: provider_id.to_string(),
+                    model_id: self.id.clone(),
+                    reason,
+                },
+            )?;
         }
-        let input = ModelInputModalities::try_from(self.input.clone())
-            .map_err(|reason| ConfigValidationError::InvalidModelInput {
-                provider_id: provider_id.to_string(),
-                model_id: self.id.clone(),
-                reason,
-            })?;
-        // The upstream DeepSeek wire is text-only even when old configuration advertised images.
-        let input = if provider.id == ProviderId::Deepseek {
-            ModelInputModalities::default()
-        } else {
-            input
-        };
-
-        Ok(ModelProfile::builder()
-            .provider_id(provider_id.to_string())
-            .model_id(self.id.clone())
-            .display_name(
-                self.display_name.clone().unwrap_or_else(|| self.id.clone()),
-            )
-            .context_tokens(context_tokens)
-            .max_output_tokens(max_output_tokens)
-            .input(input)
-            .build())
+        Ok(())
     }
 }
 
 impl Default for LlmModel {
-    /// Creates an empty text-only model configuration.
+    /// Creates an empty model configuration; omitted metadata comes from the rig catalog.
     fn default() -> Self {
         Self::builder().id(String::new()).build()
     }
 }
 
 impl LlmProvider {
-    /// Validates unique model identifiers and all runtime-required limits.
+    /// Returns the rig preset name, which defaults to the local identifier.
+    pub fn preset(&self) -> &str {
+        self.preset.as_deref().unwrap_or(self.id.as_str())
+    }
+
+    /// Rejects an `id` or `preset` that is empty, padded, or contains `/`.
+    ///
+    /// `/` separates provider and model in selections, and a padded preset would
+    /// silently miss rig's presets.
+    pub fn validate_names(&self) -> Result<(), ConfigValidationError> {
+        let names = [
+            ("id", Some(self.id.as_str())),
+            ("preset", self.preset.as_deref()),
+        ];
+        for (field, value) in names {
+            if let Some(value) = value.filter(|value| {
+                value.is_empty()
+                    || value.trim() != *value
+                    || value.contains('/')
+            }) {
+                return Err(ConfigValidationError::InvalidProviderName {
+                    provider_id: self.id.as_str().to_owned(),
+                    field,
+                    value: value.to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates unique model identifiers and every configured model value.
     pub fn validate_models(&self) -> Result<(), ConfigValidationError> {
         let mut model_ids = std::collections::HashSet::new();
         for model in &self.models {
@@ -305,7 +285,7 @@ impl LlmProvider {
                     model_id: model.id.clone(),
                 });
             }
-            model.to_profile(self)?;
+            model.validate(self)?;
         }
 
         Ok(())
@@ -316,9 +296,11 @@ impl LlmProvider {
         if let Some(ProviderAuthConfig::Chatgpt { token_store_dir }) =
             &self.auth
         {
-            let reason = if self.id != ProviderId::Chatgpt
-                || self.provider_type != ProviderType::Responses
-            {
+            let reason = if self.preset() != "chatgpt"
+                || !matches!(
+                    self.provider_type,
+                    None | Some(ProviderType::Responses)
+                ) {
                 Some(
                     "chatgpt authentication requires the ChatGPT Responses provider",
                 )
@@ -377,8 +359,11 @@ thinking = { type = "enabled" }
 reasoning_effort = "high"
 "#;
         let provider: LlmProvider = toml::from_str(toml).unwrap();
-        assert_eq!(provider.id, ProviderId::Deepseek);
-        assert_eq!(provider.provider_type, ProviderType::OpenaiCompletions);
+        assert_eq!(provider.id, ProviderId::from("deepseek"));
+        assert_eq!(
+            provider.provider_type,
+            Some(ProviderType::OpenaiCompletions)
+        );
         assert_eq!(
             provider.api_key,
             Some(ApiKeyConfig::Plaintext("sk-abc".to_string()))
@@ -392,9 +377,9 @@ reasoning_effort = "high"
         );
     }
 
-    /// ProviderType defaults to Responses.
+    /// An omitted protocol deserializes as unset.
     #[test]
-    fn provider_type_default_is_responses() {
+    fn provider_type_is_optional() {
         let provider: LlmProvider = toml::from_str(
             r#"
 id = "openai"
@@ -404,11 +389,12 @@ api_key = "sk-test"
 "#,
         )
         .unwrap();
-        assert_eq!(provider.id, ProviderId::Openai);
-        assert_eq!(provider.provider_type, ProviderType::Responses);
+        assert_eq!(provider.id, ProviderId::from("openai"));
+        // An omitted protocol stays unset until the provider layer resolves the preset.
+        assert_eq!(provider.provider_type, None);
     }
 
-    /// Unknown provider ids deserialize into ProviderId::Other.
+    /// Any provider id round-trips as the string it was configured with.
     #[test]
     fn provider_id_preserves_unknown_values() {
         let provider: LlmProvider = toml::from_str(
@@ -420,10 +406,7 @@ api_key = "sk-test"
 "#,
         )
         .unwrap();
-        assert_eq!(
-            provider.id,
-            ProviderId::Other("custom-provider".to_string())
-        );
+        assert_eq!(provider.id, ProviderId::from("custom-provider"));
         assert_eq!(provider.id.as_str(), "custom-provider");
     }
 
@@ -466,7 +449,7 @@ id = "gpt-5.4"
         )
         .unwrap();
 
-        assert_eq!(provider.id, ProviderId::Chatgpt);
+        assert_eq!(provider.id, ProviderId::from("chatgpt"));
         assert!(provider.api_key.is_none());
         assert_eq!(
             provider.auth,

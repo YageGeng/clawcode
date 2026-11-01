@@ -282,3 +282,23 @@ fn image_model_request_preserves_images() {
         MessageContent::User { blocks } if blocks == &vec![image]
     ));
 }
+
+/// Off sends nothing; every other level maps to the same-named effort and tolerates unsupported levels.
+#[test]
+fn thinking_levels_map_to_generation_options() {
+    use protocol::ThinkingLevel;
+    use rig_core::completion::options::{Effort, OnUnsupported, Reasoning};
+    assert!(ThinkingLevel::Off.generation_options().is_none());
+    assert_eq!(ThinkingLevel::default(), ThinkingLevel::Medium);
+    for (level, effort) in [
+        (ThinkingLevel::Minimal, Effort::Minimal),
+        (ThinkingLevel::Low, Effort::Low),
+        (ThinkingLevel::Medium, Effort::Medium),
+        (ThinkingLevel::High, Effort::High),
+        (ThinkingLevel::XHigh, Effort::XHigh),
+    ] {
+        let options = level.generation_options().expect("options");
+        assert_eq!(options.reasoning, Some(Reasoning::Effort(effort)));
+        assert_eq!(options.unsupported_policy(), OnUnsupported::Ignore);
+    }
+}

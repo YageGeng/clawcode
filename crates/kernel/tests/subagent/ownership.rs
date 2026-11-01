@@ -12,6 +12,7 @@ async fn deleting_owner_only_reads_headers_for_ownership() {
         .create_owned_session(
             ownership(&owner),
             SessionTitle::try_from("child").expect("title"),
+            None,
         )
         .await
         .expect("child");
@@ -118,6 +119,7 @@ async fn close_waits_for_inflight_owned_creation() {
             .create_owned_session(
                 edge,
                 SessionTitle::try_from("child").expect("title"),
+                None,
             )
             .await
     });
@@ -163,6 +165,7 @@ async fn owned_session_copies_owner_agent() {
         .create_owned_session(
             ownership(&owner),
             SessionTitle::try_from("subagent: x").expect("title"),
+            None,
         )
         .await
         .expect("child");
@@ -217,7 +220,8 @@ async fn creating_owned_session_requires_live_owner() {
         test.kernel
             .create_owned_session(
                 ownership(&missing),
-                SessionTitle::try_from("x").expect("title")
+                SessionTitle::try_from("x").expect("title"),
+                None
             )
             .await,
         Err(KernelError::OwnerUnavailable(_))

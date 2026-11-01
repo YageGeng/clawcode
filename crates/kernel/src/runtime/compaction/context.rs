@@ -41,7 +41,8 @@ impl CompactionPolicyExt for CompactionPolicy {
         if metadata.stop_reason == StopReason::MaxTokens
             && (usage
                 .output_tokens
-                .is_some_and(|output| output < profile.max_output_tokens)
+                // Below the requested budget, a length stop means the window ran out.
+                .is_some_and(|output| output < profile.request_max_tokens)
                 || usage.input_tokens.is_some_and(|input| {
                     input.saturating_mul(100)
                         >= profile.context_tokens.saturating_mul(99)
@@ -441,5 +442,46 @@ impl EstimatedTokens for AgentMessage {
             total.saturating_add(block_characters)
         });
         u64::try_from(characters.div_ceil(4)).unwrap_or(u64::MAX)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A length stop that used the whole request budget is a normal truncation, not an overflow.
+    #[test]
+    fn length_stop_at_request_budget_is_not_overflow() {
+        let profile = ModelProfile::builder()
+            .provider_id("p".to_string())
+            .model_id("m".to_string())
+            .display_name("m".to_string())
+            .context_tokens(100_000)
+            .max_output_tokens(64_000)
+            .request_max_tokens(16_000)
+            .build();
+        let policy = CompactionPolicy::builder()
+            .enabled(true)
+            .reserve_tokens(16_384)
+            .keep_recent_tokens(20_000)
+            .build();
+        let metadata = |output: u64| {
+            AssistantMetadata::builder()
+                .provider_id("p".to_string())
+                .model_id("m".to_string())
+                .stop_reason(StopReason::MaxTokens)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(1_000)
+                        .output_tokens(output),
+                ))
+                .build()
+        };
+
+        assert_eq!(policy.overflow_recovery(&metadata(16_000), &profile), None);
+        assert_eq!(
+            policy.overflow_recovery(&metadata(9_000), &profile),
+            Some(OverflowRecovery::CompactAndRetry)
+        );
     }
 }

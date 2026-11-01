@@ -61,10 +61,6 @@ input = ["text"]
 context_tokens = 1000000
 max_output_tokens = 384000
 
-[providers.models.extra_param]
-thinking = { type = "enabled" }
-reasoning_effort = "high"
-
 [app.recovery]
 # Caps source Session updates consumed into one outbound ACP frame.
 max_batch_size = 512
@@ -90,7 +86,7 @@ max_retry_delay_ms = 60000
 
 [compaction]
 enabled = true
-reserve_tokens = 16384
+reserve_tokens = 65536
 keep_recent_tokens = 20000
 
 [prompt]
@@ -141,6 +137,93 @@ Model `id` is the stable local identifier used by `active_model`, Session
 metadata, and model selection. When an upstream API expects a different
 `model` value, set the optional `upstream_id`; when omitted, requests use
 `id`.
+
+Each model limit has one meaning. `context_tokens` is the model's input limit
+and `max_output_tokens` its output capability; both default to rig's catalog and
+are metadata only. `request_max_tokens` is the `max_tokens` every Turn sends. It
+must not exceed `max_output_tokens` or `compaction.reserve_tokens`, and defaults
+to the smaller of the two. Compaction keeps input below `context_tokens` minus
+`reserve_tokens`, so a budget within the reserve keeps input plus output inside
+the window. For longer responses, raise `compaction.reserve_tokens` (compaction
+then starts earlier) together with `request_max_tokens`. With compaction
+disabled, input is not bounded and this guarantee does not apply.
+
+Upgrade note: Turns previously sent `max_output_tokens` as `max_tokens`; they now
+send `request_max_tokens`, which is usually smaller (a model with
+`max_output_tokens = 384000` and the built-in 16384 reserve now requests 16384).
+To restore longer responses, raise `compaction.reserve_tokens` and, if needed,
+set `request_max_tokens` up to that reserve.
+
+Providers resolve through rig's provider registry. Provider `id` is the local
+key used in `provider/model` selections, so any non-empty name without `/` or
+surrounding whitespace works; keep it stable, because saved sessions refer to it.
+The optional `preset` names the rig preset that decides protocol details and
+model metadata, and defaults to `id`. `provider_type` (`responses`,
+`openai-completions`, `anthropic`, `gemini`) chooses the protocol. Both
+`provider_type` and `base_url` are optional for presets rig knows, and the model
+limits and `input` are optional for models in rig's catalog. Configured values
+always take priority over the catalog. A minimal provider is:
+
+```toml
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key = { env = "DEEPSEEK_API_KEY" }
+
+[[providers.models]]
+id = "deepseek-flash"
+```
+
+| Case | Provider fields |
+|---|---|
+| Official endpoint | `id = "deepseek"` |
+| A known preset's other protocol | `id = "moonshot"`, `provider_type = "anthropic"` |
+| Proxy of a known preset | `id = "ds-proxy"`, `preset = "deepseek"`, `base_url = "…"` |
+| Generic compatible endpoint (vLLM, LiteLLM, gateways) | `id = "corp"`, `provider_type = "openai-completions"`, `base_url = "…"`, model limits required |
+| Gateway serving a known preset's models over another protocol | `id = "litellm"`, `preset = "anthropic"`, `provider_type = "openai-completions"`, `base_url = "…"` |
+
+When rig has no preset for the preset and protocol pair, `base_url` is required
+and the protocol's generic dialect is used; if rig knows the preset under
+another protocol, a startup warning names the provider and protocol, because
+that preset's dialect details no longer apply. An omitted `provider_type` means
+the preset's rig default, or `responses` for presets rig does not know.
+
+Upgrade note: a provider whose `id` matches a rig preset that was not one of the
+previously built-in providers (for example `openrouter`, `groq`, `mistral`, `xai`,
+or `ollama`) used the generic OpenAI dialect before, and the Responses route
+when `provider_type` was omitted. It now uses that preset's rig dialect and
+default route. To keep the previous behavior, set `preset` to a name rig does
+not know, such as `preset = "custom"`, and keep `base_url`.
+
+Gemini's rig preset is `gcp.gemini`: use `preset = "gcp.gemini"` for the
+official endpoint, or `provider_type = "gemini"` with a `base_url` for a
+compatible one.
+
+The Session thinking level is sent as a portable reasoning effort that rig
+translates for each provider. Sessions without a persisted choice start at
+`medium`; compaction summaries and MCP sampling always send no reasoning option.
+`off` sends no reasoning option, leaving the model default and `extra_param` in
+charge. When rig's catalog lists the effort tiers a
+model takes, a level snaps to the highest listed tier at or below it, or the
+lowest listed tier: on DeepSeek (low, high, max) Minimal and Medium send low and
+XHigh sends high, so a stronger level never sends less reasoning. For a model
+the catalog does not list, a level the provider rejects is skipped instead of
+failing the request.
+
+When a resumed session's persisted model is no longer configured, the session
+opens on its previously selected or active model and a warning is logged.
+`extra_param` keys override the translated parameters by top-level key; for
+example, an `extra_param` `thinking` object replaces the generated one. A
+`thinking` or `reasoning_effort` key in a model's `extra_param` therefore pins
+reasoning for every Session thinking level; remove those keys to let the
+Session level choose.
+
+The built-in `subagent` tool and the `background_subagent` `spawn` action take an
+optional `model` argument naming a configured model as `provider/model`. The
+reference splits at the first `/`, so `openrouter/aion-labs/aion-2.0` works. When
+omitted, the child uses the parent's current model; it always inherits the
+thinking level and tools. An unconfigured model is rejected with the list of
+configured models.
 
 ## MCP discovery and output
 
@@ -320,16 +403,16 @@ stops remove the failed Assistant from active context and compact-and-retry at
 most once. The former Turn-count compaction fields are not backward compatible.
 
 Provider adapters use the crates.io releases of `rig-core` and `rig-reqwest`
-with the range `>=0.46.0-rc.1, <1`. This admits later stable 0.x releases and
-newer prereleases of 0.46.0, while retaining the required API baseline.
-`Cargo.lock` records the versions validated for this application; ordinary builds
-retain them. Run `cargo update -p rig-core -p rig-reqwest` to obtain newer allowed
-releases, then run the workspace tests and Clippy. Pre-1.0 minor releases may
-require API adaptations; moving to 1.x is an explicit range change.
-DeepSeek follows the upstream
-text-only capability: configured image input is downgraded to the existing text
-placeholder. Other providers use their configured protocol and upstream dialect.
-Each session owns its model history cache; HTTP pools and authentication are shared.
+pinned to `0.46` (`>=0.46.0, <0.47.0`), so `cargo update` only admits 0.46.x
+patch releases. `Cargo.lock` records the versions validated for this application.
+Pre-1.0 minor releases may change the API and the serialized native Assistant
+message stored in session files, so moving to 0.47 or later is an explicit range
+change for both crates together, followed by the workspace tests and Clippy. A
+stored native message the current build cannot read is dropped on load: that
+Assistant replays from its displayed content, and a debug log records the fallback.
+Model input capabilities come from configuration first, then rig's catalog.
+Each request builds its upstream model; the HTTP pool is shared, and each
+provider shares one authenticator across its models.
 
 Usage follows upstream optional counters. Input tokens already include cache
 reads and writes; these are subsets, never additional input. Missing counts display

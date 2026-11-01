@@ -680,6 +680,8 @@ async fn compact_builds_structured_summary_request_with_additional_focus() {
     let request = requests.get(1).expect("summary request");
     assert!(request.tools.is_empty());
     assert_eq!(request.options.max_tokens, Some(8_000));
+    // Summaries never inherit a reasoning level, whatever the default level is.
+    assert_eq!(request.options.thinking_level, protocol::ThinkingLevel::Off);
     assert_eq!(request.messages.len(), 2);
     let MessageContent::System { blocks } = &request.messages[0].content else {
         panic!("summary protocol must use a dedicated System message");

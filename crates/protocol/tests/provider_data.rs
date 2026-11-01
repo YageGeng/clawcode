@@ -93,6 +93,30 @@ fn native_assistant_message_survives_protocol_storage() {
     assert_eq!(value["metadata"]["context_overflow"], true);
 }
 
+/// An unreadable native payload falls back to canonical replay instead of failing the session.
+#[test]
+fn unreadable_native_assistant_message_falls_back_to_canonical_blocks() {
+    for native in [
+        // A future upstream shape this build cannot read.
+        json!({"renamed_content_field":[{"kind":"text","value":"done"}]}),
+        json!("not an object"),
+        serde_json::Value::Null,
+    ] {
+        let content: protocol::MessageContent = serde_json::from_value(json!({
+            "type":"assistant", "blocks":[{"type":"text","text":"done"}],
+            "model_message":native,
+            "metadata":{
+                "provider_id":"openai","model_id":"audit","stop_reason":"end_turn",
+                "usage":{"format":"rig-core-v1","usage":{}}
+            }
+        }))
+        .expect("decode assistant despite unreadable native payload");
+        let value = serde_json::to_value(content).expect("encode assistant");
+        assert!(value.get("model_message").is_none(), "{value}");
+        assert_eq!(value["blocks"][0]["text"], "done");
+    }
+}
+
 /// Invalid provider argument JSON must remain distinguishable from an empty valid object.
 #[test]
 fn invalid_tool_arguments_survive_protocol_storage() {

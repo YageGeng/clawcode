@@ -687,6 +687,8 @@ impl Kernel {
             options: ModelRequestOptions {
                 max_tokens,
                 temperature: None,
+                // Summaries never reason; the session level applies to Turns only.
+                thinking_level: protocol::ThinkingLevel::Off,
             },
         };
         if request.adapt_input(model.profile()) {

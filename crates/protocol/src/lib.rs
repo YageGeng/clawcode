@@ -134,5 +134,6 @@ pub use turn::{
     TurnTimingError,
 };
 
+pub mod llm;
 pub mod usage;
 pub use usage::{ModelUsage, Usage};

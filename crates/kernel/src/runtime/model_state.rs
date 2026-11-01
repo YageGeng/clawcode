@@ -70,6 +70,35 @@ impl SessionModelState {
         self.catalog.resolve(provider_id, model_id)
     }
 
+    /// Resolves a `provider/model` reference, splitting at the first slash.
+    ///
+    /// The error names the reference and lists every configured model so a model
+    /// caller can correct itself.
+    pub(super) fn resolve_reference(
+        &self,
+        reference: &str,
+    ) -> Result<Arc<dyn Model>, String> {
+        reference
+            .split_once('/')
+            .and_then(|(provider_id, model_id)| {
+                self.catalog.resolve(provider_id, model_id)
+            })
+            .ok_or_else(|| {
+                let configured = self
+                    .catalog
+                    .profiles()
+                    .iter()
+                    .map(|profile| {
+                        format!("{}/{}", profile.provider_id, profile.model_id)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "unknown model '{reference}'; configured models: {configured}"
+                )
+            })
+    }
+
     /// Returns every configured model profile in catalog order.
     pub(super) fn profiles(&self) -> Vec<ModelProfile> {
         self.catalog.profiles()
@@ -202,6 +231,139 @@ mod tests {
         assert_eq!(selected.profile().model_id, "secondary");
         assert_eq!(level, ThinkingLevel::High);
     }
+    /// References split at the first slash, so model ids may contain their own slashes.
+    #[test]
+    fn resolve_reference_splits_at_first_slash() {
+        let routed: Arc<dyn Model> = Arc::new(TestModel(
+            ModelProfile::builder()
+                .provider_id("openrouter".to_string())
+                .model_id("aion-labs/aion-2.0".to_string())
+                .display_name("Aion".to_string())
+                .context_tokens(128_000)
+                .max_output_tokens(8_000)
+                .build(),
+        ));
+        let catalog = Arc::new(
+            ModelCatalog::new(
+                "openrouter",
+                "aion-labs/aion-2.0",
+                vec![Arc::clone(&routed)],
+            )
+            .expect("model catalog"),
+        );
+        let state = SessionModelState::new(catalog, routed, ThinkingLevel::Off);
+
+        let found = state
+            .resolve_reference("openrouter/aion-labs/aion-2.0")
+            .map(|model| model.profile().model_id.clone());
+        assert_eq!(found.as_deref(), Ok("aion-labs/aion-2.0"));
+        for reference in ["openrouter/missing", "nomodel"] {
+            let Err(error) = state.resolve_reference(reference) else {
+                panic!("{reference} must not resolve");
+            };
+            assert!(error.contains(reference), "{error}");
+            assert!(error.contains("openrouter/aion-labs/aion-2.0"), "{error}");
+        }
+    }
+    /// Builds a kernel over `root` whose provider offers the listed models.
+    fn kernel_with_models(
+        root: &std::path::Path,
+        models: &[&str],
+    ) -> crate::Kernel {
+        let entries = models
+            .iter()
+            .map(|id| {
+                format!(
+                    "[[providers.models]]\nid=\"{id}\"\ncontext_tokens=32768\nmax_output_tokens=128\n"
+                )
+            })
+            .collect::<String>();
+        let config: config::AppConfig = toml::from_str(&format!(
+            "active_model=\"openai/audit\"\n[[providers]]\nid=\"openai\"\ndisplay_name=\"audit\"\nprovider_type=\"responses\"\nbase_url=\"https://provider.invalid\"\napi_key=\"synthetic-key\"\n{entries}"
+        ))
+        .expect("config");
+        let clock: Arc<dyn store::Clock> = Arc::new(store::SystemClock);
+        crate::KernelFactory::builder()
+            .model_factory(Arc::new(crate::ProviderModelFactory::from_config(
+                config::ConfigHandle::from_config(config),
+            )))
+            .tool_factory(Arc::new(tools::BuiltinToolFactory::new()))
+            .store_factory(Arc::new(store::JsonlStoreFactory::new(
+                root,
+                Arc::clone(&clock),
+            )))
+            .extension_factory(Arc::new(
+                extension::StaticExtensionFactory::default(),
+            ))
+            .prompt_factory(Arc::new(prompt::FilesystemPromptFactory::new(
+                root.join("config"),
+                protocol::PromptPolicy::default(),
+            )))
+            .clock(clock)
+            .id_generator(Arc::new(crate::NanoidIdGenerator))
+            .build()
+            .build()
+            .expect("kernel")
+    }
+
+    /// Sessions without a persisted choice start at the default thinking level.
+    #[tokio::test]
+    async fn new_sessions_start_at_the_default_thinking_level() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let session = protocol::SessionId::try_from("a").expect("id");
+        let kernel = kernel_with_models(temporary.path(), &["audit"]);
+        kernel
+            .create_session(store::SessionCreateOptions {
+                session_id: session.clone(),
+                cwd: temporary.path().into(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("create");
+        assert_eq!(
+            kernel
+                .session_settings(&session)
+                .expect("settings")
+                .thinking_level,
+            ThinkingLevel::default()
+        );
+    }
+
+    /// A persisted model that is no longer configured falls back instead of blocking Resume.
+    #[tokio::test]
+    async fn resume_falls_back_when_persisted_model_is_gone() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let session = protocol::SessionId::try_from("a").expect("id");
+        let before = kernel_with_models(temporary.path(), &["audit", "other"]);
+        before
+            .create_session(store::SessionCreateOptions {
+                session_id: session.clone(),
+                cwd: temporary.path().into(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("create");
+        before
+            .set_session_model(&session, "openai", "other")
+            .await
+            .expect("select other");
+        before.close_session(&session).await.expect("close");
+
+        let after = kernel_with_models(temporary.path(), &["audit"]);
+        after
+            .resume_session(session.clone(), temporary.path().into())
+            .await
+            .expect("resume without the persisted model");
+        assert_eq!(
+            after
+                .session_settings(&session)
+                .expect("settings")
+                .model
+                .model_id,
+            "audit"
+        );
+    }
+
     /// Real Session creation never installs a model handle from another Session's catalog.
     #[tokio::test]
     async fn sessions_own_distinct_model_catalogs_and_release_them_on_close() {

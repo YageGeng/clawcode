@@ -119,6 +119,7 @@ async fn parallel_children_resume_shared_owner() {
                         name: name.into(),
                     },
                     protocol::SessionTitle::try_from(name).expect("title"),
+                    None,
                 )
                 .await
                 .expect("child"),
@@ -232,6 +233,7 @@ async fn cyclic_owner_is_rejected_without_waiting_on_itself() {
                 name: "child".into(),
             },
             protocol::SessionTitle::try_from("child").expect("title"),
+            None,
         )
         .await
         .expect("child");

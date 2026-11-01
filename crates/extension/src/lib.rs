@@ -36,3 +36,8 @@ pub use registry::{
 pub use runtime::{
     DiscardExtensionDiagnostics, ExtensionDiagnosticSink, ExtensionRuntime,
 };
+
+/// rig's HTTP contract for request-scoped provider middleware written by extensions.
+pub use rig_core::http_client;
+/// The boxed future type returned by `HttpMiddleware` hooks.
+pub use rig_core::wasm_compat::WasmBoxedFuture;

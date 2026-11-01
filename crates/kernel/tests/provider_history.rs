@@ -400,14 +400,14 @@ async fn anthropic_refusal_preserves_reported_usage() {
     let config = config::ConfigHandle::from_config(
         server.configuration("anthropic", "anthropic"),
     );
-    let definition = provider::ProviderFactory::new(config.clone())
-        .resolve("anthropic", "audit")
-        .unwrap();
-    let provider::ProviderCompletion::Anthropic(native_model) =
-        definition.build_model(None).unwrap()
-    else {
-        panic!("Anthropic")
-    };
+    // The decoder only needs the Messages wire, so build it straight from rig.
+    let native_model =
+        rig_core::providers::anthropic::AnthropicConfig::with_key(
+            &rig_core::providers::anthropic::wire::ANTHROPIC,
+            "synthetic-key",
+        )
+        .connect(rig_core::test_utils::RecordingHttpClient::new("{}"))
+        .completion("audit");
     let native = rig_core::test_utils::history::decode(
         &native_model.wire,
         rig_core::wire::Mode::Streaming,

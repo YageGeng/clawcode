@@ -4,17 +4,27 @@ use crate::ModelProfile;
 
 /// Configurable model reasoning level following Pi's ordered levels.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
-    /// Disable explicit reasoning when supported.
+    /// Send no reasoning option; the model default and configured parameters decide.
     Off,
     /// Minimal provider reasoning budget.
     Minimal,
     /// Low provider reasoning budget.
     Low,
-    /// Medium provider reasoning budget.
+    /// Medium provider reasoning budget; the level a session starts at.
+    #[default]
     Medium,
     /// High provider reasoning budget.
     High,
@@ -32,6 +42,31 @@ impl ThinkingLevel {
         Self::High,
         Self::XHigh,
     ];
+
+    /// Builds the portable request options for this level, or `None` for Off.
+    ///
+    /// Unsupported levels are skipped instead of failing the request, because
+    /// providers accept different effort sets (DeepSeek takes only low, high and max).
+    pub fn generation_options(
+        self,
+    ) -> Option<rig_core::completion::options::GenerationOptions> {
+        use rig_core::completion::options::{
+            Effort, GenerationOptions, OnUnsupported,
+        };
+        let effort = match self {
+            Self::Off => return None,
+            Self::Minimal => Effort::Minimal,
+            Self::Low => Effort::Low,
+            Self::Medium => Effort::Medium,
+            Self::High => Effort::High,
+            Self::XHigh => Effort::XHigh,
+        };
+        Some(
+            GenerationOptions::default()
+                .reasoning(effort)
+                .on_unsupported(OnUnsupported::Ignore),
+        )
+    }
 }
 
 /// Source of an active-model change.

@@ -4,14 +4,14 @@ use crate::ModelError;
 
 /// Borrows the authoritative assistant turn for both final settlement and edit detection.
 pub(crate) struct AssistantProjection<'a> {
-    message: &'a rig_core::message::AssistantMessage,
+    message: &'a protocol::llm::message::AssistantMessage,
 }
 
-impl<'a> From<&'a rig_core::message::AssistantMessage>
+impl<'a> From<&'a protocol::llm::message::AssistantMessage>
     for AssistantProjection<'a>
 {
     /// Creates a scoped view without cloning native provider payloads.
-    fn from(message: &'a rig_core::message::AssistantMessage) -> Self {
+    fn from(message: &'a protocol::llm::message::AssistantMessage) -> Self {
         Self { message }
     }
 }
@@ -19,7 +19,7 @@ impl<'a> From<&'a rig_core::message::AssistantMessage>
 impl AssistantProjection<'_> {
     /// Maps native termination once for snapshots and replay comparison.
     pub(crate) fn stop_reason(&self) -> protocol::StopReason {
-        use rig_core::message::StopReason;
+        use protocol::llm::message::StopReason;
         match self.message.stop.as_ref() {
             None | Some(StopReason::Stop) => protocol::StopReason::EndTurn,
             Some(StopReason::Length) => protocol::StopReason::MaxTokens,
@@ -32,8 +32,8 @@ impl AssistantProjection<'_> {
     /// Borrows only provider parts that have a project display representation.
     fn visible(
         &self,
-    ) -> impl Iterator<Item = &rig_core::message::AssistantContent> {
-        use rig_core::message::{AssistantContent, DocumentSourceKind};
+    ) -> impl Iterator<Item = &protocol::llm::message::AssistantContent> {
+        use protocol::llm::message::{AssistantContent, DocumentSourceKind};
         self.message.content.iter().filter(|content| match content {
             AssistantContent::Text(_) | AssistantContent::ToolCall(_) => true,
             AssistantContent::Reasoning(reasoning) => {
@@ -49,7 +49,7 @@ impl AssistantProjection<'_> {
 
     /// Creates display blocks without exposing opaque native items or encrypted reasoning.
     pub(crate) fn blocks(&self) -> Result<Vec<ContentBlock>, ModelError> {
-        use rig_core::message::{
+        use protocol::llm::message::{
             AssistantContent, DocumentSourceKind, MimeType,
         };
         let mut blocks = Vec::new();
@@ -143,7 +143,7 @@ impl AssistantProjection<'_> {
         if self.stop_reason() != stop_reason {
             return Ok(false);
         }
-        use rig_core::message::{
+        use protocol::llm::message::{
             AssistantContent, DocumentSourceKind, Image, MimeType,
         };
         let mut expected = self.visible().peekable();
@@ -264,7 +264,9 @@ impl ProviderContentProjection for ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::{AssistantContent, AssistantMessage, Reasoning};
+    use protocol::llm::message::{
+        AssistantContent, AssistantMessage, Reasoning,
+    };
 
     /// Harmless display resegmentation must retain signed native history.
     #[test]
@@ -302,12 +304,12 @@ mod tests {
             AssistantContent::reasoning("B"),
             AssistantContent::tool_call(
                 "call",
-                rig_core::message::ToolName::new("lookup").expect("name"),
+                protocol::llm::message::ToolName::new("lookup").expect("name"),
                 serde_json::json!("{"),
             ),
             AssistantContent::image_base64(
                 "AA==",
-                Some(rig_core::message::ImageMediaType::PNG),
+                Some(protocol::llm::message::ImageMediaType::PNG),
                 None,
             ),
             AssistantContent::image_base64("hidden-image", None, None),

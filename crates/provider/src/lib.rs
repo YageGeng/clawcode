@@ -4,6 +4,5 @@ mod auth;
 pub mod factory;
 
 pub use factory::{
-    ConfiguredModel, ProviderBuildError, ProviderCompletion,
-    ProviderConnectError, ProviderFactory,
+    ConfiguredModel, ProviderBuildError, ProviderConnectError, ProviderFactory,
 };

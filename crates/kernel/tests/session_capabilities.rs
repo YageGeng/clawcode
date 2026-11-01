@@ -405,11 +405,22 @@ record_session_observer!(
     protocol::ModelSelectEvent,
     "model_select"
 );
-record_session_observer!(
-    ThinkingLevelSelectPoint,
-    protocol::ThinkingLevelSelectEvent,
-    "thinking_level_select"
-);
+#[async_trait]
+impl ExtensionHandler<ThinkingLevelSelectPoint> for RecordingExtension {
+    /// Records the select and, separately, whether it reported a level change.
+    async fn handle(
+        &self,
+        event: &protocol::ThinkingLevelSelectEvent,
+        _context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        let mut events = self.0.lock().expect("extension lock");
+        events.push("thinking_level_select");
+        if event.previous_level != event.level {
+            events.push("thinking_level_select:changed");
+        }
+        Ok(())
+    }
+}
 record_session_observer!(
     SessionInfoChangedPoint,
     protocol::SessionInfoChangedEvent,
@@ -1374,6 +1385,11 @@ async fn session_management_dispatches_declared_extension_hooks() {
     ] {
         assert!(events.contains(&expected), "missing {expected}");
     }
+    // Startup and resume at the default level must not report a fake level change.
+    assert!(
+        !events.contains(&"thinking_level_select:changed"),
+        "{events:?}"
+    );
 }
 
 /// Project trust denial excludes project roots without suppressing Extension resources.

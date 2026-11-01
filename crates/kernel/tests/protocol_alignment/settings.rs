@@ -43,7 +43,7 @@ async fn set_session_model_persists_and_emits_settings_changed() {
     assert_eq!(
         settings_events(&test, &session),
         vec![
-            ("secondary".to_string(), ThinkingLevel::Off),
+            ("secondary".to_string(), ThinkingLevel::Medium),
             ("secondary".to_string(), ThinkingLevel::High),
         ]
     );

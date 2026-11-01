@@ -253,6 +253,8 @@ enum BackgroundAction<'a> {
         name: SubagentName,
         message: &'a str,
         when_busy: WhenBusy,
+        /// Optional `provider/model` reference; omitted inherits the owner's model.
+        model: Option<&'a str>,
     },
     Send {
         name: SubagentName,
@@ -298,6 +300,10 @@ impl<'a> TryFrom<&'a ToolCall> for BackgroundAction<'a> {
         if matches!(action, "spawn" | "send") && message.trim().is_empty() {
             return Err(format!("{action} needs a message."));
         }
+        // A model only chooses a new child; silently dropping it elsewhere would mislead.
+        if action != "spawn" && call.arguments.get("model").is_some() {
+            return Err("model only applies to spawn.".into());
+        }
         let when_busy = if call
             .arguments
             .get("followUp")
@@ -313,6 +319,10 @@ impl<'a> TryFrom<&'a ToolCall> for BackgroundAction<'a> {
                 name,
                 message,
                 when_busy,
+                model: call
+                    .arguments
+                    .get("model")
+                    .and_then(serde_json::Value::as_str),
             }),
             ("send", Some(name)) => Ok(Self::Send {
                 name,
@@ -426,9 +436,18 @@ impl BackgroundAction<'_> {
                     name,
                     message,
                     when_busy,
+                    model,
                 },
                 None,
             ) => {
+                // An unknown model is a plain, correctable reply; no child is created.
+                let model = match model
+                    .map(|reference| session.model.resolve_reference(reference))
+                    .transpose()
+                {
+                    Ok(model) => model,
+                    Err(message) => return Ok((message, None)),
+                };
                 let title = SessionTitle::try_from(name.0.clone()).map_err(
                     |error| KernelError::Protocol(error.to_string()),
                 )?;
@@ -439,6 +458,7 @@ impl BackgroundAction<'_> {
                             name: name.0.clone(),
                         },
                         title,
+                        model,
                     )
                     .await?;
                 let body = format!(
@@ -496,7 +516,32 @@ pub(super) struct BackgroundSubagentTool {
 impl AgentTool for BackgroundSubagentTool {
     /// Advertises the same spawn/send/stop/status contract as the reference extension.
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition { name: "background_subagent".into(), description: "Manage persistent subagents that work in the background. Actions: spawn (name, message), send (name, message; followUp: true queues it after the current answer instead of steering), stop (name: aborts its current work), status (name, or all subagents without one). Answers are reported back to you when they arrive.".into(), parameters: serde_json::json!({"type":"object","properties":{"action":{"type":"string","enum":["spawn","send","stop","status"]},"name":{"type":"string"},"message":{"type":"string"},"followUp":{"type":"boolean"}},"required":["action"]}) }
+        ToolDefinition {
+            name: "background_subagent".into(),
+            description: "Manage persistent subagents that work in the background. Actions: spawn (name, message, optional model as provider/model), send (name, message; followUp: true queues it after the current answer instead of steering), stop (name: aborts its current work), status (name, or all subagents without one). Answers are reported back to you when they arrive.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["spawn", "send", "stop", "status"]
+                    },
+                    "name": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "model": {
+                        "type": "string"
+                    },
+                    "followUp": {
+                        "type": "boolean"
+                    }
+                },
+                "required": ["action"]
+            }),
+        }
     }
 
     /// Applies one management action and returns user-correctable errors as plain replies.

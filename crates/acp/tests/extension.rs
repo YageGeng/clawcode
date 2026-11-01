@@ -49,6 +49,7 @@ async fn session_list_reports_ownership() {
                 tool_call_id: ToolCallId::try_from("call-1").expect("call"),
             },
             protocol::SessionTitle::try_from("child").expect("title"),
+            None,
         )
         .await
         .expect("child");
@@ -82,7 +83,7 @@ impl ModelFactory for UnusedModelFactory {
                 .provider_id("integration".to_string())
                 .model_id("unused".to_string())
                 .display_name("Unused integration model".to_string())
-                .context_tokens(8_192)
+                .context_tokens(32_768)
                 .max_output_tokens(1_024)
                 .build(),
         }))
@@ -1222,7 +1223,7 @@ async fn assistant_usage_replays_at_run_end() {
             );
             assert_eq!(replay[4]["payload"]["event"], "run_end");
             assert_eq!(replay[1]["used"], 200);
-            assert_eq!(replay[1]["size"], 8_192);
+            assert_eq!(replay[1]["size"], 32_768);
             assert_eq!(
                 replay[0]["_meta"][ProductIdentity::ACP_NAMESPACE]
                     ["sequence"],

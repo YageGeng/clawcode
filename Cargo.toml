@@ -75,9 +75,9 @@ store = { path = "crates/store" }
 tools = { path = "crates/tools" }
 
 # model providers
-# Follow 0.x releases while retaining the API baseline required by this integration.
-rig-core = { version = ">=0.46.0-rc.1, <1", default-features = false }
-rig-reqwest = { version = ">=0.46.0-rc.1, <1", default-features = false }
+# Both crates share rig-http types, so they must move together.
+rig-core = { version = "0.46", default-features = false }
+rig-reqwest = { version = "0.46", default-features = false }
 
 # error
 anyhow = "1"

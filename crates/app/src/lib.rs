@@ -6,7 +6,10 @@ mod web;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use kernel::{Kernel, KernelFactory, NanoidIdGenerator, ProviderModelFactory};
+use kernel::{
+    Kernel, KernelFactory, ModelFactory, NanoidIdGenerator,
+    ProviderModelFactory,
+};
 use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
 use prompt::FilesystemPromptFactory;
 use protocol::{IdGenerator, ProductIdentity};
@@ -117,9 +120,14 @@ impl ApplicationFactory {
             .ok_or(ApplicationError::MissingConfigDirectory)?
             .join(ProductIdentity::CONFIG_DIR_NAME);
         let cwd = std::env::current_dir()?;
-        let model_profile = snapshot.model_profile().map_err(|error| {
-            ApplicationError::Config(config::ConfigError::Validation(error))
-        })?;
+        // The provider layer completes model metadata from the rig catalog.
+        let model_factory =
+            Arc::new(ProviderModelFactory::from_config(self.config.clone()));
+        let model_profile = model_factory
+            .create()
+            .map_err(kernel::KernelError::from)?
+            .profile()
+            .clone();
         let active_model_id =
             format!("{}/{}", model_profile.provider_id, model_profile.model_id);
         let ui_bootstrap = UiBootstrapResponse::builder()
@@ -163,9 +171,7 @@ impl ApplicationFactory {
         let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
         let id_generator: Arc<dyn IdGenerator> = Arc::new(NanoidIdGenerator);
         let kernel = KernelFactory::builder()
-            .model_factory(Arc::new(ProviderModelFactory::from_config(
-                self.config,
-            )))
+            .model_factory(model_factory)
             .tool_factory(Arc::new(builtin_tools))
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 sessions_root,

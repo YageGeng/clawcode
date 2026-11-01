@@ -324,7 +324,9 @@ impl AssistantAttempt {
 mod tests {
     use super::*;
     use protocol::MessageContent;
-    use rig_core::message::{AssistantContent, AssistantMessage, Reasoning};
+    use protocol::llm::message::{
+        AssistantContent, AssistantMessage, Reasoning,
+    };
 
     /// Creates a complete attempt for authoritative-response settlement checks.
     fn attempt() -> AssistantAttempt {
@@ -363,7 +365,7 @@ mod tests {
             AssistantContent::Reasoning(Reasoning::new("Plan B.")),
             AssistantContent::text("Hello"),
         ])
-        .with_stop(rig_core::message::StopReason::Stop);
+        .with_stop(protocol::llm::message::StopReason::Stop);
         attempt
             .apply(
                 &ModelStreamEvent::Finished(
@@ -418,7 +420,7 @@ mod tests {
             .unwrap();
         let native =
             AssistantMessage::new(vec![AssistantContent::text("answer")])
-                .with_stop(rig_core::message::StopReason::Stop);
+                .with_stop(protocol::llm::message::StopReason::Stop);
         attempt
             .apply(
                 &ModelStreamEvent::Finished(

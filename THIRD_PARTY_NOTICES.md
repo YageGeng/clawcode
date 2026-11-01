@@ -6,7 +6,7 @@ This repository depends on `rig-core` and `rig-reqwest` from `0xPlaygrounds/rig`
 - License: MIT
 - Copyright: Copyright (c) 2024, Playgrounds Analytics Inc.
 
-The upstream crates come from crates.io with the range `>=0.46.0-rc.1, <1`.
+The upstream crates come from crates.io pinned to `0.46`.
 `Cargo.lock` records the currently resolved releases and checksums.
 The former vendored implementation under `crates/provider/` has been removed;
 that crate now contains project configuration and authentication assembly.

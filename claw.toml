@@ -35,7 +35,7 @@ max_retry_delay_ms = 60000
 
 [compaction]
 enabled = true
-reserve_tokens = 16384
+reserve_tokens = 65536
 keep_recent_tokens = 20000
 
 [[providers]]
@@ -52,27 +52,3 @@ id = "deepseek-flash"
 display_name = "DeepSeek V4 Flash"
 context_tokens = 1000000
 max_output_tokens = 384000
-
-[providers.models.extra_param]
-thinking = { type = "enabled" }
-reasoning_effort = "high"
-
-[[mcp_servers]]
-enabled = false
-name = "stdio-reference"
-protocol = "auto"
-command = "cargo"
-args = ["run", "--quiet", "-p", "mcp", "--example", "reference_stdio", "--", "2024-11-05"]
-exposure = "deferred"
-startup_timeout_sec = 30
-request_timeout_sec = 120
-request_total_timeout_sec = 300
-
-[[mcp_servers]]
-enabled = false
-name = "http-reference"
-protocol = "auto"
-url = "http://127.0.0.1:39128/mcp"
-startup_timeout_sec = 30
-request_timeout_sec = 120
-request_total_timeout_sec = 300

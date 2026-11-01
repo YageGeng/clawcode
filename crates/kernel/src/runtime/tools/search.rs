@@ -338,7 +338,27 @@ impl ToolSearchTool {
 impl AgentTool for ToolSearchTool {
     /// Advertises local discovery without including the entire Deferred catalog.
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition { name: "tool_search".into(), description: "Find and load deferred tools. Loaded tools become callable in the next model request, never in this same batch.".into(), parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"],"additionalProperties":false}) }
+        ToolDefinition {
+            name: "tool_search".into(),
+            description: "Find and load deferred tools. Loaded tools become callable in the next model request, never in this same batch.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        }
     }
 
     /// Bounds descriptions and load reports after result hooks.

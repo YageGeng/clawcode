@@ -305,6 +305,7 @@ impl OwnedMcpFixture {
                     tool_call_id: ToolCallId::try_from("call-1").expect("call"),
                 },
                 protocol::SessionTitle::try_from("child").expect("title"),
+                None,
             )
             .await
             .expect("child")
@@ -895,6 +896,11 @@ async fn mcp_sampling_runs_through_current_session_model() {
     assert_eq!(requests.len(), 4);
     assert_eq!(requests[2].options.max_tokens, Some(64));
     assert_eq!(requests[2].options.temperature, Some(0.25));
+    // Sampling requests never inherit a reasoning level, whatever the default is.
+    assert_eq!(
+        requests[2].options.thinking_level,
+        protocol::ThinkingLevel::Off
+    );
     assert!(matches!(
         requests[2].messages.first().map(|message| &message.content),
         Some(MessageContent::System { .. })

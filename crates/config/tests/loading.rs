@@ -10,7 +10,7 @@
 use config::{
     ApiKeyConfig, AppConfig, ConfigValidationError, LoggingConfig, load_from,
 };
-use protocol::{ModelInputModality, PromptContentSource};
+use protocol::PromptContentSource;
 use std::path::{Path, PathBuf};
 
 /// Supplies complete configuration documents for cross-field validation tests.
@@ -304,20 +304,6 @@ fn active_model_requires_a_unique_provider_model() {
     ));
 }
 
-/// Active model resolution produces one stable profile with required limits.
-#[test]
-fn active_model_resolves_to_a_stable_model_profile() {
-    let config: AppConfig = toml::from_str(ConfigFixture::valid())
-        .expect("parse valid model config");
-
-    let profile = config.model_profile().expect("model profile");
-    assert_eq!(profile.provider_id, "deepseek");
-    assert_eq!(profile.model_id, "deepseek-v4-flash");
-    assert_eq!(profile.display_name, "DeepSeek V4 Flash");
-    assert_eq!(profile.context_tokens, 1_000_000);
-    assert_eq!(profile.max_output_tokens, 384_000);
-}
-
 /// An upstream provider identifier does not replace the local model identity.
 #[test]
 fn upstream_model_id_is_transport_only() {
@@ -329,11 +315,10 @@ fn upstream_model_id_is_transport_only() {
         toml::from_str(&document).expect("parse upstream model id");
 
     config.validate().expect("validate upstream model id");
-    let profile = config.model_profile().expect("model profile");
     let model = serde_json::to_value(&config.providers[0].models[0])
         .expect("serialize model config");
 
-    assert_eq!(profile.model_id, "deepseek-v4-flash");
+    assert_eq!(model["id"], "deepseek-v4-flash");
     assert_eq!(model["upstream_id"], "vendor/deepseek-v4-flash");
 }
 
@@ -352,32 +337,6 @@ fn upstream_model_id_rejects_blank_values() {
         .expect_err("reject blank upstream model id");
 
     assert!(error.to_string().contains("upstream_id must not be empty"));
-}
-
-/// Models without an explicit input list remain text-only.
-#[test]
-fn model_input_defaults_to_text() {
-    let config: AppConfig = toml::from_str(ConfigFixture::valid())
-        .expect("parse valid model config");
-
-    let profile = config.model_profile().expect("model profile");
-    assert!(profile.input.supports(ModelInputModality::Text));
-    assert!(!profile.input.supports(ModelInputModality::Image));
-}
-
-/// The upstream DeepSeek protocol overrides obsolete image capability declarations.
-#[test]
-fn deepseek_image_declaration_is_downgraded() {
-    let document = ConfigFixture::valid().replace(
-        "display_name = \"DeepSeek V4 Flash\"",
-        "display_name = \"DeepSeek V4 Flash\"\ninput = [\"text\", \"image\"]",
-    );
-    let config: AppConfig =
-        toml::from_str(&document).expect("parse image model config");
-
-    let profile = config.model_profile().expect("model profile");
-    assert!(profile.input.supports(ModelInputModality::Text));
-    assert!(!profile.input.supports(ModelInputModality::Image));
 }
 
 /// Empty, image-only, and duplicate input lists fail model validation.
@@ -654,4 +613,168 @@ fn kernel_busy_policy_loads_default_and_explicit_values() {
     }
     toml::from_str::<AppConfig>("[kernel]\nwhen_busy = 'followUp'")
         .expect_err("ACP spelling is not configuration spelling");
+}
+
+/// A provider naming only a rig preset, key and model id loads without limits or protocol.
+#[test]
+fn minimal_preset_config_loads() {
+    let config: AppConfig = toml::from_str(
+        r#"
+active_model = "deepseek/deepseek-flash"
+
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key = "sk-test"
+
+[[providers.models]]
+id = "deepseek-flash"
+"#,
+    )
+    .expect("parse minimal provider");
+
+    config.validate().expect("validate minimal provider");
+}
+
+/// ChatGPT authentication is checked against the preset, not the local identifier.
+#[test]
+fn chatgpt_auth_follows_preset() {
+    let directory = tempfile::tempdir().expect("token store directory");
+    let document = |id: &str, preset: &str| {
+        format!(
+            r#"
+active_model = "{id}/gpt"
+
+[[providers]]
+id = "{id}"
+preset = "{preset}"
+display_name = "ChatGPT"
+auth = {{ type = "chatgpt", token_store_dir = {path:?} }}
+
+[[providers.models]]
+id = "gpt"
+context_tokens = 4096
+max_output_tokens = 128
+"#,
+            path = directory.path().to_str().expect("store path")
+        )
+    };
+    let accepted: AppConfig =
+        toml::from_str(&document("work", "chatgpt")).expect("parse chatgpt");
+    accepted.validate().expect("chatgpt preset accepts OAuth");
+    let rejected: AppConfig =
+        toml::from_str(&document("chatgpt", "openai")).expect("parse openai");
+    assert!(matches!(
+        rejected.validate(),
+        Err(ConfigValidationError::InvalidAuthentication { .. })
+    ));
+}
+
+/// The repository configuration keeps loading unchanged.
+#[test]
+fn repository_claw_toml_loads() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        jail.create_file(
+            "claw.toml",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../claw.toml"
+            )),
+        )?;
+        jail.set_env("DEEPSEEK_API_KEY", "synthetic");
+        load_from([PathBuf::from("claw.toml")])
+            .expect("load repository configuration");
+        Ok(())
+    });
+}
+
+/// A request budget larger than the compaction reserve could overflow the window.
+#[test]
+fn request_budget_cannot_exceed_reserve() {
+    let document = ConfigFixture::valid().replace(
+        "max_output_tokens = 384000",
+        "max_output_tokens = 384000\nrequest_max_tokens = 20000",
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse request budget");
+
+    let error = config.validate().expect_err("budget above reserve");
+
+    assert!(
+        matches!(
+            error,
+            ConfigValidationError::RequestBudgetExceedsReserve {
+                request_max_tokens: 20000,
+                reserve_tokens: 16384,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("20000"), "{error}");
+    assert!(error.to_string().contains("16384"), "{error}");
+}
+
+/// A zero request budget is rejected like the other zero limits.
+#[test]
+fn request_budget_rejects_zero() {
+    let document = ConfigFixture::valid().replace(
+        "max_output_tokens = 384000",
+        "max_output_tokens = 384000\nrequest_max_tokens = 0",
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse zero request budget");
+
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigValidationError::ZeroModelLimit {
+            field: "request_max_tokens",
+            ..
+        })
+    ));
+}
+
+/// A preset must be a bare name, so a stray space cannot fall back to a generic dialect.
+#[test]
+fn preset_rejects_blank_or_padded_names() {
+    for preset in ["", " deepseek", "deepseek "] {
+        let document = ConfigFixture::valid().replace(
+            "id = \"deepseek\"\n",
+            &format!("id = \"deepseek\"\npreset = {preset:?}\n"),
+        );
+        let config: AppConfig =
+            toml::from_str(&document).expect("parse preset");
+        assert!(
+            matches!(
+                config.validate(),
+                Err(ConfigValidationError::InvalidProviderName {
+                    field: "preset",
+                    ..
+                })
+            ),
+            "{preset:?}"
+        );
+    }
+}
+
+/// A provider id must be a bare name; `/` would split `provider/model` references.
+#[test]
+fn provider_id_rejects_slash_blank_or_padded_names() {
+    for id in ["", "deep/seek", " deepseek"] {
+        let document = ConfigFixture::valid()
+            .replace("id = \"deepseek\"\n", &format!("id = {id:?}\n"));
+        let config: AppConfig =
+            toml::from_str(&document).expect("parse provider id");
+        assert!(
+            matches!(
+                config.validate(),
+                Err(ConfigValidationError::InvalidProviderName {
+                    field: "id",
+                    ..
+                })
+            ),
+            "{id:?}"
+        );
+    }
 }
