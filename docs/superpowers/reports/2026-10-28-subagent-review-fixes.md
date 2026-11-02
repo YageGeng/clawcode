@@ -74,11 +74,11 @@ AGENTS.md、RTK.md 的已有改动及之前的截图资产保持原样，未暂�
 - 后台 child `session-fNegEzYNlBlqSwNIxTsr4`，名称 `review-reader`：只读 README，产生带 `E2E_BACKGROUND:` 的回报，父会话收到后自动续跑。
 - 主动重启本次测试后端后，WebUI 自动重连，前后台内容恢复，没有 `SessionStarting` 或重复会话错误。
 
-![修复后真实前后台回报](assets/2026-10-28-subagent-review-fixed.png)
+![修复后真实前后台回报](./assets/2026-10-28-subagent-review-fixed.png)
 
 冷重连过程中另外发现后台面板保留旧断线错误的 UI 问题，已在成功轮询后清除错误。复验明确先观察到 `.background-subagents [role="alert"]`，恢复后端后确认连接 ready 且该 alert 被移除；前端 check/build 再次通过。
 
-![冷重连后内容与错误状态恢复](assets/2026-10-28-subagent-review-recovered.png)
+![冷重连后内容与错误状态恢复](./assets/2026-10-28-subagent-review-recovered.png)
 
 浏览器捕获分别为 `browser.json` / `d524386169d63` 和 `browser-reconnect.json` / `d3c6d0235564c`，保存在上述日志目录。捕获中的 WebSocket 连接错误对应主动停止测试后端的断开窗口，不能将它们当作正常运行时错误；最终连接和后台面板均恢复。测试浏览器与后端进程在验证后关闭，临时会话记录保留供复查。
 

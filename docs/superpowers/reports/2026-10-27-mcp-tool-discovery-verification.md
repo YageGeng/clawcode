@@ -83,9 +83,9 @@ WebUI 正常结束和重载回放都显示相同诊断与路径。
 `session--XTPImBj7DhLE27p_eOe5`。结构化证据保存在 `/tmp/clawcode-mcp-e2e-evidence.json`。
 真实 UI 验收之后补充的持久化失败保护，由故障注入、重新打开测试和最终全量回归验证。
 
-![协商、元数据与加载状态](2026-10-27-mcp-browser-metadata.jpg)
+![协商、元数据与加载状态](./2026-10-27-mcp-browser-metadata.jpg)
 
-![结果预算与历史回放](2026-10-27-mcp-browser-output.jpg)
+![结果预算与历史回放](./2026-10-27-mcp-browser-output.jpg)
 
 ## 清理、未验证范围与既有限制
 

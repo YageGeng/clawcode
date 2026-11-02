@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-后续评审的六项修复与最新 795 项通过结果见 [评审修复与 Pi 对照](2026-10-28-subagent-review-fixes.md)。下文保留首轮实现与验收记录。
+后续评审的六项修复与最新 795 项通过结果见 [评审修复与 Pi 对照](./2026-10-28-subagent-review-fixes.md)。下文保留首轮实现与验收记录。
 
 设计与计划的第 1–14 项已完成。第 14 项使用生产 app、DeepSeek 官方 API 和环境变量 DEEPSEEK_API_KEY 完成真实 WebUI 验收；没有替换为 fixture backend。代码保留在当前工作区，没有创建 worktree、commit 或新增依赖。
 
@@ -95,22 +95,22 @@ Rust 实现完成后的工作区检查，以及本轮 WebUI 修复后重新执�
 - 浏览器捕获：`.superpowers/sdd/2026-10-28-subagent-implementation/browser-real-provider.json`，capture `d789f4db65492`。记录的浏览器错误数为 0，没有丢弃请求或控制台记录；WebSocket 业务结算另以真实 UI 和 JSONL 记录交叉验证。
 - 模型工具实际仅执行只读清单/README 查询、目录列举以及 sleep，没有文件写入或 Git 写操作。
 
-![前台完成并自动折叠](assets/2026-10-28-subagent-foreground-completed.png)
+![前台完成并自动折叠](./assets/2026-10-28-subagent-foreground-completed.png)
 
-![工具卡片内嵌子会话](assets/2026-10-28-subagent-embedded-transcript.png)
+![工具卡片内嵌子会话](./assets/2026-10-28-subagent-embedded-transcript.png)
 
-![打开子会话后继续追问](assets/2026-10-28-subagent-child-followup.png)
+![打开子会话后继续追问](./assets/2026-10-28-subagent-child-followup.png)
 
-![父会话取消结果](assets/2026-10-28-subagent-cancelled.png)
+![父会话取消结果](./assets/2026-10-28-subagent-cancelled.png)
 
-![父会话已返回而后台仍在运行](assets/2026-10-28-subagent-background-running.png)
+![父会话已返回而后台仍在运行](./assets/2026-10-28-subagent-background-running.png)
 
-![后台答案回报并驱动父会话续跑](assets/2026-10-28-subagent-background-reported.png)
+![后台答案回报并驱动父会话续跑](./assets/2026-10-28-subagent-background-reported.png)
 
-![停止后台任务后回到空闲](assets/2026-10-28-subagent-background-stopped.png)
+![停止后台任务后回到空闲](./assets/2026-10-28-subagent-background-stopped.png)
 
-![侧栏所有权嵌套](assets/2026-10-28-subagent-sidebar.png)
+![侧栏所有权嵌套](./assets/2026-10-28-subagent-sidebar.png)
 
-![子会话 MCP 管理只读](assets/2026-10-28-subagent-mcp-readonly.png)
+![子会话 MCP 管理只读](./assets/2026-10-28-subagent-mcp-readonly.png)
 
 临时测试会话文件保留供复查；本次浏览器检查会话和生产后端进程在验收后关闭。后台 Reporter 崩溃补报不在本期范围，仍保持内存语义；未做独立审阅者复核。

@@ -53,7 +53,7 @@
 
 ## 首次实现收尾状态
 
-最终 fmt/check/clippy 通过，全量 714 通过、2 ignored（96 suites）；ignored 的 stdio/HTTP 四版本互操作已显式通过。持久化失败写入保护、关闭时刷新及重新打开回归通过，目录撤下后的增量加载重验断言通过。正式 app/真实 provider 的核心路径、reconnect/resume/fork/compaction/tree/空根和历史回放均完成。详细证据与未验证范围见[验证记录](2026-10-27-mcp-tool-discovery-verification.md)。
+最终 fmt/check/clippy 通过，全量 714 通过、2 ignored（96 suites）；ignored 的 stdio/HTTP 四版本互操作已显式通过。持久化失败写入保护、关闭时刷新及重新打开回归通过，目录撤下后的增量加载重验断言通过。正式 app/真实 provider 的核心路径、reconnect/resume/fork/compaction/tree/空根和历史回放均完成。详细证据与未验证范围见[验证记录](./2026-10-27-mcp-tool-discovery-verification.md)。
 
 ## 后续六项审查修复
 

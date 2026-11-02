@@ -1,6 +1,6 @@
 # rig-core provider 迁移验收
 
-> 当前发布版及复审修复后的最新实测：生产 app + WebUI + 真实 DeepSeek 基础 12 项及 MCP Sampling 1 项通过，详见 [真实端到端验收](2026-10-30-rig-core-live-e2e.md)。
+> 当前发布版及复审修复后的最新实测：生产 app + WebUI + 真实 DeepSeek 基础 12 项及 MCP Sampling 1 项通过，详见 [真实端到端验收](./2026-10-30-rig-core-live-e2e.md)。
 
 日期：2026-10-30（America/Los_Angeles）。依据同日中文 [spec](../specs/2026-10-30-rig-core-provider-migration-design.md) 与 [plan](../plans/2026-10-30-rig-core-provider-migration-implementation.md)。用户已明确授权实施；所有修改留在当前工作区，未创建 commit、worktree 或 SubAgent。
 

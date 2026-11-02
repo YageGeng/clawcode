@@ -1,6 +1,6 @@
 # Provider 改用 rig registry 与模型目录的设计规格
 
-日期：2026-11-01。状态：设计已获口头确认，待审阅本文。前置：[rig-core 迁移设计](2026-10-30-rig-core-provider-migration-design.md)。本文推翻其中"会话级 Prepared 缓存"的决定（见 §4），其余约束继续有效。
+日期：2026-11-01。状态：设计已获口头确认，待审阅本文。前置：[rig-core 迁移设计](./2026-10-30-rig-core-provider-migration-design.md)。本文推翻其中"会话级 Prepared 缓存"的决定（见 §4），其余约束继续有效。
 
 ## 1. 目标与已确认决策
 

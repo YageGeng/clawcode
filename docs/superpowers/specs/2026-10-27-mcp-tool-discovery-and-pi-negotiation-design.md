@@ -42,8 +42,8 @@
 
 本设计替代以下历史约束：
 
-- [2026-08-16 MCP Host 设计](2026-08-16-mcp-host-design.md)中的两个精确协议、必填 protocol、禁止协商、Modern discovery/MRTR/Tasks 路径，以及对应 UI 标签和验收标准。
-- [2026-08-17 生命周期可靠性设计](2026-08-17-mcp-lifecycle-reliability-design.md)中的 Modern subscription 专属部分及“新工具一律自动激活”的选择规则。
+- [2026-08-16 MCP Host 设计](./2026-08-16-mcp-host-design.md)中的两个精确协议、必填 protocol、禁止协商、Modern discovery/MRTR/Tasks 路径，以及对应 UI 标签和验收标准。
+- [2026-08-17 生命周期可靠性设计](./2026-08-17-mcp-lifecycle-reliability-design.md)中的 Modern subscription 专属部分及“新工具一律自动激活”的选择规则。
 
 其他已实现行为继续保留：Session 级连接所有权、故障隔离、完整目录快照、显式重连、取消与关闭、OAuth 凭据边界、现有 Prompt/Resource/Completion 和支持版本内的 Host 回调。
 
