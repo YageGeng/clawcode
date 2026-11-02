@@ -33,7 +33,7 @@ pub struct KernelConfig {
     pub when_busy: QueuePlacement,
 }
 
-/// Default lane for client input while an agent Run is busy.
+/// Queue lane for input that arrives while an agent Run is busy.
 #[derive(
     Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq,
 )]

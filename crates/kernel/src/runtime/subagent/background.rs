@@ -102,7 +102,7 @@ impl TryFrom<&str> for SubagentName {
     }
 }
 
-/// Delivers independent child work and returns its answer as an owner's follow-up.
+/// Delivers independent child work and returns its answer to the owner's queue.
 #[derive(typed_builder::TypedBuilder)]
 struct Reporter {
     kernel: Kernel,
@@ -217,7 +217,7 @@ impl Reporter {
                 SubmitRequest::builder()
                     .session_id(self.owner.clone())
                     .content(vec![ContentBlock::Text { text: report }])
-                    .when_busy(WhenBusy::FollowUp)
+                    .when_busy(self.kernel.subagent_reply_as)
                     .build(),
             ),
         )
@@ -226,8 +226,10 @@ impl Reporter {
             Ok(answer)
                 if answer.outcome == super::super::AnswerOutcome::Cancelled =>
             {
+                // The receipt carries the owner's Run outcome, so a report
+                // already inserted into a cancelled Run lands here too.
                 tracing::info!(
-                    "subagent report {} -> {} was withdrawn before delivery",
+                    "subagent report {} -> {} ended cancelled: withdrawn, or inserted into a cancelled Run",
                     self.child,
                     self.owner
                 )

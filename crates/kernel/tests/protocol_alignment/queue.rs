@@ -1,7 +1,7 @@
 use kernel::{KernelError, SessionEventSinks};
 use protocol::{QueueId, QueueKind, RunRequest, TraceId};
 
-use super::fixture::{Route, TestKernel};
+use super::fixture::{KernelPolicy, Route, TestKernel};
 
 /// Removing an absent item is idempotent, including items already claimed by a Run.
 #[tokio::test]
@@ -287,8 +287,11 @@ async fn unconsumed_claim_returns_after_turn_limit_or_preflight_failure() {
         };
         let test = TestKernel::with_policy(
             move |request| hold_route(&wait, request),
-            limit,
-            WhenBusy::FollowUp,
+            KernelPolicy {
+                max_turns: limit,
+                when_busy: WhenBusy::FollowUp,
+                ..KernelPolicy::default()
+            },
         );
         let session = test.create("queue-claim-exit").await;
         let run = test.start_run(&session, "hold");
@@ -507,8 +510,10 @@ async fn configured_and_explicit_placement_determine_insertion_order() {
         let wait = Arc::clone(&release);
         let test = TestKernel::with_policy(
             move |request| hold_route(&wait, request),
-            config::TurnLimit::Unlimited,
-            default,
+            KernelPolicy {
+                when_busy: default,
+                ..KernelPolicy::default()
+            },
         );
         let session = test.create("queue-placement").await;
         let run = test.start_run(&session, "hold");

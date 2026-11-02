@@ -1,4 +1,6 @@
-use super::fixture::{Route, TestKernel, finished, request, text};
+use super::fixture::{
+    KernelPolicy, Route, TestKernel, finished, request, text,
+};
 use kernel::WhenBusy;
 use protocol::{
     MessageContent, ModelStreamEvent, SessionId, StopReason, ToolCall,
@@ -158,7 +160,7 @@ async fn concurrent_same_name_spawn_survives_cooperative_yield() {
 async fn background_management_only_reads_ownership_headers() {
     use std::io::Write;
     use store::StoreFactory;
-    let test = background_test(|_| Route::Hang);
+    let test = background_test(WhenBusy::default(), |_| Route::Hang);
     let owner = test.create("owner").await;
     let factory = store::JsonlStoreFactory::new(
         test.root.path().join("sessions"),
@@ -189,33 +191,44 @@ async fn background_management_only_reads_ownership_headers() {
 
 /// Routes owner commands through the real background tool and scripts only child inference.
 fn background_test(
+    reply_as: WhenBusy,
     child: impl Fn(&str) -> Route + Send + Sync + 'static,
 ) -> TestKernel {
-    TestKernel::new(move |r| {
-        let message = r.messages.last().expect("input");
-        let input = text(&message.content);
-        if let Some(json) = input.strip_prefix("bg:") {
-            Route::Events(vec![
-                ModelStreamEvent::ToolCall(
-                    ToolCall::builder()
-                        .tool_call_id(
-                            ToolCallId::try_from("background-call")
-                                .expect("id"),
-                        )
-                        .name("background_subagent".into())
-                        .arguments(serde_json::from_str(json).expect("args"))
-                        .build(),
-                ),
-                finished(StopReason::ToolUse),
-            ])
-        } else if matches!(message.content, MessageContent::ToolResult { .. })
-            || input.starts_with("[subagent ")
-        {
-            Route::answer("ack")
-        } else {
-            child(&input)
-        }
-    })
+    TestKernel::with_policy(
+        move |r| {
+            let message = r.messages.last().expect("input");
+            let input = text(&message.content);
+            if let Some(json) = input.strip_prefix("bg:") {
+                Route::Events(vec![
+                    ModelStreamEvent::ToolCall(
+                        ToolCall::builder()
+                            .tool_call_id(
+                                ToolCallId::try_from("background-call")
+                                    .expect("id"),
+                            )
+                            .name("background_subagent".into())
+                            .arguments(
+                                serde_json::from_str(json).expect("args"),
+                            )
+                            .build(),
+                    ),
+                    finished(StopReason::ToolUse),
+                ])
+            } else if matches!(
+                message.content,
+                MessageContent::ToolResult { .. }
+            ) || input.starts_with("[subagent ")
+            {
+                Route::answer("ack")
+            } else {
+                child(&input)
+            }
+        },
+        KernelPolicy {
+            subagent_reply_as: reply_as,
+            ..KernelPolicy::default()
+        },
+    )
 }
 
 /// Invokes one action and reads the persisted tool reply from its owner transcript.
@@ -247,7 +260,7 @@ async fn invoke(
 async fn spawn_reports_answer_to_idle_owner() {
     let gate = Arc::new(Notify::new());
     let release = Arc::clone(&gate);
-    let test = background_test(move |_| {
+    let test = background_test(WhenBusy::default(), move |_| {
         Route::Wait(
             Arc::clone(&gate),
             vec![
@@ -269,10 +282,67 @@ async fn spawn_reports_answer_to_idle_owner() {
     test.kernel.close_session(&owner).await.expect("close");
 }
 
+/// A busy owner receives a child's reply in the configured lane, then inserts it.
+#[tokio::test]
+async fn reply_to_busy_owner_uses_configured_lane() {
+    for (reply_as, lanes) in
+        [(WhenBusy::FollowUp, (0, 1)), (WhenBusy::Steer, (1, 0))]
+    {
+        let child_gate = Arc::new(Notify::new());
+        let owner_gate = Arc::new(Notify::new());
+        let release_child = Arc::clone(&child_gate);
+        let release_owner = Arc::clone(&owner_gate);
+        let test = background_test(reply_as, move |input| {
+            // "hold" keeps the owner's Run open so the child's reply must queue.
+            let gate = if input == "hold" {
+                &owner_gate
+            } else {
+                &child_gate
+            };
+            Route::Wait(
+                Arc::clone(gate),
+                vec![
+                    ModelStreamEvent::TextDelta("A whale.".into()),
+                    finished(StopReason::EndTurn),
+                ],
+            )
+        });
+        let owner = test.create("owner").await;
+        assert_eq!(invoke(&test, &owner, serde_json::json!({"action":"spawn","name":"reader","message":"Summarize."})).await, "Started reader.");
+        let holding = {
+            let kernel = test.kernel.clone();
+            let owner = owner.clone();
+            tokio::spawn(async move {
+                kernel
+                    .submit(request(&owner, "hold", WhenBusy::FollowUp))
+                    .await
+            })
+        };
+        test.wait_until(|| test.model.last_texts().iter().any(|t| t == "hold"))
+            .await;
+        release_child.notify_one();
+        test.wait_until(|| {
+            test.kernel.pending_messages(&owner).is_ok_and(|pending| {
+                pending.steering.len() + pending.follow_up.len() == 1
+            })
+        })
+        .await;
+        let pending = test.kernel.pending_messages(&owner).expect("pending");
+        assert_eq!((pending.steering.len(), pending.follow_up.len()), lanes);
+        release_owner.notify_one();
+        holding.await.expect("join hold").expect("hold run");
+        // The queued reply is delivered within the owner's held Run.
+        assert!(test.user_texts(&owner).contains(
+            &"[subagent reader answered, no reply needed] A whale.".into()
+        ));
+        test.kernel.close_session(&owner).await.expect("close");
+    }
+}
+
 /// User-correctable requests produce plain replies without allocating invalid children.
 #[tokio::test]
 async fn user_errors_are_plain_replies() {
-    let test = background_test(|_| Route::Hang);
+    let test = background_test(WhenBusy::default(), |_| Route::Hang);
     let owner = test.create("owner").await;
     for (args, expected) in [
         (serde_json::json!({"action":"send"}), "send needs a name."),
@@ -338,7 +408,7 @@ async fn user_errors_are_plain_replies() {
 /// Stopping work clears queued input and suppresses a cancelled child's report.
 #[tokio::test]
 async fn stop_suppresses_report_and_status_lists_children() {
-    let test = background_test(|_| Route::Hang);
+    let test = background_test(WhenBusy::default(), |_| Route::Hang);
     let owner = test.create("owner").await;
     assert_eq!(
         invoke(&test, &owner, serde_json::json!({"action":"status"})).await,
@@ -414,7 +484,7 @@ async fn stop_suppresses_report_and_status_lists_children() {
 /// Sending to a closed child recreates its runtime without losing its registered name.
 #[tokio::test]
 async fn send_resumes_closed_child() {
-    let test = background_test(|input| {
+    let test = background_test(WhenBusy::default(), |input| {
         if input == "follow up" {
             Route::answer("resumed answer")
         } else {
@@ -458,7 +528,9 @@ async fn send_resumes_closed_child() {
 /// Long child answers cannot bypass the ordinary tool text budget through user-message reports.
 #[tokio::test]
 async fn long_answer_report_is_truncated() {
-    let test = background_test(|_| Route::answer(&"a".repeat(30 * 1024)));
+    let test = background_test(WhenBusy::default(), |_| {
+        Route::answer(&"a".repeat(30 * 1024))
+    });
     let owner = test.create("owner").await;
     invoke(
         &test,
@@ -487,7 +559,7 @@ async fn long_answer_report_is_truncated() {
 async fn steered_messages_report_one_answer_once() {
     let release = Arc::new(Notify::new());
     let gate = Arc::clone(&release);
-    let test = background_test(move |input| {
+    let test = background_test(WhenBusy::default(), move |input| {
         if input.starts_with("You are") {
             Route::Wait(Arc::clone(&gate), vec![finished(StopReason::EndTurn)])
         } else {
@@ -554,7 +626,7 @@ async fn steered_messages_report_one_answer_once() {
 /// Owner close cancels delivery, waits for reporters, and never persists a late report.
 #[tokio::test]
 async fn closing_owner_with_reporter_in_delivery_does_not_hang() {
-    let test = background_test(|_| Route::Hang);
+    let test = background_test(WhenBusy::default(), |_| Route::Hang);
     let owner = test.create("owner").await;
     invoke(
         &test,
@@ -598,7 +670,9 @@ async fn closing_owner_with_reporter_in_delivery_does_not_hang() {
 /// A spawned subagent runs on the configured model it names.
 #[tokio::test]
 async fn background_spawn_runs_on_requested_model() {
-    let test = background_test(|_| Route::answer("primary answer"));
+    let test = background_test(WhenBusy::default(), |_| {
+        Route::answer("primary answer")
+    });
     let owner = test.create("owner").await;
     assert_eq!(invoke(&test, &owner, serde_json::json!({"action":"spawn","name":"reader","message":"Summarize.","model":"fixture/secondary"})).await, "Started reader.");
     test.wait_until(|| {

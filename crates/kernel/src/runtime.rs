@@ -247,6 +247,9 @@ pub struct KernelFactory {
     max_turns: TurnLimit,
     #[builder(default)]
     when_busy: WhenBusy,
+    /// Lane a background subagent's reply joins while its owner is busy.
+    #[builder(default)]
+    subagent_reply_as: WhenBusy,
     /// Controls how many recent user Turns remain verbatim after compaction.
     #[builder(default)]
     compaction_policy: CompactionPolicy,
@@ -311,6 +314,7 @@ impl KernelFactory {
             .include_skill_instructions(self.include_skill_instructions)
             .max_turns(self.max_turns)
             .when_busy(self.when_busy)
+            .subagent_reply_as(self.subagent_reply_as)
             .compaction_policy(self.compaction_policy)
             .retry_policy(self.retry_policy)
             .provider_retry_delay_limit_ms(self.provider_retry_delay_limit_ms)
@@ -343,6 +347,8 @@ pub struct Kernel {
     max_turns: TurnLimit,
     #[builder(default)]
     when_busy: WhenBusy,
+    #[builder(default)]
+    subagent_reply_as: WhenBusy,
     compaction_policy: CompactionPolicy,
     retry_policy: RetryPolicy,
     provider_retry_delay_limit_ms: u64,

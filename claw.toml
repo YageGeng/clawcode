@@ -8,6 +8,10 @@ max_batch_size = 512
 max_turns = { type = "unlimited" }
 # max_turns = { type = "limited", turns = 64 }
 
+[subagent]
+# How a background subagent's reply joins a busy main agent: "follow_up" or "steer".
+reply_as = "steer"
+
 [logging]
 filter = "info,acp::trace=debug"
 color = true

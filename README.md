@@ -69,6 +69,10 @@ max_batch_size = 512
 max_turns = { type = "unlimited" }
 # max_turns = { type = "limited", turns = 64 }
 
+[subagent]
+# How a background subagent's reply joins a busy main agent: "follow_up" or "steer".
+reply_as = "follow_up"
+
 [logging]
 filter = "info,acp::trace=debug"
 color = true
@@ -224,6 +228,12 @@ reference splits at the first `/`, so `openrouter/aion-labs/aion-2.0` works. Whe
 omitted, the child uses the parent's current model; it always inherits the
 thinking level and tools. An unconfigured model is rejected with the list of
 configured models.
+
+A `background_subagent` reply reaches the main agent as a follow-up by default:
+when the main agent is busy, the reply waits until its current Run would
+otherwise finish. Set `[subagent] reply_as = "steer"` to insert the reply after
+the main agent's current Turn instead. A foreground `subagent` answer is the
+tool result itself and is not affected.
 
 ## MCP discovery and output
 

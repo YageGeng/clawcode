@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod prompt;
 pub mod retry;
 pub mod skills;
+pub mod subagent;
 pub mod tools;
 
 pub use app::{AppSectionConfig, RecoveryConfig};
@@ -34,4 +35,5 @@ pub use mcp::{McpConfigError, McpOAuthConfig, McpServerConfig};
 pub use prompt::PromptPolicy;
 pub use retry::{ProviderRetryConfig, RetryConfig};
 pub use skills::{SkillSelectionRule, SkillsConfig};
+pub use subagent::SubagentConfig;
 pub use tools::ToolsConfig;

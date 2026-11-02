@@ -12,6 +12,7 @@ use crate::mcp::{McpConfigError, McpServerConfig};
 use crate::prompt::PromptPolicy;
 use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
+use crate::subagent::SubagentConfig;
 use crate::tools::ToolsConfig;
 pub use protocol::CompactionPolicy as CompactionConfig;
 use protocol::ModelInputModalitiesError;
@@ -213,6 +214,9 @@ pub struct AppConfig {
     /// Kernel runtime configuration.
     #[serde(default)]
     pub kernel: KernelConfig,
+    /// Subagent delegation configuration.
+    #[serde(default)]
+    pub subagent: SubagentConfig,
     /// Manual context compaction configuration.
     #[serde(default)]
     pub compaction: CompactionConfig,
@@ -241,6 +245,7 @@ impl Default for AppConfig {
             mcp_servers: Vec::new(),
             session_persistence: SessionPersistenceConfig::default(),
             kernel: KernelConfig::default(),
+            subagent: SubagentConfig::default(),
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         }
@@ -368,6 +373,25 @@ mod tests {
     fn app_config_default_is_empty() {
         let cfg = AppConfig::default();
         assert!(cfg.providers.is_empty());
+    }
+
+    /// Background subagent replies queue as follow-ups unless configured to steer.
+    #[test]
+    fn subagent_reply_as_defaults_to_follow_up_and_reads_steer() {
+        assert_eq!(
+            AppConfig::default().subagent.reply_as,
+            crate::QueuePlacement::FollowUp
+        );
+
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[subagent]
+reply_as = "steer"
+"#,
+        )
+        .expect("parse subagent config");
+
+        assert_eq!(cfg.subagent.reply_as, crate::QueuePlacement::Steer);
     }
 
     /// App runtime recovery batching defaults to the current transport limit.

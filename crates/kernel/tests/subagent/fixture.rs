@@ -248,6 +248,14 @@ impl IdGenerator for SequenceClock {
     }
 }
 
+/// Kernel queue and Run policies a test may override.
+#[derive(Clone, Copy, Default)]
+pub struct KernelPolicy {
+    pub max_turns: config::TurnLimit,
+    pub when_busy: WhenBusy,
+    pub subagent_reply_as: WhenBusy,
+}
+
 #[derive(typed_builder::TypedBuilder)]
 pub struct TestKernel {
     pub kernel: Kernel,
@@ -281,8 +289,7 @@ impl TestKernel {
             |root, clock| {
                 Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
             },
-            config::TurnLimit::default(),
-            WhenBusy::default(),
+            KernelPolicy::default(),
         )
     }
 
@@ -298,17 +305,14 @@ impl TestKernel {
             route,
             Arc::new(StaticExtensionFactory::default()),
             store,
-            config::TurnLimit::default(),
-            WhenBusy::default(),
+            KernelPolicy::default(),
         )
     }
 
-    /// Overrides Run limits and queue policy without changing production dependencies.
-    #[allow(dead_code)] // Used by the protocol_alignment integration target.
+    /// Overrides Run limits and queue policies without changing production dependencies.
     pub fn with_policy(
         route: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
-        max_turns: config::TurnLimit,
-        when_busy: WhenBusy,
+        policy: KernelPolicy,
     ) -> Self {
         Self::with_factories(
             route,
@@ -316,8 +320,7 @@ impl TestKernel {
             |root, clock| {
                 Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
             },
-            max_turns,
-            when_busy,
+            policy,
         )
     }
 
@@ -329,8 +332,7 @@ impl TestKernel {
             &std::path::Path,
             Arc<dyn Clock>,
         ) -> Arc<dyn store::StoreFactory>,
-        max_turns: config::TurnLimit,
-        when_busy: WhenBusy,
+        policy: KernelPolicy,
     ) -> Self {
         let root = tempfile::tempdir().expect("root");
         let model = Arc::new(RoutedModel {
@@ -341,8 +343,9 @@ impl TestKernel {
         });
         let clock: Arc<dyn Clock> = Arc::new(SequenceClock::default());
         let kernel = KernelFactory::builder()
-            .max_turns(max_turns)
-            .when_busy(when_busy)
+            .max_turns(policy.max_turns)
+            .when_busy(policy.when_busy)
+            .subagent_reply_as(policy.subagent_reply_as)
             .model_factory(Arc::new(StaticModelFactory(Arc::clone(&model))))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(store(root.path(), Arc::clone(&clock)))

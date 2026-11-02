@@ -192,6 +192,7 @@ impl ApplicationFactory {
             .include_skill_instructions(snapshot.skills.include_instructions)
             .max_turns(snapshot.kernel.max_turns)
             .when_busy(snapshot.kernel.when_busy.into())
+            .subagent_reply_as(snapshot.subagent.reply_as.into())
             .compaction_policy(snapshot.compaction)
             .retry_policy(snapshot.retry.model_policy())
             .provider_retry_delay_limit_ms(

@@ -68,6 +68,10 @@ max_batch_size = 512
 max_turns = { type = "unlimited" }
 # max_turns = { type = "limited", turns = 64 }
 
+[subagent]
+# 后台子代理的回复如何进入忙碌中的主代理："follow_up" 或 "steer"。
+reply_as = "follow_up"
+
 [logging]
 filter = "info,acp::trace=debug"
 color = true
@@ -208,6 +212,10 @@ Session 的 thinking 级别会作为可移植的推理强度发送，由 rig 翻
 参数，用 `provider/model` 指定一个已配置模型。引用按第一个 `/` 切分，因此
 `openrouter/aion-labs/aion-2.0` 可用。省略时子代理使用父会话当前模型；它始终继承
 父会话的 thinking 级别与工具。未配置的模型会被拒绝，并返回已配置模型列表。
+
+`background_subagent` 的回复默认以 follow-up 送达主代理：主代理忙碌时，回复会等到
+其当前 Run 即将结束时再插入。设置 `[subagent] reply_as = "steer"` 则改为在主代理
+当前 Turn 结束后插入。前台 `subagent` 的回答就是工具结果本身，不受此设置影响。
 
 ## MCP 发现与输出
 
