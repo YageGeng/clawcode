@@ -319,7 +319,8 @@ cargo run -p app --bin clawcode -- serve --web-root web/dist
 ```
 
 浏览器访问 `http://127.0.0.1:3000`。`GET /acp` 在请求时升级为 WebSocket，否则用于
-SSE；`POST /acp` 承载 ACP JSON-RPC 请求；健康检查位于 `GET /health`。
+SSE；`POST /acp` 承载 ACP JSON-RPC 请求；健康检查位于 `GET /health`。该端口同时接受
+HTTP/1.1 与明文 HTTP/2（h2c，prior knowledge）；WebSocket 升级仅支持 HTTP/1.1。
 
 WebUI 无认证，因此刻意只监听 loopback；通配、局域网和公网地址会被拒绝。模型、
 Skills 与 MCP 配置在界面中只读，均在启动时从 TOML 读取。界面支持文本、Markdown、

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use acp::{AcpServerFactory, AcpTransportKind};
 use agent_client_protocol::Client;
-use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
+use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use extension::StaticExtensionFactory;
 use futures::stream;
 use kernel::{

@@ -195,7 +195,7 @@ pub(crate) fn coalesce_updates(
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::v2 as wire;
+    use agent_client_protocol::v2::schema as wire;
     use agent_client_protocol::{RawJsonRpcMessage, RawJsonRpcParams};
 
     use super::coalesce_updates;

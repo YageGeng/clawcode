@@ -216,3 +216,29 @@ fn webui_bind_rejects_non_loopback_addresses() {
     let bind = LocalBindAddress::try_from(loopback).expect("loopback bind");
     assert_eq!(bind.http_origin(), "http://127.0.0.1:3000");
 }
+
+/// The HTTP transport accepts cleartext HTTP/2 from prior-knowledge clients.
+#[tokio::test]
+async fn health_endpoint_accepts_h2c_prior_knowledge() {
+    let fixture = WebFixture::missing_dist();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(
+        axum::serve(listener, fixture.router.clone()).into_future(),
+    );
+
+    let response = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .expect("h2c client")
+        .get(format!("http://{address}/health"))
+        .send()
+        .await
+        .expect("h2c response");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    server.abort();
+}

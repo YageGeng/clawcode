@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v2 as wire;
+use agent_client_protocol::v2::schema as wire;
 use protocol::{RunId, Sequence, SessionId};
 use serde::{Deserialize, Serialize};
 
@@ -275,7 +275,7 @@ impl TryFrom<Option<wire::ReplayFrom>> for AcpReplayRequest {
 mod tests {
     use std::collections::BTreeMap;
 
-    use agent_client_protocol::schema::v2 as wire;
+    use agent_client_protocol::v2::schema as wire;
     use protocol::{RunId, Sequence, SessionId};
 
     use super::{

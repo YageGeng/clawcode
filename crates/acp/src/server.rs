@@ -3,16 +3,17 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
 use agent_client_protocol::{
-    Agent, Client, ConnectTo, JsonRpcMessage, Responder, V2ConnectionTo,
+    Agent, Client, ConnectTo, JsonRpcMessage,
+    v2::{ConnectionTo as V2ConnectionTo, Responder},
 };
+use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use kernel::{InsertionNotice, Kernel, KernelError};
 use protocol::{
     AcpExtensionMethod, AcpWorkingDirectory, AgentEvent, AgentEventPayload,
     EventMetadata, IdGenerator, McpSessionChange,
     McpSessionRevisionNotification, ProductIdentity, RunRequest, Sequence,
-    SessionId, TimestampMs,
+    SessionId, SessionTitle, TimestampMs,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -101,14 +102,22 @@ pub(crate) struct SessionWatcher {
 pub(crate) type SessionWatchers =
     Arc<Mutex<BTreeMap<SessionId, SessionWatcher>>>;
 
-/// A standard Session request for a Session this connection never created or resumed.
-struct InactiveSession<'a>(&'a SessionId);
+/// A standard Session request for a Session that cannot serve it.
+struct UnavailableSession<'a> {
+    session_id: &'a SessionId,
+    reason: &'static str,
+}
 
-impl From<InactiveSession<'_>> for agent_client_protocol::Error {
-    /// Maps to `-32002` with the requested Session id.
-    fn from(inactive: InactiveSession<'_>) -> Self {
-        Self::new(-32002, "Session is not active on this connection")
-            .data(serde_json::json!({ "sessionId": inactive.0.as_str() }))
+impl From<UnavailableSession<'_>> for agent_client_protocol::Error {
+    /// Maps to ACP's `-32002` with the requested Session id.
+    fn from(unavailable: UnavailableSession<'_>) -> Self {
+        Self::new(
+            agent_client_protocol::ErrorCode::RESOURCE_NOT_FOUND,
+            unavailable.reason,
+        )
+        .data(
+            serde_json::json!({ "sessionId": unavailable.session_id.as_str() }),
+        )
     }
 }
 
@@ -131,7 +140,11 @@ fn active_watcher(
             "rejected request for Session {} that is not active on this connection",
             session_id
         );
-        InactiveSession(session_id).into()
+        UnavailableSession {
+            session_id,
+            reason: "Session is not active on this connection",
+        }
+        .into()
     })
 }
 
@@ -829,7 +842,6 @@ impl AcpServerFactory {
                         AcpExtensionMethod::PendingMessageRemove,
                         AcpExtensionMethod::PendingMessagePromote,
                         AcpExtensionMethod::ClearQueue,
-                        AcpExtensionMethod::SessionRename,
                         AcpExtensionMethod::SessionRuntime,
                         AcpExtensionMethod::InvokeSkill,
                         AcpExtensionMethod::SkillList,
@@ -879,6 +891,9 @@ impl AcpServerFactory {
                                 wire::SessionCapabilities::new()
                                     .delete(
                                         wire::SessionDeleteCapabilities::new(),
+                                    )
+                                    .title(
+                                        wire::SessionTitleCapabilities::new(),
                                     )
                                     .prompt(
                                         wire::PromptCapabilities::new().image(
@@ -1385,6 +1400,50 @@ impl AcpServerFactory {
             .on_receive_request(
                 {
                     let context = Arc::clone(&context);
+                    async move |request: wire::SetSessionTitleRequest,
+                                responder: Responder<wire::SetSessionTitleResponse>,
+                                _connection: V2ConnectionTo<Client>| {
+                    let kernel = Arc::clone(&context.kernel);
+                    let operation = context.traces.request(&responder, &request)?;
+                    operation.run(async move {
+                        let session_id =
+                            SessionId::try_from(request.session_id.to_string())
+                                .map_err(|error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                })?;
+                        // The protocol type trims and bounds the title; the
+                        // response reports exactly what was stored.
+                        let title = SessionTitle::try_from(request.title)
+                            .map_err(|error| {
+                                agent_client_protocol::Error::invalid_params()
+                                    .data(error.to_string())
+                            })?;
+                        kernel
+                            .set_session_title(&session_id, title.clone())
+                            .await
+                            .map_err(|error| match error {
+                                KernelError::SessionNotFound(_) => {
+                                    agent_client_protocol::Error::from(
+                                        UnavailableSession {
+                                            session_id: &session_id,
+                                            reason: "Session not found",
+                                        },
+                                    )
+                                }
+                                error => KernelFailure(error).into(),
+                            })?;
+                        responder.respond(wire::SetSessionTitleResponse::new(
+                            title.as_str(),
+                        ))
+                    }).await
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let context = Arc::clone(&context);
                     async move |request: wire::PromptRequest,
                                 responder: Responder<wire::PromptResponse>,
                                 connection: V2ConnectionTo<Client>| {
@@ -1849,7 +1908,7 @@ mod tests {
     use crate::input::PromptInput;
     use crate::projection::EventGroup;
     use crate::recovery::OperationPhase;
-    use agent_client_protocol::schema::v2 as wire;
+    use agent_client_protocol::v2::schema as wire;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use protocol::{ContentBlock, RunId, RunInput, Sequence};

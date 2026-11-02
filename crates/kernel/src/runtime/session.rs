@@ -583,6 +583,100 @@ impl Kernel {
         Ok(())
     }
 
+    /// Stores a client-chosen title and announces it to every Session observer.
+    ///
+    /// `rename_session` stays silent because internal callers, such as child
+    /// Session creation, set titles that no client asked to see announced.
+    pub async fn set_session_title(
+        &self,
+        session_id: &SessionId,
+        title: SessionTitle,
+    ) -> Result<(), KernelError> {
+        // Any listed Session may be retitled. A live runtime costs one map
+        // lookup; only a Session without one touches its persisted Store.
+        let session = loop {
+            match self.session(session_id) {
+                Ok(session) => {
+                    match self.rename_session(session_id, title.clone()).await {
+                        Ok(()) => break session,
+                        // Closed after the lookup; the Store still takes it.
+                        Err(KernelError::SessionNotFound(_)) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(
+                    KernelError::SessionNotFound(_)
+                    | KernelError::SessionStarting,
+                ) => {}
+                Err(error) => return Err(error),
+            }
+            // Locate the file first so the reservation spans only the write.
+            let header =
+                self.store_factory.header(session_id)?.ok_or_else(|| {
+                    KernelError::SessionNotFound(session_id.clone())
+                })?;
+            match self.reserve_session_build(session_id) {
+                Ok(_reservation) => {
+                    // The build reservation keeps Resume from opening the same
+                    // file. Nothing observes an unloaded Session, so no event.
+                    let mut store = self.store_factory.open(&header.path)?;
+                    store.set_name(Some(title.as_str().to_string()))?;
+                    store.sync()?;
+                    tracing::info!(
+                        "renamed persisted Session {} without loading it",
+                        session_id
+                    );
+                    return Ok(());
+                }
+                Err(KernelError::DuplicateSession(_)) => {
+                    // Construction or deletion owns the id; retry once it ends.
+                    let pending = self
+                        .pending_sessions
+                        .lock()
+                        .map_err(|_poison_error| KernelError::Poisoned)?
+                        .get(session_id)
+                        .map(tokio::sync::watch::Sender::subscribe);
+                    match pending {
+                        // The reservation drops its sender on success and rollback.
+                        Some(mut pending) => {
+                            let _ = pending.changed().await;
+                        }
+                        // A cancelled startup can leave a Starting runtime with
+                        // no reservation to wait for; report its lifecycle error.
+                        None => match self.session(session_id) {
+                            Ok(_) | Err(KernelError::SessionNotFound(_)) => {}
+                            Err(error) => return Err(error),
+                        },
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        // The title is stored, which is what the caller asked for; a failed
+        // announcement only leaves observers stale until their next refresh.
+        let announced: Result<(), KernelError> = async {
+            let (turn_id, emitter) =
+                self.observer_emitter(session, session_id)?;
+            emitter
+                .emit(
+                    turn_id,
+                    AgentEventPayload::SessionTitleChanged {
+                        title: title.as_str().to_string(),
+                    },
+                )
+                .await
+        }
+        .await;
+        if let Err(error) = announced {
+            tracing::warn!(
+                "stored title for Session {} but failed to announce it: {}",
+                session_id,
+                error
+            );
+        }
+        Ok(())
+    }
+
     /// Forks one selected ancestor branch into a new persisted session and registers it.
     pub async fn fork_session(
         &self,

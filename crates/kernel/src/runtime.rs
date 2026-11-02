@@ -649,3 +649,32 @@ impl EventEmitter {
         Ok(())
     }
 }
+
+impl Kernel {
+    /// Builds the emitter for an observer event raised outside a Run's own emitter.
+    ///
+    /// The event joins the running Turn and its sink when there is one, so it
+    /// stays ordered with that Turn's events; an idle Session gets a fresh Turn.
+    fn observer_emitter(
+        &self,
+        session: Arc<Session>,
+        session_id: &SessionId,
+    ) -> Result<(TurnId, EventEmitter), KernelError> {
+        let active = session.execution.active_run()?;
+        let turn_id = match &active {
+            Some(active) => active.turn_id.clone(),
+            None => TurnId::try_from(self.id_generator.next(IdKind::Turn))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?,
+        };
+        let sink = active.map_or_else(
+            || self.session_sink(session_id),
+            |active| active.sink,
+        );
+        let emitter = EventEmitter {
+            clock: Arc::clone(&self.clock),
+            sink,
+            session,
+        };
+        Ok((turn_id, emitter))
+    }
+}

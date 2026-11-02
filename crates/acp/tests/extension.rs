@@ -3,10 +3,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use acp::{AcpServerFactory, AcpTransportKind};
-use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
 use agent_client_protocol::{
     Client, JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, UntypedMessage,
 };
+use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use extension::StaticExtensionFactory;
 use kernel::{
     Kernel, KernelFactory, Model, ModelError, ModelFactory, ModelStream,
@@ -166,7 +166,7 @@ impl JsonRpcMessage for IntegrationRequest {
     /// Parses a supported integration request without exposing production internals.
     fn parse_message(
         method: &str,
-        params: &impl serde::Serialize,
+        params: &serde_json::Value,
     ) -> Result<Self, agent_client_protocol::Error> {
         let method = match method {
             SESSION_NEW_METHOD => SESSION_NEW_METHOD,
@@ -200,9 +200,10 @@ impl JsonRpcMessage for IntegrationRequest {
                 return Err(agent_client_protocol::Error::method_not_found());
             }
         };
-        let parameters = serde_json::to_value(params)
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
-        Ok(Self { method, parameters })
+        Ok(Self {
+            method,
+            parameters: params.clone(),
+        })
     }
 }
 
@@ -248,7 +249,7 @@ async fn mcp_status_is_session_scoped_and_strict() {
     )
     .await
     .expect_err("unknown status field");
-    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 }
 
 impl JsonRpcRequest for IntegrationRequest {
@@ -269,7 +270,7 @@ impl JsonRpcResponse for IntegrationResponse {
     }
 
     /// Captures the public ACP response JSON for integration assertions.
-    fn from_value(
+    fn from_json(
         _method: &str,
         value: serde_json::Value,
     ) -> Result<Self, agent_client_protocol::Error> {
@@ -371,7 +372,10 @@ async fn working_directory_validation_is_enforced_by_session_new() {
         )
         .await
         .expect_err("invalid directory");
-        assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+        assert_eq!(
+            error.code,
+            agent_client_protocol::ErrorCode::INVALID_PARAMS
+        );
     }
 
     let file = root.path().join("file.txt");
@@ -385,7 +389,7 @@ async fn working_directory_validation_is_enforced_by_session_new() {
     )
     .await
     .expect_err("file path");
-    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 }
 
 /// Compact rejects caller-supplied summaries through the public extension method.
@@ -417,7 +421,7 @@ async fn compact_rejects_client_supplied_summary() {
     )
     .await
     .expect_err("client summary must be rejected");
-    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 }
 
 /// Removing a queue item that was already consumed remains an idempotent ACP operation.
@@ -529,6 +533,190 @@ async fn native_session_delete_is_advertised_and_idempotent() {
         )
         .await
         .expect("native delete request");
+}
+
+/// Runs `body` against one initialized public ACP connection with a fresh Session.
+async fn with_titled_session<B>(body: B)
+where
+    B: AsyncFnOnce(
+        &agent_client_protocol::v2::ConnectionTo<agent_client_protocol::Agent>,
+        wire::InitializeResponse,
+        String,
+    ) -> Result<(), agent_client_protocol::Error>,
+{
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+
+    Client
+        .v2()
+        .connect_with(
+            AcpServerFactory::new(
+                kernel,
+                Arc::new(NanoidIdGenerator),
+                NonZeroUsize::new(128).expect("positive batch size"),
+            )
+            .component(AcpTransportKind::Stdio),
+            async move |connection| {
+                let initialized = connection
+                    .send_request(wire::InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        wire::Implementation::new(
+                            "acp-integration-test",
+                            "0.1.0",
+                        ),
+                    ))
+                    .block_task()
+                    .await?;
+                let created = connection
+                    .send_request(IntegrationRequest::new(
+                        SESSION_NEW_METHOD,
+                        serde_json::json!({ "cwd": workspace.path() }),
+                    ))
+                    .block_task()
+                    .await?;
+                let session_id = created
+                    .0
+                    .get("sessionId")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("created session id")
+                    .to_string();
+                body(&connection, initialized, session_id).await
+            },
+        )
+        .await
+        .expect("set_title connection");
+}
+
+/// Returns the listed title of one Session over the same connection.
+async fn listed_title(
+    connection: &agent_client_protocol::v2::ConnectionTo<
+        agent_client_protocol::Agent,
+    >,
+    session_id: &str,
+) -> Result<serde_json::Value, agent_client_protocol::Error> {
+    let listed = connection
+        .send_request(IntegrationRequest::new(
+            SESSION_LIST_METHOD,
+            serde_json::json!({}),
+        ))
+        .block_task()
+        .await?;
+    let session = listed
+        .0
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .expect("session list")
+        .iter()
+        .find(|session| {
+            session.get("sessionId").and_then(serde_json::Value::as_str)
+                == Some(session_id)
+        })
+        .expect("listed session");
+    Ok(session
+        .get("title")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
+/// Standard `session/set_title` is advertised and stores the normalized title.
+#[tokio::test]
+async fn native_session_set_title_is_advertised_and_normalized() {
+    with_titled_session(async |connection, initialized, session_id| {
+        assert!(
+            initialized
+                .capabilities
+                .session
+                .and_then(|session| session.title)
+                .is_some()
+        );
+        let response = connection
+            .send_request(wire::SetSessionTitleRequest::new(
+                session_id.clone(),
+                "  Renamed  ",
+            ))
+            .block_task()
+            .await?;
+        assert_eq!(response.title, "Renamed");
+        assert_eq!(listed_title(connection, &session_id).await?, "Renamed");
+        Ok(())
+    })
+    .await;
+}
+
+/// Blank and over-long titles are rejected without changing the stored title.
+#[tokio::test]
+async fn session_set_title_rejects_invalid_titles() {
+    with_titled_session(async |connection, _initialized, session_id| {
+        connection
+            .send_request(wire::SetSessionTitleRequest::new(
+                session_id.clone(),
+                "Kept",
+            ))
+            .block_task()
+            .await?;
+        for title in ["   ".to_string(), "x".repeat(121)] {
+            let error = connection
+                .send_request(wire::SetSessionTitleRequest::new(
+                    session_id.clone(),
+                    title,
+                ))
+                .block_task()
+                .await
+                .expect_err("invalid title");
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::INVALID_PARAMS
+            );
+        }
+        assert_eq!(listed_title(connection, &session_id).await?, "Kept");
+        Ok(())
+    })
+    .await;
+}
+
+/// An unknown Session fails its request without breaking the connection.
+#[tokio::test]
+async fn session_set_title_unknown_session_keeps_connection() {
+    with_titled_session(async |connection, _initialized, session_id| {
+        let error = connection
+            .send_request(wire::SetSessionTitleRequest::new(
+                "missing", "Renamed",
+            ))
+            .block_task()
+            .await
+            .expect_err("unknown session");
+        // ACP answers a Session that does not exist with `-32002`.
+        assert_eq!(
+            error.code,
+            agent_client_protocol::ErrorCode::RESOURCE_NOT_FOUND
+        );
+        assert!(listed_title(connection, &session_id).await?.is_null());
+        Ok(())
+    })
+    .await;
+}
+
+/// A listed Session that is no longer loaded can still be retitled over ACP.
+#[tokio::test]
+async fn session_set_title_renames_a_closed_session() {
+    with_titled_session(async |connection, _initialized, session_id| {
+        connection
+            .send_request(wire::CloseSessionRequest::new(session_id.clone()))
+            .block_task()
+            .await?;
+        let response = connection
+            .send_request(wire::SetSessionTitleRequest::new(
+                session_id.clone(),
+                "Cold",
+            ))
+            .block_task()
+            .await?;
+        assert_eq!(response.title, "Cold");
+        assert_eq!(listed_title(connection, &session_id).await?, "Cold");
+        Ok(())
+    })
+    .await;
 }
 
 /// ACP exposes server-side bash without negotiating client terminal callbacks.
@@ -663,7 +851,7 @@ async fn skill_extensions_are_session_scoped() {
     )
     .await
     .expect_err("missing Session id");
-    assert_eq!(error.code, agent_client_protocol::ErrorCode::InvalidParams);
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 }
 
 /// New, Resume, and Fork each publish a complete native command snapshot.

@@ -98,16 +98,6 @@ pub struct AcpPendingMessageRemoveParameters {
     pub queue_id: QueueId,
 }
 
-/// Parameters for replacing one persisted session title.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AcpSessionRenameParameters {
-    /// Session being renamed.
-    pub session_id: SessionId,
-    /// Unvalidated client-supplied title.
-    pub title: String,
-}
-
 /// Parameters for explicitly loading one discovered skill.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

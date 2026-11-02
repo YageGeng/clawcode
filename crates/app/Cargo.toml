@@ -58,6 +58,7 @@ futures = { workspace = true }
 tokio-util = { workspace = true }
 
 # http
+reqwest = { workspace = true, features = ["http2"] }
 tower = { workspace = true }
 
 # fs

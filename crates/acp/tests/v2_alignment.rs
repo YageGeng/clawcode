@@ -4,8 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acp::{AcpServerFactory, AcpTransportKind};
-use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
-use agent_client_protocol::{Agent, Client, V2ConnectionTo};
+use agent_client_protocol::{
+    Agent, Client, v2::ConnectionTo as V2ConnectionTo,
+};
+use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use async_trait::async_trait;
 use extension::{
     BeforeAgentStartPoint, ExtensionContext, ExtensionError, ExtensionHandler,
@@ -526,7 +528,10 @@ async fn prompt_rejected_before_insertion_emits_no_user_message() {
                 .block_task()
                 .await
                 .expect_err("preflight failure rejects the prompt");
-            assert_eq!(error.code, (-32603).into());
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::new(-32603)
+            );
             assert!(
                 drain(updates)
                     .await
@@ -597,7 +602,10 @@ async fn prompt_waiting_for_gate_is_cancelled_with_32800() {
             let (waiting, cancelled) = tokio::join!(waiting, cancel);
             cancelled?;
             let error = waiting.expect_err("waiting prompt is cancelled");
-            assert_eq!(error.code, (-32800).into());
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::new(-32800)
+            );
             Ok(())
         },
     )
@@ -643,7 +651,10 @@ async fn prompt_cancelled_during_hook_returns_32800() {
             cancelled?;
             let error =
                 waiting.expect_err("hook-time cancel rejects the prompt");
-            assert_eq!(error.code, (-32800).into());
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::new(-32800)
+            );
             let idle = next_matching(updates, |value| {
                 value["sessionUpdate"] == "state_update"
                     && value["state"] == "idle"
@@ -769,7 +780,7 @@ async fn prompt_on_inactive_session_returns_32002() {
             .block_task()
             .await
             .expect_err("inactive Session is rejected");
-        assert_eq!(error.code, (-32002).into());
+        assert_eq!(error.code, agent_client_protocol::ErrorCode::new(-32002));
         assert_eq!(error.data.expect("data")["sessionId"], session_id.as_str());
         Ok(())
     })
@@ -901,7 +912,10 @@ async fn waiting_user_bash_cancel_and_close_return_32800() {
             cancelled?;
             for result in [bang, excluded] {
                 let error = result.expect_err("waiting shell is cancelled");
-                assert_eq!(error.code, (-32800).into());
+                assert_eq!(
+                    error.code,
+                    agent_client_protocol::ErrorCode::new(-32800)
+                );
             }
 
             connection
@@ -923,7 +937,10 @@ async fn waiting_user_bash_cancel_and_close_return_32800() {
             let (closed, close) = tokio::join!(closed, close);
             close?;
             let error = closed.expect_err("waiting shell is rejected by close");
-            assert_eq!(error.code, (-32800).into());
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::new(-32800)
+            );
             Ok(())
         },
     )
@@ -1012,7 +1029,10 @@ async fn pending_close_does_not_block_other_sessions_on_connection() {
             let (blocked_prompt, rest) = tokio::join!(blocked_prompt, rest);
             rest?;
             let error = blocked_prompt.expect_err("closed before insertion");
-            assert_eq!(error.code, (-32800).into());
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::new(-32800)
+            );
             assert!(
                 dispatched(updates)
                     .iter()
@@ -1049,7 +1069,10 @@ async fn close_past_grace_period_reports_closing_then_completes() {
                     .block_task()
                     .await
                     .expect_err("close outlives its grace period");
-                assert_eq!(error.code, (-32603).into());
+                assert_eq!(
+                    error.code,
+                    agent_client_protocol::ErrorCode::new(-32603)
+                );
                 let data = error.data.expect("data");
                 assert_eq!(data["sessionId"], session_id.to_string());
                 assert_eq!(data["closing"], true);
@@ -1516,14 +1539,14 @@ async fn initialize_rejects_older_version_with_32022() {
     let mut outcome = None;
     // A v2 client rewrites its own request version, so a v1 client sends the old one.
     Client
-        .builder()
+        .v1()
         .connect_with(
             acp(&kernel).component(AcpTransportKind::Stdio),
             async |connection| {
                 outcome = Some(
                     connection
                         .send_request(
-                            agent_client_protocol::schema::v1::InitializeRequest::new(
+                            agent_client_protocol::v1::schema::InitializeRequest::new(
                                 ProtocolVersion::V1,
                             ),
                         )
@@ -1538,7 +1561,7 @@ async fn initialize_rejects_older_version_with_32022() {
     let error = outcome
         .expect("initialize outcome")
         .expect_err("unsupported version");
-    assert_eq!(error.code, (-32022).into());
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::new(-32022));
     assert_eq!(
         error.data.expect("data"),
         serde_json::json!({"requested": 1, "supported": [2]})
@@ -2490,7 +2513,7 @@ async fn invalid_busy_options_are_rejected_before_insertion() {
                     .unwrap_err();
                 assert_eq!(
                     error.code,
-                    agent_client_protocol::ErrorCode::InvalidParams
+                    agent_client_protocol::ErrorCode::INVALID_PARAMS
                 );
             }
             assert!(
@@ -2592,7 +2615,7 @@ async fn close_delivers_final_queue_and_cancels_all_busy_prompts() {
             for answer in answers {
                 assert_eq!(
                     answer.unwrap_err().code,
-                    agent_client_protocol::ErrorCode::RequestCancelled
+                    agent_client_protocol::ErrorCode::REQUEST_CANCELLED
                 );
             }
             Ok(())
@@ -2660,7 +2683,7 @@ async fn uncertain_queue_persistence_reaches_the_prompt_response() {
                         };
                         fail_sync.store(true, Ordering::SeqCst);
                         let error = connection.send_request(agent_client_protocol::UntypedMessage::new(method.as_str(), &params).unwrap()).block_task().await.unwrap_err();
-                        assert_eq!(error.code, agent_client_protocol::ErrorCode::InternalError);
+                        assert_eq!(error.code, agent_client_protocol::ErrorCode::INTERNAL_ERROR);
                         assert_eq!(error.data.as_ref().unwrap()["outcomeUnknown"], true);
                         // A poisoned transcript also prevents stop from reporting a safe withdrawal.
                         assert!(matches!(kernel.cancel_session(&protocol::SessionId::try_from(session.to_string()).unwrap()), Err(kernel::KernelError::SessionPersistenceUncertain)));
@@ -2669,7 +2692,7 @@ async fn uncertain_queue_persistence_reaches_the_prompt_response() {
             };
             let (answer, ()) = tokio::join!(queued, release);
             let error = answer.unwrap_err();
-            assert_eq!(error.code, agent_client_protocol::ErrorCode::InternalError);
+            assert_eq!(error.code, agent_client_protocol::ErrorCode::INTERNAL_ERROR);
             assert_eq!(error.data.as_ref().unwrap()["outcomeUnknown"], true);
             if failure == "enqueue" {
                 tokio::time::sleep(SETTLE).await;
@@ -2681,4 +2704,36 @@ async fn uncertain_queue_persistence_reaches_the_prompt_response() {
             Ok(())
         }).await;
     }
+}
+
+/// A client-set title reaches the Session's observers as `session_info_update`.
+#[tokio::test]
+async fn set_title_publishes_session_info_update() {
+    let state = tempfile::tempdir().expect("state");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let model = ScriptedModel::new();
+    let kernel = alignment_kernel(
+        state.path(),
+        &model,
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(
+        &acp(&kernel),
+        workspace.path(),
+        async |connection, session_id, updates| {
+            connection
+                .send_request(wire::SetSessionTitleRequest::new(
+                    session_id, "Renamed",
+                ))
+                .block_task()
+                .await?;
+            next_matching(updates, |value| {
+                value["sessionUpdate"] == "session_info_update"
+                    && value["title"] == "Renamed"
+            })
+            .await;
+            Ok(())
+        },
+    )
+    .await;
 }

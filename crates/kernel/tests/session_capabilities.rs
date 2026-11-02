@@ -2554,3 +2554,117 @@ async fn delete_session_removes_active_and_persisted_state_idempotently() {
         .await
         .expect("repeat delete");
 }
+
+/// Rejects every observer event so notification failures stay observable.
+struct ClosedSinks;
+
+impl kernel::SessionEventSinks for ClosedSinks {
+    /// Returns a sink whose consumer has already gone away.
+    fn sink(&self, _session_id: &SessionId) -> Arc<dyn EventSink> {
+        Arc::new(ClosedSink)
+    }
+}
+
+/// Event sink that reports a closed consumer for every event.
+struct ClosedSink;
+
+#[async_trait]
+impl EventSink for ClosedSink {
+    /// Fails like a protocol consumer that stopped accepting events.
+    async fn emit(&self, _event: AgentEvent) -> Result<(), kernel::SinkError> {
+        Err(kernel::SinkError::Closed)
+    }
+}
+
+/// A startup cancelled mid-hook leaves nothing to wait for, so titling fails fast.
+#[tokio::test]
+async fn set_session_title_reports_a_starting_session_left_by_a_cancelled_startup()
+ {
+    let _mcp_test_guard = MCP_SESSION_TEST_LOCK.lock().await;
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(4_700)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let kernel = build_gated_start_kernel(
+        root.path(),
+        clock,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+    );
+    let session_id =
+        SessionId::try_from("session-cancelled-start").expect("session id");
+    let create_kernel = Arc::clone(&kernel);
+    let create_session_id = session_id.clone();
+    let create = tokio::spawn(async move {
+        create_kernel
+            .create_session(SessionCreateOptions {
+                session_id: create_session_id,
+                cwd,
+                parent_session_id: None,
+            })
+            .await
+    });
+    entered.notified().await;
+    create.abort();
+    let _cancelled = create.await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        kernel.set_session_title(
+            &session_id,
+            SessionTitle::try_from("Stuck").expect("title"),
+        ),
+    )
+    .await
+    .expect("set_session_title must not wait on a startup nobody finishes");
+    assert!(matches!(result, Err(kernel::KernelError::SessionStarting)));
+}
+
+/// A stored title is reported as success even when announcing it fails.
+#[tokio::test]
+async fn set_session_title_succeeds_when_its_notification_fails() {
+    let root = tempfile::tempdir().expect("store root");
+    let cwd = root.path().join("workspace");
+    fs::create_dir_all(&cwd).expect("create project cwd");
+    let model: Arc<dyn Model> = Arc::new(ScriptedModel {
+        scripts: Mutex::new(VecDeque::new()),
+    });
+    let kernel = build_kernel(
+        root.path().to_path_buf(),
+        model,
+        Arc::new(StepClock(AtomicU64::new(4_800))),
+        Arc::new(SequentialIds(AtomicU64::new(0))),
+        None,
+    );
+    let session_id =
+        SessionId::try_from("session-closed-sink").expect("session id");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .install_event_sinks(Arc::new(ClosedSinks))
+        .expect("install failing sinks");
+
+    kernel
+        .set_session_title(
+            &session_id,
+            SessionTitle::try_from("Stored").expect("title"),
+        )
+        .await
+        .expect("stored title must not fail on a closed observer");
+    assert_eq!(
+        kernel
+            .session_tree(&session_id)
+            .expect("tree")
+            .name
+            .as_deref(),
+        Some("Stored")
+    );
+}

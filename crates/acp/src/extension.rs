@@ -3,15 +3,15 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{
     Client, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-    JsonRpcResponse, UntypedMessage, V2ConnectionTo,
+    JsonRpcResponse, UntypedMessage, v2::ConnectionTo as V2ConnectionTo,
 };
 use kernel::Kernel;
 use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExtensionMethod,
     AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpSessionParameters,
-    AcpSessionRenameParameters, AcpSkillParameters, AcpUserBashParameters,
-    McpSessionRevisionNotification, ProductIdentity, SessionTitle,
+    AcpSkillParameters, AcpUserBashParameters, McpSessionRevisionNotification,
+    ProductIdentity,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -52,14 +52,12 @@ impl JsonRpcMessage for AcpMcpUpdateNotification {
     /// Parses one typed revision payload without accepting unknown protocol fields.
     fn parse_message(
         method: &str,
-        params: &impl serde::Serialize,
+        params: &serde_json::Value,
     ) -> Result<Self, agent_client_protocol::Error> {
         if !Self::matches_method(method) {
             return Err(agent_client_protocol::Error::method_not_found());
         }
-        let value = serde_json::to_value(params)
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
-        serde_json::from_value(value)
+        serde::Deserialize::deserialize(params)
             .map(Self)
             .map_err(invalid_parameters)
     }
@@ -102,13 +100,14 @@ impl JsonRpcMessage for AcpExtensionRequest {
     /// Parses one recognized extension method while preserving its complete parameter object.
     fn parse_message(
         method: &str,
-        params: &impl serde::Serialize,
+        params: &serde_json::Value,
     ) -> Result<Self, agent_client_protocol::Error> {
         let method = AcpExtensionMethod::parse(method)
             .ok_or_else(agent_client_protocol::Error::method_not_found)?;
-        let parameters = serde_json::to_value(params)
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
-        Ok(Self { method, parameters })
+        Ok(Self {
+            method,
+            parameters: params.clone(),
+        })
     }
 }
 
@@ -130,7 +129,7 @@ impl JsonRpcResponse for AcpExtensionResponse {
     }
 
     /// Preserves extension responses received by SDK-side clients.
-    fn from_value(
+    fn from_json(
         _method: &str,
         value: serde_json::Value,
     ) -> Result<Self, agent_client_protocol::Error> {
@@ -321,20 +320,6 @@ impl AcpExtensionDispatcher {
                     .clear_pending_messages(&input.session_id)
                     .map_err(crate::server::KernelFailure)?;
                 serde_json::json!({ "cleared": true })
-            }
-            AcpExtensionMethod::SessionRename => {
-                let input: AcpSessionRenameParameters =
-                    serde_json::from_value(request.parameters)
-                        .map_err(invalid_parameters)?;
-                let title = SessionTitle::try_from(input.title)
-                    .map_err(invalid_parameters)?;
-                self.kernel
-                    .rename_session(&input.session_id, title.clone())
-                    .await
-                    .map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?;
-                serde_json::json!({ "title": title.as_str() })
             }
             AcpExtensionMethod::SessionRuntime => {
                 let input: AcpSessionParameters =

@@ -1,5 +1,5 @@
 use acp::AcpEventMapper;
-use agent_client_protocol::schema::v2::SessionUpdate;
+use agent_client_protocol::v2::schema::SessionUpdate;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
     AssistantMetadata, BashExecutionMessage, CompactionOutcome,
@@ -457,7 +457,7 @@ fn only_agent_settled_maps_to_idle_state() {
         assert!(updates.iter().all(|update| !matches!(
             update,
             SessionUpdate::StateUpdate(
-                agent_client_protocol::schema::v2::StateUpdate::Idle(_)
+                agent_client_protocol::v2::schema::StateUpdate::Idle(_)
             )
         )));
     }
@@ -474,7 +474,7 @@ fn only_agent_settled_maps_to_idle_state() {
     assert!(updates.iter().any(|update| matches!(
         update,
         SessionUpdate::StateUpdate(
-            agent_client_protocol::schema::v2::StateUpdate::Idle(_)
+            agent_client_protocol::v2::schema::StateUpdate::Idle(_)
         )
     )));
 }
@@ -550,7 +550,7 @@ fn failed_agent_settlement_does_not_map_to_cancelled() {
         .iter()
         .find_map(|update| match update {
             SessionUpdate::StateUpdate(
-                agent_client_protocol::schema::v2::StateUpdate::Idle(idle),
+                agent_client_protocol::v2::schema::StateUpdate::Idle(idle),
             ) => Some(idle),
             _ => None,
         })

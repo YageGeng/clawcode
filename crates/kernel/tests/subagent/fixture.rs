@@ -193,6 +193,19 @@ impl RecordingSinks {
             .collect()
     }
 
+    /// Returns every event, with metadata, emitted for one Session in order.
+    // Only the protocol_alignment target, which shares this fixture, reads events.
+    #[allow(dead_code)]
+    pub fn events(&self, session: &SessionId) -> Vec<AgentEvent> {
+        self.0
+            .lock()
+            .expect("events")
+            .iter()
+            .filter(|(id, _event)| id == session)
+            .map(|(_id, event)| event.clone())
+            .collect()
+    }
+
     /// Checks events emitted by real Kernel runs for a particular Session.
     pub fn saw(
         &self,

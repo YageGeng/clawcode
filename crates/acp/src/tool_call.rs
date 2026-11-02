@@ -1,4 +1,4 @@
-use agent_client_protocol::schema::v2 as wire;
+use agent_client_protocol::v2::schema as wire;
 use protocol::{ToolCall, ToolLocation};
 
 /// Borrows a Kernel tool call for its ACP tool kind.

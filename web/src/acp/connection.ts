@@ -168,27 +168,24 @@ export class AcpConnection {
     return this.requestId;
   }
 
-  /** Decodes one JSON-RPC transport frame and preserves its notification boundary. */
+  /** Decodes one single-message JSON-RPC transport frame; ACP v2 forbids batches. */
   private receive(data: unknown): void {
     if (typeof data !== "string") {
       this.callbacks.diagnostic("Ignored non-text ACP WebSocket frame");
       return;
     }
-    let messages: JsonRpcMessage[];
+    let message: JsonRpcMessage;
     try {
       const value: unknown = JSON.parse(data);
-      const values = Array.isArray(value) ? value : [value];
-      if (values.length === 0) throw new Error("JSON-RPC batch must not be empty");
-      messages = values.map((item, index) => {
-        const record = AcpProtocol.decodeRecord(
-          item,
-          values.length === 1 ? "JSON-RPC message" : `JSON-RPC batch member ${index}`
-        );
-        if (record.jsonrpc !== "2.0") {
-          throw new Error("JSON-RPC version must be 2.0");
-        }
-        return record as JsonRpcMessage;
-      });
+      if (Array.isArray(value)) {
+        this.callbacks.diagnostic("Ignored JSON-RPC batch frame; ACP v2 forbids batches");
+        return;
+      }
+      const record = AcpProtocol.decodeRecord(value, "JSON-RPC message");
+      if (record.jsonrpc !== "2.0") {
+        throw new Error("JSON-RPC version must be 2.0");
+      }
+      message = record as JsonRpcMessage;
     } catch (reason: unknown) {
       this.callbacks.diagnostic(
         reason instanceof Error ? reason.message : String(reason)
@@ -196,37 +193,35 @@ export class AcpConnection {
       return;
     }
     this.callbacks.activity();
-    const notifications: AcpNotification[] = [];
-    for (const message of messages) {
-      if ("id" in message && !("method" in message)) {
-        const pending = this.pending.get(message.id);
-        if (pending === undefined) {
-          this.callbacks.diagnostic(`Ignored response for unknown id ${message.id}`);
-          continue;
-        }
-        this.pending.delete(message.id);
-        if (pending.timeout !== undefined) window.clearTimeout(pending.timeout);
-        if ("error" in message) {
-          pending.reject(new AcpRequestError(message.error));
-        } else {
-          pending.resolve(message.result);
-        }
-        continue;
+    if ("id" in message && !("method" in message)) {
+      const pending = this.pending.get(message.id);
+      if (pending === undefined) {
+        this.callbacks.diagnostic(`Ignored response for unknown id ${message.id}`);
+        return;
       }
-      if ("method" in message && "id" in message) {
-        this.answer(message.id, message.method, message.params);
-        continue;
+      this.pending.delete(message.id);
+      if (pending.timeout !== undefined) window.clearTimeout(pending.timeout);
+      if ("error" in message) {
+        pending.reject(new AcpRequestError(message.error));
+      } else {
+        pending.resolve(message.result);
       }
-      if ("method" in message && message.method === "$/cancel_request") {
-        const params = message.params as Readonly<{ requestId?: number | string }> | undefined;
-        if (params?.requestId !== undefined) this.inbound.get(params.requestId)?.abort();
-        continue;
-      }
-      if ("method" in message) {
-        notifications.push({ method: message.method, params: message.params });
-      }
+      return;
     }
-    if (notifications.length > 0) this.callbacks.notifications(notifications);
+    if ("method" in message && "id" in message) {
+      this.answer(message.id, message.method, message.params);
+      return;
+    }
+    if ("method" in message && message.method === "$/cancel_request") {
+      const params = message.params as Readonly<{ requestId?: number | string }> | undefined;
+      if (params?.requestId !== undefined) this.inbound.get(params.requestId)?.abort();
+      return;
+    }
+    // One frame carries one notification; a negotiated batch carrier is
+    // expanded later by the controller, which knows the product namespace.
+    if ("method" in message) {
+      this.callbacks.notifications([{ method: message.method, params: message.params }]);
+    }
   }
 
   /** Runs a registered handler and replies once; unknown methods get -32601. */

@@ -150,7 +150,7 @@ export class WorkspaceController {
 
   async renameSession(sessionId: SessionId, title: string): Promise<void> {
     const result = await this.requireConnection().request<Readonly<{ title: string }>>(
-      this.methods.sessionRename,
+      AcpProtocol.methods.sessionSetTitle,
       { sessionId, title }
     );
     this.dispatch({ type: "session/title", sessionId, title: result.title });
@@ -587,7 +587,8 @@ export class WorkspaceController {
         capabilities: { elicitation: { form: {}, url: {} } },
         _meta: {
           [this.bootstrap.product.slug]: {
-            sessionRecovery: { version: 1, sessions: this.updateRouter.recoveryCursors() }
+            sessionRecovery: { version: 1, sessions: this.updateRouter.recoveryCursors() },
+            sessionUpdateBatch: { version: 1 }
           }
         }
       });
@@ -886,7 +887,11 @@ export class WorkspaceController {
         continue;
       }
       const update = AcpProtocol.decodeRecord(notification.params, "session/update") as SessionUpdateNotification;
-      if (!this.missingSessionIds.has(update.sessionId)) sessionUpdates.push(update);
+      // A negotiated carrier expands in place; a malformed one throws into the
+      // reconnect path so recovery resynchronizes instead of applying part of it.
+      for (const item of AcpProtocol.expandSessionUpdateBatch(update, this.bootstrap.product.slug)) {
+        if (!this.missingSessionIds.has(item.sessionId)) sessionUpdates.push(item);
+      }
     }
     if (sessionUpdates.length > 0) {
       const before = useWorkspaceStore.getState();

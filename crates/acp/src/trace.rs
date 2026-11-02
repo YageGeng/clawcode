@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
-use agent_client_protocol::{JsonRpcResponse, Responder};
+use agent_client_protocol::{JsonRpcResponse, v2::Responder};
 use protocol::{IdGenerator, IdKind, TraceId};
 use serde::Serialize;
 

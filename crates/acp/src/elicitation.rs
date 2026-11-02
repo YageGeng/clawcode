@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use agent_client_protocol::schema::v2 as wire;
+use agent_client_protocol::v2::schema as wire;
 use agent_client_protocol::{
-    Client, RequestCancellationHandle, V2ConnectionTo,
+    Client, RequestCancellationHandle, v2::ConnectionTo as V2ConnectionTo,
 };
 use kernel::{Kernel, KernelError};
 use protocol::{

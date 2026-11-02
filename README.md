@@ -359,7 +359,8 @@ cargo run -p app --bin clawcode -- serve --web-root web/dist
 
 Open `http://127.0.0.1:3000`. `GET /acp` upgrades to WebSocket when requested
 and is otherwise used for SSE; `POST /acp` carries ACP JSON-RPC requests. The
-service also exposes `GET /health`.
+service also exposes `GET /health`. The port accepts HTTP/1.1 and cleartext
+HTTP/2 (h2c, prior knowledge); WebSocket upgrades require HTTP/1.1.
 
 The unauthenticated WebUI is deliberately loopback-only. The server rejects
 wildcard, LAN, and public bind addresses. The active model, Skills, and MCP

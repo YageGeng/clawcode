@@ -1,6 +1,6 @@
 //! ACP prompt validation and conversion into Kernel input.
 
-use agent_client_protocol::schema::v2 as wire;
+use agent_client_protocol::v2::schema as wire;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 

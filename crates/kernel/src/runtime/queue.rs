@@ -377,28 +377,18 @@ impl Kernel {
                 let _guard = publishing.queue_publish.lock().await;
                 let result: Result<(), KernelError> = async {
                     let pending = publishing.execution.pending_snapshot()?;
-                    let active = publishing.execution.active_run()?;
-                    let turn_id = match &active {
-                        Some(active) => active.turn_id.clone(),
-                        None => TurnId::try_from(
-                            kernel.id_generator.next(IdKind::Turn),
+                    let (turn_id, emitter) = kernel.observer_emitter(
+                        Arc::clone(&publishing),
+                        &session_id,
+                    )?;
+                    emitter
+                        .emit(
+                            turn_id,
+                            protocol::AgentEventPayload::QueueChanged {
+                                pending,
+                            },
                         )
-                        .map_err(|e| KernelError::Protocol(e.to_string()))?,
-                    };
-                    let sink = active.map_or_else(
-                        || kernel.session_sink(&session_id),
-                        |active| active.sink,
-                    );
-                    EventEmitter {
-                        clock: Arc::clone(&kernel.clock),
-                        sink,
-                        session: Arc::clone(&publishing),
-                    }
-                    .emit(
-                        turn_id,
-                        protocol::AgentEventPayload::QueueChanged { pending },
-                    )
-                    .await
+                        .await
                 }
                 .await;
                 if let Err(error) = result {

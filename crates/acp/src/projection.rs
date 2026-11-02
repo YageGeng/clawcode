@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use agent_client_protocol::schema::v2 as wire;
+use agent_client_protocol::v2::schema as wire;
 use async_trait::async_trait;
 use kernel::{EventSink, Kernel, SinkError};
 use protocol::{
@@ -1007,7 +1007,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use agent_client_protocol::schema::v2 as wire;
+    use agent_client_protocol::v2::schema as wire;
     use extension::StaticExtensionFactory;
     use futures::stream;
     use kernel::{

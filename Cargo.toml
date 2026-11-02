@@ -96,7 +96,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-util = "0.7"
 
 # http
-axum = "0.8"
+axum = { version = "0.8", features = ["http2"] }
 bytes = "1"
 http = "1"
 reqwest = { version = "0.13", default-features = false }
@@ -125,8 +125,8 @@ tempfile = "3"
 toml = "=0.8"
 
 # protocol
-agent-client-protocol = "3"
-agent-client-protocol-http = { version = "3", default-features = false }
+agent-client-protocol = "5"
+agent-client-protocol-http = { version = "5", default-features = false }
 
 # cli
 clap = { version = "4", features = ["derive"] }

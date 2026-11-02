@@ -4,6 +4,7 @@ mod fixture;
 mod insertion;
 mod queue;
 mod settings;
+mod title;
 mod tools;
 mod usage;
 

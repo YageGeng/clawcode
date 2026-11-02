@@ -21,8 +21,8 @@ mod turn;
 pub use acp::{
     AcpCommandParameters, AcpCompactParameters, AcpForkParameters,
     AcpNavigateParameters, AcpPendingMessageRemoveParameters,
-    AcpSessionParameters, AcpSessionRenameParameters, AcpSkillParameters,
-    AcpUserBashParameters, AcpWorkingDirectory, AcpWorkingDirectoryError,
+    AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
+    AcpWorkingDirectory, AcpWorkingDirectoryError,
 };
 pub use capability::{
     CompactionData, CompactionDetails, CompactionOperationError,

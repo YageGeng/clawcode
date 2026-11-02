@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use agent_client_protocol::schema::v2 as wire;
+use agent_client_protocol::v2::schema as wire;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentOutcome, CompactionOutcome,
     ContentBlock, MessageContent, ModelUsage, ProductIdentity, RunId,

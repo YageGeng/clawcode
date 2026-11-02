@@ -138,6 +138,7 @@ export const AcpProtocol = {
     sessionPrompt: "session/prompt",
     sessionCancel: "session/cancel",
     sessionSetConfigOption: "session/set_config_option",
+    sessionSetTitle: "session/set_title",
     sessionUpdate: "session/update"
   },
   /** Keeps select options, flattening grouped choices; malformed entries are dropped. */
@@ -168,6 +169,45 @@ export const AcpProtocol = {
     return typeof namespaced === "object" && namespaced !== null && !Array.isArray(namespaced)
       ? namespaced as Record<string, unknown>
       : undefined;
+  },
+  /**
+   * Expands one negotiated batch carrier into its ordered Session updates.
+   *
+   * The outer update comes first, without the batch key; nested items follow in
+   * order. A malformed carrier throws so the caller resynchronizes the connection
+   * instead of applying a partial frame.
+   */
+  expandSessionUpdateBatch(
+    update: SessionUpdateNotification,
+    namespace: string
+  ): readonly SessionUpdateNotification[] {
+    const product = this.productMeta(update._meta, namespace);
+    if (product?.sessionUpdateBatch === undefined) return [update];
+    const items = product.sessionUpdateBatch;
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error("ACP session update batch is invalid");
+    }
+    const nested = items.map((item: unknown) => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        throw new Error("ACP session update batch is invalid");
+      }
+      const record = item as Record<string, unknown>;
+      if (
+        record.sessionId !== update.sessionId
+        || this.productMeta(record._meta, namespace)?.sessionUpdateBatch !== undefined
+      ) {
+        throw new Error("ACP session update batch is invalid");
+      }
+      return record as SessionUpdateNotification;
+    });
+    // Keep every other product key on the outer update; only the carrier moves out.
+    const outerProduct: Record<string, unknown> = { ...product };
+    delete outerProduct.sessionUpdateBatch;
+    const outer: SessionUpdateNotification = {
+      ...update,
+      _meta: { ...update._meta, [namespace]: outerProduct }
+    };
+    return [outer, ...nested];
   },
   eventMeta(meta: unknown, namespace: string): EventMeta | undefined {
     const value = this.productMeta(meta, namespace);

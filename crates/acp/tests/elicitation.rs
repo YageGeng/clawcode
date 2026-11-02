@@ -6,8 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use acp::{AcpServerFactory, AcpTransportKind};
-use agent_client_protocol::schema::{ProtocolVersion, v2 as wire};
-use agent_client_protocol::{Agent, Client, Responder, V2ConnectionTo};
+use agent_client_protocol::{
+    Agent, Client,
+    v2::{ConnectionTo as V2ConnectionTo, Responder},
+};
+use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use async_trait::async_trait;
 use extension::StaticExtensionFactory;
 use futures::stream;
