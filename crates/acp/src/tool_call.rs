@@ -11,7 +11,7 @@ impl From<ToolKindOf<'_>> for wire::ToolKind {
             "read" => Self::Read,
             "write" | "edit" => Self::Edit,
             "bash" => Self::Execute,
-            "tool_search" => Self::Search,
+            "grep" | "tool_search" => Self::Search,
             _ => Self::Other,
         }
     }

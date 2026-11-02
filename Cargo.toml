@@ -118,6 +118,7 @@ sha2 = "0.11"
 typed-builder = "0.23"
 
 # fs
+grep = "0.4"
 ignore = "0.4"
 tempfile = "3"
 # Match Figment's TOML major version to avoid compiling parallel parser stacks.

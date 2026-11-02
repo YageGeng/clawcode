@@ -31,7 +31,10 @@ fn builtin_factory_registers_only_pi_coding_tools() {
         .create()
         .expect("built-ins should register");
 
-    assert_eq!(registry.names(), vec!["bash", "edit", "read", "write"]);
+    assert_eq!(
+        registry.names(),
+        vec!["bash", "edit", "grep", "read", "write"]
+    );
 }
 
 /// Built-in tools expose pi's exact System Prompt contributions.
@@ -82,6 +85,16 @@ fn builtin_tools_expose_pi_prompt_contributions() {
         Some(&ToolPromptContribution {
             snippet: Some(
                 "Execute bash commands (ls, grep, find, etc.)".to_string()
+            ),
+            guidelines: Vec::new(),
+        })
+    );
+    assert_eq!(
+        contributions.get("grep"),
+        Some(&ToolPromptContribution {
+            snippet: Some(
+                "Search file contents for patterns (respects .gitignore)"
+                    .to_string()
             ),
             guidelines: Vec::new(),
         })

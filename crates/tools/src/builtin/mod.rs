@@ -1,5 +1,6 @@
 mod bash;
 mod edit;
+mod grep;
 mod mutation;
 pub(crate) mod output;
 mod path;
@@ -26,7 +27,7 @@ impl BuiltinToolFactory {
         }
     }
 
-    /// Enables or disables read, write, and edit registration.
+    /// Enables or disables read, write, edit, and grep registration.
     #[must_use]
     pub fn filesystem_enabled(mut self, enabled: bool) -> Self {
         self.filesystem_enabled = enabled;
@@ -57,6 +58,7 @@ impl ToolFactory for BuiltinToolFactory {
             registry
                 .register(Arc::new(write::WriteTool) as Arc<dyn AgentTool>)?;
             registry.register(Arc::new(edit::EditTool) as Arc<dyn AgentTool>)?;
+            registry.register(Arc::new(grep::GrepTool) as Arc<dyn AgentTool>)?;
         }
         if self.shell_enabled {
             registry.register(Arc::new(bash::BashTool) as Arc<dyn AgentTool>)?;
