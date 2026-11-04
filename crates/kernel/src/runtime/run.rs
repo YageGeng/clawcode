@@ -548,10 +548,18 @@ impl Kernel {
                 let mut request_for_model = ModelRequest {
                     messages: history,
                     tools: turn_tools.definitions(),
-                    options: protocol::ModelRequestOptions {
-                        thinking_level,
-                        ..Default::default()
-                    },
+                    // Only providers configured for prompt caching get a retention, and
+                    // the Session id routes each of their Turns to the server that holds
+                    // the conversation's cached prefix.
+                    options: protocol::ModelRequestOptions::builder()
+                        .thinking_level(thinking_level)
+                        .prompt_cache(turn_model.profile().prompt_cache.map(
+                            |retention| protocol::PromptCache {
+                                retention,
+                                key: request.session_id.to_string(),
+                            },
+                        ))
+                        .build(),
                 };
                 if let Some(messages) = session
                     .extensions

@@ -192,6 +192,11 @@ pub struct LlmProvider {
     #[serde(default)]
     #[builder(default)]
     pub models: Vec<LlmModel>,
+    /// Prompt-cache retention requested for agent Turns. Omitted sends no cache option
+    /// or routing key, leaving caching to the provider's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub prompt_cache: Option<protocol::PromptCacheRetention>,
 }
 
 impl LlmModel {

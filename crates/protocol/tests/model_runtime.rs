@@ -198,7 +198,9 @@ fn text_only_model_request_replaces_unsupported_images() {
             },
         ],
         tools: Vec::new(),
-        options: ModelRequestOptions::default(),
+        options: ModelRequestOptions::builder()
+            .thinking_level(protocol::ThinkingLevel::Medium)
+            .build(),
     };
     let profile = ModelProfile::builder()
         .provider_id("fixture".to_string())
@@ -259,7 +261,9 @@ fn image_model_request_preserves_images() {
             },
         }],
         tools: Vec::new(),
-        options: ModelRequestOptions::default(),
+        options: ModelRequestOptions::builder()
+            .thinking_level(protocol::ThinkingLevel::Medium)
+            .build(),
     };
     let profile = ModelProfile::builder()
         .provider_id("fixture".to_string())
@@ -286,9 +290,16 @@ fn image_model_request_preserves_images() {
 /// Off sends nothing; every other level maps to the same-named effort and tolerates unsupported levels.
 #[test]
 fn thinking_levels_map_to_generation_options() {
-    use protocol::ThinkingLevel;
+    use protocol::{ModelRequestOptions, ThinkingLevel};
     use rig_core::completion::options::{Effort, OnUnsupported, Reasoning};
-    assert!(ThinkingLevel::Off.generation_options().is_none());
+    assert!(ThinkingLevel::Off.effort().is_none());
+    assert!(
+        ModelRequestOptions::builder()
+            .thinking_level(ThinkingLevel::Off)
+            .build()
+            .into_generation_options()
+            .is_none()
+    );
     assert_eq!(ThinkingLevel::default(), ThinkingLevel::Medium);
     for (level, effort) in [
         (ThinkingLevel::Minimal, Effort::Minimal),
@@ -297,8 +308,41 @@ fn thinking_levels_map_to_generation_options() {
         (ThinkingLevel::High, Effort::High),
         (ThinkingLevel::XHigh, Effort::XHigh),
     ] {
-        let options = level.generation_options().expect("options");
+        let options = ModelRequestOptions::builder()
+            .thinking_level(level)
+            .build()
+            .into_generation_options()
+            .expect("options");
         assert_eq!(options.reasoning, Some(Reasoning::Effort(effort)));
+        assert_eq!(options.cache, None);
+        assert_eq!(options.cache_key, None);
+        assert_eq!(options.unsupported_policy(), OnUnsupported::Ignore);
+    }
+}
+
+/// A prompt cache sends its retention and routing key together; reasoning stays independent.
+#[test]
+fn prompt_cache_sends_retention_with_routing_key() {
+    use protocol::{
+        ModelRequestOptions, PromptCache, PromptCacheRetention, ThinkingLevel,
+    };
+    use rig_core::completion::options::{CacheRetention, OnUnsupported};
+    for (retention, expected) in [
+        (PromptCacheRetention::Short, CacheRetention::Short),
+        (PromptCacheRetention::Long, CacheRetention::Long),
+    ] {
+        let options = ModelRequestOptions::builder()
+            .thinking_level(ThinkingLevel::Off)
+            .prompt_cache(Some(PromptCache {
+                retention,
+                key: "session-1".into(),
+            }))
+            .build()
+            .into_generation_options()
+            .expect("cache options");
+        assert_eq!(options.reasoning, None);
+        assert_eq!(options.cache, Some(expected));
+        assert_eq!(options.cache_key.as_deref(), Some("session-1"));
         assert_eq!(options.unsupported_policy(), OnUnsupported::Ignore);
     }
 }

@@ -86,11 +86,11 @@ async fn model_options_and_compaction_summary_reach_provider() {
     let server = Server::start(vec![(200, Server::completion())]).await;
     let model = server.factory(false).create().unwrap();
     let mut request = Server::request("hi");
-    request.options = protocol::ModelRequestOptions {
-        temperature: Some(0.25),
-        max_tokens: Some(32),
-        ..Default::default()
-    };
+    request.options = protocol::ModelRequestOptions::builder()
+        .temperature(Some(0.25))
+        .max_tokens(Some(32))
+        .thinking_level(protocol::ThinkingLevel::Medium)
+        .build();
     request.messages[0].content = MessageContent::CompactionSummary {
         compaction: protocol::CompactionSummaryMessage::builder()
             .entry_id(protocol::EntryId::try_from("entry").unwrap())
@@ -115,6 +115,47 @@ async fn model_options_and_compaction_summary_reach_provider() {
         requests[0]["messages"]
             .to_string()
             .contains("checkpoint body")
+    );
+}
+
+/// Prompt-cache options reach OpenAI as its routing key and retention; defaults send neither.
+#[tokio::test]
+async fn prompt_cache_options_reach_openai_request() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![
+        (200, Server::completion()),
+        (200, Server::completion()),
+    ])
+    .await;
+    let model = server.factory(false).create().unwrap();
+    let mut cached = Server::request("hi");
+    cached.options.prompt_cache = Some(protocol::PromptCache {
+        retention: protocol::PromptCacheRetention::Short,
+        key: "session-1".into(),
+    });
+    for request in [cached, Server::request("hi")] {
+        for event in model
+            .stream(request, CancellationToken::new())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+        {
+            event.unwrap();
+        }
+    }
+    let requests = server.requests();
+    assert_eq!(requests[0]["prompt_cache_key"], "session-1");
+    assert_eq!(requests[0]["prompt_cache_retention"], "in_memory");
+    assert!(
+        requests[1].get("prompt_cache_key").is_none(),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[1].get("prompt_cache_retention").is_none(),
+        "{}",
+        requests[1]
     );
 }
 

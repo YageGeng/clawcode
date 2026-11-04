@@ -684,12 +684,11 @@ impl Kernel {
         let mut request = ModelRequest {
             messages: request_messages,
             tools: Vec::new(),
-            options: ModelRequestOptions {
-                max_tokens,
-                temperature: None,
-                // Summaries never reason; the session level applies to Turns only.
-                thinking_level: protocol::ThinkingLevel::Off,
-            },
+            // Summaries never reason and set no cache option: a one-off prompt is not reused.
+            options: ModelRequestOptions::builder()
+                .max_tokens(max_tokens)
+                .thinking_level(protocol::ThinkingLevel::Off)
+                .build(),
         };
         if request.adapt_input(model.profile()) {
             tracing::debug!(

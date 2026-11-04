@@ -203,6 +203,27 @@ Gemini's rig preset is `gcp.gemini`: use `preset = "gcp.gemini"` for the
 official endpoint, or `provider_type = "gemini"` with a `base_url` for a
 compatible one.
 
+Prompt caching is opt-in per provider. Setting `prompt_cache = "short"` or
+`"long"` on a `[[providers]]` entry sends that retention on every Turn together
+with the Session id as the cache routing key (`prompt_cache_key` on OpenAI-format
+APIs, and the session header on the ChatGPT backend). rig translates the
+retention per dialect: Anthropic receives a top-level `cache_control` (one hour
+for `long`) and places the cache point itself, and OpenAI receives its retention
+field where the model takes one. A tier rig's catalog says the model cannot
+honour, such as `short` on the ChatGPT backend or `long` on DeepSeek, is dropped
+for that model with one startup warning; for a model the catalog does not list,
+a tier the dialect cannot honour is skipped with a warning on each request, so
+pick the tier the provider supports. Providers that cache
+automatically, such as DeepSeek and OpenAI, need no setting. Without
+`prompt_cache`, no cache option or routing key is sent; compaction summaries and
+MCP sampling never send one. Providers without a rig preset use the generic
+OpenAI or Anthropic dialect and receive these fields as written, so enable it
+there only when the gateway accepts them.
+
+The WebUI shows the cache hit rate (cache reads ÷ input) per message, per Run,
+and for the Session. Within a Run or Session, a request without a cache-read
+count counts as a miss, because some providers omit zero counts.
+
 The Session thinking level is sent as a portable reasoning effort that rig
 translates for each provider. Sessions without a persisted choice start at
 `medium`; compaction summaries and MCP sampling always send no reasoning option.

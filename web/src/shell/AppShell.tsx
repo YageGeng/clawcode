@@ -1,8 +1,9 @@
 import { Boxes, Info, MessageSquareText, PanelLeftOpen, PanelRightOpen, PlugZap, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EntryId, SessionId } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
+import { ModelUsages } from "../domain/model";
 import { NewSessionDialog } from "../features/sessions/NewSessionDialog";
 import { SessionSidebar } from "../features/sessions/SessionSidebar";
 import { Conversation } from "../features/conversation/Conversation";
@@ -41,6 +42,12 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   // Subscribe to the handful of Session fields this shell renders rather than
   // the entire projection, so streaming deltas do not re-render its frame.
   const contextUsage = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.contextUsage);
+  const runUsages = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.runUsages);
+  // Session-wide cache hit rate over every Run's usage; unknown until a provider reports cache reads.
+  const sessionCacheHitRate = useMemo(
+    () => (runUsages === undefined ? undefined : ModelUsages.cacheHitRate(ModelUsages.sum([...runUsages.values()].map((run) => run.usage)))),
+    [runUsages]
+  );
   const configOptions = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.configOptions ?? initialSessionWorkspaceState.configOptions);
   const retry = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.retry);
   const skills = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.skills ?? initialSessionWorkspaceState.skills);
@@ -214,6 +221,7 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
                 Context {contextUsage.used === undefined ? "未知" : BigInt(contextUsage.used).toLocaleString()} / {BigInt(contextUsage.size).toLocaleString()}
               </span>
             )}
+            {sessionCacheHitRate === undefined ? null : <span className="runtime-chip" title="会话累计：缓存读取 ÷ 输入">Cache {sessionCacheHitRate}</span>}
             {retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}
             {retry?.type === "running" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts}</span> : null}
             {retry?.type === "finished" && !retry.success ? <span className="runtime-chip" data-tone="danger">Retry 失败</span> : null}

@@ -12,12 +12,13 @@ export type AgentUsageProps = Readonly<{
 /** Renders token accounting for one complete Agent Run. */
 export function AgentUsage({ runId, usage }: AgentUsageProps) {
   const metrics = [
-    ["总计", usage.totalTokens],
-    ["输入", usage.inputTokens],
-    ["输出", usage.outputTokens],
-    ["缓存读取", usage.cacheReadTokens],
-    ["缓存写入", usage.cacheWriteTokens],
-    ...(usage.reasoningTokens === undefined ? [] : [["推理", usage.reasoningTokens]])
+    ["总计", ModelUsages.formatTokens(usage.totalTokens)],
+    ["输入", ModelUsages.formatTokens(usage.inputTokens)],
+    ["输出", ModelUsages.formatTokens(usage.outputTokens)],
+    ["缓存读取", ModelUsages.formatTokens(usage.cacheReadTokens)],
+    ["缓存写入", ModelUsages.formatTokens(usage.cacheWriteTokens)],
+    ["缓存命中率", ModelUsages.cacheHitRate(usage) ?? "未知"],
+    ...(usage.reasoningTokens === undefined ? [] : [["推理", ModelUsages.formatTokens(usage.reasoningTokens)]])
   ] as const;
 
   return (
@@ -34,7 +35,7 @@ export function AgentUsage({ runId, usage }: AgentUsageProps) {
         {metrics.map(([label, value]) => (
           <div className="agent-usage__metric" key={label}>
             <dt>{label}</dt>
-            <dd>{ModelUsages.formatTokens(value)}</dd>
+            <dd>{value}</dd>
           </div>
         ))}
       </dl>

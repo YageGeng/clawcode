@@ -394,6 +394,34 @@ reply_as = "steer"
         assert_eq!(cfg.subagent.reply_as, crate::QueuePlacement::Steer);
     }
 
+    /// Providers send no prompt-cache option unless one names a retention.
+    #[test]
+    fn provider_prompt_cache_defaults_to_none_and_reads_retention() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[[providers]]
+id = "plain"
+display_name = "Plain"
+
+[[providers]]
+id = "anthropic"
+display_name = "Anthropic"
+prompt_cache = "long"
+"#,
+        )
+        .expect("parse provider prompt cache");
+        assert_eq!(cfg.providers[0].prompt_cache, None);
+        assert_eq!(
+            cfg.providers[1].prompt_cache,
+            Some(crate::PromptCacheRetention::Long)
+        );
+        // The former global "unset" value is not a retention.
+        toml::from_str::<AppConfig>(
+            "[[providers]]\nid = \"x\"\ndisplay_name = \"X\"\nprompt_cache = \"unset\"\n",
+        )
+        .expect_err("unset is not a prompt-cache retention");
+    }
+
     /// App runtime recovery batching defaults to the current transport limit.
     #[test]
     fn app_config_default_recovery_batch_size_is_128() {

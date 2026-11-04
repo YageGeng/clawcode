@@ -369,13 +369,12 @@ impl TryFrom<ModelRequest> for ProviderRequest {
             .tools(tools)
             .temperature(request.options.temperature)
             .max_tokens(request.options.max_tokens);
-        // Off leaves reasoning to the model default and configured parameters.
-        Ok(Self(
-            match request.options.thinking_level.generation_options() {
-                Some(options) => completion.options(options),
-                None => completion,
-            },
-        ))
+        // Off without a prompt cache sends no options, leaving the model default and
+        // configured parameters in charge.
+        Ok(Self(match request.options.into_generation_options() {
+            Some(options) => completion.options(options),
+            None => completion,
+        }))
     }
 }
 

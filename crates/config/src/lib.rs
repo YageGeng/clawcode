@@ -33,6 +33,7 @@ pub use loader::{ConfigError, ConfigHandle, load, load_from};
 pub use logging::LoggingConfig;
 pub use mcp::{McpConfigError, McpOAuthConfig, McpServerConfig};
 pub use prompt::PromptPolicy;
+pub use protocol::PromptCacheRetention;
 pub use retry::{ProviderRetryConfig, RetryConfig};
 pub use skills::{SkillSelectionRule, SkillsConfig};
 pub use subagent::SubagentConfig;

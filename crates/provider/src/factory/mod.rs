@@ -339,6 +339,22 @@ impl ConfiguredModel {
             None => Ok(ModelInputModalities::default()),
         }
         .map_err(|error| error.to_string())?;
+        // A tier the catalog says the model cannot honour would be skipped with a
+        // warning on every request, so it is dropped here with one startup warning.
+        let prompt_cache = match (provider.prompt_cache, spec) {
+            (Some(retention), Some(spec))
+                if !spec.caching.retention.is_empty()
+                    && !spec.caching.retention.contains(&retention.into()) =>
+            {
+                tracing::warn!(
+                    "model '{}' does not honour prompt_cache {:?}; its Turns send no cache option",
+                    catalog_key,
+                    retention
+                );
+                None
+            }
+            (prompt_cache, _) => prompt_cache,
+        };
         Ok(ModelProfile::builder()
             .provider_id(provider.id.as_str().to_owned())
             .model_id(model.id.clone())
@@ -353,6 +369,7 @@ impl ConfiguredModel {
             .max_output_tokens(max_output_tokens)
             .request_max_tokens(request_max_tokens)
             .input(input)
+            .prompt_cache(prompt_cache)
             .build())
     }
 

@@ -43,29 +43,20 @@ impl ThinkingLevel {
         Self::XHigh,
     ];
 
-    /// Builds the portable request options for this level, or `None` for Off.
+    /// Returns the portable reasoning effort for this level, or `None` for Off.
     ///
-    /// Unsupported levels are skipped instead of failing the request, because
+    /// Callers skip unsupported efforts instead of failing the request, because
     /// providers accept different effort sets (DeepSeek takes only low, high and max).
-    pub fn generation_options(
-        self,
-    ) -> Option<rig_core::completion::options::GenerationOptions> {
-        use rig_core::completion::options::{
-            Effort, GenerationOptions, OnUnsupported,
-        };
-        let effort = match self {
-            Self::Off => return None,
-            Self::Minimal => Effort::Minimal,
-            Self::Low => Effort::Low,
-            Self::Medium => Effort::Medium,
-            Self::High => Effort::High,
-            Self::XHigh => Effort::XHigh,
-        };
-        Some(
-            GenerationOptions::default()
-                .reasoning(effort)
-                .on_unsupported(OnUnsupported::Ignore),
-        )
+    pub fn effort(self) -> Option<rig_core::completion::options::Effort> {
+        use rig_core::completion::options::Effort;
+        match self {
+            Self::Off => None,
+            Self::Minimal => Some(Effort::Minimal),
+            Self::Low => Some(Effort::Low),
+            Self::Medium => Some(Effort::Medium),
+            Self::High => Some(Effort::High),
+            Self::XHigh => Some(Effort::XHigh),
+        }
     }
 }
 

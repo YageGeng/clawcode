@@ -82,7 +82,7 @@ export const MessageView = memo(function MessageView({ message, entry, cwd, runn
             <dt>Provider</dt><dd>{assistant.providerId}</dd>
             <dt>Model</dt><dd>{assistant.modelId}</dd>
             <dt>StopReason</dt><dd>{assistant.stopReason}{assistant.rawStopReason === undefined ? "" : ` (${assistant.rawStopReason})`}</dd>
-          <dt>Usage</dt><dd>in {ModelUsages.formatTokens(assistant.usage.inputTokens)} · out {ModelUsages.formatTokens(assistant.usage.outputTokens)} · cache read {ModelUsages.formatTokens(assistant.usage.cacheReadTokens)} · cache write {ModelUsages.formatTokens(assistant.usage.cacheWriteTokens)} · total {ModelUsages.formatTokens(assistant.usage.totalTokens)}</dd>
+          <dt>Usage</dt><dd>in {ModelUsages.formatTokens(assistant.usage.inputTokens)} · out {ModelUsages.formatTokens(assistant.usage.outputTokens)} · cache read {ModelUsages.formatTokens(assistant.usage.cacheReadTokens)} · cache write {ModelUsages.formatTokens(assistant.usage.cacheWriteTokens)} · cache hit {ModelUsages.cacheHitRate(assistant.usage) ?? "未知"} · total {ModelUsages.formatTokens(assistant.usage.totalTokens)}</dd>
             {assistant.error === undefined ? null : <><dt>Error</dt><dd>{assistant.error}</dd></>}
           </>}
         </dl>

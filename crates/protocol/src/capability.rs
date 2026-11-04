@@ -223,6 +223,10 @@ pub struct ModelProfile {
     #[serde(default)]
     #[builder(default)]
     pub input: ModelInputModalities,
+    /// Prompt-cache retention the provider requests for Turns; `None` sends no cache option.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub prompt_cache: Option<crate::PromptCacheRetention>,
 }
 
 /// Current model, thinking level, and the configured models a client may pick.

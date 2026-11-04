@@ -23,9 +23,19 @@ impl Server {
         retry: config::RetryConfig,
         extensions: extension::StaticExtensionFactory,
     ) -> kernel::Kernel {
+        Self::kernel_with(self.factory(true), root, retry, extensions)
+    }
+
+    /// Creates a real Kernel over `models`, for tests that edit provider configuration.
+    pub fn kernel_with(
+        models: ProviderModelFactory,
+        root: &std::path::Path,
+        retry: config::RetryConfig,
+        extensions: extension::StaticExtensionFactory,
+    ) -> kernel::Kernel {
         let clock: Arc<dyn store::Clock> = Arc::new(store::SystemClock);
         kernel::KernelFactory::builder()
-            .model_factory(Arc::new(self.factory(true)))
+            .model_factory(Arc::new(models))
             .retry_policy(retry.model_policy())
             .provider_retry_delay_limit_ms(retry.provider.max_retry_delay_ms)
             .tool_factory(Arc::new(tools::BuiltinToolFactory::new()))
@@ -238,7 +248,9 @@ max_output_tokens = 128
                 },
             }],
             tools: Vec::new(),
-            options: Default::default(),
+            options: protocol::ModelRequestOptions::builder()
+                .thinking_level(protocol::ThinkingLevel::Medium)
+                .build(),
         }
     }
 }

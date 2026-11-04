@@ -681,12 +681,12 @@ impl Session {
         let mut model_request = ModelRequest {
             messages,
             tools: Vec::new(),
-            options: ModelRequestOptions {
-                max_tokens: Some(request.max_tokens),
-                temperature: request.temperature,
-                // MCP sampling never reasons; the session level applies to Turns only.
-                thinking_level: protocol::ThinkingLevel::Off,
-            },
+            // MCP sampling never reasons; the session level applies to Turns only.
+            options: ModelRequestOptions::builder()
+                .max_tokens(Some(request.max_tokens))
+                .temperature(request.temperature)
+                .thinking_level(protocol::ThinkingLevel::Off)
+                .build(),
         };
         if model_request.adapt_input(model.profile()) {
             tracing::debug!(

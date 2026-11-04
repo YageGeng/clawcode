@@ -194,6 +194,21 @@ id = "deepseek-flash"
 Gemini 的 rig 预设是 `gcp.gemini`：官方端点使用 `preset = "gcp.gemini"`；兼容端点
 使用 `provider_type = "gemini"` 加 `base_url`。
 
+Prompt 缓存按 provider 显式开启。在 `[[providers]]` 上设置 `prompt_cache = "short"`
+或 `"long"` 后，每个 Turn 都会发送该保留时长，并以 Session id 作为缓存路由键
+（OpenAI 格式 API 的 `prompt_cache_key`，以及 ChatGPT 后端的会话请求头）。rig 按方言
+翻译保留时长：Anthropic 收到顶层 `cache_control`（`long` 为一小时），由其自行放置
+缓存点；OpenAI 在模型支持时收到对应的保留字段。rig 目录标明模型不支持的档位（例如
+ChatGPT 后端的 `short`、DeepSeek 的 `long`）会在启动时对该模型丢弃并记录一次警告；
+目录未收录的模型若方言无法满足该档位，则每次请求跳过并记录警告，因此请选择 provider
+支持的档位。DeepSeek、OpenAI 等自动缓存的 provider 无需配置。未设置
+`prompt_cache` 时不发送任何缓存选项或路由键；Compaction 摘要与 MCP sampling 从不
+发送。没有 rig 预设的 provider 使用通用 OpenAI 或 Anthropic 方言，这些字段会原样
+发出，因此只有网关接受时才应开启。
+
+WebUI 按消息、Run 和 Session 展示缓存命中率（缓存读取 ÷ 输入）。在 Run 或 Session
+汇总中，未报告缓存读取的请求按未命中计算，因为部分 provider 会省略为 0 的计数。
+
 Session 的 thinking 级别会作为可移植的推理强度发送，由 rig 翻译为各家参数。没有
 持久化选择的 Session 从 `medium` 开始；压缩摘要与 MCP sampling 始终不发送推理
 参数。`off` 不发送推理参数，交由模型默认值和 `extra_param` 决定。当 rig 目录列出

@@ -286,6 +286,52 @@ async fn kernel_settles_and_reopens_native_provider_messages() {
             .to_string()
             .contains("native answer")
     );
+    // A provider without prompt_cache sends no cache routing key.
+    for request in server.requests() {
+        assert!(request.get("prompt_cache_key").is_none(), "{request}");
+    }
+}
+
+/// A provider configured for prompt caching routes every Turn by its Session id.
+#[tokio::test]
+async fn configured_prompt_cache_routes_turns_by_session_id() {
+    let directory = tempfile::tempdir().expect("cache directory");
+    let response = json!({"type":"response.completed","sequence_number":0,"response":{"id":"r","object":"response","status":"completed","created_at":0,"model":"audit","tools":[],"output":[{"id":"msg","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"cached answer","annotations":[]}]}]}});
+    let server =
+        Server::start(vec![(200, format!("data: {response}\n\n"))]).await;
+    let mut config = server.configuration("openai", "responses");
+    config.providers[0].prompt_cache =
+        Some(protocol::PromptCacheRetention::Short);
+    let kernel = Server::kernel_with(
+        kernel::ProviderModelFactory::from_config(
+            config::ConfigHandle::from_config(config),
+        ),
+        directory.path(),
+        Default::default(),
+        Default::default(),
+    );
+    let session = SessionId::try_from("cached").expect("session ID");
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: session.clone(),
+            cwd: directory.path().into(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1024);
+    kernel
+        .run(
+            protocol::RunRequest {
+                session_id: session,
+                input: "hi".into(),
+            },
+            Arc::new(kernel::ChannelEventSink::new(sender)),
+        )
+        .await
+        .expect("cached Turn");
+    let request = server.requests().remove(0);
+    assert_eq!(request["prompt_cache_key"], "cached", "{request}");
 }
 
 /// Both dialects retain their own signed/native reasoning on the next serialized request.

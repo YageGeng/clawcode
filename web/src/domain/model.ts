@@ -80,6 +80,25 @@ export const ModelUsages = {
     }
   },
 
+  /**
+   * Formats the share of input tokens read from the provider cache, or `undefined` when the
+   * provider did not report both counters. Upstream input already includes cache reads.
+   *
+   * Over a sum, a request without a cache-read count counts as a miss: Gemini and legacy
+   * records omit zero reads, so dropping them would overstate the rate.
+   * ponytail: a provider that never reports cache reads lowers a mixed-provider rate;
+   * attribute usage per model if mixed sessions need exact rates.
+   */
+  cacheHitRate(usage: ModelUsage): string | undefined {
+    if (usage.inputTokens === undefined || usage.cacheReadTokens === undefined) return undefined;
+    const input = BigInt(usage.inputTokens);
+    if (input === 0n) return undefined;
+    // Per-mille in BigInt keeps one decimal place without losing u64 precision;
+    // a provider reporting reads above input still never shows more than 100%.
+    const perMille = (BigInt(usage.cacheReadTokens) * 1000n) / input;
+    return `${(Number(perMille > 1000n ? 1000n : perMille) / 10).toFixed(1)}%`;
+  },
+
   /** Mirrors upstream context_tokens without inventing a reported billing total. */
   contextTokens(usage: ModelUsage): string | undefined {
     if (usage.totalTokens !== undefined) return usage.totalTokens;

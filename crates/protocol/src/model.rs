@@ -12,14 +12,78 @@ const TOOL_IMAGE_PLACEHOLDER: &str =
     "(tool image omitted: model does not support images)";
 
 /// Optional generation controls applied only to one model request.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, typed_builder::TypedBuilder)]
 pub struct ModelRequestOptions {
     /// Maximum provider output tokens requested by the caller.
+    #[builder(default)]
     pub max_tokens: Option<u64>,
     /// Sampling temperature requested by the caller.
+    #[builder(default)]
     pub temperature: Option<f64>,
-    /// Session reasoning level; Off sends no reasoning option.
+    /// Reasoning level; Off sends no reasoning option. Required by the builder so
+    /// one-off requests state Off instead of inheriting the Medium default.
     pub thinking_level: crate::ThinkingLevel,
+    /// Provider prompt cache; `None` sends neither a retention nor a routing key.
+    #[builder(default)]
+    pub prompt_cache: Option<PromptCache>,
+}
+
+impl ModelRequestOptions {
+    /// Converts the controls into rig's portable options, or `None` when nothing is set so
+    /// the request is sent exactly as built. Values a provider cannot honour are skipped.
+    pub fn into_generation_options(
+        self,
+    ) -> Option<rig_core::completion::options::GenerationOptions> {
+        use rig_core::completion::options::{GenerationOptions, OnUnsupported};
+        let mut options = GenerationOptions::default();
+        if let Some(effort) = self.thinking_level.effort() {
+            options = options.reasoning(effort);
+        }
+        if let Some(cache) = self.prompt_cache {
+            options =
+                options.cache(cache.retention.into()).cache_key(cache.key);
+        }
+        (!options.is_default())
+            .then(|| options.on_unsupported(OnUnsupported::Ignore))
+    }
+}
+
+/// One request's prompt cache: the retention to ask for and the key that routes a
+/// conversation's requests to the provider server holding its cached prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptCache {
+    /// Requested cache lifetime tier.
+    pub retention: PromptCacheRetention,
+    /// Conversation-stable routing key, such as the Session id.
+    pub key: String,
+}
+
+/// Prompt-cache retention a provider is configured to request.
+///
+/// A project enum rather than rig's `CacheRetention` keeps the configuration schema
+/// independent of pre-1.0 rig releases and leaves out `none`, which providers that
+/// always cache reject on every request; omitting `prompt_cache` already sends nothing.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheRetention {
+    /// The provider's short retention, typically minutes.
+    Short,
+    /// The provider's long retention, typically an hour or more.
+    Long,
+}
+
+impl From<PromptCacheRetention>
+    for rig_core::completion::options::CacheRetention
+{
+    /// Maps the configured tier to rig's portable retention.
+    fn from(retention: PromptCacheRetention) -> Self {
+        match retention {
+            PromptCacheRetention::Short => Self::Short,
+            PromptCacheRetention::Long => Self::Long,
+        }
+    }
 }
 
 /// Complete model input assembled for one pi-compatible Turn.
@@ -29,7 +93,8 @@ pub struct ModelRequest {
     pub messages: Vec<AgentMessage>,
     /// Active tools exposed for this request.
     pub tools: Vec<ToolDefinition>,
-    /// Request-local generation controls, empty for ordinary agent Turns.
+    /// Request-local generation controls: Turns carry the Session reasoning level and,
+    /// when the provider enables it, the prompt cache.
     pub options: ModelRequestOptions,
 }
 

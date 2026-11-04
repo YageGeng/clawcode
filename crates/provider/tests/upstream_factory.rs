@@ -483,8 +483,13 @@ id = "{model}"
         let configured = factory.resolve(preset, model).expect("catalog model");
         for (level, expected) in cases {
             let request = configured.prepare(
-                rig_core::completion::CompletionRequest::new("hi")
-                    .options(level.generation_options().expect("level")),
+                rig_core::completion::CompletionRequest::new("hi").options(
+                    protocol::ModelRequestOptions::builder()
+                        .thinking_level(level)
+                        .build()
+                        .into_generation_options()
+                        .expect("level"),
+                ),
             );
             assert_eq!(
                 request.options.reasoning,
@@ -558,6 +563,51 @@ fn repository_claw_toml_builds_every_model() {
             profile.request_max_tokens,
             profile.max_output_tokens.min(reserve),
             "{provider}/{model}"
+        );
+    }
+}
+
+/// A prompt-cache tier the catalog says a model cannot honour is dropped once at startup,
+/// so it never reaches rig to be skipped with a warning on every request.
+#[test]
+fn prompt_cache_keeps_only_catalog_supported_tiers() {
+    use protocol::PromptCacheRetention::{Long, Short};
+    for (preset, model, tier, configured, expected) in [
+        ("deepseek", "deepseek-flash", "short", Short, Some(Short)),
+        ("deepseek", "deepseek-flash", "long", Long, None),
+        ("chatgpt", "gpt-5.3-codex", "short", Short, None),
+        ("anthropic", "claude-fable-5", "long", Long, Some(Long)),
+        // The catalog does not know this model, so nothing is refused.
+        ("deepseek", "unlisted-audit", "long", Long, Some(Long)),
+    ] {
+        if model != "unlisted-audit" {
+            // Guards against a catalog change silently making the case vacuous.
+            assert!(
+                !catalog_spec(preset, model).caching.retention.is_empty(),
+                "{preset}/{model} must list its cache tiers"
+            );
+        }
+        let document = format!(
+            r#"
+active_model = "{preset}/{model}"
+[[providers]]
+id = "{preset}"
+display_name = "audit"
+api_key = "synthetic-key"
+prompt_cache = "{tier}"
+[[providers.models]]
+id = "{model}"
+context_tokens = 32768
+max_output_tokens = 128
+"#
+        );
+        let configured_model = factory_from(&document)
+            .resolve(preset, model)
+            .unwrap_or_else(|error| panic!("{preset}/{model}: {error}"));
+        assert_eq!(
+            configured_model.profile().prompt_cache,
+            expected,
+            "{preset}/{model} configured {configured:?}"
         );
     }
 }
