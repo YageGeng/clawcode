@@ -6,7 +6,8 @@ use protocol::{
     SlashCommandStatus,
 };
 
-use super::super::{AgentEventPayload, EventEmitter, Kernel, KernelError};
+use super::super::rename::SessionRename;
+use super::super::{EventEmitter, Kernel, KernelError};
 use super::execution::SlashCommandExecution;
 use super::session_stats::SessionStatistics;
 use tokio_util::sync::CancellationToken;
@@ -160,14 +161,15 @@ impl Kernel {
                         ));
                     }
                 };
-                self.rename_session(execution.session_id, title.clone())
-                    .await?;
-                emitter
-                    .emit(
+                SessionRename::builder()
+                    .kernel(self)
+                    .session_id(execution.session_id)
+                    .session(execution.session)
+                    .build()
+                    .announced_on(
+                        Some(title.as_str().to_string()),
+                        emitter,
                         execution.turn_id.clone(),
-                        AgentEventPayload::SessionTitleChanged {
-                            title: title.as_str().to_string(),
-                        },
                     )
                     .await?;
                 Ok(command.output(

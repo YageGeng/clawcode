@@ -1,6 +1,39 @@
-use super::*;
-
 mod replay;
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Duration;
+
+use ::extension::{
+    DynamicCommandRegistry, ExtensionRegistrar, ExtensionRuntime,
+};
+use ::tools::ToolRegistry;
+use protocol::{
+    AgentMessage, EntryId, IdKind, LaneId, RecordId, RunId, SessionId,
+    SessionSummary, SessionTitle, SessionTreeSnapshot, ThinkingLevel,
+};
+use store::{
+    EntryKind, NewRecord, RecordKind, SessionCreateOptions, SessionForkOptions,
+    SessionStore,
+};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
+use tokio_util::sync::CancellationToken;
+
+use super::rename::SessionRename;
+use crate::runtime::extension::{
+    KernelExtensionDiagnostics, SessionExtensions,
+};
+use crate::runtime::lifecycle::{SessionExecution, SessionLifecycle};
+use crate::runtime::mcp::SessionMcpRuntime;
+use crate::runtime::model_state::SessionModelState;
+use crate::runtime::queue::PendingQueue;
+use crate::runtime::resources::SessionResources;
+use crate::runtime::tools::SessionToolState;
+use crate::runtime::transcript::SessionTranscript;
+use crate::runtime::{Kernel, KernelError, Session, mcp, tools};
+use crate::{Model, ModelCatalog};
 
 /// Releases one exclusively reserved Session identifier when its operation exits.
 pub(super) struct SessionIdReservation {
@@ -255,12 +288,8 @@ impl Kernel {
     ) -> Result<PathBuf, KernelError> {
         tracing::info!("started Session Resume {}", session_id);
         let result: Result<PathBuf, KernelError> = async {
-        let existing = self
-            .sessions
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .get(&session_id)
-            .map(Arc::clone);
+        let existing =
+            self.sessions.read()?.get(&session_id).map(Arc::clone);
         if let Some(existing) = existing {
             // A live map entry is published during startup for hook context, but
             // external Resume must not observe it as an initialized Session.
@@ -404,7 +433,9 @@ impl Kernel {
             let _creation_guard = session.owned_creation.write().await;
             // Transition before invoking hooks so reentrant host operations fail
             // immediately instead of waiting on the gate held by this shutdown.
-            session.begin_closing()?;
+            // Held to the end of shutdown, after the runtime leaves the map, so
+            // waiters retry only once the id is free or the Session is active again.
+            let _closing = session.begin_closing()?;
             tracing::debug!("waiting for {} queue publications while closing session {}", session.queue_publishes.len(), session_id);
             session.queue_publishes.close();
             session.queue_publishes.wait().await;
@@ -451,7 +482,7 @@ impl Kernel {
             let removal_result = self
                 .sessions
                 .write()
-                .map_err(|_poison_error| KernelError::Poisoned)
+                .map_err(KernelError::from)
                 .map(|mut sessions| {
                     sessions.remove(session_id);
                 });
@@ -558,35 +589,24 @@ impl Kernel {
         self.session(session_id)?.transcript.tree_snapshot()
     }
 
-    /// Persists a normalized manual session title without modifying transcript entries.
+    /// Stores a title on a live Session without announcing it, for internal
+    /// callers such as owned child creation that no client asked to see.
     pub async fn rename_session(
         &self,
         session_id: &SessionId,
         title: SessionTitle,
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
-        session
-            .transcript
-            .set_name(Some(title.as_str().to_string()))?;
-        session.sync_store()?;
-        let context = self.extension_context(&session, None, None)?;
-        session
-            .extensions
-            .runtime_ref()
-            .emit_session_info_changed(
-                &protocol::SessionInfoChangedEvent {
-                    name: Some(title.as_str().to_string()),
-                },
-                &context,
-            )
-            .await;
-        Ok(())
+        SessionRename::builder()
+            .kernel(self)
+            .session_id(session_id)
+            .session(&session)
+            .build()
+            .silent(Some(title.as_str().to_string()))
+            .await
     }
 
     /// Stores a client-chosen title and announces it to every Session observer.
-    ///
-    /// `rename_session` stays silent because internal callers, such as child
-    /// Session creation, set titles that no client asked to see announced.
     pub async fn set_session_title(
         &self,
         session_id: &SessionId,
@@ -594,87 +614,152 @@ impl Kernel {
     ) -> Result<(), KernelError> {
         // Any listed Session may be retitled. A live runtime costs one map
         // lookup; only a Session without one touches its persisted Store.
-        let session = loop {
+        loop {
             match self.session(session_id) {
+                // One runtime both stores and announces the title, so the event
+                // follows the runtime that actually took the name.
                 Ok(session) => {
-                    match self.rename_session(session_id, title.clone()).await {
-                        Ok(()) => break session,
-                        // Closed after the lookup; the Store still takes it.
-                        Err(KernelError::SessionNotFound(_)) => continue,
-                        Err(error) => return Err(error),
+                    match SessionRename::builder()
+                        .kernel(self)
+                        .session_id(session_id)
+                        .session(&session)
+                        .build()
+                        .announced(Some(title.as_str().to_string()))
+                        .await
+                    {
+                        // The runtime closed while the rename waited for its
+                        // lock; its sealed transcript refused the write, so
+                        // retry and let the Store take the title.
+                        Err(
+                            KernelError::SessionNotFound(_)
+                            | KernelError::SessionClosing,
+                        ) => continue,
+                        result => return result,
                     }
                 }
                 Err(
                     KernelError::SessionNotFound(_)
                     | KernelError::SessionStarting,
                 ) => {}
+                // Shutdown gives the id back when it ends; the Store, or the
+                // runtime restored by an aborted close, then takes the title.
+                Err(KernelError::SessionClosing) => {
+                    if self.wait_for_session_close(session_id).await? {
+                        continue;
+                    }
+                    return Err(KernelError::SessionClosing);
+                }
                 Err(error) => return Err(error),
             }
-            // Locate the file first so the reservation spans only the write.
-            let header =
-                self.store_factory.header(session_id)?.ok_or_else(|| {
-                    KernelError::SessionNotFound(session_id.clone())
-                })?;
             match self.reserve_session_build(session_id) {
                 Ok(_reservation) => {
                     // The build reservation keeps Resume from opening the same
-                    // file. Nothing observes an unloaded Session, so no event.
-                    let mut store = self.store_factory.open(&header.path)?;
-                    store.set_name(Some(title.as_str().to_string()))?;
-                    store.sync()?;
+                    // file. Looking the file up under it reports a deletion that
+                    // finished first as SessionNotFound, not a raw I/O error.
+                    // Nothing observes an unloaded Session, so no event.
+                    let header =
+                        self.store_factory.header(session_id)?.ok_or_else(
+                            || KernelError::SessionNotFound(session_id.clone()),
+                        )?;
+                    // One appended fact, not a replay, keeps the reservation short.
+                    self.store_factory.set_name_at(
+                        &header.path,
+                        Some(title.as_str().to_string()),
+                    )?;
                     tracing::info!(
                         "renamed persisted Session {} without loading it",
                         session_id
                     );
                     return Ok(());
                 }
+                // Construction or deletion owns the id; retry once it ends.
                 Err(KernelError::DuplicateSession(_)) => {
-                    // Construction or deletion owns the id; retry once it ends.
-                    let pending = self
-                        .pending_sessions
-                        .lock()
-                        .map_err(|_poison_error| KernelError::Poisoned)?
-                        .get(session_id)
-                        .map(tokio::sync::watch::Sender::subscribe);
-                    match pending {
-                        // The reservation drops its sender on success and rollback.
-                        Some(mut pending) => {
-                            let _ = pending.changed().await;
-                        }
+                    if !self.wait_for_session_reservation(session_id).await? {
                         // A cancelled startup can leave a Starting runtime with
                         // no reservation to wait for; report its lifecycle error.
-                        None => match self.session(session_id) {
-                            Ok(_) | Err(KernelError::SessionNotFound(_)) => {}
+                        match self.session(session_id) {
+                            Ok(_)
+                            | Err(
+                                KernelError::SessionNotFound(_)
+                                | KernelError::SessionClosing,
+                            ) => {}
                             Err(error) => return Err(error),
-                        },
+                        }
                     }
                 }
                 Err(error) => return Err(error),
             }
-        };
-        // The title is stored, which is what the caller asked for; a failed
-        // announcement only leaves observers stale until their next refresh.
-        let announced: Result<(), KernelError> = async {
-            let (turn_id, emitter) =
-                self.observer_emitter(session, session_id)?;
-            emitter
-                .emit(
-                    turn_id,
-                    AgentEventPayload::SessionTitleChanged {
-                        title: title.as_str().to_string(),
-                    },
-                )
-                .await
         }
+    }
+
+    /// Waits until a closing Session's shutdown finishes or aborts.
+    ///
+    /// Returns `false` without waiting when no shutdown is in progress, so a
+    /// caller reports the lifecycle error instead of retrying forever.
+    pub(super) async fn wait_for_session_close(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, KernelError> {
+        // A hung shutdown hook or MCP teardown must not hang callers with it;
+        // past this bound they get SessionClosing and may retry.
+        const CLOSE_WAIT: Duration = Duration::from_secs(10);
+        let session = self.sessions.read()?.get(session_id).map(Arc::clone);
+        // Shutdown already removed the runtime, which frees the id.
+        let Some(session) = session else {
+            return Ok(true);
+        };
+        let mut closing = session.execution.closing();
+        if !*closing.borrow_and_update() {
+            // No shutdown is running: an aborted close left the Session active,
+            // a finished one is about to free the id, and a runtime reopened
+            // in its place may still be starting, so retry; only a runtime
+            // stuck closing with no shutdown is reported.
+            return match session.ensure_active() {
+                Err(KernelError::SessionClosing) => {
+                    session.execution.is_closed()
+                }
+                _ => Ok(true),
+            };
+        }
+        // An error means the runtime was dropped, which also ends its shutdown.
+        let waited = tokio::time::timeout(
+            CLOSE_WAIT,
+            closing.wait_for(|closing| !*closing),
+        )
         .await;
-        if let Err(error) = announced {
+        if waited.is_err() {
             tracing::warn!(
-                "stored title for Session {} but failed to announce it: {}",
+                "gave up waiting for Session {} to finish closing after {:?}",
                 session_id,
-                error
+                CLOSE_WAIT
             );
         }
-        Ok(())
+        Ok(waited.is_ok())
+    }
+
+    /// Waits until a pending build or deletion reservation of `session_id` ends.
+    ///
+    /// Returns `false` without waiting when none is pending, so callers fall
+    /// back to the Session's lifecycle instead of retrying in a tight loop.
+    pub(super) async fn wait_for_session_reservation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, KernelError> {
+        let pending = self
+            .pending_sessions
+            .lock()?
+            .get(session_id)
+            .map(tokio::sync::watch::Sender::subscribe);
+        let Some(mut pending) = pending else {
+            return Ok(false);
+        };
+        tracing::info!(
+            "waiting for the pending build or deletion of Session {}",
+            session_id
+        );
+        // The reservation drops its sender on both success and rollback.
+        let _ = pending.changed().await;
+        Ok(true)
     }
 
     /// Forks one selected ancestor branch into a new persisted session and registers it.
@@ -1136,10 +1221,7 @@ impl Kernel {
         runtime: &Arc<Session>,
     ) -> Result<(), KernelError> {
         let registration = (|| {
-            let mut sessions = self
-                .sessions
-                .write()
-                .map_err(|_poison_error| KernelError::Poisoned)?;
+            let mut sessions = self.sessions.write()?;
             if sessions.contains_key(&session_id) {
                 return Err(KernelError::DuplicateSession(session_id.clone()));
             }
@@ -1168,17 +1250,11 @@ impl Kernel {
     ) -> Result<SessionIdReservation, KernelError> {
         // Hold the map read lock until the pending id is inserted so registration
         // and reservation cannot both observe the identifier as absent.
-        let sessions = self
-            .sessions
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let sessions = self.sessions.read()?;
         if sessions.contains_key(session_id) {
             return Err(KernelError::DuplicateSession(session_id.clone()));
         }
-        let mut pending_sessions = self
-            .pending_sessions
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut pending_sessions = self.pending_sessions.lock()?;
         if pending_sessions.contains_key(session_id) {
             return Err(KernelError::DuplicateSession(session_id.clone()));
         }
@@ -1197,14 +1273,8 @@ impl Kernel {
     ) -> Result<SessionIdReservation, KernelError> {
         // Match construction's lock order and keep the map stable until the id
         // is reserved, closing both absent-runtime races around registration.
-        let _sessions = self
-            .sessions
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
-        let mut pending_sessions = self
-            .pending_sessions
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let _sessions = self.sessions.read()?;
+        let mut pending_sessions = self.pending_sessions.lock()?;
         if pending_sessions.contains_key(session_id) {
             return Err(KernelError::DuplicateSession(session_id.clone()));
         }
@@ -1250,11 +1320,7 @@ impl Kernel {
         session_id: &SessionId,
         delete_persisted: bool,
     ) -> Result<(), KernelError> {
-        let runtime = self
-            .sessions
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .remove(session_id);
+        let runtime = self.sessions.write()?.remove(session_id);
         if let Some(runtime) = runtime {
             runtime.extensions.runtime_ref().invalidate();
             let mcp_result = runtime.mcp.shutdown().await;
@@ -1317,8 +1383,7 @@ impl Kernel {
     ) -> Result<Arc<Session>, KernelError> {
         let session = self
             .sessions
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?
+            .read()?
             .get(session_id)
             .map(Arc::clone)
             .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
@@ -1347,39 +1412,6 @@ impl Kernel {
         entry_id: EntryId,
     ) -> Result<(), KernelError> {
         session.transcript.append_context_message(entry_id, message)
-    }
-
-    /// Sets the first non-empty user line as the default title exactly once.
-    pub(super) fn ensure_default_title(
-        &self,
-        session: &Session,
-        message: &AgentMessage,
-    ) -> Result<Option<String>, KernelError> {
-        let title = match &message.content {
-            MessageContent::User { blocks } => blocks
-                .iter()
-                .filter_map(ContentBlock::text)
-                .flat_map(str::lines)
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(|line| line.chars().take(80).collect::<String>()),
-            MessageContent::ExpandedUser { expansion } => expansion
-                .invocation
-                .original
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(|line| line.chars().take(80).collect::<String>()),
-            MessageContent::System { .. }
-            | MessageContent::Assistant { .. }
-            | MessageContent::ToolResult { .. }
-            | MessageContent::BashExecution { .. }
-            | MessageContent::Extension { .. }
-            | MessageContent::SlashCommand { .. }
-            | MessageContent::CompactionSummary { .. } => None,
-        };
-        let Some(title) = title else { return Ok(None) };
-        session.transcript.set_default_name(title)
     }
 
     /// Appends one durable pi v4 lane record for run recovery and inspection.

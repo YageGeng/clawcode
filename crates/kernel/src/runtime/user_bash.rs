@@ -1,4 +1,19 @@
-use super::*;
+use std::sync::Arc;
+
+use ::tools::{BashExecutionRequest, BashExecutor};
+use protocol::{
+    AgentEventPayload, AgentMessage, AgentOutcome, BashExecutionMessage,
+    IdKind, MessageContent, MessageId, MessageIdentity, MessageTiming, RunId,
+    RunRequest, RunResult, TimestampMs, TurnId, UserBashInput, UserBashRequest,
+    UserBashResult,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::EventSink;
+use crate::runtime::admission::AdmissionTicket;
+use crate::runtime::insertion::{InsertionNotice, WaiterCancellation};
+use crate::runtime::lifecycle::ActiveRunContext;
+use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
 /// Internal correlated result shared by prefixed prompts and direct ACP requests.
 pub(super) struct UserBashExecution {
@@ -90,8 +105,7 @@ impl Kernel {
         }
         let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        let turn_id = TurnId::try_from(self.id_generator.next(IdKind::Turn))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let turn_id = self.new_turn_id()?;
         let _active_run = session.execution.install_run(ActiveRunContext {
             run_id: run_id.clone(),
             turn_id: turn_id.clone(),

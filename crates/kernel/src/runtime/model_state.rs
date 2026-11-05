@@ -38,7 +38,7 @@ impl SessionModelState {
         self.selection
             .read()
             .map(|selection| Arc::clone(&selection.model))
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns the current thinking level.
@@ -46,7 +46,7 @@ impl SessionModelState {
         self.selection
             .read()
             .map(|selection| selection.thinking_level)
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Captures the active model and thinking level under one read lock.
@@ -58,7 +58,7 @@ impl SessionModelState {
             .map(|selection| {
                 (Arc::clone(&selection.model), selection.thinking_level)
             })
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Resolves one configured model without changing the active selection.
@@ -109,10 +109,7 @@ impl SessionModelState {
         &self,
         model: Arc<dyn Model>,
     ) -> Result<(), KernelError> {
-        self.selection
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .model = model;
+        self.selection.write()?.model = model;
         Ok(())
     }
 
@@ -121,10 +118,7 @@ impl SessionModelState {
         &self,
         level: ThinkingLevel,
     ) -> Result<(), KernelError> {
-        self.selection
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?
-            .thinking_level = level;
+        self.selection.write()?.thinking_level = level;
         Ok(())
     }
 }

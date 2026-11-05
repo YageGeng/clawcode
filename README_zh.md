@@ -44,7 +44,9 @@ Agent Client Protocol（ACP）v2 提供 stdio、HTTP/SSE 和 WebSocket，并包�
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-approval = "request_approval"
+# 尚未实现审批提示：工具总是直接执行，不会请求批准。
+# 设置为 "yolo" 以外的值会在启动时记录一条警告。
+approval = "yolo"
 
 [[providers]]
 id = "deepseek"

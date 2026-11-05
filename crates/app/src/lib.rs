@@ -103,6 +103,16 @@ impl ApplicationFactory {
     /// Builds provider, tool, MCP, skill, store, extension, and kernel factories.
     pub fn build(self) -> Result<Application, ApplicationError> {
         let snapshot = self.config.current();
+        // ponytail: approval prompts are not implemented, so every tool runs
+        // without asking whatever the policy says; wire ACP permission requests
+        // into tool execution before honouring it.
+        let approval = snapshot.effective_approval_policy();
+        if approval != config::AskForApproval::Never {
+            tracing::warn!(
+                "approval policy {:?} is not enforced yet: tools run without asking for permission",
+                approval
+            );
+        }
         // Resolve generated extension code before external factories so an
         // unavailable runtime selection fails startup without side effects.
         let extension_factory = extensions::compiled_extensions()?

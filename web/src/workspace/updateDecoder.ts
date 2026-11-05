@@ -60,10 +60,12 @@ export class SessionUpdateDecoder {
   ): DecodedSessionUpdate {
     const update = notification.update;
     const kind = update.sessionUpdate;
-    if (kind === "session_info_update" && typeof update.title === "string") {
+    if (kind === "session_info_update" && (typeof update.title === "string" || update.title === null)) {
+      // A null title clears the name; lists show an untitled Session by its id.
+      const title = update.title?.trim() || notification.sessionId;
       return {
         scope: "global",
-        actions: [{ type: "session/title", sessionId: notification.sessionId, title: update.title }],
+        actions: [{ type: "session/title", sessionId: notification.sessionId, title }],
         refreshRuntime: false
       };
     }

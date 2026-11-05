@@ -164,7 +164,7 @@ fn title_change_maps_to_native_session_info_update() {
             sequence: Sequence::try_from(5).expect("sequence"),
         },
         payload: AgentEventPayload::SessionTitleChanged {
-            title: "New title".to_string(),
+            title: Some("New title".to_string()),
         },
     };
 

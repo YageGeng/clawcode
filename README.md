@@ -45,7 +45,9 @@ Example:
 
 ```toml
 active_model = "deepseek/deepseek-v4-pro"
-approval = "request_approval"
+# Approval prompts are not implemented yet: tools always run without asking.
+# Any value other than "yolo" logs a startup warning.
+approval = "yolo"
 
 [[providers]]
 id = "deepseek"

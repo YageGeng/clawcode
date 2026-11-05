@@ -11,6 +11,8 @@ use protocol::{
     ThinkingLevel, TurnId,
 };
 
+use super::super::EventEmitter;
+use super::super::rename::SessionRename;
 use super::super::settings::SessionSettingsUpdate;
 use super::super::{RunInvocation, Session};
 use super::context::ExtensionMessageMaterializer;
@@ -385,40 +387,39 @@ impl ExtensionHost for SessionExtensionHost {
         Ok(entry_id)
     }
 
-    /// Sets or clears the persisted session name.
+    /// Sets or clears the persisted session name and announces a set title to clients.
     async fn set_session_name(
         &self,
         invocation: &ExtensionInvocation,
         name: Option<String>,
     ) -> Result<(), ExtensionHostError> {
-        self.session
-            .transcript
-            .set_name(name.clone())
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        self.session.sync_store().map_err(|error| {
-            ExtensionHostError::Operation(error.to_string())
-        })?;
-        let context = self
-            .kernel
-            .extension_context(
-                &self.session,
-                invocation.run_id.as_ref(),
-                invocation.turn_id.as_ref(),
-            )
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
-        self.session
-            .extensions
-            .runtime_ref()
-            .emit_session_info_changed(
-                &protocol::SessionInfoChangedEvent { name },
-                &context,
-            )
-            .await;
-        Ok(())
+        let rename = SessionRename::builder()
+            .kernel(&self.kernel)
+            .session_id(&invocation.session_id)
+            .session(&self.session)
+            .invocation(invocation)
+            .build();
+        // An operation-local sink (such as an extension command's) keeps the
+        // title ordered with that operation's output. Without one, the
+        // Observers path picks the active Run, or the Session sink, only once
+        // the rename holds its lock, so a Run settling meanwhile is skipped.
+        let renamed = match &self.event_sink {
+            Some(sink) => {
+                let emitter = EventEmitter {
+                    clock: Arc::clone(&self.clock),
+                    sink: Arc::clone(sink),
+                    session: Arc::clone(&self.session),
+                };
+                let turn_id = invocation
+                    .turn_id
+                    .clone()
+                    .unwrap_or_else(|| TurnId::system(&invocation.session_id));
+                rename.announced_on(name, &emitter, turn_id).await
+            }
+            None => rename.announced(name).await,
+        };
+        renamed
+            .map_err(|error| ExtensionHostError::Operation(error.to_string()))
     }
 
     /// Sets or clears one persisted entry label.

@@ -40,8 +40,10 @@ const MessageRow = memo(function MessageRow({ sessionId, compact, messageId, ent
   controller: WorkspaceController;
 }>) {
   const message = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.messages.get(messageId));
+  const cacheMiss = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.cacheTrail.misses.get(messageId));
   return message === undefined ? null : <MessageView
     message={message}
+    {...(cacheMiss === undefined ? {} : { cacheMiss })}
     {...(entry === undefined ? {} : { entry })}
     {...(cwd === undefined ? {} : { cwd })}
     running={running}
@@ -80,7 +82,7 @@ const CompactionRow = memo(function CompactionRow({ sessionId, entryId }: Readon
 /** Agent Usage row subscribes only to its immutable Run settlement snapshot. */
 const AgentUsageRow = memo(function AgentUsageRow({ sessionId, runId }: Readonly<{ sessionId: SessionId; runId: RunId }>) {
   const usage = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.runUsages.get(runId));
-  return usage === undefined ? null : <AgentUsage runId={runId} usage={usage.usage} />;
+  return usage === undefined ? null : <AgentUsage runId={runId} run={usage} />;
 });
 
 /** Renders either the selected Session or an explicitly attached child transcript. */

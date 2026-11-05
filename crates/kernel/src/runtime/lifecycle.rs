@@ -38,6 +38,9 @@ pub(super) struct SessionExecution {
     #[builder(default)]
     pub(super) admission: Mutex<super::admission::AdmissionState>,
     lifecycle: RwLock<SessionLifecycle>,
+    /// True while a shutdown is in progress, so waiters learn when it ends.
+    #[builder(default = tokio::sync::watch::channel(false).0)]
+    closing: tokio::sync::watch::Sender<bool>,
     gate: AsyncMutex<()>,
     #[builder(default)]
     close_requested: Mutex<CancellationToken>,
@@ -58,11 +61,7 @@ impl SessionExecution {
         &self,
     ) -> Result<MutexGuard<'_, ()>, KernelError> {
         self.ensure_active()?;
-        let closing = self
-            .close_requested
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?
-            .clone();
+        let closing = self.close_requested.lock()?.clone();
         let guard = tokio::select! {
             biased;
             () = closing.cancelled() => return Err(KernelError::SessionClosing),
@@ -81,19 +80,10 @@ impl SessionExecution {
         waiters: WaiterCancellation,
     ) -> Result<(MutexGuard<'_, ()>, CancellationToken), KernelError> {
         self.ensure_active()?;
-        let closing = self
-            .close_requested
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?
-            .clone();
+        let closing = self.close_requested.lock()?.clone();
         // Internal input never observes the session-wide waiter generation.
         let waiting = match &waiters {
-            WaiterCancellation::Reject => Some(
-                self.waiters
-                    .lock()
-                    .map_err(|_lock_error| KernelError::Poisoned)?
-                    .clone(),
-            ),
+            WaiterCancellation::Reject => Some(self.waiters.lock()?.clone()),
             WaiterCancellation::Ignore => None,
             WaiterCancellation::Captured(token) => Some(token.clone()),
         };
@@ -125,10 +115,7 @@ impl SessionExecution {
             KernelError::SessionClosing => waiters.closing(),
             other => other,
         })?;
-        let mut current = self
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut current = self.cancellation.lock()?;
         // `cancel()` rejects waiters while holding this lock, so a cancel either
         // rejects this admission or reaches the token installed below.
         if waiting
@@ -162,12 +149,7 @@ impl SessionExecution {
         &self,
     ) -> Result<Option<MutexGuard<'_, ()>>, KernelError> {
         self.ensure_active()?;
-        if self
-            .close_requested
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?
-            .is_cancelled()
-        {
+        if self.close_requested.lock()?.is_cancelled() {
             return Err(KernelError::SessionClosing);
         }
         let Ok(guard) = self.gate.try_lock() else {
@@ -179,10 +161,7 @@ impl SessionExecution {
 
     /// Stops admission before cancelling the active run, including a racing token install.
     pub(super) fn request_close(&self) -> Result<(), KernelError> {
-        self.close_requested
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?
-            .cancel();
+        self.close_requested.lock()?.cancel();
         self.cancel()
     }
 
@@ -205,19 +184,10 @@ impl SessionExecution {
             CancellationToken::new,
             CancellationToken::child_token,
         );
-        if self
-            .close_requested
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?
-            .is_cancelled()
-        {
+        if self.close_requested.lock()?.is_cancelled() {
             cancellation.cancel();
         }
-        *self
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            cancellation.clone();
+        *self.cancellation.lock()? = cancellation.clone();
         Ok(cancellation)
     }
 
@@ -228,7 +198,7 @@ impl SessionExecution {
         self.cancellation
             .lock()
             .map(|cancellation| cancellation.clone())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns a defensive snapshot of all pending messages.
@@ -238,7 +208,7 @@ impl SessionExecution {
         self.queue
             .lock()
             .map(|queue| queue.snapshot())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns pending identifiers in deterministic scheduling order.
@@ -246,7 +216,7 @@ impl SessionExecution {
         self.queue
             .lock()
             .map(|queue| queue.ids())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Reports whether any steering or follow-up message is pending.
@@ -254,7 +224,7 @@ impl SessionExecution {
         self.queue
             .lock()
             .map(|queue| !queue.is_empty())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Transfers a consumed receipt to the Run holding the execution gate.
@@ -262,10 +232,7 @@ impl SessionExecution {
         &self,
         receipt: Arc<super::submit::SubmissionReceipt>,
     ) -> Result<(), KernelError> {
-        self.submissions
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?
-            .push(receipt);
+        self.submissions.lock()?.push(receipt);
         Ok(())
     }
 
@@ -274,12 +241,7 @@ impl SessionExecution {
         &self,
         answer: Arc<super::SubmissionAnswer>,
     ) -> Result<(), KernelError> {
-        let submissions = std::mem::take(
-            &mut *self
-                .submissions
-                .lock()
-                .map_err(|_error| KernelError::Poisoned)?,
-        );
+        let submissions = std::mem::take(&mut *self.submissions.lock()?);
         for receipt in submissions {
             receipt.resolve(Arc::clone(&answer));
         }
@@ -290,26 +252,16 @@ impl SessionExecution {
     pub(super) fn waiter_token(
         &self,
     ) -> Result<CancellationToken, KernelError> {
-        Ok(self
-            .waiters
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?
-            .clone())
+        Ok(self.waiters.lock()?.clone())
     }
 
     /// Cancels the current operation and rejects client prompts waiting for the gate.
     pub(super) fn cancel(&self) -> Result<(), KernelError> {
-        let current = self
-            .cancellation
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let current = self.cancellation.lock()?;
         current.cancel();
         // Waiters are replaced under the admission lock so a cancel cannot fall
         // between a prompt's gate acquisition and its token installation.
-        let mut waiters = self
-            .waiters
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut waiters = self.waiters.lock()?;
         waiters.cancel();
         *waiters = CancellationToken::new();
         self.close_queue()
@@ -320,10 +272,7 @@ impl SessionExecution {
         self: &Arc<Self>,
         context: ActiveRunContext,
     ) -> Result<ActiveRunLease, KernelError> {
-        let mut active_run = self
-            .active_run
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut active_run = self.active_run.lock()?;
         if active_run.is_some() {
             return Err(KernelError::Protocol(
                 "session already has an active run".to_string(),
@@ -344,7 +293,7 @@ impl SessionExecution {
         self.active_run
             .lock()
             .map(|active_run| active_run.clone())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Advances the diagnostic Turn for the currently installed Run.
@@ -353,10 +302,7 @@ impl SessionExecution {
         run_id: &RunId,
         turn_id: TurnId,
     ) -> Result<(), KernelError> {
-        let mut active_run = self
-            .active_run
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut active_run = self.active_run.lock()?;
         let context = active_run.as_mut().ok_or_else(|| {
             KernelError::Protocol("session has no active run".to_string())
         })?;
@@ -399,16 +345,16 @@ impl SessionExecution {
     }
 
     /// Transitions an active execution into closing while its gate is held.
-    pub(super) fn begin_closing(&self) -> Result<(), KernelError> {
-        let mut lifecycle = self
-            .lifecycle
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+    pub(super) fn begin_closing(
+        &self,
+    ) -> Result<ClosingGuard<'_>, KernelError> {
+        let mut lifecycle = self.lifecycle.write()?;
         match *lifecycle {
             SessionLifecycle::Starting => Err(KernelError::SessionStarting),
             SessionLifecycle::Active => {
                 *lifecycle = SessionLifecycle::Closing;
-                Ok(())
+                self.closing.send_replace(true);
+                Ok(ClosingGuard(&self.closing))
             }
             SessionLifecycle::Closing | SessionLifecycle::Closed => {
                 Err(KernelError::SessionClosing)
@@ -418,18 +364,11 @@ impl SessionExecution {
 
     /// Restores an active lifecycle when shutdown stops before resource teardown.
     pub(super) fn abort_closing(&self) -> Result<(), KernelError> {
-        let mut lifecycle = self
-            .lifecycle
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut lifecycle = self.lifecycle.write()?;
         match *lifecycle {
             SessionLifecycle::Closing => {
                 *lifecycle = SessionLifecycle::Active;
-                *self
-                    .close_requested
-                    .lock()
-                    .map_err(|_lock_error| KernelError::Poisoned)? =
-                    CancellationToken::new();
+                *self.close_requested.lock()? = CancellationToken::new();
                 Ok(())
             }
             SessionLifecycle::Starting
@@ -442,20 +381,18 @@ impl SessionExecution {
 
     /// Marks a closing execution closed before its Session is removed.
     pub(super) fn finish_closing(&self) -> Result<(), KernelError> {
-        *self
-            .lifecycle
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)? =
-            SessionLifecycle::Closed;
+        *self.lifecycle.write()? = SessionLifecycle::Closed;
         Ok(())
+    }
+
+    /// Subscribes to shutdown progress: `true` while a close is in progress.
+    pub(super) fn closing(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.closing.subscribe()
     }
 
     /// Publishes a fully initialized execution as active after its startup checkpoint.
     pub(super) fn finish_starting(&self) -> Result<(), KernelError> {
-        let mut lifecycle = self
-            .lifecycle
-            .write()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut lifecycle = self.lifecycle.write()?;
         match *lifecycle {
             SessionLifecycle::Starting => {
                 *lifecycle = SessionLifecycle::Active;
@@ -469,12 +406,14 @@ impl SessionExecution {
         }
     }
 
+    /// Whether shutdown finished, so the Store may already belong to a new runtime.
+    pub(super) fn is_closed(&self) -> Result<bool, KernelError> {
+        Ok(*self.lifecycle.read()? == SessionLifecycle::Closed)
+    }
+
     /// Rejects ordinary work before startup completes or after shutdown starts.
     pub(super) fn ensure_active(&self) -> Result<(), KernelError> {
-        let lifecycle = self
-            .lifecycle
-            .read()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let lifecycle = self.lifecycle.read()?;
         match *lifecycle {
             SessionLifecycle::Starting => Err(KernelError::SessionStarting),
             SessionLifecycle::Active => Ok(()),
@@ -482,6 +421,18 @@ impl SessionExecution {
                 Err(KernelError::SessionClosing)
             }
         }
+    }
+}
+
+/// Reports a Session's shutdown as settled when the closing operation ends on
+/// any path: completion, an abort back to active, or a dropped close future.
+#[must_use = "dropping the guard immediately reports the shutdown as settled"]
+pub(super) struct ClosingGuard<'a>(&'a tokio::sync::watch::Sender<bool>);
+
+impl Drop for ClosingGuard<'_> {
+    /// Wakes callers, such as title changes, waiting for this shutdown to end.
+    fn drop(&mut self) {
+        self.0.send_replace(false);
     }
 }
 
@@ -554,7 +505,9 @@ impl Session {
     }
 
     /// Transitions an active runtime into closing while holding its run gate.
-    pub(super) fn begin_closing(&self) -> Result<(), KernelError> {
+    pub(super) fn begin_closing(
+        &self,
+    ) -> Result<ClosingGuard<'_>, KernelError> {
         self.execution.begin_closing()
     }
 
@@ -563,9 +516,12 @@ impl Session {
         self.execution.abort_closing()
     }
 
-    /// Marks a closing runtime closed before its final map removal.
+    /// Marks a closing runtime closed before its final map removal, sealing
+    /// its transcript first so a stale handle cannot write after a Resume.
     pub(super) fn finish_closing(&self) -> Result<(), KernelError> {
-        self.execution.finish_closing()
+        let sealed = self.transcript.seal();
+        self.execution.finish_closing()?;
+        sealed
     }
 
     /// Publishes this runtime for ordinary operations after startup is durable.
@@ -684,7 +640,7 @@ mod tests {
         });
         tokio::task::yield_now().await;
 
-        execution.begin_closing().expect("begin closing");
+        let _closing = execution.begin_closing().expect("begin closing");
         drop(guard);
 
         assert!(matches!(
@@ -799,7 +755,7 @@ mod tests {
     fn closing_can_be_aborted_before_teardown() {
         let execution = execution();
 
-        execution.begin_closing().expect("begin closing");
+        let _closing = execution.begin_closing().expect("begin closing");
         execution.abort_closing().expect("abort closing");
 
         execution

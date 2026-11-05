@@ -1,13 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use super::*;
-
 mod builtin;
 mod execution;
 mod session_stats;
-
 pub(super) use builtin::BuiltinSlashCommand;
 pub(super) use execution::SlashCommandExecution;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use protocol::{AgentEvent, AgentEventPayload, EventMetadata, SessionId};
+
+use crate::runtime::{Kernel, KernelError, Session};
 
 /// Direct command selected before Extension input hooks and prompt expansion.
 pub(super) enum DirectSlashCommand {
@@ -224,10 +225,7 @@ impl Kernel {
         let session = self.session(session_id)?;
         Ok(AgentEvent {
             metadata: EventMetadata {
-                turn_id: TurnId::try_from(self.id_generator.next(IdKind::Turn))
-                    .map_err(|error| {
-                        KernelError::Protocol(error.to_string())
-                    })?,
+                turn_id: self.new_turn_id()?,
                 timestamp_ms: self.clock.now(),
                 sequence: session.execution.next_sequence()?,
             },

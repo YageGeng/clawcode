@@ -493,16 +493,25 @@ fn open_repairs_torn_json_tail_and_recovers_lanes() {
         .write_all(b"{\"kind\":")
         .expect("append torn tail");
 
-    let reopened = factory.open(&path).expect("repair and reopen session");
+    let mut reopened = factory.open(&path).expect("repair and reopen session");
 
     assert_eq!(
         reopened.lane(&lane).map(|entry| entry.as_str()),
         Some("entry-1")
     );
     assert!(
-        fs::read_to_string(path)
+        fs::read_to_string(&path)
             .expect("read repaired file")
             .ends_with('\n')
+    );
+    // Appends after the repair must leave a log that reopens cleanly.
+    reopened
+        .set_name(Some("after repair".to_string()))
+        .expect("append after repair");
+    drop(reopened);
+    assert_eq!(
+        factory.open(&path).expect("reopen after append").name(),
+        Some("after repair")
     );
 }
 
@@ -765,4 +774,93 @@ fn delete_session_removes_history_idempotently() {
     factory
         .delete(&session_id)
         .expect("repeated delete remains successful");
+}
+
+/// Renaming an unloaded Session appends one name fact after the last sequence, and falls
+/// back to a full replay for a header-only log or a torn final append.
+#[test]
+fn set_name_at_appends_after_the_last_sequence_without_replay() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let create = |id: &str| {
+        factory
+            .create(SessionCreateOptions {
+                session_id: SessionId::try_from(id).expect("valid session id"),
+                cwd: root.path().into(),
+                parent_session_id: None,
+            })
+            .expect("session should be created")
+    };
+    let lane = LaneId::try_from("main").expect("valid lane id");
+    let mut store = create("session-1");
+    // A large final line exercises the backward scan across read windows.
+    store
+        .append_entry(
+            &lane,
+            NewEntry {
+                id: EntryId::try_from("entry-1").expect("valid entry id"),
+                kind: EntryKind::Custom,
+                payload: serde_json::json!({ "customType": "x".repeat(200_000) }),
+            },
+        )
+        .expect("append entry");
+    let path = store.path().to_path_buf();
+    drop(store);
+
+    factory
+        .set_name_at(&path, Some("Cold".to_string()))
+        .expect("rename unloaded session");
+    let mut reopened = factory.open(&path).expect("reopen renamed session");
+    assert_eq!(reopened.name(), Some("Cold"));
+    assert_eq!(reopened.last_sequence(), 2);
+    reopened
+        .set_name(Some("Warm".to_string()))
+        .expect("later mutation keeps consecutive sequences");
+
+    // A header-only log has no sequence to read.
+    let empty = create("session-2");
+    let empty_path = empty.path().to_path_buf();
+    drop(empty);
+    factory
+        .set_name_at(&empty_path, Some("First".to_string()))
+        .expect("rename header-only session");
+    assert_eq!(
+        factory.open(&empty_path).expect("reopen").name(),
+        Some("First")
+    );
+
+    // A torn final append is repaired by the replay fallback before the fact lands.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open tail")
+        .write_all(b"{\"kind\":")
+        .expect("append torn tail");
+    factory
+        .set_name_at(&path, Some("Repaired".to_string()))
+        .expect("rename after torn tail");
+    let repaired = factory.open(&path).expect("reopen repaired session");
+    assert_eq!(repaired.name(), Some("Repaired"));
+    assert_eq!(repaired.last_sequence(), 4);
+}
+
+/// A cleared name is still a recorded name fact, before and after a reopen.
+#[test]
+fn cleared_name_still_counts_as_named() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let mut store = factory
+        .create(SessionCreateOptions {
+            session_id: SessionId::try_from("session-1")
+                .expect("valid session id"),
+            cwd: root.path().into(),
+            parent_session_id: None,
+        })
+        .expect("session should be created");
+    assert!(!store.was_named());
+    store.set_name(None).expect("clear name");
+    assert!(store.name().is_none() && store.was_named());
+    let path = store.path().to_path_buf();
+    drop(store);
+    assert!(factory.open(&path).expect("reopen").was_named());
 }

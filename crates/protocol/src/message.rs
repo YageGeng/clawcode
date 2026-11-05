@@ -577,3 +577,32 @@ pub struct AgentMessage {
     /// Typed or opaque message content.
     pub content: MessageContent,
 }
+
+impl AgentMessage {
+    /// Returns the first non-empty line a user typed, cut to 80 characters,
+    /// as a Session's default title; other roles have none.
+    pub fn default_title(&self) -> Option<String> {
+        let first_line = |text: &str| {
+            text.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(80).collect::<String>())
+        };
+        match &self.content {
+            MessageContent::User { blocks } => blocks
+                .iter()
+                .filter_map(ContentBlock::text)
+                .find_map(first_line),
+            MessageContent::ExpandedUser { expansion } => {
+                first_line(&expansion.invocation.original)
+            }
+            MessageContent::System { .. }
+            | MessageContent::Assistant { .. }
+            | MessageContent::ToolResult { .. }
+            | MessageContent::BashExecution { .. }
+            | MessageContent::Extension { .. }
+            | MessageContent::SlashCommand { .. }
+            | MessageContent::CompactionSummary { .. } => None,
+        }
+    }
+}

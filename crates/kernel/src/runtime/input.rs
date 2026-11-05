@@ -1,4 +1,6 @@
-use super::*;
+use protocol::{ContentBlock, MessageContent, SessionId};
+
+use crate::runtime::{KernelError, Session};
 
 /// Server-expanded text or preserved multimodal prompt content.
 pub(super) enum PromptInputExpansion {

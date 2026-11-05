@@ -206,8 +206,7 @@ impl Kernel {
         };
         let mut requests = state
             .elicitations
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
+            .lock()?
             .values()
             .map(|pending| pending.request.clone())
             .collect::<Vec<_>>();
@@ -227,10 +226,7 @@ impl Session {
         let Some(state) = self.mcp.state() else {
             return Ok(protocol::McpSessionSnapshot::default());
         };
-        let notifications = state
-            .notifications
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let notifications = state.notifications.lock()?;
         let selection = self.tools.snapshot()?;
         let mut snapshot = state.session.snapshot().as_ref().clone();
         snapshot.revision = notifications.revision;
@@ -255,7 +251,7 @@ impl Session {
                     .notifications
                     .lock()
                     .map(|notifications| notifications.sender.subscribe())
-                    .map_err(|_poison_error| KernelError::Poisoned)
+                    .map_err(KernelError::from)
             })
             .transpose()
     }
@@ -269,10 +265,7 @@ impl Session {
         let Some(state) = self.mcp.state() else {
             return Ok(());
         };
-        let mut notifications = state
-            .notifications
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut notifications = state.notifications.lock()?;
         notifications.revision =
             MCP_UI_REVISION.fetch_add(1, Ordering::Relaxed);
         let _ = notifications.sender.send(::mcp::McpSessionEvent {
@@ -523,8 +516,7 @@ impl Session {
         })?;
         let pending = state
             .elicitations
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?
+            .lock()?
             .remove(&request.request_id)
             .ok_or_else(|| {
                 // Another client answered first, or the Turn cancelled it.
@@ -566,8 +558,7 @@ impl SessionMcpHost {
     ) -> Result<(), KernelError> {
         let id = runtime.transcript.session_id()?;
         self.routes
-            .write()
-            .map_err(|_lock_error| KernelError::Poisoned)?
+            .write()?
             .insert(id.clone(), Arc::downgrade(runtime));
         tracing::info!(
             "attached MCP route for session {} to owner {}",

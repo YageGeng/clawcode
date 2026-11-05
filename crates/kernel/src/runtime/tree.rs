@@ -1,6 +1,15 @@
-use store::SessionEntry;
+use protocol::{
+    AgentMessage, EntryId, IdKind, MessageContent, RunId, SessionId,
+    SessionTreeEntry, SessionTreeSnapshot,
+};
+use store::{EntryKind, NewEntry, SessionEntry};
+use tokio_util::sync::CancellationToken;
 
-use super::*;
+use crate::runtime::compaction::{SummaryGeneration, SummaryProtocol};
+use crate::runtime::transcript::{
+    TranscriptNavigationCommit, TranscriptNavigationSnapshot,
+};
+use crate::runtime::{Kernel, KernelError, tools};
 
 const BRANCH_SUMMARY_INSTRUCTION: &str = "Summarize the abandoned conversation branch for another agent. Preserve user requirements, decisions, completed work, unresolved problems, exact identifiers, and important technical details. Return only the summary.";
 
@@ -191,11 +200,7 @@ impl Kernel {
                         .map_err(|error| {
                             KernelError::Protocol(error.to_string())
                         })?;
-                let turn_id =
-                    TurnId::try_from(self.id_generator.next(IdKind::Turn))
-                        .map_err(|error| {
-                            KernelError::Protocol(error.to_string())
-                        })?;
+                let turn_id = self.new_turn_id()?;
                 let cancellation = CancellationToken::new();
                 let instruction = match decision.custom_instructions.as_deref()
                 {

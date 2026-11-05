@@ -375,6 +375,20 @@ pub trait StoreFactory: Send + Sync {
 
     /// Removes every persisted log owned by the stable session identifier.
     fn delete(&self, session_id: &SessionId) -> Result<(), StoreError>;
+
+    /// Durably sets the name fact of a persisted Session that is not loaded.
+    ///
+    /// The default replays the whole log; backends that can append without
+    /// replaying should override it, since renaming is a single fact.
+    fn set_name_at(
+        &self,
+        path: &Path,
+        name: Option<String>,
+    ) -> Result<(), StoreError> {
+        let mut store = self.open(path)?;
+        store.set_name(name)?;
+        store.sync()
+    }
 }
 
 /// Mutable pi v4 session-log interface consumed by the kernel.
@@ -464,6 +478,11 @@ pub trait SessionStore: Send {
 
     /// Returns the latest global session name fact.
     fn name(&self) -> Option<&str>;
+
+    /// Reports whether any name fact was recorded, including one that cleared
+    /// the name, so a deliberate clear is not mistaken for a never-named Session.
+    /// Required so a wrapping Store cannot silently lose clear semantics.
+    fn was_named(&self) -> bool;
 
     /// Sets or clears a label on an existing entry.
     fn set_label(

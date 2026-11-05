@@ -65,6 +65,8 @@ export type ModelUsage = Readonly<{
 
 export type AgentRunUsage = Readonly<{
   usage: ModelUsage;
+  /** Input and cache reads summed per `provider/model`, the basis of cache hit rates. */
+  cacheByModel: ReadonlyMap<string, ModelUsage>;
   settled: boolean;
 }>;
 
@@ -85,9 +87,8 @@ export const ModelUsages = {
    * provider did not report both counters. Upstream input already includes cache reads.
    *
    * Over a sum, a request without a cache-read count counts as a miss: Gemini and legacy
-   * records omit zero reads, so dropping them would overstate the rate.
-   * ponytail: a provider that never reports cache reads lowers a mixed-provider rate;
-   * attribute usage per model if mixed sessions need exact rates.
+   * records omit zero reads, so dropping them would overstate the rate. Mixed-model sums
+   * go through `AgentRunUsages.cacheHitRate`, which leaves out models that never report.
    */
   cacheHitRate(usage: ModelUsage): string | undefined {
     if (usage.inputTokens === undefined || usage.cacheReadTokens === undefined) return undefined;
@@ -127,6 +128,51 @@ export const ModelUsages = {
   }
 } as const;
 
+export const AgentRunUsages = {
+  /** Keys cache usage by the provider and model that served a request. */
+  modelKey(assistant: AssistantDiagnostics): string {
+    return `${assistant.providerId}/${assistant.modelId}`;
+  },
+
+  /** Adds one settled Turn's Assistant usage to its Run, starting the Run when absent. */
+  settleTurn(previous: AgentRunUsage | undefined, assistants: readonly AssistantDiagnostics[]): AgentRunUsage {
+    const cacheByModel = new Map(previous?.cacheByModel);
+    for (const assistant of assistants) {
+      const key = AgentRunUsages.modelKey(assistant);
+      const { inputTokens, cacheReadTokens } = assistant.usage;
+      const counted = {
+        ...(inputTokens === undefined ? {} : { inputTokens }),
+        ...(cacheReadTokens === undefined ? {} : { cacheReadTokens })
+      };
+      const before = cacheByModel.get(key);
+      cacheByModel.set(key, before === undefined ? ModelUsages.sum([counted]) : ModelUsages.sum([before, counted]));
+    }
+    const usages = assistants.map((assistant) => assistant.usage);
+    return {
+      usage: ModelUsages.sum(previous === undefined ? usages : [previous.usage, ...usages]),
+      cacheByModel,
+      settled: previous?.settled ?? false
+    };
+  },
+
+  /**
+   * Cache hit rate over the models that reported cache reads at least once. A model that
+   * never reports them, such as a gateway without cache data, is left out instead of
+   * lowering the rate; within a reporting model a missing count is a miss.
+   */
+  cacheHitRate(runs: Iterable<AgentRunUsage>): string | undefined {
+    const byModel = new Map<string, ModelUsage>();
+    for (const run of runs) {
+      for (const [key, usage] of run.cacheByModel) {
+        const before = byModel.get(key);
+        byModel.set(key, before === undefined ? usage : ModelUsages.sum([before, usage]));
+      }
+    }
+    const reporting = [...byModel.values()].filter((usage) => usage.cacheReadTokens !== undefined);
+    return reporting.length === 0 ? undefined : ModelUsages.cacheHitRate(ModelUsages.sum(reporting));
+  }
+} as const;
+
 export type AssistantDiagnostics = Readonly<{
   providerId: string;
   modelId: string;
@@ -135,6 +181,86 @@ export type AssistantDiagnostics = Readonly<{
   usage: ModelUsage;
   error?: string;
 }>;
+
+/** A significant prompt-cache miss on one Assistant request and its likely causes. */
+export type CacheMiss = Readonly<{
+  /** Tokens of the previous request's prompt that this request did not read from cache. */
+  missedTokens: string;
+  /** Milliseconds between the previous request's end and this request's start. */
+  idleMs: number;
+  /** Whether the provider or model changed since the previous request. */
+  modelChanged: boolean;
+}>;
+
+/** The latest Assistant request whose prompt the next request should read from cache. */
+type CacheRequest = Readonly<{ modelKey: string; inputTokens: bigint; endedAtMs: number }>;
+
+/**
+ * Per-Session cache-miss state. It advances once per settled Turn, so replay stays linear,
+ * and keeps misses by message so a re-decoded message does not drop its diagnosis.
+ */
+export type CacheTrail = Readonly<{
+  /** Models that have read from cache at least once in this Session. */
+  caching: ReadonlySet<string>;
+  last: CacheRequest | undefined;
+  misses: ReadonlyMap<MessageId, CacheMiss>;
+}>;
+
+export const CacheMisses = {
+  /** Misses at or below this many tokens are cache-breakpoint granularity noise. */
+  noiseFloor: 1024n,
+  /** Gaps longer than the common five-minute cache lifetime likely expired the entry. */
+  ttlMs: 300_000,
+  empty: { caching: new Set(), last: undefined, misses: new Map() } as CacheTrail,
+
+  /**
+   * Advances the trail over one settled Turn's messages, recording each Assistant request
+   * that missed a significant part of the previous request's prompt. A request is judged
+   * only when its model has read from cache (with caching off every read is zero, which is
+   * not a miss) and reports its own reads, since an omitted count cannot be told apart from
+   * zero. A shrunken prompt (compaction or branch navigation) is a rewrite, not a miss.
+   */
+  settleTurn(trail: CacheTrail, messages: readonly MessageEntity[]): CacheTrail {
+    const requests = messages
+      .flatMap((message) => {
+        const assistant = message.assistant;
+        const input = assistant?.usage.inputTokens;
+        return assistant === undefined || input === undefined ? [] : [{ message, assistant, input: BigInt(input) }];
+      })
+      .sort((left, right) => Number(left.message.startedAtMs) - Number(right.message.startedAtMs));
+    if (requests.length === 0) return trail;
+    const caching = new Set(trail.caching);
+    for (const { assistant } of requests) {
+      if (BigInt(assistant.usage.cacheReadTokens ?? "0") > 0n) caching.add(AgentRunUsages.modelKey(assistant));
+    }
+    const found = new Map<MessageId, CacheMiss>();
+    let last = trail.last;
+    for (const { message, assistant, input } of requests) {
+      const modelKey = AgentRunUsages.modelKey(assistant);
+      const cacheRead = assistant.usage.cacheReadTokens;
+      const missed = last === undefined || cacheRead === undefined ? 0n : last.inputTokens - BigInt(cacheRead);
+      if (last !== undefined && caching.has(modelKey) && input >= last.inputTokens && missed > CacheMisses.noiseFloor) {
+        found.set(message.messageId, {
+          missedTokens: missed.toString(),
+          idleMs: Number(message.startedAtMs) - last.endedAtMs,
+          modelChanged: last.modelKey !== modelKey
+        });
+      }
+      last = { modelKey, inputTokens: input, endedAtMs: Number(message.endedAtMs) };
+    }
+    const misses = found.size === 0 ? trail.misses : new Map([...trail.misses, ...found]);
+    return { caching, last, misses };
+  },
+
+  /** Describes a miss with its likely causes for message diagnostics. */
+  describe(miss: CacheMiss): string {
+    const causes = [
+      ...(miss.idleMs > CacheMisses.ttlMs ? [`idle ${Math.round(miss.idleMs / 60_000)}m`] : []),
+      ...(miss.modelChanged ? ["model changed"] : [])
+    ];
+    return [`${BigInt(miss.missedTokens).toLocaleString()} tokens`, ...causes].join(" · ");
+  }
+} as const;
 
 export type ContextUsage = Readonly<{
   used?: string;

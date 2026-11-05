@@ -16,6 +16,9 @@ pub(super) struct SessionState {
     pub(super) used_record_ids: HashSet<RecordId>,
     #[builder(default)]
     pub(super) name: Option<String>,
+    /// Whether a name fact was ever applied, so a cleared name stays deliberate.
+    #[builder(default)]
+    pub(super) named: bool,
     pub(super) labels: HashMap<EntryId, String>,
 }
 
@@ -93,6 +96,18 @@ pub(super) struct NameFactMutation {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub(super) name: Option<String>,
+}
+
+impl NameFactMutation {
+    /// Builds the global name fact written at `sequence`; `None` clears the name.
+    pub(super) fn new(sequence: Sequence, name: Option<String>) -> Self {
+        Self::builder()
+            .kind(MutationKind::Fact)
+            .sequence(sequence)
+            .fact(FactKind::Name)
+            .name(name)
+            .build()
+    }
 }
 
 /// Persisted optional label for one transcript entry.

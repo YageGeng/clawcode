@@ -233,7 +233,7 @@ async fn runtime_applies_typed_composition_rules() {
     );
     let context = extension_context();
 
-    let context_result = runtime
+    let context_request = runtime
         .emit_context(
             ContextEvent {
                 request: ModelRequest {
@@ -247,10 +247,7 @@ async fn runtime_applies_typed_composition_rules() {
             &context,
         )
         .await;
-    assert_eq!(
-        context_result.messages.expect("replacement context").len(),
-        3
-    );
+    assert_eq!(context_request.messages.len(), 3);
 
     let input_result = runtime
         .emit_input(

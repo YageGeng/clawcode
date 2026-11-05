@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use protocol::{
-    AgentEventPayload, ContentBlock, IdKind, InputResult, MessageContent,
-    QueueId, RunRequest, RunResult, SessionId, TraceId, TurnId,
+    AgentEventPayload, ContentBlock, InputResult, MessageContent, QueueId,
+    RunRequest, RunResult, SessionId, TraceId, TurnId,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -45,13 +45,7 @@ pub struct AdmissionTicket {
 impl AdmissionTicket {
     /// Waits for earlier admissions, including tickets dropped before their turn.
     async fn wait(&self) -> Result<(), KernelError> {
-        let mut next = self
-            .execution
-            .admission
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?
-            .next
-            .subscribe();
+        let mut next = self.execution.admission.lock()?.next.subscribe();
         loop {
             if self.cancellation.is_cancelled() {
                 return Err(KernelError::PromptCancelled);
@@ -127,11 +121,7 @@ impl Kernel {
     ) -> Result<AdmissionTicket, KernelError> {
         let session = self.session(session_id)?;
         let cancellation = session.execution.waiter_token()?;
-        let mut state = session
-            .execution
-            .admission
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let mut state = session.execution.admission.lock()?;
         let number = state.issued;
         state.issued = state.issued.checked_add(1).ok_or_else(|| {
             KernelError::Protocol("admission sequence overflow".into())
@@ -219,10 +209,7 @@ impl Kernel {
                         request.run.input = text.into()
                     }
                     InputResult::Handled => {
-                        let turn = TurnId::try_from(
-                            self.id_generator.next(IdKind::Turn),
-                        )
-                        .map_err(|e| KernelError::Protocol(e.to_string()))?;
+                        let turn = self.new_turn_id()?;
                         let emitter = EventEmitter {
                             clock: Arc::clone(&self.clock),
                             sink: Arc::clone(&request.sink),

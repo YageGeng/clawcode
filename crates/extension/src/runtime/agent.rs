@@ -1,7 +1,7 @@
 use protocol::{
     AgentEndEvent, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
-    BeforeAgentStartResult, ContextEvent, ContextResult, MessageEndEvent,
-    MessageStartEvent, MessageUpdateEvent, TurnEndEvent, TurnStartEvent,
+    BeforeAgentStartResult, ContextEvent, MessageEndEvent, MessageStartEvent,
+    MessageUpdateEvent, ModelRequest, TurnEndEvent, TurnStartEvent,
 };
 
 use crate::{
@@ -42,25 +42,20 @@ impl ExtensionRuntime {
     }
 
     /// Chains model-context replacements while leaving persisted history untouched.
+    ///
+    /// The request moves through every handler and back to the caller, so a
+    /// Turn's history is never copied, even when no handler is registered.
     pub async fn emit_context(
         &self,
-        event: ContextEvent,
+        mut event: ContextEvent,
         context: &ExtensionContext,
-    ) -> ContextResult {
-        let mut request = event.request;
+    ) -> ModelRequest {
         for registered in self.handlers::<ContextPoint>() {
             let handler_context = context.for_extension(registered.source());
-            let current_event = ContextEvent {
-                request: request.clone(),
-            };
-            match registered
-                .handler
-                .handle(&current_event, &handler_context)
-                .await
-            {
+            match registered.handler.handle(&event, &handler_context).await {
                 Ok(result) => {
                     if let Some(messages) = result.messages {
-                        request.messages = messages;
+                        event.request.messages = messages;
                     }
                 }
                 Err(error) => {
@@ -68,9 +63,7 @@ impl ExtensionRuntime {
                 }
             }
         }
-        ContextResult {
-            messages: Some(request.messages),
-        }
+        event.request
     }
 
     /// Chains final message replacements while preserving identity validation for the host.

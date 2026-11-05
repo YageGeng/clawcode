@@ -276,6 +276,10 @@ impl SessionStore for FailingDiagnosticStore {
         self.inner.name()
     }
 
+    fn was_named(&self) -> bool {
+        self.inner.was_named()
+    }
+
     /// Delegates entry-label persistence.
     fn set_label(
         &mut self,

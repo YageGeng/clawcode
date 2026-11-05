@@ -18,11 +18,17 @@ pub(super) struct SessionTranscript {
 }
 
 /// State that must change under one lock to keep Store and history consistent.
+#[derive(typed_builder::TypedBuilder)]
 struct SessionTranscriptState {
     store: Box<dyn SessionStore>,
     history: Vec<AgentMessage>,
     // Failed durability requires reopening before another mutation may proceed.
+    #[builder(default)]
     write_failed: bool,
+    /// Set when the Session finishes closing: a resumed runtime may then own
+    /// the file, so a write through this one would duplicate a sequence.
+    #[builder(default)]
+    sealed: bool,
 }
 
 /// Owned Store topology used to plan tree navigation without retaining a lock.
@@ -58,14 +64,21 @@ impl SessionTranscript {
     fn writable(
         &self,
     ) -> Result<MutexGuard<'_, SessionTranscriptState>, KernelError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let state = self.state.lock()?;
+        // Checked under the same lock as the write, so sealing cannot race it.
+        if state.sealed {
+            return Err(KernelError::SessionClosing);
+        }
         if state.write_failed {
             return Err(KernelError::SessionPersistenceUncertain);
         }
         Ok(state)
+    }
+
+    /// Refuses every later write once the Session finished closing.
+    pub(super) fn seal(&self) -> Result<(), KernelError> {
+        self.state.lock()?.sealed = true;
+        Ok(())
     }
 
     /// Rejects ingress before hooks or command side effects when prior writes were uncertain.
@@ -79,10 +92,7 @@ impl SessionTranscript {
         &self,
         leaf: Option<&EntryId>,
     ) -> Result<Vec<SessionEntry>, KernelError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let state = self.state.lock()?;
         Ok(leaf
             .map(|leaf| state.store.branch(leaf))
             .transpose()?
@@ -190,11 +200,12 @@ impl SessionTranscript {
     ) -> Self {
         Self {
             lane,
-            state: Mutex::new(SessionTranscriptState {
-                store,
-                history,
-                write_failed: false,
-            }),
+            state: Mutex::new(
+                SessionTranscriptState::builder()
+                    .store(store)
+                    .history(history)
+                    .build(),
+            ),
         }
     }
 
@@ -203,7 +214,7 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| state.store.session_id().clone())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns the backing Store path as an owned value.
@@ -211,7 +222,7 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| state.store.path().to_path_buf())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns the active lane identifier as an owned value.
@@ -224,7 +235,7 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| state.store.name().map(ToOwned::to_owned))
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns a defensive copy of the model-visible context.
@@ -232,7 +243,7 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| state.history.clone())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Inspects model-visible context under the transcript lock without cloning it.
@@ -243,7 +254,7 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| inspect(&state.history))
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns the current lane leaf as an owned value.
@@ -251,17 +262,14 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| state.store.lane(&self.lane).cloned())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Returns the active branch as owned Store entries.
     pub(super) fn active_branch(
         &self,
     ) -> Result<Vec<SessionEntry>, KernelError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let state = self.state.lock()?;
         let Some(leaf) = state.store.lane(&self.lane) else {
             return Ok(Vec::new());
         };
@@ -273,17 +281,14 @@ impl SessionTranscript {
         self.state
             .lock()
             .map(|state| state.store.records())
-            .map_err(|_poison_error| KernelError::Poisoned)
+            .map_err(KernelError::from)
     }
 
     /// Builds the public tree snapshot from one consistent Store view.
     pub(super) fn tree_snapshot(
         &self,
     ) -> Result<SessionTreeSnapshot, KernelError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let state = self.state.lock()?;
         let entries = state
             .store
             .entries()
@@ -356,10 +361,7 @@ impl SessionTranscript {
 
     /// Flushes all buffered transcript mutations to durable storage.
     pub(super) fn sync(&self) -> Result<(), KernelError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let mut state = self.state.lock()?;
         if let Err(error) = state.store.sync() {
             tracing::error!(
                 "failed to sync persistent state for session {}: {}",
@@ -386,7 +388,8 @@ impl SessionTranscript {
         name: String,
     ) -> Result<Option<String>, KernelError> {
         let mut state = self.writable()?;
-        if state.store.name().is_some() {
+        // A deliberately cleared name still counts: the default is set once.
+        if state.store.was_named() {
             return Ok(None);
         }
         state.store.set_name(Some(name.clone()))?;
@@ -420,10 +423,7 @@ impl SessionTranscript {
         &self,
         target_id: &EntryId,
     ) -> Result<TranscriptNavigationSnapshot, KernelError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_poison_error| KernelError::Poisoned)?;
+        let state = self.state.lock()?;
         let target =
             state.store.get_entry(target_id).cloned().ok_or_else(|| {
                 store::StoreError::EntryNotFound(target_id.clone())
@@ -702,6 +702,39 @@ mod tests {
         assert_eq!(transcript.tree_snapshot().expect("tree").entries.len(), 1);
     }
 
+    /// A sealed transcript refuses writes, so a stale runtime handle cannot
+    /// append after a resumed runtime took over the same file.
+    #[test]
+    fn sealed_transcript_refuses_writes() {
+        let root = tempfile::tempdir().expect("temporary store root");
+        let factory =
+            JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
+        let store = factory
+            .create(SessionCreateOptions {
+                session_id: SessionId::try_from("session-1")
+                    .expect("session id"),
+                cwd: PathBuf::from("/workspace"),
+                parent_session_id: None,
+            })
+            .expect("create store");
+        let transcript = SessionTranscript::new(
+            store,
+            protocol::LaneId::try_from("main").expect("lane id"),
+            Vec::new(),
+        );
+        transcript
+            .set_name(Some("before".into()))
+            .expect("live write");
+
+        transcript.seal().expect("seal");
+
+        assert!(matches!(
+            transcript.set_name(Some("after".into())),
+            Err(crate::KernelError::SessionClosing)
+        ));
+        assert_eq!(transcript.name().expect("name").as_deref(), Some("before"));
+    }
+
     /// Restores the prior observable branch when a post-move append fails.
     #[test]
     fn failed_navigation_restores_the_previous_lane_and_history() {
@@ -887,6 +920,10 @@ mod tests {
         /// Returns the delegated Session name.
         fn name(&self) -> Option<&str> {
             self.inner.name()
+        }
+
+        fn was_named(&self) -> bool {
+            self.inner.was_named()
         }
 
         /// Delegates entry labeling.

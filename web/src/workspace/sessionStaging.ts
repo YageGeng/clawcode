@@ -2,13 +2,13 @@ import type { ConfigSelect, EntryId, MessageId, RunId, TurnId } from "../acp/pro
 import type { TerminalEntity } from "./terminals";
 import type {
   AgentRunUsage,
+  CacheTrail,
   CompactionEntity,
   CompactionStatus,
   ContextUsage,
   ExtensionEntity,
   McpSessionSnapshot,
   MessageEntity,
-  ModelUsage,
   PendingMessages,
   RetryStatus,
   SessionEvent,
@@ -17,7 +17,7 @@ import type {
   ToolCallEntity,
   TranscriptEntry
 } from "../domain/model";
-import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
+import { AgentRunUsages, CacheMisses, EventOrdering as Ordering } from "../domain/model";
 import { EventSequenceRanges, initialSessionWorkspaceState, retainEvents } from "./sessionState";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 
@@ -57,6 +57,7 @@ export class SessionWorkspaceStager {
   private readonly compactions: MapDraft<EntryId, CompactionEntity>;
   private readonly turnRuns: MapDraft<TurnId, RunId>;
   private readonly runUsages: MapDraft<RunId, AgentRunUsage>;
+  private cacheTrail: CacheTrail;
   private transcript: readonly TranscriptEntry[];
   private appendedTranscript: TranscriptEntry[] = [];
   private events: readonly SessionEvent[];
@@ -85,6 +86,7 @@ export class SessionWorkspaceStager {
     this.compactions = new MapDraft(base.compactions);
     this.turnRuns = new MapDraft(base.turnRuns);
     this.runUsages = new MapDraft(base.runUsages);
+    this.cacheTrail = base.cacheTrail;
     this.transcript = base.transcript;
     this.events = base.events;
     this.diagnostics = base.diagnostics;
@@ -116,6 +118,7 @@ export class SessionWorkspaceStager {
         this.compactions.replace(new Map());
         this.turnRuns.replace(new Map());
         this.runUsages.replace(new Map());
+        this.cacheTrail = CacheMisses.empty;
         this.transcript = [];
         this.appendedTranscript = [];
         this.events = [];
@@ -203,19 +206,15 @@ export class SessionWorkspaceStager {
       }
       case "turn/settled": {
         if (this.turnRuns.read().has(action.turnId)) return;
-        const usages = [...this.messages.read().values()]
-          .filter((message) => message.turnId === action.turnId && message.assistant !== undefined)
-          .map((message) => message.assistant?.usage)
-          .filter((usage): usage is ModelUsage => usage !== undefined);
+        const turnMessages = [...this.messages.read().values()].filter((message) => message.turnId === action.turnId);
+        const assistants = turnMessages.flatMap((message) => message.assistant === undefined ? [] : [message.assistant]);
         this.turnRuns.write().set(action.turnId, action.runId);
-        if (usages.length === 0) return;
-        const previous = this.runUsages.read().get(action.runId);
+        if (assistants.length === 0) return;
+        // Usage is final once the Turn settles, so cache misses are judged exactly once here.
+        this.cacheTrail = CacheMisses.settleTurn(this.cacheTrail, turnMessages);
         // The frame-local accumulator deduplicates TurnEnd and avoids scanning
         // every message again when the complete Agent Run later settles.
-        this.runUsages.write().set(action.runId, {
-          usage: ModelUsages.sum(previous === undefined ? usages : [previous.usage, ...usages]),
-          settled: previous?.settled ?? false
-        });
+        this.runUsages.write().set(action.runId, AgentRunUsages.settleTurn(this.runUsages.read().get(action.runId), assistants));
         return;
       }
       case "run/settled": {
@@ -296,6 +295,7 @@ export class SessionWorkspaceStager {
       compactions: this.compactions.read(),
       turnRuns: this.turnRuns.read(),
       runUsages: this.runUsages.read(),
+      cacheTrail: this.cacheTrail,
       events: this.events,
       pending: this.pending,
       tree: this.tree,
@@ -330,6 +330,7 @@ export class SessionWorkspaceStager {
       compactions: this.compactions.read(),
       turnRuns: this.turnRuns.read(),
       runUsages: this.runUsages.read(),
+      cacheTrail: this.cacheTrail,
       events,
       pending: this.pending,
       tree: this.tree,

@@ -1,24 +1,34 @@
-use protocol::{
-    AgentMessage, ContentBlock, MessageContent, ModelProfile,
-    ModelRequestOptions, StopReason,
-};
-
-use super::*;
-
 mod context;
 mod lifecycle;
 mod prompt;
-
 pub use context::ContextUsageEstimate;
 pub(in crate::runtime) use context::{
     CompactionPolicyExt, CompactionPreparation, EstimatedTokens,
     OverflowRecovery,
 };
-use lifecycle::CompactionLifecycle;
 pub(in crate::runtime) use prompt::{
     GeneratedSummary, SummaryGeneration, SummaryProtocol,
 };
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::StreamExt;
+use lifecycle::CompactionLifecycle;
 use prompt::{SUMMARIZATION_SYSTEM_PROMPT, SummaryPrompt, SummaryTemplate};
+use protocol::{
+    AgentEventPayload, AgentMessage, CompactionData, CompactionDetails,
+    CompactionReason, CompactionResult, ContentBlock, EntryId, IdKind,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelProfile,
+    ModelRequest, ModelRequestOptions, ModelStreamEvent, RunId, SessionId,
+    StopReason, TimestampMs, TurnId,
+};
+use store::{EntryKind, NewEntry, RecordKind};
+use tokio_util::sync::CancellationToken;
+
+use crate::runtime::retry::RetryState;
+use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
+use crate::{EventSink, ModelError};
 
 /// Borrowed execution context shared by manual, threshold, and overflow compaction paths.
 #[derive(typed_builder::TypedBuilder)]
@@ -209,10 +219,7 @@ impl Kernel {
                 RunId::try_from(self.id_generator.next(IdKind::Run)).map_err(
                     |error| KernelError::Protocol(error.to_string()),
                 )?,
-                TurnId::try_from(self.id_generator.next(IdKind::Turn))
-                    .map_err(|error| {
-                        KernelError::Protocol(error.to_string())
-                    })?,
+                self.new_turn_id()?,
                 self.clock.now(),
             ),
         };

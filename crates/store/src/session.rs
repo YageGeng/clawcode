@@ -48,18 +48,21 @@ impl JsonlSessionStore {
         Ok(())
     }
 
-    /// Validates a mutation against a candidate state before making it durable.
+    /// Validates a mutation, appends it, and only then applies it to the state.
+    ///
+    /// Validation reads the live state instead of a cloned candidate, so one
+    /// append costs the size of its mutation rather than of the whole Session.
     fn persist<T: Serialize>(
         &mut self,
         mutation: &T,
     ) -> Result<(), StoreError> {
         let value = serde_json::to_value(mutation)?;
-        let mut candidate = self.state.clone();
-        Self::apply_loaded_mutation(&mut candidate, value.clone())?;
+        // Validation consumes its copy; replay passes owned lines without one.
+        let validated = Self::validate(&self.state, value.clone())?;
         self.append(&value)?;
         // State advances only after the complete JSONL line reaches the OS;
         // crash durability is guaranteed by the explicit `sync` checkpoints.
-        self.state = candidate;
+        Self::commit(&mut self.state, validated);
         Ok(())
     }
 
@@ -68,12 +71,24 @@ impl JsonlSessionStore {
         state: &mut SessionState,
         value: serde_json::Value,
     ) -> Result<(), StoreError> {
+        let validated = Self::validate(state, value)?;
+        Self::commit(state, validated);
+        Ok(())
+    }
+
+    /// Checks one mutation against the current state without changing it.
+    fn validate(
+        state: &SessionState,
+        value: serde_json::Value,
+    ) -> Result<ValidatedMutation, StoreError> {
+        // Owned, so the typed decode below can move the value out.
         let kind = value
             .get("kind")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| {
                 StoreError::InvalidSession("mutation has no kind".to_string())
-            })?;
+            })?
+            .to_owned();
         let sequence = value
             .get("seq")
             .and_then(serde_json::Value::as_u64)
@@ -89,7 +104,7 @@ impl JsonlSessionStore {
             )));
         }
 
-        match kind {
+        match kind.as_str() {
             "lane" => {
                 let mutation: LaneMutation = serde_json::from_value(value)?;
                 if let Some(target) = &mutation.leaf_id
@@ -100,8 +115,7 @@ impl JsonlSessionStore {
                         mutation.lane
                     )));
                 }
-                state.next_sequence = mutation.sequence.get();
-                state.lanes.insert(mutation.lane, mutation.leaf_id);
+                Ok(ValidatedMutation::Lane(mutation))
             }
             "entry" => {
                 let mutation: EntryMutation = serde_json::from_value(value)?;
@@ -146,14 +160,7 @@ impl JsonlSessionStore {
                         "entry does not chain to lane leaf".to_string(),
                     ));
                 }
-                state.next_sequence = mutation.entry.sequence.get();
-                state
-                    .lanes
-                    .insert(mutation.lane, Some(mutation.entry.id.clone()));
-                state.entry_order.push(mutation.entry.id.clone());
-                state
-                    .entries
-                    .insert(mutation.entry.id.clone(), mutation.entry);
+                Ok(ValidatedMutation::Entry(mutation))
             }
             "record" => {
                 let mutation: RecordMutation = serde_json::from_value(value)?;
@@ -163,14 +170,13 @@ impl JsonlSessionStore {
                         mutation.record.lane
                     )));
                 }
-                if !state.used_record_ids.insert(mutation.record.id.clone()) {
+                if state.used_record_ids.contains(&mutation.record.id) {
                     return Err(StoreError::InvalidSession(format!(
                         "duplicate record id {}",
                         mutation.record.id
                     )));
                 }
-                state.next_sequence = mutation.record.sequence.get();
-                state.records.push(mutation.record);
+                Ok(ValidatedMutation::Record(mutation))
             }
             "fact" => {
                 let fact = value
@@ -182,12 +188,13 @@ impl JsonlSessionStore {
                         )
                     })?;
                 match fact {
-                    "name" => {
-                        state.name = value
+                    "name" => Ok(ValidatedMutation::Name {
+                        sequence,
+                        name: value
                             .get("name")
                             .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned);
-                    }
+                            .map(ToOwned::to_owned),
+                    }),
                     "label" => {
                         let target = value
                             .get("targetId")
@@ -204,36 +211,86 @@ impl JsonlSessionStore {
                         if !state.entries.contains_key(&target_id) {
                             return Err(StoreError::EntryNotFound(target_id));
                         }
-                        match value
-                            .get("label")
-                            .and_then(serde_json::Value::as_str)
-                        {
-                            Some(label) => {
-                                state
-                                    .labels
-                                    .insert(target_id, label.to_string());
-                            }
-                            None => {
-                                state.labels.remove(&target_id);
-                            }
-                        }
+                        Ok(ValidatedMutation::Label {
+                            sequence,
+                            target_id,
+                            label: value
+                                .get("label")
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned),
+                        })
                     }
-                    other => {
-                        return Err(StoreError::InvalidSession(format!(
-                            "unknown fact type {other}"
-                        )));
+                    other => Err(StoreError::InvalidSession(format!(
+                        "unknown fact type {other}"
+                    ))),
+                }
+            }
+            other => Err(StoreError::InvalidSession(format!(
+                "unknown mutation kind {other}"
+            ))),
+        }
+    }
+
+    /// Applies a mutation that already passed validation; it cannot fail.
+    fn commit(state: &mut SessionState, mutation: ValidatedMutation) {
+        match mutation {
+            ValidatedMutation::Lane(mutation) => {
+                state.next_sequence = mutation.sequence.get();
+                state.lanes.insert(mutation.lane, mutation.leaf_id);
+            }
+            ValidatedMutation::Entry(mutation) => {
+                state.next_sequence = mutation.entry.sequence.get();
+                state
+                    .lanes
+                    .insert(mutation.lane, Some(mutation.entry.id.clone()));
+                state.entry_order.push(mutation.entry.id.clone());
+                state
+                    .entries
+                    .insert(mutation.entry.id.clone(), mutation.entry);
+            }
+            ValidatedMutation::Record(mutation) => {
+                state.next_sequence = mutation.record.sequence.get();
+                state.used_record_ids.insert(mutation.record.id.clone());
+                state.records.push(mutation.record);
+            }
+            ValidatedMutation::Name { sequence, name } => {
+                state.next_sequence = sequence;
+                state.name = name;
+                state.named = true;
+            }
+            ValidatedMutation::Label {
+                sequence,
+                target_id,
+                label,
+            } => {
+                state.next_sequence = sequence;
+                match label {
+                    Some(label) => {
+                        state.labels.insert(target_id, label);
+                    }
+                    None => {
+                        state.labels.remove(&target_id);
                     }
                 }
-                state.next_sequence = sequence;
-            }
-            other => {
-                return Err(StoreError::InvalidSession(format!(
-                    "unknown mutation kind {other}"
-                )));
             }
         }
-        Ok(())
     }
+}
+
+/// One decoded mutation that passed validation against the current state.
+enum ValidatedMutation {
+    Lane(LaneMutation),
+    Entry(EntryMutation),
+    Record(RecordMutation),
+    Name {
+        sequence: u64,
+        name: Option<String>,
+    },
+    Label {
+        sequence: u64,
+        target_id: EntryId,
+        label: Option<String>,
+    },
 }
 
 impl SessionStore for JsonlSessionStore {
@@ -417,12 +474,7 @@ impl SessionStore for JsonlSessionStore {
 
     /// Persists the current optional session name as a global fact mutation.
     fn set_name(&mut self, name: Option<String>) -> Result<(), StoreError> {
-        let mutation = NameFactMutation::builder()
-            .kind(MutationKind::Fact)
-            .sequence(self.candidate_sequence()?)
-            .fact(FactKind::Name)
-            .name(name.clone())
-            .build();
+        let mutation = NameFactMutation::new(self.candidate_sequence()?, name);
         self.persist(&mutation)?;
         Ok(())
     }
@@ -430,6 +482,11 @@ impl SessionStore for JsonlSessionStore {
     /// Returns the latest persisted session name.
     fn name(&self) -> Option<&str> {
         self.state.name.as_deref()
+    }
+
+    /// Reports whether any name fact was recorded, including one that cleared it.
+    fn was_named(&self) -> bool {
+        self.state.named
     }
 
     /// Persists an optional label for an existing entry.

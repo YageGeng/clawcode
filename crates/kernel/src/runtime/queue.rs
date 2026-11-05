@@ -4,7 +4,6 @@ use std::sync::Arc;
 use protocol::{
     AgentMessage, EntryId, IdKind, MessageIdentity, MessageTiming,
     PendingMessages, QueueId, QueueKind, QueuedMessage, RecordId, SessionId,
-    TurnId,
 };
 use serde::{Deserialize, Serialize};
 use store::{NewRecord, RecordKind, SessionRecord, SessionStore};
@@ -135,12 +134,7 @@ impl Kernel {
                     .message(AgentMessage {
                         identity: MessageIdentity {
                             message_id: self.message_id()?,
-                            turn_id: TurnId::try_from(
-                                self.id_generator.next(IdKind::Turn),
-                            )
-                            .map_err(|error| {
-                                KernelError::Protocol(error.to_string())
-                            })?,
+                            turn_id: self.new_turn_id()?,
                         },
                         timing: MessageTiming::try_from((
                             timestamp, timestamp, timestamp,
@@ -270,11 +264,7 @@ impl Kernel {
         );
         let session = self.session(session_id)?;
         // Keep selection, durable cancellation, and draining under one lock so claims cannot race.
-        let mut queue = session
-            .execution
-            .queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let mut queue = session.execution.queue.lock()?;
         let queue_ids = queue.ids();
         let records = queue_ids
             .iter()
@@ -311,11 +301,7 @@ impl Kernel {
         queue_id: &QueueId,
     ) -> Result<bool, KernelError> {
         let session = self.session(session_id)?;
-        let mut queue = session
-            .execution
-            .queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let mut queue = session.execution.queue.lock()?;
         if queue
             .steering
             .iter()
@@ -409,11 +395,7 @@ impl Kernel {
         session_id: &SessionId,
     ) -> Result<(), KernelError> {
         let session = self.session(session_id)?;
-        let mut queue = session
-            .execution
-            .queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let mut queue = session.execution.queue.lock()?;
         queue.open = false;
         let ids = queue
             .steering
@@ -497,11 +479,7 @@ impl Session {
         item: PendingQueueItem,
         cancellation: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<(), KernelError> {
-        let mut queue = self
-            .execution
-            .queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let mut queue = self.execution.queue.lock()?;
         if cancellation
             .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
         {
@@ -523,11 +501,7 @@ impl Session {
         record: NewRecord,
         queue_id: &QueueId,
     ) -> Result<(), KernelError> {
-        let mut queue = self
-            .execution
-            .queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let mut queue = self.execution.queue.lock()?;
         if !queue.ids().contains(queue_id) {
             return Ok(());
         }
@@ -546,11 +520,7 @@ impl Session {
         record: NewRecord,
     ) -> Result<(), KernelError> {
         // Cancel and the first write share this boundary, including multi-threaded callers.
-        let cancellation = self
-            .execution
-            .cancellation
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
+        let cancellation = self.execution.cancellation.lock()?;
         if cancellation.is_cancelled() {
             return Err(KernelError::PromptCancelled);
         }
@@ -638,23 +608,14 @@ impl Drop for ClaimedItem {
 impl SessionExecution {
     /// Opens acceptance only for an agent Run, never for a command or maintenance operation.
     pub(super) fn open_queue(&self) -> Result<(), KernelError> {
-        let cancellation = self
-            .cancellation
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?;
-        self.queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?
-            .open = !cancellation.is_cancelled();
+        let cancellation = self.cancellation.lock()?;
+        self.queue.lock()?.open = !cancellation.is_cancelled();
         Ok(())
     }
 
     /// Closes acceptance before settlement or cancellation withdraws pending inputs.
     pub(super) fn close_queue(&self) -> Result<(), KernelError> {
-        self.queue
-            .lock()
-            .map_err(|_error| KernelError::Poisoned)?
-            .open = false;
+        self.queue.lock()?.open = false;
         Ok(())
     }
 
@@ -663,8 +624,7 @@ impl SessionExecution {
         self: &Arc<Self>,
         allow_follow_up: bool,
     ) -> Result<Option<ClaimedItem>, KernelError> {
-        let mut queue =
-            self.queue.lock().map_err(|_error| KernelError::Poisoned)?;
+        let mut queue = self.queue.lock()?;
         let item = queue.steering.pop_front().or_else(|| {
             allow_follow_up
                 .then(|| queue.follow_up.pop_front())

@@ -1,4 +1,14 @@
-use super::*;
+use std::sync::Weak;
+
+use ::tools::{AgentTool, ToolError, ToolExecutionContext};
+use async_trait::async_trait;
+use protocol::{
+    ContentBlock, SessionOwnership, SessionTitle, ToolCall, ToolDefinition,
+    ToolResult, ToolResultDetails,
+};
+
+use crate::runtime::subagent::SubagentError;
+use crate::runtime::{AnswerOutcome, Kernel, Session, SubmitRequest, WhenBusy};
 
 /// Delegates one self-contained task while holding its owner's tool invocation open.
 pub(super) struct SubagentTool {

@@ -1,4 +1,13 @@
-use super::*;
+use std::sync::Arc;
+
+use ::tools::ToolRegistry;
+use protocol::{
+    AgentMessage, ContentBlock, MessageContent, MessageId, MessageIdentity,
+    MessageTiming, SessionId, TimestampMs, TurnId,
+};
+
+use crate::runtime::resources::SessionResources;
+use crate::runtime::{Kernel, KernelError, Session};
 
 impl Session {
     /// Returns the initialized immutable Prompt snapshot for this Session.

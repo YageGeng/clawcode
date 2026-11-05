@@ -11,6 +11,7 @@ mod model_state;
 mod ownership;
 mod prompt;
 mod queue;
+mod rename;
 mod resources;
 mod retry;
 mod run;
@@ -24,70 +25,43 @@ mod transcript;
 mod tree;
 mod user_bash;
 
-use extension::{KernelExtensionDiagnostics, SessionExtensions};
+use extension::SessionExtensions;
 use insertion::WaiterCancellation;
-use lifecycle::{ActiveRunContext, SessionExecution, SessionLifecycle};
+use lifecycle::SessionExecution;
 use mcp::SessionMcpRuntime;
 use model_state::SessionModelState;
 use resources::SessionResources;
 use run::RunInvocation;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::Duration;
 
-use ::extension::{
-    DynamicCommandRegistry, ExtensionFactory, ExtensionRegistrar,
-    ExtensionRuntime,
-};
-use ::tools::{
-    BashExecutionRequest, BashExecutor, ToolExecutionContext, ToolFactory,
-    ToolRegistry,
-};
+use ::extension::ExtensionFactory;
+use ::tools::{ToolExecutionContext, ToolFactory, ToolRegistry};
 use config::TurnLimit;
 use futures::StreamExt;
 use protocol::{
-    AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome,
-    BashExecutionMessage, CompactionData, CompactionDetails, CompactionPolicy,
-    CompactionReason, CompactionResult, ContentBlock, EntryId, EventMetadata,
-    ExtensionFlagDefinition, IdGenerator, IdKind, LaneId, McpSessionSnapshot,
-    MessageContent, MessageId, MessageIdentity, MessageTiming, ModelRequest,
-    ModelStreamEvent, QueueId, RecordId, RetryPolicy, RunId, RunRequest,
-    RunResult, SessionId, SessionSummary, SessionTitle, SessionTreeEntry,
-    SessionTreeSnapshot, StopReason, ThinkingLevel, TimestampMs, ToolCall,
-    ToolResult, TraceId, TurnId, TurnIdentity, TurnOutcome, TurnRecord,
-    TurnTiming, UserBashInput, UserBashRequest, UserBashResult,
+    AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome, CompactionData,
+    CompactionPolicy, CompactionReason, CompactionResult, ContentBlock,
+    EventMetadata, ExtensionFlagDefinition, IdGenerator, IdKind, LaneId,
+    McpSessionSnapshot, MessageContent, MessageId, MessageIdentity,
+    MessageTiming, QueueId, RetryPolicy, RunId, RunRequest, RunResult,
+    SessionId, TimestampMs, ToolCall, ToolResult, TraceId, TurnId, TurnRecord,
 };
-use store::{
-    Clock, EntryKind, NewEntry, NewRecord, RecordKind, SessionCreateOptions,
-    SessionForkOptions, SessionStore, StoreFactory,
-};
-use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
+use store::{Clock, EntryKind, RecordKind, SessionStore, StoreFactory};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    EventSink, Model, ModelCatalog, ModelError, ModelFactory, SinkError,
-};
+use crate::{EventSink, ModelError, ModelFactory, SinkError};
 pub use admission::{AdmissionTicket, PromptOutcome, PromptRequest};
-use attempt::{
-    AssistantAttempt, AssistantAttemptResult, AssistantAttemptSettlement,
-};
 pub use compaction::ContextUsageEstimate;
-use compaction::{
-    CompactionExecution, CompactionIdentity, CompactionPolicyExt,
-    OverflowRecovery, SummaryGeneration, SummaryProtocol,
-};
+use compaction::{CompactionExecution, CompactionIdentity};
 pub use insertion::{InsertionNotice, InsertionReceiver};
-use queue::{PendingQueue, QueueCancellationReason};
-use retry::RetryState;
-use settlement::{RunCompletion, RunSettlement};
+use queue::PendingQueue;
 pub use submit::{AnswerOutcome, SubmissionAnswer, SubmitRequest, WhenBusy};
-use tools::{SessionToolState, ToolBatch, ToolBatchResult};
-use transcript::{
-    SessionTranscript, TranscriptNavigationCommit, TranscriptNavigationSnapshot,
-};
+use tools::SessionToolState;
+use transcript::SessionTranscript;
 
 /// Errors surfaced by kernel construction, persistence, extensions, and Turns.
 #[derive(Debug, thiserror::Error)]
@@ -574,6 +548,14 @@ impl Kernel {
     }
 }
 
+impl<T> From<std::sync::PoisonError<T>> for KernelError {
+    /// Lets lock acquisition use `?`: a poisoned lock means another thread
+    /// panicked mid-update, so the guarded state can no longer be trusted.
+    fn from(_poison: std::sync::PoisonError<T>) -> Self {
+        Self::Poisoned
+    }
+}
+
 impl From<serde_json::Error> for KernelError {
     /// Treats persistence JSON conversion as a store-boundary failure.
     fn from(error: serde_json::Error) -> Self {
@@ -603,6 +585,9 @@ struct Session {
     /// Serializes settings changes so reported snapshots follow change order.
     #[builder(default)]
     settings_changes: tokio::sync::Mutex<()>,
+    /// Serializes name changes so announced titles follow the order they were stored.
+    #[builder(default)]
+    name_changes: tokio::sync::Mutex<()>,
     execution: Arc<SessionExecution>,
 }
 
@@ -663,8 +648,7 @@ impl Kernel {
         let active = session.execution.active_run()?;
         let turn_id = match &active {
             Some(active) => active.turn_id.clone(),
-            None => TurnId::try_from(self.id_generator.next(IdKind::Turn))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?,
+            None => self.new_turn_id()?,
         };
         let sink = active.map_or_else(
             || self.session_sink(session_id),

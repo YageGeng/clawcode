@@ -2158,7 +2158,7 @@ async fn first_user_message_sets_default_title_and_manual_rename_wins() {
         matches!(
             &event.payload,
             AgentEventPayload::SessionTitleChanged { title }
-                if title == "First line"
+                if title.as_deref() == Some("First line")
         )
     }));
 

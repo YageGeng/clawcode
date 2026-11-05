@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use protocol::{SessionId, SessionOwnership, TimestampMs};
+use protocol::{Sequence, SessionId, SessionOwnership, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 use crate::session::JsonlSessionStore;
-use crate::state::SessionState;
+use crate::state::{NameFactMutation, SessionState};
 use crate::{
     Clock, NewEntry, OwnedSessionCreateOptions, SessionCreateOptions,
     SessionForkOptions, SessionHeader, SessionMetadata, SessionStore,
@@ -76,6 +76,33 @@ impl JsonlStoreFactory {
 }
 
 impl StoreFactory for JsonlStoreFactory {
+    /// Appends one name fact after the log's final sequence without replaying it.
+    ///
+    /// A log whose final line is not a complete mutation, either header-only
+    /// or a torn append, falls back to the replay that repairs it.
+    fn set_name_at(
+        &self,
+        path: &Path,
+        name: Option<String>,
+    ) -> Result<(), StoreError> {
+        let Some(last) = Self::last_sequence(path)? else {
+            let mut store = self.open(path)?;
+            store.set_name(name)?;
+            return store.sync();
+        };
+        let sequence = last
+            .checked_add(1)
+            .and_then(|next| Sequence::try_from(next).ok())
+            .ok_or(StoreError::SequenceExhausted)?;
+        let mutation = NameFactMutation::new(sequence, name);
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        let mut line = serde_json::to_vec(&mutation)?;
+        line.push(b'\n');
+        file.write_all(&line)?;
+        file.sync_data()?;
+        Ok(())
+    }
+
     /// Looks up identity using the common header-only path.
     fn exists(&self, session_id: &SessionId) -> Result<bool, StoreError> {
         Ok(self.header(session_id)?.is_some())
@@ -142,6 +169,7 @@ impl StoreFactory for JsonlStoreFactory {
         }
 
         let mut state = SessionState::new()?;
+        let mut repaired = false;
         for (index, line) in lines.iter().enumerate().skip(1) {
             let value = match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(value) => value,
@@ -153,6 +181,7 @@ impl StoreFactory for JsonlStoreFactory {
                         )
                     })?;
                     Self::repair_torn_tail(path, valid_lines)?;
+                    repaired = true;
                     break;
                 }
                 Err(error) => {
@@ -164,9 +193,11 @@ impl StoreFactory for JsonlStoreFactory {
             };
             JsonlSessionStore::apply_loaded_mutation(&mut state, value)?;
         }
-        if !content.ends_with('\n') {
-            // The torn-tail repair above rewrote the file, so the append handle
-            // is opened after repair and reused for the trailing-newline fix.
+        // The repair rewrote the file with a trailing newline already; adding
+        // another would leave an empty line that breaks the next reopen.
+        if !repaired && !content.ends_with('\n') {
+            // A complete final line only lacks its newline; the append handle
+            // is reused for the fix.
             let mut writer =
                 BufWriter::new(OpenOptions::new().append(true).open(path)?);
             writer.write_all(b"\n")?;
@@ -346,6 +377,41 @@ impl StoreFactory for JsonlStoreFactory {
 }
 
 impl JsonlStoreFactory {
+    /// Reads the sequence of the log's final line by scanning back from the end.
+    ///
+    /// Returns `None` unless the log ends with a complete mutation line, so the
+    /// caller replays (and repairs) anything else. Mutations are appended in
+    /// consecutive order, so the final line holds the highest sequence.
+    fn last_sequence(path: &Path) -> Result<Option<u64>, StoreError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = fs::File::open(path)?;
+        let length = file.metadata()?.len();
+        let mut window: u64 = 64 * 1024;
+        loop {
+            let start = length.saturating_sub(window);
+            let mut tail = Vec::new();
+            file.seek(SeekFrom::Start(start))?;
+            file.read_to_end(&mut tail)?;
+            // A torn final append has no trailing newline.
+            let Some(body) = tail.strip_suffix(b"\n") else {
+                return Ok(None);
+            };
+            match body.iter().rposition(|byte| *byte == b'\n') {
+                Some(newline) => {
+                    let line = body.get(newline + 1..).unwrap_or_default();
+                    return Ok(serde_json::from_slice::<serde_json::Value>(
+                        line,
+                    )
+                    .ok()
+                    .and_then(|value| value.get("seq")?.as_u64()));
+                }
+                // The whole file is one line: only a header, no mutations.
+                None if start == 0 => return Ok(None),
+                // The final line is longer than the window; widen it.
+                None => window = window.saturating_mul(4),
+            }
+        }
+    }
     /// Shares header-only traversal across identity checks, ownership scans, and deletion.
     fn scan_headers(
         &self,

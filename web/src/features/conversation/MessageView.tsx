@@ -1,7 +1,7 @@
 import { memo } from "react";
 
-import type { MessageEntity, SessionTreeEntry } from "../../domain/model";
-import { ModelUsages } from "../../domain/model";
+import type { CacheMiss, MessageEntity, SessionTreeEntry } from "../../domain/model";
+import { CacheMisses, ModelUsages } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandMessageCard } from "./CommandMessageCard";
 import { MarkdownContent } from "./MarkdownContent";
@@ -10,6 +10,8 @@ import { ReasoningBlock } from "./ReasoningBlock";
 
 export type MessageViewProps = Readonly<{
   message: MessageEntity;
+  /** Set once the Turn settles when this request missed a significant cached prefix. */
+  cacheMiss?: CacheMiss;
   entry?: SessionTreeEntry;
   cwd?: string;
   running: boolean;
@@ -20,7 +22,7 @@ export type MessageViewProps = Readonly<{
 }>;
 
 /** Presents one message and hides parent-targeted actions in embedded child transcripts. */
-export const MessageView = memo(function MessageView({ message, entry, cwd, running, inspecting, onInspect, controller, readOnly = false }: MessageViewProps) {
+export const MessageView = memo(function MessageView({ message, cacheMiss, entry, cwd, running, inspecting, onInspect, controller, readOnly = false }: MessageViewProps) {
   const assistant = message.assistant;
   // ACP projects Tool Calls into dedicated transcript cards, which leaves a
   // settled tool-only assistant message with no independently visible content.
@@ -83,6 +85,7 @@ export const MessageView = memo(function MessageView({ message, entry, cwd, runn
             <dt>Model</dt><dd>{assistant.modelId}</dd>
             <dt>StopReason</dt><dd>{assistant.stopReason}{assistant.rawStopReason === undefined ? "" : ` (${assistant.rawStopReason})`}</dd>
           <dt>Usage</dt><dd>in {ModelUsages.formatTokens(assistant.usage.inputTokens)} · out {ModelUsages.formatTokens(assistant.usage.outputTokens)} · cache read {ModelUsages.formatTokens(assistant.usage.cacheReadTokens)} · cache write {ModelUsages.formatTokens(assistant.usage.cacheWriteTokens)} · cache hit {ModelUsages.cacheHitRate(assistant.usage) ?? "未知"} · total {ModelUsages.formatTokens(assistant.usage.totalTokens)}</dd>
+            {cacheMiss === undefined ? null : <><dt>Cache miss</dt><dd>{CacheMisses.describe(cacheMiss)}</dd></>}
             {assistant.error === undefined ? null : <><dt>Error</dt><dd>{assistant.error}</dd></>}
           </>}
         </dl>

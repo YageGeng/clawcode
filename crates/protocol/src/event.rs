@@ -259,8 +259,8 @@ pub enum AgentEventPayload {
 
     /// The persisted display title for this session changed.
     SessionTitleChanged {
-        /// New normalized session title.
-        title: String,
+        /// New normalized session title; `None` when the name was cleared.
+        title: Option<String>,
     },
 
     /// The Session's model or thinking level changed.

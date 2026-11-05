@@ -3,6 +3,7 @@ import type { TerminalEntity } from "./terminals";
 import type {
   AgentRunUsage,
   AvailableCommandEntity,
+  CacheTrail,
   CompactionEntity,
   CompactionStatus,
   ContextUsage,
@@ -11,7 +12,6 @@ import type {
   ExtensionEntity,
   McpSessionSnapshot,
   MessageEntity,
-  ModelUsage,
   PendingMessages,
   RecoveryNotice,
   RetryStatus,
@@ -21,7 +21,7 @@ import type {
   ToolCallEntity,
   TranscriptEntry
 } from "../domain/model";
-import { EventOrdering as Ordering, ModelUsages } from "../domain/model";
+import { AgentRunUsages, CacheMisses, EventOrdering as Ordering } from "../domain/model";
 
 export type SessionWorkspaceState = Readonly<{
   messages: ReadonlyMap<MessageId, MessageEntity>;
@@ -32,6 +32,7 @@ export type SessionWorkspaceState = Readonly<{
   compactions: ReadonlyMap<EntryId, CompactionEntity>;
   turnRuns: ReadonlyMap<TurnId, RunId>;
   runUsages: ReadonlyMap<RunId, AgentRunUsage>;
+  cacheTrail: CacheTrail;
   events: readonly SessionEvent[];
   pending: PendingMessages;
   tree: SessionTree | undefined;
@@ -107,6 +108,7 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   compactions: new Map(),
   turnRuns: new Map(),
   runUsages: new Map(),
+  cacheTrail: CacheMisses.empty,
   events: [],
   pending: { steering: [], followUp: [] },
   tree: undefined,
@@ -216,25 +218,22 @@ export function reduceSessionWorkspace(
     }
     case "turn/settled": {
       if (state.turnRuns.has(action.turnId)) return state;
-      const usages = [...state.messages.values()]
-        .filter((message) => message.turnId === action.turnId && message.assistant !== undefined)
-        .map((message) => message.assistant?.usage)
-        .filter((usage): usage is ModelUsage => usage !== undefined);
+      const turnMessages = [...state.messages.values()].filter((message) => message.turnId === action.turnId);
+      const assistants = turnMessages.flatMap((message) => message.assistant === undefined ? [] : [message.assistant]);
       const turnRuns = new Map(state.turnRuns);
       turnRuns.set(action.turnId, action.runId);
-      if (usages.length === 0) return { ...state, turnRuns };
+      if (assistants.length === 0) return { ...state, turnRuns };
+      // Usage is final once the Turn settles, so cache misses are judged exactly once here.
+      const cacheTrail = CacheMisses.settleTurn(state.cacheTrail, turnMessages);
       const runUsages = new Map(state.runUsages);
-      const previous = runUsages.get(action.runId);
       // TurnEnd contributes exactly once to its owning Run, but presentation
       // waits for the later RunEnd boundary of the complete Agent loop.
-      runUsages.set(action.runId, {
-        usage: ModelUsages.sum(previous === undefined ? usages : [previous.usage, ...usages]),
-        settled: previous?.settled ?? false
-      });
+      runUsages.set(action.runId, AgentRunUsages.settleTurn(runUsages.get(action.runId), assistants));
       return {
         ...state,
         turnRuns,
-        runUsages
+        runUsages,
+        cacheTrail
       };
     }
     case "run/settled": {

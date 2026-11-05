@@ -2,16 +2,9 @@ mod background;
 mod foreground;
 pub(super) use background::SessionBackgroundWork;
 
-use super::{
-    AnswerOutcome, Kernel, KernelError, Session, SubmitRequest, WhenBusy,
-};
-use ::tools::{AgentTool, ToolError, ToolExecutionContext};
-use async_trait::async_trait;
-use protocol::{
-    ContentBlock, SessionOwnership, SessionTitle, ToolCall, ToolDefinition,
-    ToolResult, ToolResultDetails,
-};
-use std::sync::{Arc, Weak};
+use super::{Kernel, KernelError, Session};
+use ::tools::ToolError;
+use std::sync::Arc;
 
 /// Adds tool identity to infrastructure failures without changing their source.
 #[derive(Debug, thiserror::Error)]

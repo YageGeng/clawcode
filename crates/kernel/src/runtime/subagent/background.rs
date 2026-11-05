@@ -1,9 +1,19 @@
-use super::*;
-use protocol::{MessageId, SessionId};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+
+use ::tools::{AgentTool, ToolError, ToolExecutionContext};
+use async_trait::async_trait;
+use protocol::{
+    ContentBlock, MessageId, SessionId, SessionOwnership, SessionTitle,
+    ToolCall, ToolDefinition, ToolResult, ToolResultDetails,
+};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+use crate::runtime::subagent::SubagentError;
+use crate::runtime::{
+    AnswerOutcome, Kernel, KernelError, Session, SubmitRequest, WhenBusy,
+};
 
 /// Reporters and answer deduplication owned by one live Session.
 #[derive(typed_builder::TypedBuilder)]
@@ -28,10 +38,7 @@ impl Default for SessionBackgroundWork {
 impl SessionBackgroundWork {
     /// Tracks reporter tasks and reaps settled tasks without blocking the tool call.
     fn spawn(&self, reporter: Reporter) -> Result<(), KernelError> {
-        let mut tasks = self
-            .tasks
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?;
+        let mut tasks = self.tasks.lock()?;
         if self.shutdown.is_cancelled() {
             tracing::warn!(
                 "refused subagent reporter for closing session {}",
@@ -50,12 +57,7 @@ impl SessionBackgroundWork {
 
     /// Waits outside the synchronous lock after all child work has been cancelled.
     pub(in crate::runtime) async fn join(&self) -> Result<(), KernelError> {
-        let mut tasks = std::mem::take(
-            &mut *self
-                .tasks
-                .lock()
-                .map_err(|_lock_error| KernelError::Poisoned)?,
-        );
+        let mut tasks = std::mem::take(&mut *self.tasks.lock()?);
         while let Some(result) = tasks.join_next().await {
             if let Err(error) = result {
                 tracing::warn!(
@@ -75,8 +77,7 @@ impl SessionBackgroundWork {
     ) -> Result<bool, KernelError> {
         Ok(self
             .reported
-            .lock()
-            .map_err(|_lock_error| KernelError::Poisoned)?
+            .lock()?
             .entry(child.clone())
             .or_default()
             .insert(message.clone()))

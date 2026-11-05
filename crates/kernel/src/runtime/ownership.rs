@@ -1,7 +1,15 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use protocol::{
+    EntryId, IdGenerator, IdKind, SessionId, SessionOwnership, SessionTitle,
+    ThinkingLevel, ToolSelection,
+};
+use store::{NewEntry, OwnedSessionCreateOptions, SessionCreateOptions};
+
 use super::settings::SettingChange;
-use super::*;
-use protocol::{SessionOwnership, ToolSelection};
-use store::OwnedSessionCreateOptions;
+use crate::Model;
+use crate::runtime::{Kernel, KernelError, Session, mcp, tools};
 
 pub(in crate::runtime) const SUBAGENT_TOOL_NAMES: [&str; 2] =
     ["subagent", "background_subagent"];
@@ -218,20 +226,12 @@ impl Kernel {
                 ) => {}
                 Err(error) => return Err(error),
             }
-            let pending = self
-                .pending_sessions
-                .lock()
-                .map_err(|_error| KernelError::Poisoned)?
-                .get(owner)
-                .map(tokio::sync::watch::Sender::subscribe);
-            if let Some(mut pending) = pending {
+            if self.wait_for_session_reservation(owner).await? {
                 tracing::info!(
-                    "waiting for owner {} startup before resuming session {}",
+                    "waited for owner {} startup before resuming session {}",
                     owner,
                     child
                 );
-                // The reservation drops its sender on both success and rollback.
-                let _ = pending.changed().await;
                 continue;
             }
             // A cancelled startup may leave a Starting runtime without a reservation;
@@ -281,8 +281,7 @@ impl Kernel {
         // shortcut: scans live Sessions in O(n); add an owner index if runtime counts make this costly.
         Ok(self
             .sessions
-            .read()
-            .map_err(|_lock_error| KernelError::Poisoned)?
+            .read()?
             .iter()
             .filter(|(_, child)| {
                 child
