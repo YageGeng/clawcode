@@ -6,17 +6,19 @@ use async_trait::async_trait;
 use extension::{
     ContextPoint, ExtensionContext, ExtensionDiagnosticSink, ExtensionError,
     ExtensionHandler, ExtensionModule, ExtensionRegistrar, ExtensionRuntime,
-    InputPoint, NON_UI_EXTENSION_POINT_NAMES, SessionBeforeSwitchPoint,
-    ToolCallPoint, ToolExecutionUpdatePoint,
+    InputPoint, MessageEndPoint, MessageUpdatePoint,
+    NON_UI_EXTENSION_POINT_NAMES, SessionBeforeSwitchPoint, ToolCallPoint,
+    ToolExecutionUpdatePoint,
 };
 use protocol::{
     AgentMessage, ContentBlock, ContextEvent, ContextResult,
     ExtensionDescriptor, ExtensionId, ExtensionInvocation, ExtensionSnapshot,
-    InputEvent, InputResult, InputSource, LaneId, MessageContent, MessageId,
-    MessageIdentity, MessageTiming, ModelRequest, SessionBeforeSwitchEvent,
-    SessionCancelResult, SessionId, SessionSwitchReason, SessionTreeSnapshot,
-    ThinkingLevel, TimestampMs, ToolBlock, ToolCall, ToolCallEvent, ToolCallId,
-    ToolCallResult, ToolExecutionUpdateEvent, ToolResult, TurnId,
+    InputEvent, InputResult, InputSource, LaneId, MessageContent,
+    MessageEndEvent, MessageId, MessageIdentity, MessageTiming, ModelRequest,
+    SessionBeforeSwitchEvent, SessionCancelResult, SessionId,
+    SessionSwitchReason, SessionTreeSnapshot, ThinkingLevel, TimestampMs,
+    ToolBlock, ToolCall, ToolCallEvent, ToolCallId, ToolCallResult,
+    ToolExecutionUpdateEvent, ToolResult, TurnId,
 };
 
 /// Creates one complete user message for context-chain assertions.
@@ -212,6 +214,108 @@ impl ExtensionDiagnosticSink for RecordingDiagnostics {
             message.to_string(),
         ));
     }
+}
+
+/// Hosts may skip building a costly event payload only when no handler would read it.
+#[test]
+fn has_handlers_reports_only_registered_points() {
+    let mut registrar = ExtensionRegistrar::new();
+    registrar
+        .register_module(&RuntimeModule {
+            first_input_calls: Arc::default(),
+            skipped_input_calls: Arc::default(),
+        })
+        .expect("register runtime module");
+    let runtime = ExtensionRuntime::new(
+        Arc::new(registrar.freeze()),
+        Arc::new(RecordingDiagnostics::default()),
+    );
+
+    assert!(runtime.has_handlers::<ToolCallPoint>());
+    assert!(!runtime.has_handlers::<MessageUpdatePoint>());
+}
+
+/// Replaces the final message with one prepared value.
+struct ReplaceMessage(AgentMessage);
+
+#[async_trait]
+impl ExtensionHandler<MessageEndPoint> for ReplaceMessage {
+    /// Returns the prepared replacement regardless of the current message.
+    async fn handle(
+        &self,
+        _event: &MessageEndEvent,
+        _context: &ExtensionContext,
+    ) -> Result<Option<AgentMessage>, ExtensionError> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+/// Registers one replacement handler per prepared message, in order.
+struct ReplacementModule(Vec<AgentMessage>);
+
+impl ExtensionModule for ReplacementModule {
+    /// Returns stable metadata for diagnostic source attribution.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("replacer").expect("extension id"),
+            name: "Replacer".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the replacement chain under test.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        for message in &self.0 {
+            registrar
+                .on::<MessageEndPoint, _>(ReplaceMessage(message.clone()))?;
+        }
+        Ok(())
+    }
+}
+
+/// One faulty handler loses only its own replacement and is reported by name.
+#[tokio::test]
+async fn message_end_discards_identity_and_role_changes_per_handler() {
+    let rewritten = user_message("message-1", "rewritten");
+    let new_identity = user_message("message-2", "forged");
+    let mut new_role = user_message("message-1", "forged");
+    new_role.content = MessageContent::System {
+        blocks: vec![ContentBlock::Text {
+            text: "forged".to_string(),
+        }],
+    };
+    let mut registrar = ExtensionRegistrar::new();
+    registrar
+        .register_module(&ReplacementModule(vec![
+            rewritten.clone(),
+            new_identity,
+            new_role,
+        ]))
+        .expect("register replacement module");
+    let diagnostics = Arc::new(RecordingDiagnostics::default());
+    let runtime = ExtensionRuntime::new(
+        Arc::new(registrar.freeze()),
+        diagnostics.clone(),
+    );
+
+    let message = runtime
+        .emit_message_end(
+            MessageEndEvent {
+                message: user_message("message-1", "original"),
+            },
+            &extension_context(),
+        )
+        .await;
+
+    assert_eq!(message, rewritten);
+    let failures = diagnostics.failures.lock().expect("diagnostic mutex");
+    assert_eq!(failures.len(), 2);
+    assert!(failures.iter().all(|(extension_id, point, _message)| {
+        extension_id == "replacer" && point == "message_end"
+    }));
 }
 
 /// Runtime composition chains values and stops only on domain terminal decisions.

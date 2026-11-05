@@ -537,6 +537,16 @@ impl MessageContent {
         }
     }
 
+    /// Reports whether two contents fill one role, treating expanded input as user input.
+    #[must_use]
+    pub fn same_role(&self, other: &Self) -> bool {
+        match (self.role(), other.role()) {
+            (Some(role), Some(other_role)) => role == other_role,
+            // Kinds without a model role, such as ToolResult, only match themselves.
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+
     /// Joins plain text blocks for consumers that need a textual projection.
     #[must_use]
     pub fn text_content(&self) -> Option<String> {

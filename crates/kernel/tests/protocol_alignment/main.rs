@@ -2,6 +2,7 @@
 #[path = "../subagent/fixture.rs"]
 mod fixture;
 mod insertion;
+mod message_end;
 mod queue;
 mod settings;
 mod title;

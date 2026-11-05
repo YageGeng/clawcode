@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ::extension::ExtensionContext;
+use ::extension::{ExtensionContext, MessageUpdatePoint};
 use ::tools::ToolRegistry;
 use futures::StreamExt;
 use protocol::{
@@ -499,7 +499,6 @@ impl RunScope<'_> {
                         &turn.extension_context,
                     )
                     .await;
-                let identity = message.identity.clone();
                 let message = self
                     .session
                     .extensions
@@ -509,17 +508,6 @@ impl RunScope<'_> {
                         &turn.extension_context,
                     )
                     .await;
-                if message.identity != identity
-                    || !matches!(
-                        message.content,
-                        MessageContent::Extension { .. }
-                    )
-                {
-                    return Err(KernelError::Protocol(
-                        "message_end must preserve Extension identity and role"
-                            .to_string(),
-                    ));
-                }
                 kernel.persist_message(self.session, &message)?;
                 self.emitter
                     .emit(
@@ -608,6 +596,14 @@ impl RunScope<'_> {
                 extension_context,
             )
             .await;
+        // A snapshot copies the whole accumulated message on every delta, so
+        // only pay for it when a handler reads it. Registries are frozen for
+        // the Session's lifetime, so one check holds for the whole stream.
+        let observes_updates = self
+            .session
+            .extensions
+            .runtime_ref()
+            .has_handlers::<MessageUpdatePoint>();
 
         // Provider cancellation, stream closure, and stream errors all
         // converge into one typed Assistant settlement.
@@ -654,7 +650,7 @@ impl RunScope<'_> {
                         settled_at_ms: kernel.clock.now(),
                     };
                 }
-                match item {
+                let update = match item {
                     ModelStreamEvent::TextDelta(delta) => {
                         self.emitter
                             .emit_at(
@@ -666,19 +662,7 @@ impl RunScope<'_> {
                                 },
                             )
                             .await?;
-                        self.session
-                            .extensions
-                            .runtime_ref()
-                            .emit_message_update(
-                                &protocol::MessageUpdateEvent {
-                                    message: attempt.snapshot(timestamp)?,
-                                    update: protocol::MessageUpdate::Text {
-                                        delta,
-                                    },
-                                },
-                                extension_context,
-                            )
-                            .await;
+                        protocol::MessageUpdate::Text { delta }
                     }
                     ModelStreamEvent::ReasoningDelta(delta) => {
                         self.emitter
@@ -691,37 +675,25 @@ impl RunScope<'_> {
                                 },
                             )
                             .await?;
-                        self.session
-                            .extensions
-                            .runtime_ref()
-                            .emit_message_update(
-                                &protocol::MessageUpdateEvent {
-                                    message: attempt.snapshot(timestamp)?,
-                                    update:
-                                        protocol::MessageUpdate::Reasoning {
-                                            delta,
-                                        },
-                                },
-                                extension_context,
-                            )
-                            .await;
+                        protocol::MessageUpdate::Reasoning { delta }
                     }
                     ModelStreamEvent::ToolCall(call) => {
-                        self.session
-                            .extensions
-                            .runtime_ref()
-                            .emit_message_update(
-                                &protocol::MessageUpdateEvent {
-                                    message: attempt.snapshot(timestamp)?,
-                                    update: protocol::MessageUpdate::ToolCall {
-                                        call,
-                                    },
-                                },
-                                extension_context,
-                            )
-                            .await;
+                        protocol::MessageUpdate::ToolCall { call }
                     }
-                    ModelStreamEvent::Finished(_final) => {}
+                    ModelStreamEvent::Finished(_final) => continue,
+                };
+                if observes_updates {
+                    self.session
+                        .extensions
+                        .runtime_ref()
+                        .emit_message_update(
+                            &protocol::MessageUpdateEvent {
+                                message: attempt.snapshot(timestamp)?,
+                                update,
+                            },
+                            extension_context,
+                        )
+                        .await;
                 }
             },
             Err(ModelError::Cancelled) => {
@@ -764,7 +736,6 @@ impl RunScope<'_> {
             *run_usage += &metadata.usage;
         }
         // Native provenance does not change the assistant role or its lifecycle.
-        let original_identity = assistant.identity.clone();
         let mut assistant = self
             .session
             .extensions
@@ -774,14 +745,6 @@ impl RunScope<'_> {
                 extension_context,
             )
             .await;
-        if assistant.identity != original_identity
-            || !matches!(assistant.content, MessageContent::Assistant { .. })
-        {
-            return Err(KernelError::Protocol(
-                "message_end must preserve Assistant identity and role"
-                    .to_string(),
-            ));
-        }
         let MessageContent::Assistant {
             blocks,
             metadata,
@@ -789,7 +752,7 @@ impl RunScope<'_> {
         } = &mut assistant.content
         else {
             unreachable!(
-                "AssistantAttempt always produces an Assistant message"
+                "AssistantAttempt produces an Assistant and message_end keeps its role"
             )
         };
         // Hooks may stop a successful turn, but cannot revive a failed/cancelled provider attempt.
@@ -948,7 +911,6 @@ impl RunScope<'_> {
                     &turn.extension_context,
                 )
                 .await;
-            let original_identity = message.identity.clone();
             let cancelled_call = matches!(
                 message.content,
                 MessageContent::ToolResult {
@@ -970,14 +932,6 @@ impl RunScope<'_> {
                 &mut message.content
             {
                 *cancelled |= cancelled_call;
-            }
-            if message.identity != original_identity
-                || !matches!(message.content, MessageContent::ToolResult { .. })
-            {
-                return Err(KernelError::Protocol(
-                    "message_end must preserve ToolResult identity and role"
-                        .to_string(),
-                ));
             }
             self.kernel.persist_message(self.session, &message)?;
             turn_loop.produced_messages.push(message.clone());

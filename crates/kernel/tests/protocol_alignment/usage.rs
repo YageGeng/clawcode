@@ -2,16 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use extension::{
-    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
-    ExtensionRegistrar, MessageEndPoint, StaticExtensionFactory,
-};
-use kernel::{ModelError, SessionEventSinks};
+use kernel::{EventSink, ModelError, SessionEventSinks, SinkError};
 use protocol::{
-    AgentEventPayload, AgentMessage, AgentOutcome, ExtensionDescriptor,
-    ExtensionId, MessageContent, MessageEndEvent, MessageId, ModelFinal,
+    AgentEvent, AgentEventPayload, AgentOutcome, MessageContent, ModelFinal,
     ModelRequest, ModelStreamEvent, ModelUsage, RunRequest, SessionId,
-    StaticExtensionRegistration, StopReason, ToolCall, ToolCallId,
+    StopReason, ToolCall, ToolCallId,
 };
 
 use super::fixture::{Route, TestKernel, text};
@@ -139,73 +134,32 @@ async fn cancelled_run_preserves_known_usage() {
     );
 }
 
-/// Replaces an assistant message's identity, which the Kernel rejects as a protocol error.
-#[derive(Clone)]
-struct BreakAssistantIdentity;
+/// Forwards events but rejects the settled Assistant's `MessageEnd`, failing the
+/// Run after its tokens were counted.
+struct RejectAssistantEnd(Arc<dyn EventSink>);
 
 #[async_trait]
-impl ExtensionHandler<MessageEndPoint> for BreakAssistantIdentity {
-    /// Returns the assistant under a new id so validation fails after the attempt settled.
-    async fn handle(
-        &self,
-        event: &MessageEndEvent,
-        _context: &ExtensionContext,
-    ) -> Result<Option<AgentMessage>, ExtensionError> {
-        if !matches!(
-            event.message.content,
-            MessageContent::Assistant {
-                model_message: None,
-                ..
-            }
-        ) {
-            return Ok(None);
+impl EventSink for RejectAssistantEnd {
+    /// Fails only the Assistant's terminal event so settlement can still report usage.
+    async fn emit(&self, event: AgentEvent) -> Result<(), SinkError> {
+        if let AgentEventPayload::MessageEnd { message } = &event.payload
+            && matches!(message.content, MessageContent::Assistant { .. })
+        {
+            return Err(SinkError::Consumer("rejected".into()));
         }
-        let mut message = event.message.clone();
-        message.identity.message_id =
-            MessageId::try_from("message-replaced").expect("id");
-        Ok(Some(message))
-    }
-}
-
-/// Registers the identity-breaking handler.
-struct BreakModule;
-
-impl ExtensionModule for BreakModule {
-    /// Identifies the identity-breaking test extension.
-    fn descriptor(&self) -> ExtensionDescriptor {
-        ExtensionDescriptor {
-            id: ExtensionId::try_from("identity-breaker").expect("id"),
-            name: "Identity breaker".into(),
-            version: "1".into(),
-        }
-    }
-
-    /// Registers the message_end replacement.
-    fn register(
-        &self,
-        registrar: &mut ExtensionRegistrar,
-    ) -> Result<(), ExtensionError> {
-        registrar.on::<MessageEndPoint, _>(BreakAssistantIdentity)
+        self.0.emit(event).await
     }
 }
 
 /// Settled usage survives an internal error after a model has already consumed tokens.
 #[tokio::test]
 async fn failed_run_preserves_usage_from_settled_assistant() {
-    let test = TestKernel::with_extensions(
-        |_| {
-            Route::Events(vec![
-                ModelStreamEvent::TextDelta("answer".into()),
-                finished_with(StopReason::EndTurn, 15),
-            ])
-        },
-        Arc::new(StaticExtensionFactory::new(
-            StaticExtensionRegistration::default(),
-            vec![Arc::new(|| {
-                Ok(Arc::new(BreakModule) as Arc<dyn ExtensionModule>)
-            })],
-        )),
-    );
+    let test = TestKernel::new(|_| {
+        Route::Events(vec![
+            ModelStreamEvent::TextDelta("answer".into()),
+            finished_with(StopReason::EndTurn, 15),
+        ])
+    });
     let session = test.create("owner").await;
     test.kernel
         .run(
@@ -213,10 +167,10 @@ async fn failed_run_preserves_usage_from_settled_assistant() {
                 session_id: session.clone(),
                 input: "hello".into(),
             },
-            test.sinks.sink(&session),
+            Arc::new(RejectAssistantEnd(test.sinks.sink(&session))),
         )
         .await
-        .expect_err("identity check fails the Run");
+        .expect_err("rejected event fails the Run");
     assert!(test.sinks.saw(&session, |event| matches!(
         event,
         AgentEventPayload::AgentSettled {

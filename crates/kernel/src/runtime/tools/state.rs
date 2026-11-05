@@ -72,12 +72,19 @@ impl SessionToolSnapshot {
         &self,
     ) -> Result<ToolRegistry, ToolError> {
         let available = self.available_registry();
-        available.subset(self.active_names().iter().map(String::as_str))
+        available.subset(self.active_names_in(&available))
     }
 
     /// Returns deterministic visible names under the frozen host policy.
     pub(in crate::runtime) fn active_names(&self) -> Vec<String> {
-        let available = self.available_registry();
+        self.active_names_in(&self.available_registry())
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    /// Filters an already composed catalog so callers build it only once.
+    fn active_names_in<'a>(&self, available: &'a ToolRegistry) -> Vec<&'a str> {
         available
             .names()
             .into_iter()
@@ -92,7 +99,6 @@ impl SessionToolSnapshot {
                     self.declares(name, exposure)
                 })
             })
-            .map(ToOwned::to_owned)
             .collect()
     }
 

@@ -1,4 +1,13 @@
-use super::super::*;
+use std::collections::{HashMap, HashSet};
+
+use protocol::{
+    AgentMessage, AgentOutcome, CompactionData, CompactionResult, LaneId,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, SessionId,
+    TurnRecord,
+};
+use store::{EntryKind, RecordKind, SessionStore};
+
+use crate::runtime::{Kernel, KernelError};
 
 impl Kernel {
     /// Computes a safe live-event floor above every expanded durable replay event.

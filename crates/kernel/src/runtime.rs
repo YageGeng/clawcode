@@ -33,23 +33,20 @@ use model_state::SessionModelState;
 use resources::SessionResources;
 use run::RunInvocation;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use ::extension::ExtensionFactory;
-use ::tools::{ToolExecutionContext, ToolFactory, ToolRegistry};
+use ::tools::{ToolFactory, ToolRegistry};
 use config::TurnLimit;
-use futures::StreamExt;
 use protocol::{
-    AgentEvent, AgentEventPayload, AgentMessage, AgentOutcome, CompactionData,
-    CompactionPolicy, CompactionReason, CompactionResult, ContentBlock,
-    EventMetadata, ExtensionFlagDefinition, IdGenerator, IdKind, LaneId,
-    McpSessionSnapshot, MessageContent, MessageId, MessageIdentity,
-    MessageTiming, QueueId, RetryPolicy, RunId, RunRequest, RunResult,
-    SessionId, TimestampMs, ToolCall, ToolResult, TraceId, TurnId, TurnRecord,
+    AgentEvent, AgentEventPayload, CompactionPolicy, CompactionReason,
+    EventMetadata, ExtensionFlagDefinition, IdGenerator, IdKind,
+    McpSessionSnapshot, MessageId, QueueId, RetryPolicy, RunRequest, RunResult,
+    SessionId, TimestampMs, TraceId, TurnId,
 };
-use store::{Clock, EntryKind, RecordKind, SessionStore, StoreFactory};
+use store::{Clock, RecordKind, StoreFactory};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 

@@ -111,4 +111,10 @@ impl ExtensionRuntime {
     pub(crate) fn handlers<P: RegisterPoint>(&self) -> &[RegisteredHandler<P>] {
         self.registry.handlers::<P>()
     }
+
+    /// Reports whether any handler reads this point, so hosts can skip costly payloads.
+    #[must_use]
+    pub fn has_handlers<P: RegisterPoint>(&self) -> bool {
+        !self.handlers::<P>().is_empty()
+    }
 }

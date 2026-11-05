@@ -48,6 +48,12 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
         point: &'static str,
         error_message: &str,
     ) {
+        tracing::warn!(
+            "extension {} failed at {}: {}",
+            extension_id,
+            point,
+            error_message
+        );
         // Handler failures remain non-fatal, but failures in their diagnostic
         // path must remain observable even when durable replay is unavailable.
         let active_run = match self.execution.active_run() {

@@ -1,4 +1,10 @@
-use super::super::*;
+use protocol::{
+    AgentEventPayload, CompactionReason, CompactionResult, RunId, TurnId,
+};
+use store::RecordKind;
+
+use crate::ModelError;
+use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
 /// Correlated terminal writer for one compaction whose start event was emitted.
 #[derive(typed_builder::TypedBuilder)]

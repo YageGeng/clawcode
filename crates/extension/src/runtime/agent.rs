@@ -6,8 +6,9 @@ use protocol::{
 
 use crate::{
     AgentEndPoint, AgentSettledPoint, AgentStartPoint, BeforeAgentStartPoint,
-    ContextPoint, ExtensionContext, ExtensionRuntime, MessageEndPoint,
-    MessageStartPoint, MessageUpdatePoint, TurnEndPoint, TurnStartPoint,
+    ContextPoint, ExtensionContext, ExtensionError, ExtensionRuntime,
+    MessageEndPoint, MessageStartPoint, MessageUpdatePoint, TurnEndPoint,
+    TurnStartPoint,
 };
 
 impl ExtensionRuntime {
@@ -66,7 +67,8 @@ impl ExtensionRuntime {
         event.request
     }
 
-    /// Chains final message replacements while preserving identity validation for the host.
+    /// Chains final message replacements, reporting and discarding any that change
+    /// the message's identity or role.
     pub async fn emit_message_end(
         &self,
         mut event: MessageEndEvent,
@@ -75,7 +77,22 @@ impl ExtensionRuntime {
         for registered in self.handlers::<MessageEndPoint>() {
             let handler_context = context.for_extension(registered.source());
             match registered.handler.handle(&event, &handler_context).await {
-                Ok(Some(message)) => event.message = message,
+                Ok(Some(message)) => {
+                    // Announced events and queue entries correlate on this identity.
+                    // Failing the Run instead would return a queued message to its
+                    // queue, where the same handler would fail every later Run.
+                    if message.identity == event.message.identity
+                        && message.content.same_role(&event.message.content)
+                    {
+                        event.message = message;
+                    } else {
+                        self.report::<MessageEndPoint>(
+                            registered,
+                            &ExtensionError::InvalidMessageReplacement,
+                        )
+                        .await;
+                    }
+                }
                 Ok(None) => {}
                 Err(error) => {
                     self.report::<MessageEndPoint>(registered, &error).await;

@@ -51,6 +51,11 @@ pub enum ExtensionError {
     /// An extension handler failed at runtime.
     #[error("extension handler failed: {0}")]
     Handler(String),
+    /// A `message_end` handler returned a message with another identity or role.
+    #[error(
+        "message_end replacement must preserve the message identity and role"
+    )]
+    InvalidMessageReplacement,
     /// Extension factory construction failed.
     #[error("extension factory failed: {0}")]
     Factory(String),

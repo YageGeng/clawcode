@@ -1,10 +1,60 @@
 use std::convert::TryFrom;
 
 use protocol::{
-    AgentMessage, AssistantMetadata, ContentBlock, ExtensionMessage,
-    MessageContent, MessageId, MessageIdentity, MessageTiming,
-    MessageTimingError, Role, StopReason, TimestampMs, TurnId,
+    AgentMessage, AssistantMetadata, ContentBlock, ExtensionId,
+    ExtensionMessage, MessageContent, MessageId, MessageIdentity,
+    MessageTiming, MessageTimingError, Role, SlashCommandExpansion,
+    SlashCommandInvocation, SlashCommandSource, StopReason, TimestampMs,
+    ToolCallId, TurnId,
 };
+
+/// Expanded input is still user input, while kinds without a model role only match themselves.
+#[test]
+fn same_role_compares_model_role_then_kind() {
+    let blocks = || {
+        vec![ContentBlock::Text {
+            text: "text".to_string(),
+        }]
+    };
+    let user = MessageContent::User { blocks: blocks() };
+    let expanded = MessageContent::ExpandedUser {
+        expansion: SlashCommandExpansion::builder()
+            .invocation(
+                SlashCommandInvocation::try_from("/skill:review")
+                    .expect("Skill command"),
+            )
+            .source(SlashCommandSource::Skill)
+            .model_blocks(blocks())
+            .build(),
+    };
+    let system = MessageContent::System { blocks: blocks() };
+    let tool_result = MessageContent::ToolResult {
+        tool_call_id: ToolCallId::try_from("call-1").expect("tool call id"),
+        blocks: blocks(),
+        is_error: false,
+        details: None,
+        output: None,
+        cancelled: false,
+    };
+    let extension = MessageContent::Extension {
+        extension: ExtensionMessage {
+            extension_id: ExtensionId::try_from("ext").expect("extension id"),
+            custom_type: "note".to_string(),
+            blocks: blocks(),
+            display: true,
+            include_in_context: false,
+            details: None,
+        },
+    };
+
+    assert!(user.same_role(&expanded));
+    assert!(expanded.same_role(&user));
+    assert!(tool_result.same_role(&tool_result));
+    assert!(!user.same_role(&system));
+    assert!(!user.same_role(&tool_result));
+    // Neither has a model role, so a role-only comparison would wrongly match them.
+    assert!(!tool_result.same_role(&extension));
+}
 
 /// A complete agent message exposes exact turn and timing metadata at the wire boundary.
 #[test]

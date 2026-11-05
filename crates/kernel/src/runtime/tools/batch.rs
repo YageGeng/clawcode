@@ -1,4 +1,16 @@
-use super::super::*;
+use std::sync::Arc;
+
+use ::tools::{ToolExecutionContext, ToolRegistry};
+use futures::StreamExt;
+use protocol::{
+    AgentEventPayload, AgentMessage, ContentBlock, MessageContent,
+    MessageIdentity, MessageTiming, RunId, SessionId, ToolCall, ToolResult,
+    TraceId, TurnId,
+};
+use tokio_util::sync::CancellationToken;
+
+use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
+
 use super::update::{ToolExecutionUpdate, ToolUpdateChannel};
 
 /// Immutable inputs required to execute and correlate one complete tool batch.
