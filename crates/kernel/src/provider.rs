@@ -12,9 +12,9 @@ use protocol::llm::{
     streaming::{Item, StreamEvent},
 };
 use protocol::{
-    AgentMessage, ContentBlock, MessageContent, ModelFailure, ModelFinal,
-    ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage, Role, StopReason,
-    ToolCall as AgentToolCall,
+    AgentMessage, ContentBlock, DeviceCodeSink, LoginMethod, MessageContent,
+    ModelFailure, ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent,
+    ModelUsage, Role, StopReason, ToolCall as AgentToolCall,
 };
 use provider::{ConfiguredModel, ProviderConnectError, ProviderFactory};
 use serde_json::Value;
@@ -192,6 +192,14 @@ impl ProviderModel {
         phase: &str,
         error: ProviderConnectError,
     ) -> ModelError {
+        if let ProviderConnectError::SignInRequired { method_id } = error {
+            tracing::info!(
+                "provider {}/{} {phase} requires sign-in",
+                self.profile().provider_id,
+                self.profile().model_id
+            );
+            return ModelError::AuthRequired { method_id };
+        }
         let summary = format!(
             "provider {}/{} {phase} failed: {error}",
             self.profile().provider_id,
@@ -238,6 +246,9 @@ impl ProviderModel {
             ModelError::Request(failure)
         })?;
         let span = tracing::info_span!("provider_request");
+        // The first read is where a rejected credential surfaces, and only the
+        // provider judges what the status means.
+        let configured = Arc::clone(&self.configured);
         let stream = async_stream::try_stream! {
             let started = Instant::now();
             tracing::info!("started Provider request {}", identity);
@@ -252,6 +263,7 @@ impl ProviderModel {
                 let Some(event) = event else { break; };
                 let event = event.map_err(|error| {
                     let failure = ModelFailure::from(error);
+                    configured.note_failure_status(failure.status);
                     tracing::warn!("Provider request {} stream failed: {}", identity, failure.summary);
                     ModelError::Stream(failure)
                 })?;
@@ -309,6 +321,27 @@ impl Model for ProviderModel {
     /// Readiness checks never start a paid request or an interactive login.
     async fn preflight(&self) -> Result<(), ModelError> {
         Ok(())
+    }
+
+    /// Exposes the provider's sign-in, if it has one.
+    fn login_method(&self) -> Option<LoginMethod> {
+        self.configured.login_method().cloned()
+    }
+
+    /// Adapts the provider's verdict; only the provider decides what needs a sign-in.
+    async fn ensure_signed_in(&self) -> Result<(), ModelError> {
+        self.configured
+            .ensure_signed_in()
+            .await
+            .map_err(|error| self.connection_failure("sign-in check", error))
+    }
+
+    /// Runs the provider's sign-in; dropping the future stops it.
+    async fn sign_in(&self, on_code: DeviceCodeSink) -> Result<(), ModelError> {
+        self.configured
+            .sign_in(on_code)
+            .await
+            .map_err(|error| self.connection_failure("sign-in", error))
     }
 
     /// Streams without extension middleware for non-extension callers.

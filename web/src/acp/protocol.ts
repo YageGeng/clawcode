@@ -130,6 +130,7 @@ export type SessionUpdateNotification = Readonly<{
 export const AcpProtocol = {
   methods: {
     initialize: "initialize",
+    authLogin: "auth/login",
     sessionNew: "session/new",
     sessionList: "session/list",
     sessionResume: "session/resume",

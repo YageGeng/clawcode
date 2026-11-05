@@ -6,6 +6,7 @@ mod event;
 mod extension;
 mod id;
 mod identity;
+mod login;
 mod mcp;
 mod message;
 mod model;
@@ -133,6 +134,8 @@ pub use turn::{
     StopReason, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
     TurnTimingError,
 };
+
+pub use login::{DeviceCode, DeviceCodeSink, LoginMethod};
 
 pub mod llm;
 pub mod usage;

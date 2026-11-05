@@ -52,6 +52,8 @@ export class WorkspaceController {
   // Resolvers for queued elicitation dialogs, keyed like their store prompts.
   private readonly elicitationAnswers = new Map<string, (answer: ElicitationAnswer) => void>();
   private elicitationSequence = 0;
+  // One request per method, so a model switch and a prompt share the same sign-in.
+  private readonly logins = new Map<string, Promise<boolean>>();
   private sessionRefresh: Readonly<{ connection: AcpConnection; promise: Promise<void> }> | undefined;
   private listenersInstalled = false;
   private stopped = false;
@@ -224,6 +226,16 @@ export class WorkspaceController {
       const data = reason.rpc.data;
       if (typeof data === "object" && data !== null && "outcomeUnknown" in data && data.outcomeUnknown === true) {
         this.markUnknown(sessionId, submission, "会话持久化异常，请关闭并重新打开会话");
+        return;
+      }
+      const authMethodId = reason.authMethodId;
+      if (authMethodId !== undefined) {
+        // Nothing entered history, so the user can edit and resend after signing in.
+        records.delete(submission.submissionId);
+        this.returnInput(sessionId, submission, "需要先登录，登录后请重新发送");
+        void this.login(authMethodId).catch(() => {
+          this.dispatch({ type: "notice/added", notice: { id: `login-${authMethodId}`, sessionId, title: "登录未完成，请重试" } });
+        });
         return;
       }
       records.delete(submission.submissionId);
@@ -409,14 +421,50 @@ export class WorkspaceController {
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot });
   }
 
-  /** Changes one Session config option; the response carries every option's new value. */
+  /**
+   * Changes one Session config option; the response carries every option's new value.
+   *
+   * A model that needs a sign-in is refused without changing anything, so this signs
+   * in and retries once. A user who cancels the sign-in just stays on the old model.
+   */
   async setConfigOption(sessionId: SessionId, configId: string, value: string): Promise<void> {
-    const result = await this.requireConnection().request<Readonly<{ configOptions?: unknown }>>(
+    const send = () => this.requireConnection().request<Readonly<{ configOptions?: unknown }>>(
       AcpProtocol.methods.sessionSetConfigOption,
       { sessionId, configId, type: "id", value }
     );
+    let result: Readonly<{ configOptions?: unknown }>;
+    try {
+      result = await send();
+    } catch (reason: unknown) {
+      const authMethodId = reason instanceof AcpRequestError ? reason.authMethodId : undefined;
+      if (authMethodId === undefined) throw reason;
+      if (!(await this.login(authMethodId))) return;
+      result = await send();
+    }
     const options = AcpProtocol.configOptions(result.configOptions);
     if (options !== undefined) this.dispatchSession(sessionId, { type: "config/replaced", options });
+  }
+
+  /** Signs in through `auth/login`, sharing one request per method; false means the user cancelled. */
+  private login(methodId: string): Promise<boolean> {
+    const running = this.logins.get(methodId);
+    if (running !== undefined) return running;
+    const login = this.requestLogin(methodId).finally(() => {
+      this.logins.delete(methodId);
+    });
+    this.logins.set(methodId, login);
+    return login;
+  }
+
+  /** Sends `auth/login` with no timeout, because the user may take minutes to authorize. */
+  private async requestLogin(methodId: string): Promise<boolean> {
+    try {
+      await this.requireConnection().request(AcpProtocol.methods.authLogin, { methodId });
+      return true;
+    } catch (reason: unknown) {
+      if (reason instanceof AcpRequestError && reason.rpc.code === -32800) return false;
+      throw new Error("登录未完成，请重试", { cause: reason });
+    }
   }
 
   /** Attaches through session/resume and keeps the config options its response carries. */
@@ -438,8 +486,9 @@ export class WorkspaceController {
   private async elicit(params: unknown, signal: AbortSignal): Promise<ElicitationAnswer> {
     const request = AcpProtocol.decodeRecord(params, "elicitation/create params");
     const invalid = (message: string) => new AcpRequestError({ code: -32602, message });
-    if (typeof request.sessionId !== "string" || typeof request.message !== "string") {
-      throw invalid("elicitation/create needs a Session scope and a message");
+    const scoped = typeof request.sessionId === "string" || typeof request.requestId === "string" || typeof request.requestId === "number";
+    if (!scoped || typeof request.message !== "string") {
+      throw invalid("elicitation/create needs a Session or request scope and a message");
     }
     let mode: ElicitationPrompt["mode"];
     if (request.mode === "form") {
@@ -460,10 +509,13 @@ export class WorkspaceController {
     const key = `elicitation-${++this.elicitationSequence}`;
     const prompt: ElicitationPrompt = {
       key,
-      sessionId: request.sessionId as SessionId,
+      ...(typeof request.sessionId === "string" ? { sessionId: request.sessionId as SessionId } : {}),
       ...(typeof product?.mcpServerId === "string" ? { serverId: product.mcpServerId } : {}),
       message: request.message,
-      mode
+      mode,
+      ...(typeof product?.userCode === "string" && typeof product.methodName === "string"
+        ? { login: { userCode: product.userCode, name: product.methodName } }
+        : {})
     };
     return new Promise<ElicitationAnswer>((resolve, reject) => {
       this.elicitationAnswers.set(key, resolve);

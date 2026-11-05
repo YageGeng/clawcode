@@ -32,6 +32,10 @@ pub enum Route {
     Events(Vec<ModelStreamEvent>),
     Wait(Arc<Notify>, Vec<ModelStreamEvent>),
     Hang,
+    /// Fails the request before any stream exists.
+    // Only the protocol_alignment target, which shares this fixture, fails requests.
+    #[allow(dead_code)]
+    Fail(fn() -> ModelError),
 }
 
 impl Route {
@@ -85,6 +89,10 @@ pub struct RoutedModel {
     pub requests: Mutex<Vec<ModelRequest>>,
     /// Makes provider readiness fail so tests can end a Run before insertion.
     pub preflight_failure: Mutex<Option<fn() -> ModelError>>,
+    /// Makes every model of the catalog report that this method needs a sign-in.
+    pub sign_in_required: Arc<Mutex<Option<String>>>,
+    /// Holds the sign-in check open so a test can act while it runs.
+    pub sign_in_wait: Mutex<Option<Arc<Notify>>>,
 }
 
 impl RoutedModel {
@@ -118,6 +126,18 @@ impl Model for RoutedModel {
         }
     }
 
+    /// Reports the scripted sign-in state after any scripted wait.
+    async fn ensure_signed_in(&self) -> Result<(), ModelError> {
+        let wait = self.sign_in_wait.lock().expect("sign-in wait").clone();
+        if let Some(wait) = wait {
+            wait.notified().await;
+        }
+        match self.sign_in_required.lock().expect("sign-in").clone() {
+            Some(method_id) => Err(ModelError::AuthRequired { method_id }),
+            None => Ok(()),
+        }
+    }
+
     /// Controls only the model boundary; persistence, tools, and lifecycle remain real.
     async fn stream(
         &self,
@@ -136,6 +156,7 @@ impl Model for RoutedModel {
                 cancellation.cancelled().await;
                 return Err(ModelError::Cancelled);
             }
+            Route::Fail(failure) => return Err(failure()),
         };
         Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
     }
@@ -165,6 +186,8 @@ impl ModelFactory for StaticModelFactory {
                     route: Box::new(|_| Route::answer("secondary answer")),
                     requests: Mutex::new(Vec::new()),
                     preflight_failure: Mutex::new(None),
+                    sign_in_required: Arc::clone(&self.0.sign_in_required),
+                    sign_in_wait: Mutex::new(None),
                 }),
             ],
         )
@@ -353,6 +376,8 @@ impl TestKernel {
             route: Box::new(route),
             requests: Mutex::new(Vec::new()),
             preflight_failure: Mutex::new(None),
+            sign_in_required: Arc::new(Mutex::new(None)),
+            sign_in_wait: Mutex::new(None),
         });
         let clock: Arc<dyn Clock> = Arc::new(SequenceClock::default());
         let kernel = KernelFactory::builder()

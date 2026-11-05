@@ -61,6 +61,45 @@ async fn set_session_model_persists_and_emits_settings_changed() {
     assert_eq!(restored.thinking_level, ThinkingLevel::High);
 }
 
+/// A model that needs a sign-in is refused before anything is persisted or published.
+#[tokio::test]
+async fn model_change_requiring_sign_in_changes_nothing() {
+    let test = TestKernel::new(|_| Route::answer("ok"));
+    let session = test.create("settings-sign-in").await;
+    *test.model.sign_in_required.lock().expect("sign-in") =
+        Some("chatgpt".to_owned());
+    let error = test
+        .kernel
+        .set_session_model(&session, "fixture", "secondary")
+        .await
+        .expect_err("sign-in required");
+    assert!(
+        matches!(
+            &error,
+            kernel::KernelError::Model(kernel::ModelError::AuthRequired {
+                method_id,
+            }) if method_id == "chatgpt"
+        ),
+        "{error:?}"
+    );
+    let settings = test.kernel.session_settings(&session).expect("settings");
+    assert_eq!(settings.model.model_id, "primary");
+    assert!(settings_events(&test, &session).is_empty());
+
+    // The refused change must not reappear when the Session is reopened.
+    test.kernel
+        .close_session(&session)
+        .await
+        .expect("close Session");
+    *test.model.sign_in_required.lock().expect("sign-in") = None;
+    test.kernel
+        .resume_session(session.clone(), test.root.path().to_path_buf())
+        .await
+        .expect("resume Session");
+    let restored = test.kernel.session_settings(&session).expect("settings");
+    assert_eq!(restored.model.model_id, "primary");
+}
+
 /// Selecting the current value changes nothing and reports nothing.
 #[tokio::test]
 async fn unchanged_setting_emits_nothing() {

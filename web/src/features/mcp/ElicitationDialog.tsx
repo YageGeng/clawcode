@@ -5,6 +5,7 @@ import type { ElicitationPrompt } from "../../domain/model";
 import { useModalFocus } from "../../shell/useModalFocus";
 import type { WorkspaceController } from "../../workspace/controller";
 import { useWorkspaceStore } from "../../workspace/store";
+import { SignInDialog } from "../session/SignInDialog";
 import { ElicitationForm } from "./elicitationForm";
 import type { ElicitationField, ElicitationValue } from "./elicitationForm";
 
@@ -45,8 +46,15 @@ function FieldInput({ field, value, onChange, invalid }: Readonly<{
   }
 }
 
-/** Asks the user for one MCP elicitation; Escape and the safe default cancel it. */
+/** Shows one elicitation in the form its content calls for. */
 export function ElicitationDialog({ prompt, controller }: ElicitationDialogProps) {
+  return prompt.login === undefined
+    ? <InputDialog prompt={prompt} controller={controller} />
+    : <SignInDialog prompt={prompt} login={prompt.login} controller={controller} />;
+}
+
+/** Asks the user for one MCP elicitation; Escape and the safe default cancel it. */
+function InputDialog({ prompt, controller }: ElicitationDialogProps) {
   const form = useMemo(() => prompt.mode.type === "form" ? ElicitationForm.parse(prompt.mode.requestedSchema) : undefined, [prompt]);
   const [values, setValues] = useState(() => form?.initialValues() ?? {});
   const [errors, setErrors] = useState<Readonly<Record<string, string>>>({});
@@ -75,12 +83,12 @@ export function ElicitationDialog({ prompt, controller }: ElicitationDialogProps
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section ref={dialogRef} aria-describedby="elicitation-message" aria-labelledby="elicitation-title" aria-modal="true" className="dialog mcp-elicitation" role="dialog" tabIndex={-1}>
+      <section ref={dialogRef} aria-describedby="elicitation-message" aria-labelledby="elicitation-title" aria-modal="true" className="dialog elicitation-dialog" role="dialog" tabIndex={-1}>
         <header>
           <MessageSquareWarning size={18} aria-hidden="true" />
           <div>
             <h2 id="elicitation-title">{prompt.serverId === undefined ? "MCP 请求输入" : `${prompt.serverId} 请求输入`}</h2>
-            <p>会话 {session?.title ?? prompt.sessionId}</p>
+            {prompt.sessionId === undefined ? null : <p>会话 {session?.title ?? prompt.sessionId}</p>}
           </div>
         </header>
         <p id="elicitation-message">{prompt.message}</p>

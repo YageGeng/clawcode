@@ -464,7 +464,7 @@ Factories receive the request's `ExtensionContext` and run on every attempt;
 authentication traffic uses the base transport.
 
 ChatGPT subscription authentication uses upstream `FileTokenStore` in a separate
-absolute directory, for example:
+directory, given as an absolute path or one starting with `~/`, for example:
 
 ```toml
 [[providers]]
@@ -472,7 +472,7 @@ id = "chatgpt"
 display_name = "ChatGPT"
 provider_type = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "chatgpt", token_store_dir = "/absolute/path/to/clawcode-chatgpt" }
+auth = { type = "chatgpt", auth_dir = "~/.clawcode/chatgpt" }
 
 [[providers.models]]
 id = "your-model-id"
@@ -482,8 +482,11 @@ max_output_tokens = 16384
 
 Do not combine this auth configuration with `api_key`. The old `codex`/`auth_file`
 configuration is rejected; existing Codex credentials are neither read nor moved.
-The first request requires a fresh device sign-in. Its prompt goes to stderr to
-preserve ACP stdio, and refresh/persistence are managed by upstream.
+`token_store_dir` was renamed to `auth_dir`, and the old name is rejected.
+Switching to a model that is not signed in, or sending a message to one, opens a
+device sign-in in the WebUI through ACP `auth/login`; the switch completes once you
+authorize. ACP clients without URL elicitation get the code on stderr, which keeps
+stdio usable. Refresh and persistence are managed by upstream.
 
 ## ACP extensions
 

@@ -400,7 +400,8 @@ authenticator。
 factory 会收到请求的 `ExtensionContext`，并在每次尝试时执行；认证流量使用基础
 transport。
 
-ChatGPT 订阅认证使用上游 `FileTokenStore`，需要一个独立的绝对目录，例如：
+ChatGPT 订阅认证使用上游 `FileTokenStore`，需要一个独立的目录（绝对路径或以 `~/`
+开头），例如：
 
 ```toml
 [[providers]]
@@ -408,7 +409,7 @@ id = "chatgpt"
 display_name = "ChatGPT"
 provider_type = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "chatgpt", token_store_dir = "/absolute/path/to/clawcode-chatgpt" }
+auth = { type = "chatgpt", auth_dir = "~/.clawcode/chatgpt" }
 
 [[providers.models]]
 id = "your-model-id"
@@ -417,8 +418,10 @@ max_output_tokens = 16384
 ```
 
 不要把该认证配置与 `api_key` 同时使用。旧的 `codex`/`auth_file` 配置会被拒绝；
-已有 Codex 凭据不会被读取或迁移。首次请求需要完成一次设备登录。登录提示写入
-stderr 以保持 ACP stdio 可用，刷新与持久化由上游负责。
+已有 Codex 凭据不会被读取或迁移。`token_store_dir` 已改名为 `auth_dir`，旧名称会被
+拒绝。切换到未登录的模型或未登录时发消息，WebUI 会通过 ACP `auth/login` 弹出设备登录，
+授权后切换自动完成。不支持 URL elicitation 的 ACP 客户端，登录码打印到 stderr，以保持
+stdio 可用。刷新与持久化由上游负责。
 
 ## ACP 扩展
 

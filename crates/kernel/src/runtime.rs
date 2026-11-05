@@ -40,7 +40,7 @@ use store::{Clock, RecordKind, StoreFactory};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::{EventSink, ModelError, ModelFactory, SinkError};
+use crate::{EventSink, ModelCatalog, ModelError, ModelFactory, SinkError};
 pub use compaction::ContextUsageEstimate;
 use compaction::{CompactionExecution, CompactionIdentity};
 pub use run::admission::{AdmissionTicket, PromptOutcome, PromptRequest};
@@ -171,6 +171,9 @@ impl KernelError {
             Self::ExtensionBlocked(reason) => {
                 Self::ExtensionBlocked(reason.clone())
             }
+            Self::Model(error @ ModelError::AuthRequired { .. }) => {
+                Self::Model(error.clone())
+            }
             other => Self::Protocol(other.to_string()),
         }
     }
@@ -266,6 +269,7 @@ impl KernelFactory {
         let tools = Arc::new(self.tool_factory.create()?);
         Ok(Kernel::builder()
             .model_factory(self.model_factory)
+            .login_catalog(Arc::new(catalog))
             .static_extensions(static_extensions)
             .tools(tools)
             .store_factory(self.store_factory)
@@ -296,6 +300,8 @@ pub struct Kernel {
     event_sinks: Arc<OnceLock<Arc<dyn crate::SessionEventSinks>>>,
     /// Each Session builds independent runtime bindings over shared provider definitions.
     model_factory: Arc<dyn ModelFactory>,
+    /// Answers sign-ins without a Session; its models share Session provider definitions.
+    login_catalog: Arc<ModelCatalog>,
     static_extensions: Arc<protocol::StaticExtensionRegistration>,
     tools: Arc<ToolRegistry>,
     store_factory: Arc<dyn StoreFactory>,
@@ -361,6 +367,23 @@ impl Kernel {
     /// Waits until an extension or the embedding application requests shutdown.
     pub async fn wait_for_shutdown(&self) {
         self.shutdown.cancelled().await;
+    }
+
+    /// Lists the sign-ins clients can offer; empty without an OAuth provider.
+    #[must_use]
+    pub fn login_methods(&self) -> Vec<protocol::LoginMethod> {
+        self.login_catalog.login_methods()
+    }
+
+    /// Forwards one sign-in to the provider that owns `method_id`.
+    ///
+    /// Dropping the returned future stops the sign-in.
+    pub async fn sign_in(
+        &self,
+        method_id: &str,
+        on_code: protocol::DeviceCodeSink,
+    ) -> Result<(), KernelError> {
+        Ok(self.login_catalog.sign_in(method_id, on_code).await?)
     }
 
     /// Invokes one discovered skill explicitly and returns its complete source.

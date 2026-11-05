@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+
+import { Page, openBlankPage, startChrome } from './cdp_page.mjs';
 
 // Run against the production app and its configured provider; no model or backend is substituted.
 const base = new URL(process.argv[2] ?? 'http://127.0.0.1:3001');
@@ -11,59 +12,13 @@ const evidence = resolve(process.argv[4] ?? '/tmp/clawcode-rig-core-e2e/evidence
 assert(['127.0.0.1', 'localhost'].includes(base.hostname), 'Use an isolated local production app');
 await mkdir(evidence, { recursive: true });
 const profile = await mkdtemp(join(evidence, 'chrome-'));
-const browser = spawn(process.env.CHROME_BIN ?? '/opt/google/chrome/chrome', [
-  '--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--disable-dev-shm-usage',
-  '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'
-], { stdio: ['ignore', 'ignore', 'ignore'] });
+const browser = startChrome(profile);
 
-/** Owns one CDP connection and correlates only this script's requests. */
-class Page {
-  pending = new Map();
-  errors = [];
-  sequence = 0;
-  constructor(socket) {
-    this.socket = socket;
-    socket.addEventListener('message', ({ data }) => {
-      const frame = JSON.parse(data);
-      if (frame.method === 'Runtime.exceptionThrown') this.errors.push(frame.params.exceptionDetails.text);
-      const waiter = this.pending.get(frame.id);
-      if (!waiter) return;
-      this.pending.delete(frame.id);
-      if (frame.error) waiter.reject(new Error(JSON.stringify(frame.error)));
-      else waiter.resolve(frame.result);
-    });
-  }
-  /** Sends a CDP operation without relying on an additional browser framework. */
-  call(method, params = {}) {
-    return new Promise((resolve, reject) => {
-      const id = ++this.sequence;
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-  /** Evaluates an observable page action and propagates page exceptions. */
-  async evaluate(expression) {
-    const result = await this.call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-    return result.result.value;
-  }
-  /** Waits for a visible or protocol condition within a bounded acceptance window. */
-  async wait(expression, timeout = 180000) {
-    const until = Date.now() + timeout;
-    while (Date.now() < until) {
-      const value = await this.evaluate(expression);
-      if (value) return value;
-      await delay(100);
-    }
-    throw new Error(`Timed out: ${expression}`);
-  }
-  /** Uses the native value setter so the real React input handler receives the edit. */
-  async fill(selector, value) {
-    await this.evaluate(`(() => { const element=document.querySelector(${JSON.stringify(selector)}); if(!element)throw Error('missing input'); const prototype=element.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(prototype,'value').set.call(element,${JSON.stringify(value)}); element.dispatchEvent(new Event('input',{bubbles:true})); })()`);
-  }
-  /** Clicks a visible enabled button by its exact displayed text. */
-  async click(text) {
-    await this.evaluate(`(() => {const button=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()===${JSON.stringify(text)}&&!item.disabled);if(!button)throw Error('missing button '+${JSON.stringify(text)});button.click()})()`);
+/** Adds the audit window's helpers, and waits as long as real provider Turns take. */
+class AuditPage extends Page {
+  /** Keeps this script's longer acceptance window as the default. */
+  wait(expression, timeout = 180000) {
+    return super.wait(expression, timeout);
   }
   /** Submits through the real Composer and waits until a request is actually sent. */
   async send(text, button = '发送') {
@@ -91,18 +46,7 @@ class Page {
 let page;
 const results = [];
 try {
-  let port;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { port = Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); break; }
-    catch { await delay(100); }
-  }
-  assert(port, 'Chrome started');
-  const target = await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' })).json();
-  const socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }); });
-  page = new Page(socket);
-  await page.call('Runtime.enable');
-  await page.call('Page.enable');
+  page = await openBlankPage(profile, AuditPage);
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1100, deviceScaleFactor: 1, mobile: false });
   // Observe genuine ACP traffic and DOM snapshots; never fabricate provider replies.
   await page.call('Page.addScriptToEvaluateOnNewDocument', { source: `

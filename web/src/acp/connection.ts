@@ -35,6 +35,13 @@ export class AcpRequestError extends Error {
   isSessionNotFound(sessionId: string): boolean {
     return this.rpc.code === -32603 && this.rpc.data === `session not found: ${sessionId}`;
   }
+
+  /** Names the login method that resolves this failure when the agent reported `auth_required`. */
+  get authMethodId(): string | undefined {
+    const data = this.rpc.data;
+    if (this.rpc.code !== -32000 || typeof data !== "object" || data === null || !("methodId" in data)) return undefined;
+    return typeof data.methodId === "string" ? data.methodId : undefined;
+  }
 }
 
 export class AcpConnection {

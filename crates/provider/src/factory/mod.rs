@@ -3,10 +3,11 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use config::{LlmModel, LlmProvider, ProviderType};
-use protocol::{ModelInputModalities, ModelInputModality, ModelProfile};
-use rig_core::providers::chatgpt::auth::{
-    AuthContext, AuthError, Authenticator,
+use protocol::{
+    DeviceCodeSink, LoginMethod, ModelInputModalities, ModelInputModality,
+    ModelProfile,
 };
+use rig_core::providers::chatgpt::auth::{AuthContext, AuthError};
 use rig_core::{
     DynModel,
     catalog::{Catalog, ModelSpec, ReasoningSupport},
@@ -23,6 +24,8 @@ use rig_core::{
 };
 use serde_json::Value;
 
+use crate::auth::ProviderAuth;
+
 /// Configuration failures retained for a provider/model lookup without leaking credentials.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderBuildError {
@@ -36,6 +39,13 @@ pub enum ProviderBuildError {
 
 /// Authentication failures stay distinguishable at the model boundary.
 pub enum ProviderConnectError {
+    /// The provider has no usable credential until the user signs in.
+    SignInRequired {
+        /// Method clients use to sign in, which is the provider identifier.
+        method_id: String,
+    },
+    /// A sign-in could not run; the text is ours, so it is safe to show and log.
+    SignInFailed(&'static str),
     /// The upstream authenticator could not supply a credential.
     Authentication(Box<AuthError>),
 }
@@ -43,7 +53,18 @@ pub enum ProviderConnectError {
 impl std::fmt::Display for ProviderConnectError {
     /// Emits actionable typed categories without exposing upstream auth text or credentials.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Authentication(error) = self;
+        let error = match self {
+            Self::SignInRequired { method_id } => {
+                return write!(
+                    formatter,
+                    "sign-in required for provider '{method_id}'"
+                );
+            }
+            Self::SignInFailed(reason) => {
+                return write!(formatter, "sign-in failed: {reason}");
+            }
+            Self::Authentication(error) => error,
+        };
         formatter.write_str("ChatGPT authentication failed: ")?;
         // AuthError Display may contain response bodies, URLs, file contents, or store secrets.
         match error.as_ref() {
@@ -79,8 +100,10 @@ impl std::fmt::Debug for ProviderConnectError {
 impl std::error::Error for ProviderConnectError {
     /// Retains the original source for typed inspection, never for ordinary diagnostic logging.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        let Self::Authentication(error) = self;
-        Some(error.as_ref())
+        match self {
+            Self::SignInRequired { .. } | Self::SignInFailed(_) => None,
+            Self::Authentication(error) => Some(error.as_ref()),
+        }
     }
 }
 
@@ -94,7 +117,7 @@ pub struct ConfiguredModel {
     parameters: Value,
     http: DynHttpClient,
     #[builder(default)]
-    auth: Option<Authenticator>,
+    auth: Option<Arc<ProviderAuth>>,
     /// Stream idle timeout resolved once from configuration; `None` waits indefinitely.
     #[builder(default)]
     idle_timeout: Option<Duration>,
@@ -125,14 +148,14 @@ impl std::fmt::Debug for ConfiguredModel {
 
 impl ConfiguredModel {
     /// Validates one explicit model and binds the upstream dialect without sending a request.
-    /// `auth` is the provider's shared authenticator, never one built per model; `app`
+    /// `auth` is the provider's shared sign-in state, never one built per model; `app`
     /// supplies the stream timeout and the compaction reserve that bounds the request budget.
     fn new(
         provider: &LlmProvider,
         model: &LlmModel,
         app: &config::AppConfig,
         http: DynHttpClient,
-        auth: Option<Authenticator>,
+        auth: Option<Arc<ProviderAuth>>,
     ) -> Result<Self, String> {
         provider
             .validate_names()
@@ -383,7 +406,43 @@ impl ConfiguredModel {
         self.http.clone()
     }
 
-    /// Resolves the provider's shared authenticator through the base transport.
+    /// Returns the method clients use to sign in, when this provider has one.
+    pub fn login_method(&self) -> Option<&LoginMethod> {
+        self.auth.as_deref().map(ProviderAuth::method)
+    }
+
+    /// Decides whether this provider needs a sign-in, without ever prompting.
+    ///
+    /// Returns only `SignInRequired`: other failures, including a check that takes
+    /// too long, are left for the request itself to report.
+    pub async fn ensure_signed_in(&self) -> Result<(), ProviderConnectError> {
+        match &self.auth {
+            Some(auth) => Arc::clone(auth).check(self.http.clone()).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Runs a device sign-in for this provider through the base transport.
+    pub async fn sign_in(
+        &self,
+        on_code: DeviceCodeSink,
+    ) -> Result<(), ProviderConnectError> {
+        match &self.auth {
+            Some(auth) => auth.sign_in(&self.http, on_code).await,
+            None => Err(ProviderConnectError::SignInFailed(
+                "provider has no sign-in",
+            )),
+        }
+    }
+
+    /// Records a failed request's status so a rejected credential requires a sign-in.
+    pub fn note_failure_status(&self, status: Option<u16>) {
+        if let Some(auth) = &self.auth {
+            auth.note_failure_status(status);
+        }
+    }
+
+    /// Resolves the provider's shared sign-in state through the base transport.
     ///
     /// OAuth traffic never passes request middleware; the authenticator keeps the
     /// live credential, refresh lock and token store for every model of the provider.
@@ -391,11 +450,7 @@ impl ConfiguredModel {
         &self,
     ) -> Result<Option<AuthContext>, ProviderConnectError> {
         match &self.auth {
-            Some(auth) => Ok(Some(
-                auth.auth_context(&self.http).await.map_err(|error| {
-                    ProviderConnectError::Authentication(Box::new(error))
-                })?,
-            )),
+            Some(auth) => auth.context(&self.http).await.map(Some),
             None => Ok(None),
         }
     }
@@ -508,16 +563,27 @@ pub struct ProviderFactory {
 }
 
 impl ProviderFactory {
-    /// Builds all explicit definitions once, retaining safe failures for strict lookups.
+    /// Builds all explicit definitions once over the shared connection pool.
     pub fn new(config: config::ConfigHandle) -> Self {
+        Self::with_http(config, rig_reqwest::shared())
+    }
+
+    /// Builds all explicit definitions once, retaining safe failures for strict lookups.
+    ///
+    /// `http` carries both authentication and model traffic unless a request overrides it.
+    pub fn with_http(
+        config: config::ConfigHandle,
+        http: DynHttpClient,
+    ) -> Self {
         let config = config.current();
-        let http = rig_reqwest::shared();
         let mut models = HashMap::new();
         let mut failures = HashMap::new();
         for provider in &config.providers {
-            // Clones share the refresh lock and remembered credential across this provider's models.
-            let auth =
-                provider.auth.as_ref().map(ConfiguredModel::authenticator);
+            // Every model of a provider shares one sign-in state.
+            let auth = provider
+                .auth
+                .as_ref()
+                .map(|auth| Arc::new(ProviderAuth::new(provider, auth)));
             for model in &provider.models {
                 let key = format!("{}/{}", provider.id.as_str(), model.id);
                 if models.contains_key(&key) || failures.contains_key(&key) {

@@ -173,6 +173,11 @@ impl ElicitationBridge {
         let _first = self.modes.set(modes);
     }
 
+    /// Reports whether this client can follow a URL elicitation.
+    pub(crate) fn supports_url(&self) -> bool {
+        self.modes.get().copied().unwrap_or_default().url
+    }
+
     /// Asks the client for one pending elicitation without waiting for its answer.
     pub(crate) fn request(
         &self,

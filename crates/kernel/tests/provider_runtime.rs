@@ -542,6 +542,79 @@ async fn provider_failure_logs_safe_diagnostics() {
     );
 }
 
+/// Builds a production ChatGPT model on the local server and one credential directory.
+fn chatgpt_model(
+    server: &Server,
+    directory: &std::path::Path,
+) -> Arc<dyn kernel::Model> {
+    let mut config = server.configuration("chatgpt", "responses");
+    let provider = config.providers.first_mut().expect("provider");
+    provider.api_key = None;
+    provider.auth = Some(config::ProviderAuthConfig::Chatgpt {
+        auth_dir: directory.to_path_buf(),
+    });
+    ProviderModelFactory::from_config(config::ConfigHandle::from_config(config))
+        .create()
+        .expect("model")
+}
+
+/// The adapter turns the provider's verdict into the Kernel's typed sign-in error.
+#[tokio::test]
+async fn provider_model_reports_auth_required() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = Server::start(Vec::new()).await;
+    let model = chatgpt_model(&server, directory.path());
+    let method = model.login_method().expect("method");
+    assert_eq!(
+        (method.id.as_str(), method.name.as_str()),
+        ("chatgpt", "audit")
+    );
+    let required = |error: Option<kernel::ModelError>| {
+        matches!(
+            error,
+            Some(kernel::ModelError::AuthRequired { method_id })
+                if method_id == "chatgpt"
+        )
+    };
+    assert!(required(model.ensure_signed_in().await.err()));
+    assert!(required(
+        model
+            .stream(Server::request("hi"), CancellationToken::new())
+            .await
+            .err()
+    ));
+}
+
+/// A 401 from the model endpoint makes the next check ask for a new sign-in.
+#[tokio::test]
+async fn unauthorized_provider_response_requires_sign_in() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("chatgpt.json"),
+        json!({"access_token":"t","account_id":"a","expires_at":4_102_444_800_i64})
+            .to_string(),
+    )
+    .unwrap();
+    let server = Server::start(vec![(
+        401,
+        json!({"error":{"message":"revoked"}}).to_string(),
+    )])
+    .await;
+    let model = chatgpt_model(&server, directory.path());
+    model.ensure_signed_in().await.expect("looks signed in");
+    let events = model
+        .stream(Server::request("hi"), CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.into_iter().any(|event| event.is_err()));
+    assert!(matches!(
+        model.ensure_signed_in().await,
+        Err(kernel::ModelError::AuthRequired { .. })
+    ));
+}
+
 /// Corrupt stored OAuth data fails locally with a safe category in both diagnostics and logs.
 #[tokio::test]
 async fn provider_auth_failure_is_classified_and_logged() {
@@ -556,7 +629,7 @@ async fn provider_auth_failure_is_classified_and_logged() {
     let config = serde_json::from_value(json!({
         "active_model":"chatgpt/audit",
         "providers":[{"id":"chatgpt","display_name":"audit","provider_type":"responses","base_url":"https://provider.invalid",
-            "auth":{"type":"chatgpt","token_store_dir":directory.path()},
+            "auth":{"type":"chatgpt","auth_dir":directory.path()},
             "models":[{"id":"audit","context_tokens":32768,"max_output_tokens":128}]}]
     })).unwrap();
     let model = ProviderModelFactory::from_config(

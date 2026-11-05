@@ -227,6 +227,9 @@ impl Kernel {
                     }
                 }
             }
+            // Refuse before the message enters history; a cancel during the check
+            // is still honoured below.
+            session.model.active()?.ensure_signed_in().await?;
             if request.ticket.cancellation.is_cancelled() {
                 return Err(KernelError::PromptCancelled);
             }

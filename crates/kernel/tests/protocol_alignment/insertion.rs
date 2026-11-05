@@ -9,8 +9,8 @@ use extension::{
     MessageStartPoint, StaticExtensionFactory,
 };
 use kernel::{
-    AnswerOutcome, InsertionNotice, KernelError, ModelError, SessionEventSinks,
-    SubmitRequest, WhenBusy,
+    AnswerOutcome, InsertionNotice, KernelError, ModelError, PromptOutcome,
+    PromptRequest, SessionEventSinks, SubmitRequest, WhenBusy,
 };
 use protocol::{
     AgentEventPayload, AgentOutcome, BeforeAgentStartEvent,
@@ -18,7 +18,7 @@ use protocol::{
     InputEvent, InputResult, MessageContent, MessageEndEvent, MessageId,
     MessageStartEvent, ModelRequest, RunRequest, RunResult, SessionId,
     SlashCommandMessage, SlashCommandStatus, StaticExtensionRegistration,
-    TraceId,
+    StopReason, TraceId,
 };
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
@@ -608,6 +608,152 @@ async fn preflight_failure_rejects_insertion() {
         .expect("join")
         .expect_err("preflight failure ends the Run");
     assert!(test.user_texts(&session).is_empty());
+}
+
+/// Submits one prompt through admission, as the ACP `session/prompt` handler does.
+fn admit(
+    test: &TestKernel,
+    session: &SessionId,
+    input: &str,
+) -> (JoinHandle<Result<PromptOutcome, KernelError>>, Insertion) {
+    let ticket = test.kernel.admission_ticket(session).expect("ticket");
+    let (notice, receiver) = InsertionNotice::new();
+    let prompt = PromptRequest::builder()
+        .run(RunRequest {
+            session_id: session.clone(),
+            input: input.into(),
+        })
+        .sink(test.sinks.sink(session))
+        .trace_id(trace())
+        .ticket(ticket)
+        .insertion(notice)
+        .build();
+    let kernel = test.kernel.clone();
+    (
+        tokio::spawn(async move { kernel.prompt(prompt).await }),
+        receiver,
+    )
+}
+
+/// A prompt for a model that needs a sign-in never reaches history or the model.
+#[tokio::test]
+async fn prompt_requiring_sign_in_is_rejected_before_insertion() {
+    let test = TestKernel::new(|_| Route::answer("unused"));
+    *test.model.sign_in_required.lock().expect("sign-in") =
+        Some("chatgpt".to_owned());
+    let session = test.create("owner").await;
+    let (prompt, receiver) = admit(&test, &session, "hello");
+    // The notice is what reaches `session/prompt`, so it must keep the error's type.
+    let rejection = receiver.await.expect("sent");
+    assert!(
+        matches!(
+            &rejection,
+            Err(KernelError::Model(ModelError::AuthRequired { method_id }))
+                if method_id == "chatgpt"
+        ),
+        "{rejection:?}"
+    );
+    assert!(matches!(
+        prompt.await.expect("join"),
+        Err(KernelError::Model(ModelError::AuthRequired { .. }))
+    ));
+    assert!(test.user_texts(&session).is_empty());
+    assert!(test.model.last_texts().is_empty());
+}
+
+/// Commands that need no model keep working without a sign-in.
+#[tokio::test]
+async fn direct_command_skips_the_sign_in_gate() {
+    let test = TestKernel::new(|_| Route::answer("unused"));
+    *test.model.sign_in_required.lock().expect("sign-in") =
+        Some("chatgpt".to_owned());
+    let session = test.create("owner").await;
+    let (prompt, _receiver) = admit(&test, &session, "/session");
+    prompt.await.expect("join").expect("direct command");
+    assert!(test.model.last_texts().is_empty());
+}
+
+/// Input a hook handles needs no model, so it needs no sign-in either.
+#[tokio::test]
+async fn handled_input_skips_the_sign_in_gate() {
+    let test = TestKernel::with_extensions(
+        |_| Route::answer("unused"),
+        hooks(|registrar| {
+            registrar
+                .on::<InputPoint, _>(FixedInput(Some(InputResult::Handled)))
+        }),
+    );
+    *test.model.sign_in_required.lock().expect("sign-in") =
+        Some("chatgpt".to_owned());
+    let session = test.create("owner").await;
+    let (prompt, _receiver) = admit(&test, &session, "hello");
+    assert!(matches!(
+        prompt.await.expect("join"),
+        Ok(PromptOutcome::Handled)
+    ));
+}
+
+/// A cancel that lands during the sign-in check still rejects the prompt.
+#[tokio::test]
+async fn cancel_during_the_sign_in_check_rejects_the_prompt() {
+    let test = TestKernel::new(|_| Route::answer("unused"));
+    let wait = Arc::new(Notify::new());
+    *test.model.sign_in_wait.lock().expect("sign-in wait") =
+        Some(Arc::clone(&wait));
+    let session = test.create("owner").await;
+    let (prompt, receiver) = admit(&test, &session, "hello");
+    tokio::time::sleep(SETTLE).await;
+    test.kernel.cancel_session(&session).expect("cancel");
+    wait.notify_one();
+    assert!(matches!(
+        receiver.await.expect("sent"),
+        Err(KernelError::PromptCancelled)
+    ));
+    assert!(matches!(
+        prompt.await.expect("join"),
+        Err(KernelError::PromptCancelled)
+    ));
+    assert!(test.user_texts(&session).is_empty());
+}
+
+/// A credential lost after admission ends the Turn with a visible, unretried error.
+#[tokio::test]
+async fn auth_required_during_a_run_shows_an_assistant_error() {
+    let test = TestKernel::new(|_| {
+        Route::Fail(|| ModelError::AuthRequired {
+            method_id: "chatgpt".to_owned(),
+        })
+    });
+    let session = test.create("owner").await;
+    let (run, receiver) = start(&test, &session, "hello");
+    receiver.await.expect("sent").expect("inserted");
+    run.await.expect("join").expect("settled Run");
+    assert_eq!(test.user_texts(&session), ["hello"]);
+    let transcript = test.kernel.session_transcript(&session).expect("history");
+    let metadata = transcript
+        .iter()
+        .find_map(|message| match &message.content {
+            MessageContent::Assistant { metadata, .. } => Some(metadata),
+            _ => None,
+        })
+        .expect("assistant error");
+    assert_eq!(metadata.stop_reason, StopReason::Error);
+    assert!(
+        metadata
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("sign-in required")),
+        "{:?}",
+        metadata.error
+    );
+    assert_eq!(test.model.requests.lock().expect("requests").len(), 1);
+    assert!(test.sinks.saw(&session, |event| matches!(
+        event,
+        AgentEventPayload::AgentSettled {
+            outcome: AgentOutcome::Failed { .. },
+            ..
+        }
+    )));
 }
 
 /// Input hook errors remain diagnostics and do not reject a prompt.

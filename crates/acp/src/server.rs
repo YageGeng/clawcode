@@ -8,7 +8,7 @@ use agent_client_protocol::{
     v2::{ConnectionTo as V2ConnectionTo, Responder},
 };
 use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
-use kernel::{InsertionNotice, Kernel, KernelError};
+use kernel::{InsertionNotice, Kernel, KernelError, ModelError};
 use protocol::{
     AcpExtensionMethod, AcpWorkingDirectory, AgentEvent, AgentEventPayload,
     EventMetadata, IdGenerator, McpSessionChange,
@@ -28,6 +28,7 @@ use crate::extension::{
     AcpExtensionDispatcher, AcpExtensionRequest, AcpMcpUpdateNotification,
 };
 use crate::input::PromptInput;
+use crate::login::LoginTask;
 use crate::projection::{
     DurableResumeSelection, EventGroup, ForegroundState, LiveFeed,
     ProjectionFeed, ProjectionRegistry,
@@ -780,6 +781,17 @@ impl AcpServerFactory {
                                 responder: Responder<wire::InitializeResponse>,
                                 _connection: V2ConnectionTo<Client>| {
                     let projections = Arc::clone(&context.projections);
+                    let auth_methods = context
+                        .kernel
+                        .login_methods()
+                        .into_iter()
+                        .map(|method| {
+                            wire::AuthMethod::Agent(wire::AuthMethodAgent::new(
+                                method.id,
+                                method.name,
+                            ))
+                        })
+                        .collect();
                     context.watchers.elicitations.negotiated(ElicitationModes::from(
                         request.capabilities.elicitation.as_ref(),
                     ));
@@ -902,6 +914,7 @@ impl AcpServerFactory {
                                     ),
                             ),
                         )
+                            .auth_methods(auth_methods)
                             .meta(capabilities_meta),
                         )
                     }).await
@@ -1367,6 +1380,47 @@ impl AcpServerFactory {
             .on_receive_request(
                 {
                     let context = Arc::clone(&context);
+                    async move |request: wire::LoginAuthRequest,
+                                responder: Responder<wire::LoginAuthResponse>,
+                                connection: V2ConnectionTo<Client>| {
+                    let operation = context.traces.request(&responder, &request)?;
+                    operation.start();
+                    let requested = request.method_id.to_string();
+                    let Some(method) = context
+                        .kernel
+                        .login_methods()
+                        .into_iter()
+                        .find(|method| method.id == requested)
+                    else {
+                        let error = agent_client_protocol::Error::invalid_params()
+                            .data(format!("unknown login method: {requested}"));
+                        tracing::warn!(
+                            "rejected auth/login for unknown method {}",
+                            requested
+                        );
+                        operation.fail(&error);
+                        return Err(error);
+                    };
+                    let task = LoginTask::builder()
+                        .kernel(Arc::clone(&context.kernel))
+                        .connection(connection.clone())
+                        .url_elicitation(context.watchers.elicitations.supports_url())
+                        .method(method)
+                        .request_id(responder.id().clone())
+                        .build();
+                    // The wait lasts until the user finishes; dispatch must keep running,
+                    // and this task ends with the connection, which also stops the sign-in.
+                    connection.spawn(async move {
+                        let _settled = operation.settle(task.run(responder)).await;
+                        Ok(())
+                    })
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                {
+                    let context = Arc::clone(&context);
                     async move |request: wire::DeleteSessionRequest,
                                 responder: Responder<wire::DeleteSessionResponse>,
                                 _connection: V2ConnectionTo<Client>| {
@@ -1501,6 +1555,9 @@ impl AcpServerFactory {
                                                 task_session_id
                                             );
                                         }
+                                        // Refused before insertion, so no Run exists to settle; the
+                                        // Kernel already logged the refusal.
+                                        Err(KernelError::Model(ModelError::AuthRequired { .. })) => {}
                                         Err(error) => {
                                             tracing::error!(
                                                 "Kernel Run for session {} failed: {}",
@@ -1807,7 +1864,7 @@ impl SessionConfigUpdate {
             })
             .await
             .map_err(agent_client_protocol::Error::into_internal_error)?
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
+            .map_err(KernelFailure)?;
             // An unchanged value adds no event, so this waits only for what is queued.
             match projections.last_sequence(&session_id) {
                 Ok(Some(sequence)) => delivery.wait_through(sequence).await,
@@ -1891,10 +1948,15 @@ impl TryFrom<Option<&wire::Meta>> for PromptOptions {
 pub(crate) struct KernelFailure(pub(crate) KernelError);
 
 impl From<KernelFailure> for agent_client_protocol::Error {
-    /// Maps cancellation to `-32800` and any other pre-insertion failure to an internal error.
+    /// Maps cancellation to `-32800`, a needed sign-in to `-32000` with its method,
+    /// and any other pre-insertion failure to an internal error.
     fn from(rejection: KernelFailure) -> Self {
         match rejection.0 {
             KernelError::PromptCancelled => Self::request_cancelled(),
+            KernelError::Model(ModelError::AuthRequired { method_id }) => {
+                Self::auth_required()
+                    .data(serde_json::json!({ "methodId": method_id }))
+            }
             error @ KernelError::SessionPersistenceUncertain => Self::internal_error().data(serde_json::json!({"outcomeUnknown": true, "message": error.to_string()})),
             error => Self::internal_error().data(error.to_string()),
         }

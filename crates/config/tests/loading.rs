@@ -649,7 +649,7 @@ active_model = "{id}/gpt"
 id = "{id}"
 preset = "{preset}"
 display_name = "ChatGPT"
-auth = {{ type = "chatgpt", token_store_dir = {path:?} }}
+auth = {{ type = "chatgpt", auth_dir = {path:?} }}
 
 [[providers.models]]
 id = "gpt"

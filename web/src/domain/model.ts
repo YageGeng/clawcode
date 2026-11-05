@@ -544,10 +544,13 @@ export type McpOAuthState = "notConfigured" | "unauthenticated" | "authorizing" 
 /** One standard `elicitation/create` waiting for the user, oldest first in the queue. */
 export type ElicitationPrompt = Readonly<{
   key: string;
-  sessionId: SessionId;
+  /** Absent for a request-scoped elicitation such as a sign-in, which has no Session. */
+  sessionId?: SessionId;
   serverId?: string;
   message: string;
   mode: Readonly<{ type: "form"; requestedSchema: unknown }> | Readonly<{ type: "url"; url: string }>;
+  /** Present when this elicitation carries a sign-in device code. */
+  login?: Readonly<{ userCode: string; name: string }>;
 }>;
 
 /** The user's answer, serialized as the standard elicitation response. */

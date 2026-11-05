@@ -106,9 +106,26 @@ impl ApiKeyConfig {
 pub enum ProviderAuthConfig {
     /// Use the upstream ChatGPT authenticator and its independent token store.
     Chatgpt {
-        /// Explicit absolute directory for upstream chatgpt.json credentials.
-        token_store_dir: std::path::PathBuf,
+        /// Directory for upstream chatgpt.json credentials; a leading `~` means the user's home.
+        #[serde(deserialize_with = "expand_home")]
+        auth_dir: std::path::PathBuf,
     },
+}
+
+/// Expands a whole leading `~` component so validation and the store read one path.
+///
+/// Without a home directory the path stays relative, and validation rejects it.
+fn expand_home<'de, D>(deserializer: D) -> Result<std::path::PathBuf, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let path = std::path::PathBuf::deserialize(deserializer)?;
+    let expanded = path
+        .strip_prefix("~")
+        .ok()
+        .zip(dirs::home_dir())
+        .map(|(tail, home)| home.join(tail));
+    Ok(expanded.unwrap_or(path))
 }
 
 /// User-visible model metadata attached to an [`LlmProvider`].
@@ -298,9 +315,7 @@ impl LlmProvider {
 
     /// Validates that the provider has a resolvable authentication source.
     pub fn validate_auth_source(&self) -> Result<(), ConfigValidationError> {
-        if let Some(ProviderAuthConfig::Chatgpt { token_store_dir }) =
-            &self.auth
-        {
+        if let Some(ProviderAuthConfig::Chatgpt { auth_dir }) = &self.auth {
             let reason = if self.preset() != "chatgpt"
                 || !matches!(
                     self.provider_type,
@@ -313,11 +328,9 @@ impl LlmProvider {
                 Some(
                     "choose an explicit access token or ChatGPT authentication, not both",
                 )
-            } else if !token_store_dir.is_absolute()
-                || token_store_dir.is_file()
-            {
+            } else if !auth_dir.is_absolute() || auth_dir.is_file() {
                 Some(
-                    "token_store_dir must be an absolute directory; Codex auth.json is not imported",
+                    "auth_dir must be an absolute or ~/ directory; Codex auth.json is not imported",
                 )
             } else {
                 None
@@ -437,7 +450,7 @@ env = "OPENAI_API_KEY"
         );
     }
 
-    /// auth = { type = "chatgpt", token_store_dir = "/tmp/clawcode-auth" } parses without an api_key.
+    /// auth = { type = "chatgpt", auth_dir = "/tmp/clawcode-auth" } parses without an api_key.
     #[test]
     fn provider_supports_codex_auth_without_api_key() {
         let provider: LlmProvider = toml::from_str(
@@ -446,7 +459,7 @@ id = "chatgpt"
 display_name = "ChatGPT"
 provider_type = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "chatgpt", token_store_dir = "/tmp/clawcode-auth" }
+auth = { type = "chatgpt", auth_dir = "/tmp/clawcode-auth" }
 
 [[models]]
 id = "gpt-5.4"
@@ -459,21 +472,44 @@ id = "gpt-5.4"
         assert_eq!(
             provider.auth,
             Some(ProviderAuthConfig::Chatgpt {
-                token_store_dir: "/tmp/clawcode-auth".into()
+                auth_dir: "/tmp/clawcode-auth".into()
             })
         );
     }
 
-    /// An explicit upstream token-store directory is retained without Codex compatibility.
+    /// Only a whole leading `~` component names the home directory.
     #[test]
-    fn provider_parses_chatgpt_token_store_override() {
+    fn auth_dir_expands_a_leading_home_component() {
+        let home = dirs::home_dir().expect("home directory");
+        for (configured, expected) in [
+            ("~", home.clone()),
+            ("~/.clawcode/chatgpt", home.join(".clawcode/chatgpt")),
+            ("~other/auth", "~other/auth".into()),
+            ("/tmp/~/auth", "/tmp/~/auth".into()),
+            ("relative", "relative".into()),
+        ] {
+            let auth: ProviderAuthConfig = toml::from_str(&format!(
+                "type = \"chatgpt\"\nauth_dir = {configured:?}"
+            ))
+            .unwrap();
+            assert_eq!(
+                auth,
+                ProviderAuthConfig::Chatgpt { auth_dir: expected },
+                "{configured}"
+            );
+        }
+    }
+
+    /// An explicit upstream credential directory is retained without Codex compatibility.
+    #[test]
+    fn provider_parses_chatgpt_auth_dir() {
         let provider: LlmProvider = toml::from_str(
             r#"
 id = "chatgpt"
 display_name = "ChatGPT"
 provider_type = "responses"
 base_url = "https://chatgpt.com/backend-api/codex"
-auth = { type = "chatgpt", token_store_dir = "/tmp/custom-auth" }
+auth = { type = "chatgpt", auth_dir = "/tmp/custom-auth" }
 
 [[models]]
 id = "gpt-5.4"
@@ -484,7 +520,7 @@ id = "gpt-5.4"
         assert_eq!(
             provider.auth,
             Some(ProviderAuthConfig::Chatgpt {
-                token_store_dir: "/tmp/custom-auth".into(),
+                auth_dir: "/tmp/custom-auth".into(),
             })
         );
     }

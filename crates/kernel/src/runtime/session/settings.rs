@@ -42,6 +42,8 @@ impl SessionSettingsUpdate<'_> {
                 "model is not configured: {provider_id}/{model_id}"
             )));
         };
+        // Only the provider decides; this may refresh a token, so it stays outside the lock.
+        model.ensure_signed_in().await?;
         let previous_model = {
             let _serial = self.session.settings_changes.lock().await;
             let previous_model = self.session.model.active()?.profile().clone();

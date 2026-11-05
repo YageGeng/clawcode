@@ -222,10 +222,12 @@ impl AssistantAttempt {
                                     )
                                     .build()
                             }
-                            // Cancelled is handled above; keep this fallback
-                            // non-panicking so a logic drift degrades gracefully.
-                            ModelError::Cancelled => ModelFailure::builder()
-                                .summary("model request cancelled".to_string())
+                            // Retrying cannot help until the user signs in. Cancelled
+                            // is handled above; keep this fallback non-panicking so a
+                            // logic drift degrades gracefully.
+                            error @ (ModelError::AuthRequired { .. }
+                            | ModelError::Cancelled) => ModelFailure::builder()
+                                .summary(error.to_string())
                                 .status(None)
                                 .retry_disposition(
                                     ModelRetryDisposition::NonRetryable,

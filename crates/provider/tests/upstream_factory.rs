@@ -537,9 +537,12 @@ fn repository_claw_toml_builds_every_model() {
     )))
     .expect("repository configuration");
     // Keys come from the environment in real use; a literal keeps the test offline.
+    // OAuth providers hold no key, and validation rejects one next to `auth`.
     for provider in &mut config.providers {
-        provider.api_key =
-            Some(config::ApiKeyConfig::Plaintext("synthetic-key".into()));
+        if provider.auth.is_none() {
+            provider.api_key =
+                Some(config::ApiKeyConfig::Plaintext("synthetic-key".into()));
+        }
     }
     let reserve = config.compaction.reserve_tokens;
     let models = config

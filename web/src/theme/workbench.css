@@ -2791,28 +2791,28 @@
   font-size: 9px;
 }
 
-.mcp-elicitation header {
+.elicitation-dialog header {
   display: flex;
   align-items: center;
   gap: 9px;
 }
 
-.mcp-elicitation header h2,
-.mcp-elicitation header p {
+.elicitation-dialog header h2,
+.elicitation-dialog header p {
   margin: 0;
 }
 
-.mcp-elicitation header div {
+.elicitation-dialog header div {
   min-width: 0;
 }
 
-.mcp-elicitation header p {
+.elicitation-dialog header p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.mcp-elicitation > p {
+.elicitation-dialog > p {
   margin: 14px 0 0;
 }
 
@@ -2821,6 +2821,27 @@
   align-items: center;
   gap: 6px;
   color: var(--text-secondary);
+}
+
+.sign-in-code {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.sign-in-code code {
+  font-size: 1.5rem;
+  letter-spacing: 0.08em;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.sign-in-status {
+  color: var(--text-secondary);
+  text-align: center;
 }
 
 .elicitation-form {
@@ -2871,7 +2892,7 @@
   gap: 5px;
 }
 
-.mcp-elicitation footer {
+.elicitation-dialog footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;

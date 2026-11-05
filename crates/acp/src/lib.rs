@@ -8,6 +8,7 @@ mod delivery;
 mod elicitation;
 mod extension;
 mod input;
+mod login;
 mod mapping;
 mod projection;
 mod recovery;

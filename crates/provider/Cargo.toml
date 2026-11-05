@@ -18,6 +18,9 @@ rig-reqwest = { workspace = true, features = ["rustls"] }
 # error
 thiserror = { workspace = true }
 
+# async
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
 # tracing & log
 tracing = { workspace = true }
 
@@ -33,7 +36,7 @@ rig-core = { workspace = true, features = ["test-utils"] }
 
 # async
 futures = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 # http
 http = { workspace = true }
