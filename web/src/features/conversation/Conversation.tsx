@@ -4,6 +4,7 @@ import type { UiBootstrap } from "../../bootstrap/model";
 import { MessageActionModel } from "../../domain/messageActions";
 import type { EntryId, MessageId, RunId, SessionId } from "../../acp/protocol";
 import type { MessageEntity, SessionTreeEntry, ToolCallEntity } from "../../domain/model";
+import { TranscriptRowKeys } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { initialSessionWorkspaceState } from "../../workspace/sessionState";
 import { sessionWorkspaceOf } from "../../workspace/selectors";
@@ -24,6 +25,10 @@ export type ConversationProps = Readonly<{
   compact?: boolean;
   controller: WorkspaceController;
   contextSelection?: ContextSelection;
+  /** One Inspector locate request for a row this branch renders. */
+  revealRowKey?: string;
+  /** Reports that the request was handled, so a later remount cannot replay it. */
+  onRevealed?: () => void;
   onInspect: (selection: ContextSelection) => void;
 }>;
 
@@ -86,7 +91,7 @@ const AgentUsageRow = memo(function AgentUsageRow({ sessionId, runId }: Readonly
 });
 
 /** Renders either the selected Session or an explicitly attached child transcript. */
-export function Conversation({ bootstrap, controller, contextSelection, onInspect, sessionId: requestedSessionId, compact = false }: ConversationProps) {
+export function Conversation({ bootstrap, controller, contextSelection, revealRowKey, onRevealed, onInspect, sessionId: requestedSessionId, compact = false }: ConversationProps) {
   const activeSessionId = useWorkspaceStore((state) => requestedSessionId ?? state.activeSessionId);
   const sessionId = activeSessionId;
   // Subscribe only to the fields this view renders so ongoing streaming deltas
@@ -140,7 +145,13 @@ export function Conversation({ bootstrap, controller, contextSelection, onInspec
     : state.drafts.get(activeSessionId));
   const composerRevision = useWorkspaceStore((state) => state.composerRevision);
   // The scroll controller observes the DOM, so it needs no projection subscription.
-  const { transcriptRef, onScroll } = useTranscriptScroll(activeSessionId);
+  const { transcriptRef, onScroll, revealRow } = useTranscriptScroll(activeSessionId);
+  /** Handles one Inspector locate request exactly once. */
+  useEffect(() => {
+    if (revealRowKey === undefined) return;
+    revealRow(revealRowKey);
+    onRevealed?.();
+  }, [revealRowKey, revealRow, onRevealed]);
   const liveRegionRef = useRef<HTMLDivElement>(null);
   const runningRef = useRef(running);
   useEffect(() => {
@@ -175,7 +186,7 @@ export function Conversation({ bootstrap, controller, contextSelection, onInspec
           if (entry.type === "message") {
             const treeEntry = messageTreeIndex.get(entry.messageId);
             return <MessageRow
-              key={`message:${entry.messageId}`}
+              key={TranscriptRowKeys.message(entry.messageId)}
               sessionId={activeSessionId}
               compact={compact}
               messageId={entry.messageId}
@@ -187,14 +198,14 @@ export function Conversation({ bootstrap, controller, contextSelection, onInspec
               controller={controller}
             />;
           }
-          if (entry.type === "extension") return <ExtensionRow sessionId={activeSessionId} key={`extension:${entry.extensionEventId}`} id={entry.extensionEventId} />;
-          if (entry.type === "compaction") return <CompactionRow sessionId={activeSessionId} key={`compaction:${entry.entryId}`} entryId={entry.entryId} />;
+          if (entry.type === "extension") return <ExtensionRow sessionId={activeSessionId} key={TranscriptRowKeys.extension(entry.extensionEventId)} id={entry.extensionEventId} />;
+          if (entry.type === "compaction") return <CompactionRow sessionId={activeSessionId} key={TranscriptRowKeys.compaction(entry.entryId)} entryId={entry.entryId} />;
           if (entry.type === "agent_usage") return <AgentUsageRow sessionId={activeSessionId} key={`agent-usage:${entry.runId}`} runId={entry.runId} />;
           return <ToolRow
             sessionId={activeSessionId}
             controller={controller}
             compact={compact}
-            key={`tool:${entry.toolCallId}`}
+            key={TranscriptRowKeys.tool(entry.toolCallId)}
             toolCallId={entry.toolCallId}
             inspecting={contextSelection?.type === "tool" && contextSelection.toolCallId === entry.toolCallId}
             onInspect={handleInspectTool}

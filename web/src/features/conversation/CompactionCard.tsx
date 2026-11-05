@@ -1,6 +1,7 @@
 import { ArchiveRestore, ChevronRight } from "lucide-react";
 
 import type { CompactionEntity } from "../../domain/model";
+import { TranscriptRowKeys } from "../../domain/model";
 import { MarkdownContent } from "./MarkdownContent";
 
 export type CompactionCardProps = Readonly<{
@@ -14,7 +15,7 @@ export function CompactionCard({ compaction }: CompactionCardProps) {
   const reason = compaction.reason === "manual" ? "手动" : compaction.reason === "threshold" ? "达到上下文阈值" : "上下文溢出恢复";
 
   return (
-    <details className="compaction-card">
+    <details className="compaction-card" data-transcript-key={TranscriptRowKeys.compaction(compaction.entryId)}>
       <summary>
         <span className="compaction-card__icon"><ArchiveRestore size={16} /></span>
         <span className="compaction-card__heading">

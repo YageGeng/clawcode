@@ -597,3 +597,25 @@ export type TranscriptEntry =
   | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>
   | Readonly<{ type: "agent_usage"; runId: RunId; order: EventOrder }>
   | Readonly<{ type: "recovery"; notice: RecoveryNotice; order: EventOrder }>;
+
+/**
+ * Stable transcript row keys shared by row rendering and Tree-driven reveal so
+ * one durable Tree entry can find the DOM row that projects it.
+ */
+export const TranscriptRowKeys = {
+  message: (messageId: MessageId) => `message:${messageId}`,
+  tool: (toolCallId: ToolCallId) => `tool:${toolCallId}`,
+  extension: (extensionEventId: string) => `extension:${extensionEventId}`,
+  compaction: (entryId: EntryId) => `compaction:${entryId}`,
+
+  /** Returns the key one row renders under; usage and recovery rows have no Tree node. */
+  of(row: TranscriptEntry): string | undefined {
+    switch (row.type) {
+      case "message": return TranscriptRowKeys.message(row.messageId);
+      case "tool": return TranscriptRowKeys.tool(row.toolCallId);
+      case "extension": return TranscriptRowKeys.extension(row.extensionEventId);
+      case "compaction": return TranscriptRowKeys.compaction(row.entryId);
+      default: return undefined;
+    }
+  }
+} as const;

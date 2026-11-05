@@ -2,6 +2,7 @@ import { Ban, Check, ChevronDown, CircleAlert, CircleSlash, FilePen, FileText, L
 import { memo, useEffect, useState } from "react";
 
 import type { ToolCallEntity, ToolKind } from "../../domain/model";
+import { TranscriptRowKeys } from "../../domain/model";
 import { CodeBlock, JsonBlock, MarkdownContent } from "./MarkdownContent";
 import { TerminalView } from "./TerminalView";
 import type { TerminalEntity } from "../../workspace/terminals";
@@ -106,7 +107,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
   const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "cancelled" ? <CircleSlash size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <KindIcon kind={tool.kind} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);
   return (
-    <details className="tool-card" data-status={tool.status} data-kind={tool.kind} data-origin={tool.origin} open={open}>
+    <details className="tool-card" data-status={tool.status} data-kind={tool.kind} data-origin={tool.origin} data-transcript-key={TranscriptRowKeys.tool(tool.toolCallId)} open={open}>
       <summary onClick={(event) => {
         // Mount large tool payloads only on demand; collapsed tool cards are
         // common during replay and must not parse hidden Markdown or JSON.

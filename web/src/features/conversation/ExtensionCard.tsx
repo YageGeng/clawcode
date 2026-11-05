@@ -1,4 +1,5 @@
 import type { ExtensionEntity } from "../../domain/model";
+import { TranscriptRowKeys } from "../../domain/model";
 
 export type ExtensionCardProps = Readonly<{
   extension: ExtensionEntity;
@@ -12,7 +13,7 @@ export function ExtensionCard({ extension }: ExtensionCardProps) {
     .filter((value) => value.length > 0)
     .join("\n");
   return (
-    <article className={`extension-card extension-card--${extension.kind}`}>
+    <article className={`extension-card extension-card--${extension.kind}`} data-transcript-key={TranscriptRowKeys.extension(extension.id)}>
       <header><span>{extension.extensionId}</span><small>{extension.customType}</small></header>
       {extension.message === undefined ? null : <p>{extension.message}</p>}
       {text.length === 0 ? null : <p className="extension-card__content">{text}</p>}

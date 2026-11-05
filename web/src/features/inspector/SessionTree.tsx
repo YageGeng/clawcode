@@ -1,4 +1,4 @@
-import { GitBranch, GitFork, LocateFixed, Minimize2 } from "lucide-react";
+import { Crosshair, GitBranch, GitFork, LocateFixed, Minimize2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { EntryId } from "../../acp/protocol";
@@ -9,12 +9,15 @@ export type SessionTreeProps = Readonly<{
   tree?: SessionTreeModel;
   cwd?: string;
   focusEntryId?: EntryId;
+  /** Nodes on the active branch that render a row, so only they offer a locate button. */
+  revealableRows?: ReadonlyMap<EntryId, string>;
+  onRevealRow?: (rowKey: string) => void;
   controller: WorkspaceController;
 }>;
 
 type PresentedEntry = Readonly<{ entry: SessionTreeEntry; depth: number }>;
 
-export function SessionTree({ tree, cwd, focusEntryId, controller }: SessionTreeProps) {
+export function SessionTree({ tree, cwd, focusEntryId, revealableRows, onRevealRow, controller }: SessionTreeProps) {
   const [selected, setSelected] = useState<EntryId | null | undefined>(focusEntryId);
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
@@ -74,24 +77,30 @@ export function SessionTree({ tree, cwd, focusEntryId, controller }: SessionTree
       {focusEntryId === undefined ? null : <span aria-hidden="true" className="tree-locate-spacer" data-position="before" />}
       <button className="tree-root" data-selected={target === null} type="button" onClick={() => setSelected(null)}>根节点</button>
       <div className="tree-entries">
-        {entries.map(({ entry, depth }) => (
-          <button
-            aria-pressed={entry.entryId === target}
-            className="tree-entry"
-            data-active={entry.entryId === tree.leafId}
-            data-located={entry.entryId === focusEntryId}
-            data-selected={entry.entryId === target}
-            key={entry.entryId}
-            {...(entry.entryId === focusEntryId ? { ref: focusedEntryRef } : {})}
-            style={{ paddingLeft: `${10 + Math.min(depth, 8) * 13}px` }}
-            type="button"
-            onClick={() => setSelected(entry.entryId)}
-          >
-            <span className="tree-entry__rail" />
-            <span className="tree-entry__kind">{entry.kind}</span>
-            <span className="tree-entry__id">{entry.entryId}</span>
-          </button>
-        ))}
+        {entries.map(({ entry, depth }) => {
+          const rowKey = revealableRows?.get(entry.entryId);
+          return (
+            <div className="tree-row" key={entry.entryId}>
+              <button
+                aria-pressed={entry.entryId === target}
+                className="tree-entry"
+                data-active={entry.entryId === tree.leafId}
+                data-located={entry.entryId === focusEntryId}
+                data-revealable={rowKey !== undefined}
+                data-selected={entry.entryId === target}
+                {...(entry.entryId === focusEntryId ? { ref: focusedEntryRef } : {})}
+                style={{ paddingLeft: `${10 + Math.min(depth, 8) * 13}px` }}
+                type="button"
+                onClick={() => setSelected(entry.entryId)}
+              >
+                <span className="tree-entry__rail" />
+                <span className="tree-entry__kind">{entry.kind}</span>
+                <span className="tree-entry__id">{entry.entryId}</span>
+              </button>
+              {rowKey === undefined ? null : <button aria-label={`在聊天记录中定位 ${entry.entryId}`} className="tree-entry__locate" title="在聊天记录中定位" type="button" onClick={() => onRevealRow?.(rowKey)}><Crosshair size={13} aria-hidden="true" /></button>}
+            </div>
+          );
+        })}
       </div>
       {target === null ? null : <details className="tree-preview"><summary>所选节点数据</summary><pre>{JSON.stringify(tree.entries.find((entry) => entry.entryId === target)?.payload ?? {}, null, 2)}</pre></details>}
       {focusEntryId === undefined ? null : <span aria-hidden="true" className="tree-locate-spacer" />}

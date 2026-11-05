@@ -2183,6 +2183,54 @@
   font-size: 10px;
 }
 
+.tree-row {
+  position: relative;
+  min-width: 0;
+}
+
+/* Leaves room for the locate button so it never covers the node's identifier. */
+.tree-entry[data-revealable="true"] {
+  padding-right: 44px;
+}
+
+/* Selecting a node and locating it are separate actions, so locating keeps its
+   own target, revealed on demand to keep long trees scannable. */
+.tree-entry__locate {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: var(--radius-small);
+  color: var(--text-secondary);
+  background: transparent;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity var(--motion-fast);
+}
+
+.tree-row:hover .tree-entry__locate,
+.tree-entry[data-selected="true"] + .tree-entry__locate,
+.tree-entry__locate:focus-visible {
+  opacity: 1;
+}
+
+.tree-entry__locate:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Touch screens have no hover to reveal it, so it stays visible there. */
+@media (hover: none) {
+  .tree-entry__locate {
+    opacity: 1;
+  }
+}
+
 .tree-root:hover,
 .tree-entry:hover,
 .tree-root[data-selected="true"],
@@ -3251,6 +3299,24 @@
   }
 }
 
+/* A located row flashes once the scroll settles. An outline follows each row's
+   own radius and leaves its resting shadow alone, unlike a box-shadow ring. */
+.transcript [data-transcript-key][data-located="true"] {
+  outline: 3px solid transparent;
+  outline-offset: 2px;
+  animation: transcript-locate 1.2s ease-out;
+}
+
+@keyframes transcript-locate {
+  0% {
+    outline-color: var(--accent);
+  }
+
+  100% {
+    outline-color: transparent;
+  }
+}
+
 @media (max-width: 767px) {
   /* On phone layouts the Inspector occupies most of the viewport, so the Lens
      becomes viewport-relative and stays above it until dismissed. */
@@ -3339,6 +3405,12 @@
   .compaction-activity__pulse,
   .context-lens,
   .tree-entry[data-located="true"] {
+    animation: none !important;
+  }
+
+  /* Without the fade the located row still needs a marker for its flash duration. */
+  .transcript [data-transcript-key][data-located="true"] {
+    outline-color: var(--accent);
     animation: none !important;
   }
 }

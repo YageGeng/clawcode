@@ -1,7 +1,7 @@
 import { memo } from "react";
 
 import type { CacheMiss, MessageEntity, SessionTreeEntry } from "../../domain/model";
-import { CacheMisses, ModelUsages } from "../../domain/model";
+import { CacheMisses, ModelUsages, TranscriptRowKeys } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandMessageCard } from "./CommandMessageCard";
 import { MarkdownContent } from "./MarkdownContent";
@@ -55,7 +55,7 @@ export const MessageView = memo(function MessageView({ message, cacheMiss, entry
     return <CommandMessageCard message={message} actions={actions} />;
   }
   return (
-    <article className={`message${report === null ? "" : " message--subagent-report"}`} data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming}>
+    <article className={`message${report === null ? "" : " message--subagent-report"}`} data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming} data-transcript-key={TranscriptRowKeys.message(message.messageId)}>
       <div className="message__label">{report === null ? message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System" : `Subagent · ${report[1]}`}</div>
       <ReasoningBlock message={message} />
       {assistant?.error === undefined ? null : <div className="message-error" role="alert"><strong>模型调用失败</strong><span>{assistant.error}</span></div>}

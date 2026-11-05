@@ -61,6 +61,7 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1280);
   const [scopedContextSelection, setScopedContextSelection] = useState<ScopedContextSelection>();
   const [scopedTreeFocus, setScopedTreeFocus] = useState<ScopedTreeFocus>();
+  const [revealRowKey, setRevealRowKey] = useState<string>();
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const sessionTriggerRef = useRef<HTMLButtonElement>(null);
@@ -151,6 +152,18 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
     setInspectorOpen(true);
     if (window.innerWidth < 1024) setSessionsOpen(false);
   }, [activeSessionId]);
+  /** Asks the transcript to reveal one row; only the Sessions section mounts it. */
+  const handleRevealRow = useCallback((rowKey: string) => {
+    setRevealRowKey(rowKey);
+    setSection("sessions");
+    // Below the docked breakpoint the Inspector floats over the transcript behind
+    // a blurred backdrop, so it must close for the reader to see the row.
+    if (window.innerWidth < 1280) {
+      setInspectorOpen(false);
+      inspectorTriggerRef.current?.focus();
+    }
+  }, []);
+  const handleRevealed = useCallback(() => setRevealRowKey(undefined), []);
 
   return (
     <div className="workbench" data-connection={connection.type} data-sessions-open={sessionsOpen} data-inspector-open={inspectorOpen}>
@@ -237,6 +250,8 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
           bootstrap={bootstrap}
           controller={controller}
           {...(contextSelection === undefined ? {} : { contextSelection })}
+          {...(revealRowKey === undefined ? {} : { revealRowKey })}
+          onRevealed={handleRevealed}
           onInspect={handleInspect}
         /> : null}
         {section === "skills" ? <SkillsPanel skills={skills} diagnostics={skillDiagnostics} hasSession={activeSessionId !== undefined} controller={controller} /> : null}
@@ -254,6 +269,7 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
         key={`${activeSessionId ?? "none"}:${treeFocus?.revision ?? 0}`}
         controller={controller}
         {...(treeFocus?.entryId === undefined ? {} : { treeEntryId: treeFocus.entryId })}
+        onRevealRow={handleRevealRow}
         onClose={() => {
           setInspectorOpen(false);
           inspectorTriggerRef.current?.focus();

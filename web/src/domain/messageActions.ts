@@ -1,5 +1,6 @@
-import type { EntryId, ImageMimeType, MessageId } from "../acp/protocol";
-import type { PromptImage, PromptInput, SessionTree, SessionTreeEntry } from "./model";
+import type { EntryId, ImageMimeType, MessageId, ToolCallId } from "../acp/protocol";
+import type { PromptImage, PromptInput, SessionTree, SessionTreeEntry, TranscriptEntry } from "./model";
+import { TranscriptRowKeys } from "./model";
 
 export type BranchEditPlan = Readonly<{
   branchEntryId: EntryId | null;
@@ -19,6 +20,54 @@ function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
     : undefined;
 }
 
+/** Projects durable Tree entries onto the transcript rows that display them. */
+const TreeEntryRows = {
+  /** Reads every durable message identifier one Message Tree entry carries. */
+  messageIds(entry: SessionTreeEntry): readonly MessageId[] {
+    if (entry.kind !== "message") return [];
+    const primary = entry.payload.message_id;
+    const fallback = record(entry.payload.identity)?.message_id;
+    const fallbackId = typeof fallback === "string" ? fallback : undefined;
+    if (typeof primary !== "string") return fallbackId === undefined ? [] : [fallbackId as MessageId];
+    const primaryId = primary as MessageId;
+    return fallbackId === undefined || fallbackId === primary ? [primaryId] : [primaryId, fallbackId as MessageId];
+  },
+
+  /**
+   * Picks the row an Assistant displays through. Mirrors MessageView: blank text
+   * and reasoning render nothing, so unless the attempt failed it shows only as
+   * its Tool cards, and a message with neither renders no row at all.
+   */
+  assistantRowKey(content: Readonly<Record<string, unknown>>, messageId: MessageId | undefined): string | undefined {
+    const blocks = Array.isArray(content.blocks) ? content.blocks.map(record) : [];
+    const failed = typeof record(content.metadata)?.error === "string";
+    const hasVisibleBlock = blocks.some((block) => {
+      if (block?.type === "tool_call") return false;
+      return !((block?.type === "text" || block?.type === "reasoning") && block.text === "");
+    });
+    if (failed || hasVisibleBlock) return messageId === undefined ? undefined : TranscriptRowKeys.message(messageId);
+    const toolCallId = blocks.find((block) => block?.type === "tool_call")?.tool_call_id;
+    return typeof toolCallId === "string" ? TranscriptRowKeys.tool(toolCallId as ToolCallId) : undefined;
+  },
+
+  /** Maps one durable Tree entry to the key of the row that displays it, if any. */
+  rowKey(entry: SessionTreeEntry): string | undefined {
+    if (entry.kind === "compaction") return TranscriptRowKeys.compaction(entry.entryId);
+    if (entry.kind !== "message") return undefined;
+    const content = record(entry.payload.content);
+    const messageId = TreeEntryRows.messageIds(entry)[0];
+    if (content?.type === "tool_result") {
+      return typeof content.tool_call_id === "string" ? TranscriptRowKeys.tool(content.tool_call_id as ToolCallId) : undefined;
+    }
+    if (content?.type === "assistant") return TreeEntryRows.assistantRowKey(content, messageId);
+    if (messageId === undefined) return undefined;
+    // A user `!` shell renders as an Execute Tool named after its message id.
+    if (content?.type === "bash_execution") return TranscriptRowKeys.tool(String(messageId) as ToolCallId);
+    if (content?.type === "extension") return TranscriptRowKeys.extension(messageId);
+    return TranscriptRowKeys.message(messageId);
+  }
+} as const;
+
 export const MessageActionModel = {
   /** Resolves one transcript message to its durable tree entry. */
   entry(tree: SessionTree | undefined, messageId: MessageId): SessionTreeEntry | undefined {
@@ -32,20 +81,33 @@ export const MessageActionModel = {
   /** Builds a durable messageId to Tree entry index for O(1) transcript lookup. */
   index(tree: SessionTree | undefined): ReadonlyMap<MessageId, SessionTreeEntry> {
     const index = new Map<MessageId, SessionTreeEntry>();
-    const entries = tree?.entries ?? [];
-    for (const entry of entries) {
-      if (entry.kind !== "message") continue;
-      const identity = record(entry.payload.identity);
-      const primaryMessageId = entry.payload.message_id;
-      if (typeof primaryMessageId === "string" && !index.has(primaryMessageId as MessageId)) {
-        index.set(primaryMessageId as MessageId, entry);
-      }
-      const identityMessageId = identity?.message_id;
-      if (typeof identityMessageId === "string" && !index.has(identityMessageId as MessageId)) {
-        index.set(identityMessageId as MessageId, entry);
+    for (const entry of tree?.entries ?? []) {
+      for (const messageId of TreeEntryRows.messageIds(entry)) {
+        if (!index.has(messageId)) index.set(messageId, entry);
       }
     }
     return index;
+  },
+
+  /**
+   * Maps each Tree node on the active branch to the row displaying it. Walking
+   * from the leaf matters because a node on another branch can share a provider
+   * tool call id with a row this transcript does render.
+   */
+  revealableRows(tree: SessionTree | undefined, transcript: readonly TranscriptEntry[]): ReadonlyMap<EntryId, string> {
+    const rows = new Map<EntryId, string>();
+    if (tree === undefined) return rows;
+    const rendered = new Set(transcript.map((row) => TranscriptRowKeys.of(row)));
+    const entries = new Map(tree.entries.map((entry) => [entry.entryId, entry]));
+    const visited = new Set<EntryId>();
+    let entry = tree.leafId === null || tree.leafId === undefined ? undefined : entries.get(tree.leafId);
+    while (entry !== undefined && !visited.has(entry.entryId)) {
+      visited.add(entry.entryId);
+      const rowKey = TreeEntryRows.rowKey(entry);
+      if (rowKey !== undefined && rendered.has(rowKey)) rows.set(entry.entryId, rowKey);
+      entry = entry.parentId === null || entry.parentId === undefined ? undefined : entries.get(entry.parentId);
+    }
+    return rows;
   },
 
   /** Builds a same-Session Branch plan that reopens one user prompt for editing. */

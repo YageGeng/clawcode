@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { MessageEntity, SlashCommandMessageMeta, SlashCommandSource } from "../../domain/model";
+import { TranscriptRowKeys } from "../../domain/model";
 import { MarkdownContent } from "./MarkdownContent";
 
 const SOURCE_LABELS: Readonly<Record<SlashCommandSource, string>> = {
@@ -26,7 +27,7 @@ export function CommandMessageCard({ message, actions }: CommandMessageCardProps
   const command = message.slashCommand;
   if (command === undefined) return null;
   return (
-    <article className="command-message" data-kind={command.messageKind} data-status={command.status}>
+    <article className="command-message" data-kind={command.messageKind} data-status={command.status} data-transcript-key={TranscriptRowKeys.message(message.messageId)}>
       <header className="command-message__header">
         <code>/{command.name}</code>
         <span className="command-source-badge" data-source={command.source}>{SOURCE_LABELS[command.source]}</span>

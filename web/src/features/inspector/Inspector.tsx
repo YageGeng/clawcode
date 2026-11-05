@@ -1,7 +1,8 @@
 import { Activity, GitFork, Wrench, X } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { EntryId } from "../../acp/protocol";
+import { MessageActionModel } from "../../domain/messageActions";
 import type { WorkspaceController } from "../../workspace/controller";
 import { MAX_RETAINED_SESSION_EVENTS } from "../../workspace/sessionState";
 import { sessionWorkspaceOf } from "../../workspace/selectors";
@@ -15,15 +16,20 @@ type InspectorTab = "tree" | "events" | "tools";
 export type InspectorProps = Readonly<{
   controller: WorkspaceController;
   treeEntryId?: EntryId;
+  /** Reveals one transcript row chosen from a Tree node's locate button. */
+  onRevealRow?: (rowKey: string) => void;
   onClose: () => void;
 }>;
 
-/** Tree panel reads only the durable tree, so streaming deltas skip it. */
-function TreePanel({ controller, treeEntryId }: Readonly<{ controller: WorkspaceController; treeEntryId?: EntryId }>) {
+/** Tree panel reads the durable tree and row list, so streaming deltas skip it. */
+function TreePanel({ controller, treeEntryId, onRevealRow }: Readonly<{ controller: WorkspaceController; treeEntryId?: EntryId; onRevealRow?: (rowKey: string) => void }>) {
   const tree = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.tree);
+  // Deltas update message entities, so this reference changes only when a row joins.
+  const transcript = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.transcript);
   const cwd = useWorkspaceStore((state) => state.sessions
     .find((session) => session.sessionId === state.activeSessionId)?.cwd);
-  return <SessionTree {...(tree === undefined ? {} : { tree })} {...(cwd === undefined ? {} : { cwd })} {...(treeEntryId === undefined ? {} : { focusEntryId: treeEntryId })} controller={controller} />;
+  const revealableRows = useMemo(() => MessageActionModel.revealableRows(tree, transcript ?? []), [tree, transcript]);
+  return <SessionTree {...(tree === undefined ? {} : { tree })} {...(cwd === undefined ? {} : { cwd })} {...(treeEntryId === undefined ? {} : { focusEntryId: treeEntryId })} revealableRows={revealableRows} {...(onRevealRow === undefined ? {} : { onRevealRow })} controller={controller} />;
 }
 
 /** Events panel only joins the event stream and diagnostics on demand. */
@@ -47,7 +53,7 @@ function ToolsPanel() {
   return <div className="inspector-tools">{[...tools.values()].map((tool) => <ToolCallCard key={tool.toolCallId} tool={tool} />)}</div>;
 }
 
-export function Inspector({ controller, treeEntryId, onClose }: InspectorProps) {
+export function Inspector({ controller, treeEntryId, onRevealRow, onClose }: InspectorProps) {
   const [tab, setTab] = useState<InspectorTab>("tree");
   const tabs: readonly InspectorTab[] = ["tree", "events", "tools"];
   return (
@@ -87,7 +93,7 @@ export function Inspector({ controller, treeEntryId, onClose }: InspectorProps) 
         })}
       </div>
       <div aria-labelledby={`inspector-tab-${tab}`} className="inspector-content" id={`inspector-panel-${tab}`} role="tabpanel">
-        {tab === "tree" ? <TreePanel controller={controller} {...(treeEntryId === undefined ? {} : { treeEntryId })} /> : null}
+        {tab === "tree" ? <TreePanel controller={controller} {...(treeEntryId === undefined ? {} : { treeEntryId })} {...(onRevealRow === undefined ? {} : { onRevealRow })} /> : null}
         {tab === "events" ? <EventsPanel /> : null}
         {tab === "tools" ? <ToolsPanel /> : null}
       </div>
