@@ -8,11 +8,13 @@ use std::time::Duration;
 
 use ::extension::{
     DynamicCommandRegistry, ExtensionRegistrar, ExtensionRuntime,
+    HandlerRegistry,
 };
 use ::tools::ToolRegistry;
 use protocol::{
-    AgentMessage, EntryId, IdKind, LaneId, RecordId, RunId, SessionId,
-    SessionSummary, SessionTitle, SessionTreeSnapshot, ThinkingLevel,
+    AgentMessage, EntryId, ExtensionFlagDefinition, IdKind, LaneId, RecordId,
+    RunId, SessionId, SessionSummary, SessionTitle, SessionTreeSnapshot,
+    ThinkingLevel,
 };
 use store::{
     EntryKind, NewRecord, RecordKind, SessionCreateOptions, SessionForkOptions,
@@ -102,6 +104,186 @@ impl RestoredSessionSettings {
             }
         }
         Ok(settings)
+    }
+}
+
+/// Inputs for restoring and wiring one Session once its extensions are frozen.
+#[derive(typed_builder::TypedBuilder)]
+struct SessionAssembly<'a> {
+    kernel: &'a Kernel,
+    session_id: SessionId,
+    store: Box<dyn SessionStore>,
+    cwd: PathBuf,
+    #[builder(default)]
+    ownership: Option<protocol::SessionOwnership>,
+    extensions: Arc<HandlerRegistry>,
+}
+
+impl SessionAssembly<'_> {
+    /// Restores durable state and wires one runtime; the caller closes MCP on failure.
+    async fn assemble(
+        self,
+        mcp: mcp::AcquiredSessionMcp,
+    ) -> Result<Arc<Session>, KernelError> {
+        let kernel = self.kernel;
+        let lane = LaneId::try_from("main")
+            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        // Each Session builds its own catalog so model selection stays Session-local.
+        let session_models = Arc::new(
+            kernel
+                .model_factory
+                .create_catalog(&kernel.static_extensions)?,
+        );
+        let settings = RestoredSessionSettings::load(
+            self.store.as_ref(),
+            &lane,
+            &session_models,
+        )?;
+        let history = Kernel::history_from_store(self.store.as_ref(), &lane)?;
+        // Resume starts above both shared Store mutations and the extra
+        // Usage events synthesized from persisted Assistant messages.
+        let initial_event_sequence =
+            Kernel::replay_sequence_floor(self.store.as_ref(), &lane)?;
+        let queue = PendingQueue::restore(self.store.as_ref())?;
+        let commands = DynamicCommandRegistry::new(self.extensions.commands())
+            .map_err(|error| {
+                KernelError::ExtensionBlocked(error.to_string())
+            })?;
+        let flags = self.merged_flags();
+        let tools = self.restored_tools(&lane, mcp.tools)?;
+        let execution = Arc::new(
+            SessionExecution::builder()
+                .lifecycle(RwLock::new(SessionLifecycle::Starting))
+                .gate(AsyncMutex::new(()))
+                .active_run(Mutex::new(None))
+                .idle_notify(Notify::new())
+                .cancellation(Mutex::new(CancellationToken::new()))
+                .queue(Mutex::new(queue))
+                .sequence(AtomicU64::new(initial_event_sequence))
+                .build(),
+        );
+        // Diagnostics share the transcript component without retaining the
+        // Session and creating a reference cycle through ExtensionRuntime.
+        let transcript =
+            Arc::new(SessionTranscript::new(self.store, lane, history));
+        let extension_runtime = Arc::new(ExtensionRuntime::new(
+            self.extensions,
+            Arc::new(
+                KernelExtensionDiagnostics::builder()
+                    .event_sinks(Arc::clone(&kernel.event_sinks))
+                    .clock(Arc::clone(&kernel.clock))
+                    .execution(Arc::clone(&execution))
+                    .transcript(Arc::clone(&transcript))
+                    .id_generator(Arc::clone(&kernel.id_generator))
+                    .build(),
+            ),
+        ));
+        let extensions = SessionExtensions::builder()
+            .runtime(extension_runtime)
+            .commands(commands)
+            .flags(Arc::from(flags))
+            .events(broadcast::channel(64).0)
+            .build();
+        let mcp_host = mcp
+            .connection
+            .as_ref()
+            .map(|(_session, host)| Arc::clone(host));
+        let runtime = Arc::new(
+            Session::builder()
+                .ownership(self.ownership)
+                .cwd(self.cwd)
+                .transcript(transcript)
+                .mcp(SessionMcpRuntime::new(
+                    mcp.connection,
+                    self.session_id,
+                    mcp.lease,
+                ))
+                .resources(OnceLock::new())
+                .extensions(extensions)
+                .tools(tools)
+                .model(SessionModelState::new(
+                    session_models,
+                    settings.model,
+                    settings.thinking_level,
+                ))
+                .execution(execution)
+                .build(),
+        );
+        runtime.tools.register(Arc::new(tools::ToolSearchTool::new(
+            Arc::downgrade(&runtime),
+            Arc::clone(&kernel.id_generator),
+        )))?;
+        super::subagent::register(&runtime, kernel)?;
+        if let Some(host) = mcp_host
+            && let Err(error) = host.attach(&runtime)
+        {
+            runtime.extensions.runtime_ref().invalidate();
+            return Err(error);
+        }
+        if let Err(error) = runtime.start_mcp_projection().await {
+            runtime.extensions.runtime_ref().invalidate();
+            // Shutdown runs once, so the caller's later cleanup reports success
+            // and this is the only place a failure here can be observed.
+            if let Err(shutdown_error) = runtime.mcp.shutdown().await {
+                tracing::warn!(
+                    "failed to shut down MCP after its projection failed to start: {}",
+                    shutdown_error
+                );
+            }
+            return Err(error);
+        }
+        Ok(runtime)
+    }
+
+    /// Lists static flags first, so a session module cannot redefine their names.
+    fn merged_flags(&self) -> Vec<ExtensionFlagDefinition> {
+        let mut flags = self.kernel.static_extensions.flags.clone();
+        let mut flag_names = flags
+            .iter()
+            .map(|flag| flag.name.clone())
+            .collect::<BTreeSet<_>>();
+        for flag in self.extensions.flags() {
+            if flag_names.insert(flag.name.clone()) {
+                flags.push(flag);
+            }
+        }
+        flags
+    }
+
+    /// Composes tool partitions and restores the selection persisted on this branch.
+    fn restored_tools(
+        &self,
+        lane: &LaneId,
+        mcp_tools: ToolRegistry,
+    ) -> Result<Arc<SessionToolState>, KernelError> {
+        let mut extension_tools = ToolRegistry::default();
+        let mut extension_tool_names = BTreeSet::new();
+        for (_extension_id, tool) in self.extensions.tools() {
+            let name = tool.definition().name;
+            // The first extension registration wins while still overriding built-ins.
+            if extension_tool_names.insert(name) {
+                extension_tools.upsert(tool);
+            }
+        }
+        let tools = Arc::new(SessionToolState::new(
+            (*self.kernel.tools).clone(),
+            extension_tools,
+            mcp_tools,
+            protocol::ToolSelection::default(),
+        )?);
+        // Restore from the full branch rather than compaction's model-context window.
+        let entries = self
+            .store
+            .lane(lane)
+            .map(|leaf| self.store.branch(leaf))
+            .transpose()?
+            .unwrap_or_default();
+        tools.update(|next| {
+            next.selection =
+                tools::ToolSelectionUpdate::restore(&entries, next)?;
+            Ok(())
+        })?;
+        Ok(tools)
     }
 }
 
@@ -994,212 +1176,27 @@ impl Kernel {
         for module in modules {
             registrar.register_module(module.as_ref())?;
         }
-        let extension_registry = Arc::new(registrar.freeze());
-        let builtins = (*self.tools).clone();
-        let mut extension_tools = ToolRegistry::default();
-        let mut extension_tool_names = BTreeSet::new();
-        for (_extension_id, tool) in extension_registry.tools() {
-            let name = tool.definition().name;
-            // The first extension registration wins while still overriding built-ins.
-            if extension_tool_names.insert(name) {
-                extension_tools.upsert(tool);
-            }
-        }
+        let extensions = Arc::new(registrar.freeze());
         let session_id = store.session_id().clone();
-        let lease = match mcp_source {
-            mcp::SessionMcpSource::Connect => mcp::McpLease::Owned,
-            mcp::SessionMcpSource::Share(_) => mcp::McpLease::Shared,
-        };
-        let (mcp, mcp_tools, mcp_host) = if let mcp::SessionMcpSource::Share(
-            owner,
-        ) = mcp_source
-        {
-            match owner.state() {
-                Some(state) => (
-                    Some(Arc::clone(&state.session)),
-                    state.session.tool_registry()?,
-                    Some(Arc::clone(&state.host)),
-                ),
-                None => (None, ToolRegistry::default(), None),
-            }
-        } else if let Some(factory) = &self.mcp_factory {
-            let host = Arc::new(mcp::SessionMcpHost::new(cwd.clone()));
-            tracing::info!(
-                "started MCP Session creation for session {}",
-                session_id
+        let mcp = mcp_source.acquire(self, &session_id, &cwd).await?;
+        let cleanup_mcp = mcp.owned_session();
+        let result = SessionAssembly::builder()
+            .kernel(self)
+            .session_id(session_id.clone())
+            .store(store)
+            .cwd(cwd)
+            .ownership(ownership)
+            .extensions(extensions)
+            .build()
+            .assemble(mcp)
+            .await;
+        if let Err(error) = &result {
+            tracing::error!(
+                "failed Session assembly for session {}: {}",
+                session_id,
+                error
             );
-            let mcp_session = match factory
-                .create(
-                    ::mcp::McpSessionRequest::builder()
-                        .session_id(session_id.clone())
-                        .cwd(cwd.clone())
-                        .host(Arc::clone(&host) as Arc<dyn ::mcp::McpHost>)
-                        .shutdown(self.shutdown.child_token())
-                        .build(),
-                )
-                .await
-            {
-                Ok(mcp_session) => {
-                    tracing::info!(
-                        "completed MCP Session creation for session {}",
-                        session_id
-                    );
-                    Arc::new(mcp_session)
-                }
-                Err(error) => {
-                    tracing::error!(
-                        "failed MCP Session creation for session {}: {}",
-                        session_id,
-                        error
-                    );
-                    return Err(error.into());
-                }
-            };
-            let mcp_tools = match mcp_session.tool_registry() {
-                Ok(tools) => tools,
-                Err(error) => {
-                    // MCP was already created, so a catalog failure must not
-                    // leave its background transports alive.
-                    if let Err(shutdown_error) = mcp_session.shutdown().await {
-                        tracing::warn!(
-                            "failed to shut down MCP after catalog construction failed: {}",
-                            shutdown_error
-                        );
-                    }
-                    return Err(error.into());
-                }
-            };
-            (Some(mcp_session), mcp_tools, Some(host))
-        } else {
-            (None, ToolRegistry::default(), None)
-        };
-        let cleanup_mcp = mcp
-            .as_ref()
-            .filter(|_| lease == mcp::McpLease::Owned)
-            .map(Arc::clone);
-        let result: Result<Arc<Session>, KernelError> = async {
-            let lane = LaneId::try_from("main")
-                .map_err(|error| KernelError::Protocol(error.to_string()))?;
-            // Each Session builds its own catalog so model selection stays Session-local.
-            let session_models = Arc::new(
-                self.model_factory.create_catalog(&self.static_extensions)?,
-            );
-            let settings = RestoredSessionSettings::load(
-                store.as_ref(),
-                &lane,
-                &session_models,
-            )?;
-            let history = Self::history_from_store(store.as_ref(), &lane)?;
-            // Resume starts above both shared Store mutations and the extra
-            // Usage events synthesized from persisted Assistant messages.
-            let initial_event_sequence =
-                Self::replay_sequence_floor(store.as_ref(), &lane)?;
-            let queue = PendingQueue::restore(store.as_ref())?;
-            let commands =
-                DynamicCommandRegistry::new(extension_registry.commands())
-                    .map_err(|error| {
-                        KernelError::ExtensionBlocked(error.to_string())
-                    })?;
-            let mut flags = self.static_extensions.flags.clone();
-            let mut flag_names = flags
-                .iter()
-                .map(|flag| flag.name.clone())
-                .collect::<BTreeSet<_>>();
-            for flag in extension_registry.flags() {
-                if flag_names.insert(flag.name.clone()) {
-                    flags.push(flag);
-                }
-            }
-            let tools = Arc::new(SessionToolState::new(
-                builtins,
-                extension_tools,
-                mcp_tools,
-                protocol::ToolSelection::default(),
-            )?);
-            // Restore from the full branch rather than compaction's model-context window.
-            let entries = store
-                .lane(&lane)
-                .map(|leaf| store.branch(leaf))
-                .transpose()?
-                .unwrap_or_default();
-            tools.update(|next| {
-                next.selection =
-                    tools::ToolSelectionUpdate::restore(&entries, next)?;
-                Ok(())
-            })?;
-            let execution = Arc::new(
-                SessionExecution::builder()
-                    .lifecycle(RwLock::new(SessionLifecycle::Starting))
-                    .gate(AsyncMutex::new(()))
-                    .active_run(Mutex::new(None))
-                    .idle_notify(Notify::new())
-                    .cancellation(Mutex::new(CancellationToken::new()))
-                    .queue(Mutex::new(queue))
-                    .sequence(AtomicU64::new(initial_event_sequence))
-                    .build(),
-            );
-            // Diagnostics share the transcript component without retaining the
-            // Session and creating a reference cycle through ExtensionRuntime.
-            let transcript =
-                Arc::new(SessionTranscript::new(store, lane.clone(), history));
-            let extension_runtime = Arc::new(ExtensionRuntime::new(
-                Arc::clone(&extension_registry),
-                Arc::new(
-                    KernelExtensionDiagnostics::builder()
-                        .event_sinks(Arc::clone(&self.event_sinks))
-                        .clock(Arc::clone(&self.clock))
-                        .execution(Arc::clone(&execution))
-                        .transcript(Arc::clone(&transcript))
-                        .id_generator(Arc::clone(&self.id_generator))
-                        .build(),
-                ),
-            ));
-            let extensions = SessionExtensions::builder()
-                .runtime(extension_runtime)
-                .commands(commands)
-                .flags(Arc::from(flags))
-                .events(broadcast::channel(64).0)
-                .build();
-            let runtime = Arc::new(
-                Session::builder()
-                    .ownership(ownership)
-                    .cwd(cwd)
-                    .transcript(transcript)
-                    .mcp(SessionMcpRuntime::new(
-                        mcp.zip(mcp_host.as_ref().map(Arc::clone)),
-                        session_id.clone(),
-                        lease,
-                    ))
-                    .resources(OnceLock::new())
-                    .extensions(extensions)
-                    .tools(tools)
-                    .model(SessionModelState::new(
-                        session_models,
-                        settings.model,
-                        settings.thinking_level,
-                    ))
-                    .execution(execution)
-                    .build(),
-            );
-            runtime.tools.register(Arc::new(tools::ToolSearchTool::new(
-                Arc::downgrade(&runtime),
-                Arc::clone(&self.id_generator),
-            )))?;
-            super::subagent::register(&runtime, self)?;
-            if let Some(host) = mcp_host
-                && let Err(error) = host.attach(&runtime)
-            {
-                runtime.extensions.runtime_ref().invalidate();
-                return Err(error);
-            }
-            if let Err(error) = runtime.start_mcp_projection().await {
-                runtime.extensions.runtime_ref().invalidate();
-                let _ = runtime.mcp.shutdown().await;
-                return Err(error);
-            }
-            Ok(runtime)
         }
-        .await;
         if result.is_err()
             && let Some(mcp) = cleanup_mcp
             && let Err(error) = mcp.shutdown().await

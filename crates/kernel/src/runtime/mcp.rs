@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+use ::tools::ToolRegistry;
 use async_trait::async_trait;
 use futures::StreamExt;
 use protocol::{
@@ -41,6 +42,125 @@ pub(super) enum SessionMcpSource<'a> {
 pub(super) enum McpLease {
     Owned,
     Shared,
+}
+
+/// MCP capability resolved for one Session before its runtime exists.
+pub(super) struct AcquiredSessionMcp {
+    pub(super) connection:
+        Option<(Arc<::mcp::McpSession>, Arc<SessionMcpHost>)>,
+    pub(super) tools: ToolRegistry,
+    pub(super) lease: McpLease,
+}
+
+impl AcquiredSessionMcp {
+    /// Returns the connection a failed construction must close; borrowed ones stay open.
+    pub(super) fn owned_session(&self) -> Option<Arc<::mcp::McpSession>> {
+        self.connection
+            .as_ref()
+            .filter(|_connection| self.lease == McpLease::Owned)
+            .map(|(session, _host)| Arc::clone(session))
+    }
+}
+
+impl SessionMcpSource<'_> {
+    /// Opens owned transports or borrows the owner's connection for a new Session.
+    pub(super) async fn acquire(
+        self,
+        kernel: &Kernel,
+        session_id: &SessionId,
+        cwd: &Path,
+    ) -> Result<AcquiredSessionMcp, KernelError> {
+        match self {
+            Self::Share(owner) => Ok(match owner.state() {
+                Some(state) => AcquiredSessionMcp {
+                    connection: Some((
+                        Arc::clone(&state.session),
+                        Arc::clone(&state.host),
+                    )),
+                    tools: state.session.tool_registry().inspect_err(
+                        |error| {
+                            tracing::error!(
+                                "failed shared MCP tool catalog read for session {}: {}",
+                                session_id,
+                                error
+                            );
+                        },
+                    )?,
+                    lease: McpLease::Shared,
+                },
+                None => AcquiredSessionMcp {
+                    connection: None,
+                    tools: ToolRegistry::default(),
+                    lease: McpLease::Shared,
+                },
+            }),
+            Self::Connect => {
+                let Some(factory) = &kernel.mcp_factory else {
+                    return Ok(AcquiredSessionMcp {
+                        connection: None,
+                        tools: ToolRegistry::default(),
+                        lease: McpLease::Owned,
+                    });
+                };
+                let host = Arc::new(SessionMcpHost::new(cwd.to_path_buf()));
+                tracing::info!(
+                    "started MCP Session creation for session {}",
+                    session_id
+                );
+                let session = match factory
+                    .create(
+                        ::mcp::McpSessionRequest::builder()
+                            .session_id(session_id.clone())
+                            .cwd(cwd.to_path_buf())
+                            .host(Arc::clone(&host) as Arc<dyn ::mcp::McpHost>)
+                            .shutdown(kernel.shutdown.child_token())
+                            .build(),
+                    )
+                    .await
+                {
+                    Ok(session) => {
+                        tracing::info!(
+                            "completed MCP Session creation for session {}",
+                            session_id
+                        );
+                        Arc::new(session)
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "failed MCP Session creation for session {}: {}",
+                            session_id,
+                            error
+                        );
+                        return Err(error.into());
+                    }
+                };
+                let tools = match session.tool_registry() {
+                    Ok(tools) => tools,
+                    Err(error) => {
+                        tracing::error!(
+                            "failed MCP tool catalog construction for session {}: {}",
+                            session_id,
+                            error
+                        );
+                        // MCP was already created, so a catalog failure must not
+                        // leave its background transports alive.
+                        if let Err(shutdown_error) = session.shutdown().await {
+                            tracing::warn!(
+                                "failed to shut down MCP after catalog construction failed: {}",
+                                shutdown_error
+                            );
+                        }
+                        return Err(error.into());
+                    }
+                };
+                Ok(AcquiredSessionMcp {
+                    connection: Some((session, host)),
+                    tools,
+                    lease: McpLease::Owned,
+                })
+            }
+        }
+    }
 }
 
 /// Groups the MCP session, projection task, and pending elicitations.
