@@ -11,6 +11,7 @@ import { ContextLens, type ContextSelection } from "../features/inspector/Contex
 import { Inspector } from "../features/inspector/Inspector";
 import { McpPanel } from "../features/mcp/McpPanel";
 import { ElicitationDialog } from "../features/mcp/ElicitationDialog";
+import { PermissionDialog } from "../features/session/PermissionDialog";
 import { NoticeToasts } from "../features/notices/NoticeToasts";
 import { SessionConfigSelects } from "../features/session/SessionConfigSelects";
 import { SkillsPanel } from "../features/skills/SkillsPanel";
@@ -41,7 +42,6 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   const activeSessionId = useWorkspaceStore((state) => state.activeSessionId);
   // Subscribe to the handful of Session fields this shell renders rather than
   // the entire projection, so streaming deltas do not re-render its frame.
-  const contextUsage = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.contextUsage);
   const runUsages = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.runUsages);
   // Session-wide cache hit rate over the models that report cache reads.
   const sessionCacheHitRate = useMemo(
@@ -55,6 +55,7 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   const mcpSnapshot = useWorkspaceStore((state) => sessionWorkspaceOf(state)?.mcpSnapshot ?? initialSessionWorkspaceState.mcpSnapshot);
   // Requests from any attached Session queue up; one dialog at a time.
   const pendingElicitation = useWorkspaceStore((state) => state.elicitations[0]);
+  const pendingPermission = useWorkspaceStore((state) => state.permissions[0]);
   const runningSessionIds = useWorkspaceStore((state) => state.runningSessionIds);
   const [section, setSection] = useState<PrimarySection>("sessions");
   const [sessionsOpen, setSessionsOpen] = useState(() => window.innerWidth >= 768);
@@ -229,11 +230,6 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
           </div>
           <div className="runtime-status" aria-label="Agent 运行状态">
             <span className="runtime-chip" data-tone={connectionTone}><span className="runtime-chip__dot" />{connectionLabel}</span>
-            {contextUsage === undefined ? null : (
-              <span className="runtime-chip" title={`输入 ${contextUsage.exact.inputTokens ?? "未知"} · 输出 ${contextUsage.exact.outputTokens ?? "未知"} · 缓存读取 ${contextUsage.exact.cacheReadTokens ?? "未知"}`}>
-                Context {contextUsage.used === undefined ? "未知" : BigInt(contextUsage.used).toLocaleString()} / {BigInt(contextUsage.size).toLocaleString()}
-              </span>
-            )}
             {sessionCacheHitRate === undefined ? null : <span className="runtime-chip" title="会话累计：缓存读取 ÷ 输入">Cache {sessionCacheHitRate}</span>}
             {retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}
             {retry?.type === "running" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts}</span> : null}
@@ -302,6 +298,9 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
       ) : null}
       {pendingElicitation === undefined ? null : (
         <ElicitationDialog key={pendingElicitation.key} controller={controller} prompt={pendingElicitation} />
+      )}
+      {pendingElicitation !== undefined || pendingPermission === undefined ? null : (
+        <PermissionDialog key={pendingPermission.key} controller={controller} prompt={pendingPermission} />
       )}
       <NoticeToasts />
     </div>

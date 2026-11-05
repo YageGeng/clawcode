@@ -99,6 +99,7 @@ export function Conversation({ bootstrap, controller, contextSelection, revealRo
   const transcript = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.transcript ?? initialSessionWorkspaceState.transcript);
   const tree = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.tree);
   const running = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.running ?? false);
+  const contextUsage = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.contextUsage);
   const compaction = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.compaction ?? initialSessionWorkspaceState.compaction);
   const pending = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.pending ?? initialSessionWorkspaceState.pending);
   const availableCommands = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.availableCommands ?? initialSessionWorkspaceState.availableCommands);
@@ -221,6 +222,7 @@ export function Conversation({ bootstrap, controller, contextSelection, revealRo
         productSlug={bootstrap.product.slug}
         sessionId={activeSessionId}
         running={running}
+        contextUsage={contextUsage}
         outcomeUnknown={outcomeUnknown}
         pending={pending}
         availableCommands={availableCommands}

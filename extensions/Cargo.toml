@@ -11,6 +11,7 @@ workspace = true
 # workspace crates
 extension = { workspace = true }
 protocol = { workspace = true }
+tools = { workspace = true }
 
 # http
 http = { workspace = true }
@@ -20,9 +21,6 @@ async-trait = { workspace = true }
 
 # serde
 serde_json = { workspace = true }
-
-# shell
-shlex = { workspace = true }
 
 [build-dependencies]
 # workspace crates

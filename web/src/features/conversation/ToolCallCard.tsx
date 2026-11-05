@@ -1,4 +1,4 @@
-import { Ban, Check, ChevronDown, CircleAlert, CircleSlash, FilePen, FileText, LoaderCircle, ScanSearch, Search, SquareTerminal, Wrench } from "lucide-react";
+import { Ban, Check, ChevronDown, CircleAlert, CircleSlash, ClipboardList, FilePen, FileText, LoaderCircle, ScanSearch, Search, SquareTerminal, Wrench } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 
 import type { ToolCallEntity, ToolKind } from "../../domain/model";
@@ -43,6 +43,7 @@ function KindIcon({ kind }: Readonly<{ kind: ToolKind | undefined }>) {
   if (kind === "edit") return <FilePen size={14} />;
   if (kind === "execute") return <SquareTerminal size={14} />;
   if (kind === "search") return <Search size={14} />;
+  if (kind === "switch_mode") return <ClipboardList size={14} />;
   return <Wrench size={14} />;
 }
 
@@ -98,7 +99,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
   const phase = childId === undefined ? "ordinary" : `${childId}:${tool.status}`;
   const [manual, setManual] = useState<Readonly<{ phase: string; open: boolean }>>();
   // Terminal output and subagents are what a running tool is worth watching.
-  const open = manual?.phase === phase ? manual.open : (childId !== undefined || terminal !== undefined || tool.title === "bash") && tool.status === "in_progress";
+  const open = manual?.phase === phase ? manual.open : (childId !== undefined || terminal !== undefined || tool.title === "bash" || tool.kind === "switch_mode") && tool.status === "in_progress";
   useEffect(() => {
     if (childId === undefined || controller === undefined) return;
     void controller.ensureSessionListed(childId).catch(() => {});
@@ -115,7 +116,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
         setManual({ phase, open: !open });
       }}>
         <span className="tool-card__icon">{icon}</span>
-        <span className="tool-card__title">{tool.origin === "user" ? `$ ${tool.title}` : tool.title}</span>
+        <span className="tool-card__title">{tool.origin === "user" ? `$ ${tool.title}` : tool.kind === "switch_mode" ? "计划" : tool.title}</span>
         {tool.origin === "user" ? <span className="tool-card__origin">用户执行{tool.excludeFromContext === true ? " · 不进上下文" : ""}</span> : null}
         <span className="tool-card__status">{statusLabel}{elapsed === undefined ? "" : ` · ${elapsed} ms`}</span>
         <ChevronDown className="tool-card__chevron" size={14} aria-hidden="true" />

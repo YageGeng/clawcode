@@ -44,10 +44,12 @@ pub(in crate::runtime) fn register(
             "skipped built-in subagent because an extension provides it"
         );
     } else {
-        runtime.tools.register(Arc::new(foreground::SubagentTool {
-            session: Arc::downgrade(runtime),
-            kernel: kernel.clone(),
-        }))?;
+        runtime
+            .tools
+            .register_kernel(Arc::new(foreground::SubagentTool {
+                session: Arc::downgrade(runtime),
+                kernel: kernel.clone(),
+            }))?;
     }
     if runtime
         .tools
@@ -58,7 +60,7 @@ pub(in crate::runtime) fn register(
             "skipped built-in background_subagent because an extension provides it"
         );
     } else {
-        runtime.tools.register(Arc::new(
+        runtime.tools.register_kernel(Arc::new(
             background::BackgroundSubagentTool {
                 session: Arc::downgrade(runtime),
                 kernel: kernel.clone(),

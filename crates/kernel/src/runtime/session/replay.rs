@@ -3,11 +3,18 @@ use std::collections::{HashMap, HashSet};
 use protocol::{
     AgentMessage, AgentOutcome, CompactionData, CompactionResult, LaneId,
     MessageContent, MessageId, MessageIdentity, MessageTiming, SessionId,
-    TurnRecord,
+    SessionMode, TurnRecord,
 };
 use store::{EntryKind, RecordKind, SessionStore};
 
+use crate::runtime::plan::{ModeChange, ModeNote, ModeNotes};
 use crate::runtime::{Kernel, KernelError};
+
+/// Model context rebuilt from a branch, with notes still waiting for tool results.
+pub(in crate::runtime) struct RebuiltHistory {
+    pub(in crate::runtime) messages: Vec<AgentMessage>,
+    pub(in crate::runtime) notes: ModeNotes,
+}
 
 impl Kernel {
     /// Computes a safe live-event floor above every expanded durable replay event.
@@ -241,14 +248,23 @@ impl Kernel {
     }
 
     /// Reconstructs compaction-aware model context from one persisted lane branch.
+    ///
+    /// Mode switches become the same notes, at the same places, that the live
+    /// transcript added; `delegated` selects the subagent wording.
     pub(in crate::runtime) fn history_from_store(
         store: &dyn SessionStore,
         lane: &LaneId,
-    ) -> Result<Vec<AgentMessage>, KernelError> {
+        delegated: bool,
+    ) -> Result<RebuiltHistory, KernelError> {
+        let mut notes = ModeNotes::default();
         let Some(leaf) = store.lane(lane) else {
-            return Ok(Vec::new());
+            return Ok(RebuiltHistory {
+                messages: Vec::new(),
+                notes,
+            });
         };
         let mut history = Vec::new();
+        let mut mode = SessionMode::Default;
         for entry in store.branch(leaf)? {
             match entry.kind {
                 EntryKind::Message => {
@@ -263,7 +279,7 @@ impl Kernel {
                             entry.id
                         ))
                     })?;
-                    history.push(message);
+                    notes.push(&mut history, message);
                 }
                 EntryKind::Compaction => {
                     let compaction_entry_id = entry.id.clone();
@@ -297,7 +313,7 @@ impl Kernel {
                         content: MessageContent::CompactionSummary {
                             compaction:
                                 protocol::CompactionSummaryMessage::builder()
-                                    .entry_id(compaction_entry_id)
+                                    .entry_id(compaction_entry_id.clone())
                                     .summary(data.summary)
                                     .tokens_before(data.tokens_before)
                                     .read_files(details.read_files)
@@ -306,18 +322,38 @@ impl Kernel {
                         },
                     };
                     history = Vec::with_capacity(
-                        data.retained_tail.len().saturating_add(1),
+                        data.retained_tail.len().saturating_add(2),
                     );
                     history.push(summary_message);
                     history.extend(data.retained_tail);
+                    notes.clear();
+                    ModeNote::new(mode, delegated).after_compaction(
+                        &mut history,
+                        &mut notes,
+                        &compaction_entry_id,
+                    )?;
+                }
+                EntryKind::Custom => {
+                    if let Some(change) = ModeChange::from_entry(&entry) {
+                        mode = change.mode;
+                        let note = ModeNote::new(change.mode, delegated)
+                            .message(
+                                &format!("session-mode-{}", entry.id),
+                                change.turn_id,
+                                entry.timestamp_ms,
+                            )?;
+                        notes.place(&mut history, note);
+                    }
                 }
                 EntryKind::ModelChange
                 | EntryKind::ThinkingLevelChange
                 | EntryKind::ActiveToolsChange
-                | EntryKind::BranchSummary
-                | EntryKind::Custom => {}
+                | EntryKind::BranchSummary => {}
             }
         }
-        Ok(history)
+        Ok(RebuiltHistory {
+            messages: history,
+            notes,
+        })
     }
 }

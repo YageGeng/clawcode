@@ -131,6 +131,7 @@ export const AcpProtocol = {
   methods: {
     initialize: "initialize",
     authLogin: "auth/login",
+    sessionRequestPermission: "session/request_permission",
     sessionNew: "session/new",
     sessionList: "session/list",
     sessionResume: "session/resume",

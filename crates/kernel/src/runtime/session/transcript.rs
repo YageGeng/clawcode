@@ -9,11 +9,15 @@ use store::{
     EntryKind, NewEntry, NewRecord, SessionEntry, SessionRecord, SessionStore,
 };
 
+use super::replay::RebuiltHistory;
 use crate::runtime::KernelError;
+use crate::runtime::plan::{ModeChange, ModeNote, ModeNotes, SessionPlanState};
 
 /// Owns one lane's durable Store and its compaction-aware model context.
 pub(in crate::runtime) struct SessionTranscript {
     lane: LaneId,
+    /// Subagent Sessions get the delegated wording of plan-mode notes.
+    delegated: bool,
     state: Mutex<SessionTranscriptState>,
 }
 
@@ -22,6 +26,9 @@ pub(in crate::runtime) struct SessionTranscript {
 struct SessionTranscriptState {
     store: Box<dyn SessionStore>,
     history: Vec<AgentMessage>,
+    /// Plan-mode notes held until the tool results before them are in.
+    #[builder(default)]
+    notes: ModeNotes,
     // Failed durability requires reopening before another mutation may proceed.
     #[builder(default)]
     write_failed: bool,
@@ -29,6 +36,19 @@ struct SessionTranscriptState {
     /// the file, so a write through this one would duplicate a sequence.
     #[builder(default)]
     sealed: bool,
+}
+
+impl SessionTranscriptState {
+    /// Appends one context message, releasing held notes where they belong.
+    fn push_context(&mut self, message: AgentMessage) {
+        self.notes.push(&mut self.history, message);
+    }
+
+    /// Replaces model context with a branch rebuilt from the Store.
+    fn install(&mut self, rebuilt: RebuiltHistory) {
+        self.history = rebuilt.messages;
+        self.notes = rebuilt.notes;
+    }
 }
 
 /// Owned Store topology used to plan tree navigation without retaining a lock.
@@ -180,7 +200,7 @@ impl SessionTranscript {
             return Err(KernelError::SessionPersistenceUncertain);
         }
         // The entry exists even if the following consumption record fails; recovery checks its id.
-        state.history.push(message.clone());
+        state.push_context(message.clone());
         if let Err(error) = state.store.append_record(record) {
             state.write_failed = true;
             tracing::error!(
@@ -194,21 +214,29 @@ impl SessionTranscript {
         Ok(())
     }
 
-    /// Creates a transcript from one opened Store and its reconstructed context.
-    pub(in crate::runtime) fn new(
+    /// Opens a transcript on a stored lane, rebuilding its model context and the
+    /// notes that still wait for tool results.
+    pub(in crate::runtime) fn restored(
         store: Box<dyn SessionStore>,
         lane: LaneId,
-        history: Vec<AgentMessage>,
-    ) -> Self {
-        Self {
+        delegated: bool,
+    ) -> Result<Self, KernelError> {
+        let rebuilt = crate::runtime::Kernel::history_from_store(
+            store.as_ref(),
+            &lane,
+            delegated,
+        )?;
+        Ok(Self {
             lane,
+            delegated,
             state: Mutex::new(
                 SessionTranscriptState::builder()
                     .store(store)
-                    .history(history)
+                    .history(rebuilt.messages)
+                    .notes(rebuilt.notes)
                     .build(),
             ),
-        }
+        })
     }
 
     /// Returns the stable Session identifier as an owned value.
@@ -337,7 +365,35 @@ impl SessionTranscript {
                 payload: serde_json::to_value(message)?,
             },
         )?;
-        state.history.push(message.clone());
+        state.push_context(message.clone());
+        Ok(())
+    }
+
+    /// Records a mode switch and adds its note to model context under one lock.
+    ///
+    /// The note takes its identity and time from the stored entry, which is what
+    /// a rebuild from the Store reads, so both produce the same message.
+    pub(in crate::runtime) fn append_mode_note(
+        &self,
+        entry_id: EntryId,
+        change: &ModeChange,
+    ) -> Result<(), KernelError> {
+        let mut state = self.writable()?;
+        let entry = state.store.append_entry(
+            &self.lane,
+            NewEntry {
+                id: entry_id,
+                kind: EntryKind::Custom,
+                payload: change.payload(),
+            },
+        )?;
+        let note = ModeNote::new(change.mode, self.delegated).message(
+            &format!("session-mode-{}", entry.id),
+            change.turn_id.clone(),
+            entry.timestamp_ms,
+        )?;
+        let state = &mut *state;
+        state.notes.place(&mut state.history, note);
         Ok(())
     }
 
@@ -358,14 +414,29 @@ impl SessionTranscript {
     }
 
     /// Appends a compaction boundary and replaces context under one lock.
+    ///
+    /// In plan mode the summary is followed by a restated note when the retained
+    /// tail no longer holds one, exactly as a rebuild from the Store does.
     pub(in crate::runtime) fn commit_compaction(
         &self,
         entry: NewEntry,
-        context: Vec<AgentMessage>,
+        mut context: Vec<AgentMessage>,
     ) -> Result<(), KernelError> {
         let mut state = self.writable()?;
+        // Read the mode under this lock from the Store, as a rebuild does: a
+        // switch made while the summary was written is already stored there.
+        let branch = state
+            .store
+            .lane(&self.lane)
+            .map(|leaf| state.store.branch(leaf))
+            .transpose()?
+            .unwrap_or_default();
+        let mut notes = ModeNotes::default();
+        ModeNote::new(SessionPlanState::branch_mode(&branch), self.delegated)
+            .after_compaction(&mut context, &mut notes, &entry.id)?;
         state.store.append_entry(&self.lane, entry)?;
         state.history = context;
+        state.notes = notes;
         Ok(())
     }
 
@@ -461,12 +532,14 @@ impl SessionTranscript {
         let old_leaf_id = state.store.lane(&self.lane).cloned();
         state.store.move_lane(&self.lane, None)?;
         let old_history = std::mem::take(&mut state.history);
+        let old_notes = std::mem::take(&mut state.notes);
         if let Err(error) = state.store.sync() {
             // Root navigation is still reversible because it appends no entry;
             // restore both observable states before reporting checkpoint failure.
             match state.store.move_lane(&self.lane, old_leaf_id.clone()) {
                 Ok(()) => {
                     state.history = old_history;
+                    state.notes = old_notes;
                     if let Err(rollback_error) = state.store.sync() {
                         tracing::warn!(
                             "failed to sync Session root navigation rollback: {}",
@@ -481,11 +554,8 @@ impl SessionTranscript {
                     );
                     // Keep model context aligned with the lane retained by the
                     // Store when restoring the previous leaf also fails.
-                    match Self::history_from_store(
-                        state.store.as_ref(),
-                        &self.lane,
-                    ) {
-                        Ok(history) => state.history = history,
+                    match self.history_from_store(state.store.as_ref()) {
+                        Ok(rebuilt) => state.install(rebuilt),
                         Err(reconcile_error) => tracing::error!(
                             "failed to reconcile Session history after root navigation rollback error: {}",
                             reconcile_error
@@ -530,8 +600,7 @@ impl SessionTranscript {
                 ));
                 state.store.set_label(label_entry_id, Some(label))?;
             }
-            let history =
-                Self::history_from_store(state.store.as_ref(), &self.lane)?;
+            let history = self.history_from_store(state.store.as_ref())?;
             // Reaching this point means every logical mutation succeeded and
             // only the final durability checkpoint can still fail.
             reached_sync = true;
@@ -540,7 +609,7 @@ impl SessionTranscript {
         })();
         match mutation {
             Ok((new_leaf_id, history)) => {
-                state.history = history;
+                state.install(history);
                 Ok(TranscriptNavigationResult {
                     summary_entry: appended_summary,
                     new_leaf_id,
@@ -551,12 +620,11 @@ impl SessionTranscript {
                     // Branch summaries are append-only and cannot be removed.
                     // Keep the summary as the active leaf so tree snapshots do
                     // not expose an unreachable entry after a later failure.
-                    let history_reconciled = match Self::history_from_store(
-                        state.store.as_ref(),
-                        &self.lane,
-                    ) {
+                    let history_reconciled = match self
+                        .history_from_store(state.store.as_ref())
+                    {
                         Ok(history) => {
-                            state.history = history;
+                            state.install(history);
                             true
                         }
                         Err(reconcile_error) => {
@@ -615,11 +683,8 @@ impl SessionTranscript {
                         );
                         // If compensation itself fails, align the in-memory
                         // context with whichever lane the Store retained.
-                        match Self::history_from_store(
-                            state.store.as_ref(),
-                            &self.lane,
-                        ) {
-                            Ok(history) => state.history = history,
+                        match self.history_from_store(state.store.as_ref()) {
+                            Ok(history) => state.install(history),
                             Err(reconcile_error) => tracing::error!(
                                 "failed to reconcile Session history after navigation rollback error: {}",
                                 reconcile_error
@@ -632,12 +697,16 @@ impl SessionTranscript {
         }
     }
 
-    /// Reconstructs compaction-aware model context from one Store lane.
-    pub(super) fn history_from_store(
+    /// Reconstructs compaction-aware model context from this transcript's lane.
+    fn history_from_store(
+        &self,
         store: &dyn SessionStore,
-        lane: &LaneId,
-    ) -> Result<Vec<AgentMessage>, KernelError> {
-        crate::runtime::Kernel::history_from_store(store, lane)
+    ) -> Result<RebuiltHistory, KernelError> {
+        crate::runtime::Kernel::history_from_store(
+            store,
+            &self.lane,
+            self.delegated,
+        )
     }
 }
 
@@ -694,11 +763,12 @@ mod tests {
                 parent_session_id: None,
             })
             .expect("create store");
-        let transcript = SessionTranscript::new(
+        let transcript = SessionTranscript::restored(
             store,
             protocol::LaneId::try_from("main").expect("lane id"),
-            Vec::new(),
-        );
+            false,
+        )
+        .expect("restore transcript");
         let message = message("message-1", "turn-1", "hello");
 
         transcript
@@ -727,11 +797,12 @@ mod tests {
                 parent_session_id: None,
             })
             .expect("create store");
-        let transcript = SessionTranscript::new(
+        let transcript = SessionTranscript::restored(
             store,
             protocol::LaneId::try_from("main").expect("lane id"),
-            Vec::new(),
-        );
+            false,
+        )
+        .expect("restore transcript");
         transcript
             .set_name(Some("before".into()))
             .expect("live write");
@@ -786,11 +857,8 @@ mod tests {
                 },
             )
             .expect("append second entry");
-        let transcript = SessionTranscript::new(
-            store,
-            lane,
-            vec![first.clone(), second.clone()],
-        );
+        let transcript = SessionTranscript::restored(store, lane, false)
+            .expect("restore transcript");
 
         let error = match transcript.commit_navigation(
             TranscriptNavigationCommit::builder()
@@ -988,15 +1056,16 @@ mod tests {
                 )
                 .expect("append message");
         }
-        let transcript = SessionTranscript::new(
+        let transcript = SessionTranscript::restored(
             Box::new(FailingSyncStore {
                 inner: store,
                 fail_sync: false,
                 arm_after_summary: true,
             }),
             lane,
-            vec![first.clone(), second],
-        );
+            false,
+        )
+        .expect("restore transcript");
 
         let result = transcript
             .commit_navigation(
@@ -1058,15 +1127,16 @@ mod tests {
                 )
                 .expect("append message");
         }
-        let transcript = SessionTranscript::new(
+        let transcript = SessionTranscript::restored(
             Box::new(FailingSyncStore {
                 inner: store,
                 fail_sync: true,
                 arm_after_summary: false,
             }),
             lane,
-            vec![first.clone(), second.clone()],
-        );
+            false,
+        )
+        .expect("restore transcript");
 
         let error = transcript
             .clear_navigation()
@@ -1099,15 +1169,16 @@ mod tests {
             },
         )
         .expect("store");
-        let transcript = super::SessionTranscript::new(
+        let transcript = super::SessionTranscript::restored(
             Box::new(FailingSyncStore {
                 inner: store,
                 fail_sync: true,
                 arm_after_summary: false,
             }),
             protocol::LaneId::try_from("main").expect("lane"),
-            Vec::new(),
-        );
+            false,
+        )
+        .expect("restore transcript");
         let tools = crate::runtime::tools::SessionToolState::new(
             ::tools::BuiltinToolFactory::new().create().expect("tools"),
             ::tools::ToolRegistry::default(),
@@ -1155,12 +1226,13 @@ mod tests {
             .expect_err("flushing does not clear uncertain state");
         let path = transcript.path().expect("path");
         drop(transcript);
-        let reopened = super::SessionTranscript::new(
+        let reopened = super::SessionTranscript::restored(
             store::StoreFactory::open(&factory, &path)
                 .expect("reopen durable log"),
             protocol::LaneId::try_from("main").expect("lane"),
-            Vec::new(),
-        );
+            false,
+        )
+        .expect("restore transcript");
         reopened
             .set_name(Some("recovered".into()))
             .expect("a newly opened runtime can write again");

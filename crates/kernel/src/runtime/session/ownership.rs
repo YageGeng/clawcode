@@ -2,13 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use protocol::{
-    EntryId, IdGenerator, IdKind, SessionId, SessionOwnership, SessionTitle,
-    ThinkingLevel, ToolSelection,
+    EntryId, IdGenerator, IdKind, SessionId, SessionMode, SessionOwnership,
+    SessionTitle, ThinkingLevel, ToolSelection, TurnId,
 };
 use store::{NewEntry, OwnedSessionCreateOptions, SessionCreateOptions};
 
 use super::settings::SettingChange;
 use crate::Model;
+use crate::runtime::plan::ModeChange;
 use crate::runtime::{Kernel, KernelError, Session, mcp, tools};
 
 pub(in crate::runtime) const SUBAGENT_TOOL_NAMES: [&str; 2] =
@@ -19,6 +20,8 @@ struct AgentSnapshot {
     model: Arc<dyn Model>,
     thinking_level: ThinkingLevel,
     tools: ToolSelection,
+    /// A child started in plan mode stays read-only, or it could edit for its owner.
+    mode: SessionMode,
 }
 
 impl TryFrom<&Session> for AgentSnapshot {
@@ -30,6 +33,7 @@ impl TryFrom<&Session> for AgentSnapshot {
             model,
             thinking_level,
             tools: owner.tools.snapshot()?.selection.clone(),
+            mode: owner.plan.mode()?,
         })
     }
 }
@@ -67,6 +71,19 @@ impl AgentSnapshot {
         }
         child.model.replace_model(Arc::clone(&self.model))?;
         child.model.replace_thinking_level(self.thinking_level)?;
+        if self.mode == SessionMode::Plan {
+            let change = ModeChange {
+                mode: self.mode,
+                turn_id: TurnId::try_from(ids.next(IdKind::Turn))
+                    .map_err(|e| KernelError::Protocol(e.to_string()))?,
+            };
+            child.transcript.append_mode_note(
+                EntryId::try_from(ids.next(IdKind::Entry))
+                    .map_err(|e| KernelError::Protocol(e.to_string()))?,
+                &change,
+            )?;
+            child.plan.replace_mode(self.mode)?;
+        }
         tools::ToolSelectionUpdate::new(&child.tools, &child.transcript, ids)
             .adopt(self.tools.clone())
     }

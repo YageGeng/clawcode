@@ -29,6 +29,8 @@ use crate::extension::{
 };
 use crate::input::PromptInput;
 use crate::login::LoginTask;
+use crate::permission::PlanApprovalChange;
+use crate::plan::HiddenToolCalls;
 use crate::projection::{
     DurableResumeSelection, EventGroup, ForegroundState, LiveFeed,
     ProjectionFeed, ProjectionRegistry,
@@ -279,6 +281,8 @@ impl AcpServer {
         items: Vec<protocol::SessionReplayItem>,
     ) -> Result<(), agent_client_protocol::Error> {
         let mut event_index = 0_usize;
+        // Replay rebuilds which calls belong to `todo_write` from the messages it sends.
+        let mut hidden = HiddenToolCalls::default();
         for item in items {
             let events = match item {
                 protocol::SessionReplayItem::Message {
@@ -367,9 +371,10 @@ impl AcpServer {
                     agent_client_protocol::Error::into_internal_error,
                 )?;
                 let metadata = mapper.metadata();
-                let updates = mapper.updates().map_err(
+                let mut updates = mapper.updates().map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )?;
+                hidden.apply(&event.payload, &mut updates);
                 drop(mapper);
                 drop(event);
                 for update in updates {
@@ -667,6 +672,22 @@ impl AcpServer {
                         }
                         Some(ElicitationChange::Resolved { request_id }) => {
                             elicitations
+                                .resolved(&task_session_id, request_id);
+                        }
+                        None => {}
+                    }
+                    match &group.plan_approval {
+                        Some(PlanApprovalChange::Requested(request)) => {
+                            elicitations.approvals.request(
+                                &task_connection,
+                                &kernel,
+                                &task_session_id,
+                                request,
+                            );
+                        }
+                        Some(PlanApprovalChange::Resolved { request_id }) => {
+                            elicitations
+                                .approvals
                                 .resolved(&task_session_id, request_id);
                         }
                         None => {}
@@ -1860,6 +1881,10 @@ impl SessionConfigUpdate {
                         .set_session_thinking_level(&task_session_id, level)
                         .await
                         .map(|_level| ()),
+                    ConfigChange::Mode(mode) => task_kernel
+                        .set_session_mode(&task_session_id, mode)
+                        .await
+                        .map(|_mode| ()),
                 }
             })
             .await

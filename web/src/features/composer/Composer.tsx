@@ -4,16 +4,21 @@ import { useRef, useState } from "react";
 import { AcpRequestError } from "../../acp/connection";
 import type { SessionId } from "../../acp/protocol";
 import type { ImageMimeType } from "../../acp/protocol";
-import type { AvailableCommandEntity, PendingMessages, PromptImage, PromptInput, PromptResourceLink } from "../../domain/model";
+import type { AvailableCommandEntity, ContextUsage, PendingMessages, PromptImage, PromptInput, PromptResourceLink } from "../../domain/model";
+import { ModelUsages } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandPalette } from "./CommandPalette";
 import { CommandPaletteModel } from "./commandPaletteModel";
 import { PendingQueue } from "./PendingQueue";
+import { PlanPanel } from "./PlanPanel";
+import { sessionWorkspace } from "../../workspace/state";
+import { useWorkspaceStore } from "../../workspace/store";
 
 export type ComposerProps = Readonly<{
   productSlug: string;
   sessionId: SessionId;
   running: boolean;
+  contextUsage: ContextUsage | undefined;
   outcomeUnknown: boolean;
   pending: PendingMessages;
   availableCommands: readonly AvailableCommandEntity[];
@@ -23,10 +28,71 @@ export type ComposerProps = Readonly<{
 
 type StoredDraft = Readonly<{ text: string; resources: readonly PromptResourceLink[] }>;
 
+type ContextMeterProps = Readonly<{ usage: ContextUsage | undefined }>;
+
+/** Computes a bounded percentage without losing precision for large token counts. */
+function contextUsagePercent(usage: ContextUsage | undefined): number | undefined {
+  if (usage?.used === undefined) return undefined;
+  try {
+    const used = BigInt(usage.used);
+    const size = BigInt(usage.size);
+    if (size <= 0n) return undefined;
+    const perMille = (used * 1000n) / size;
+    return Number(perMille > 1000n ? 1000n : perMille) / 10;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Renders the current context budget as a compact, keyboard-accessible ring. */
+function ContextMeter({ usage }: ContextMeterProps) {
+  const percentage = contextUsagePercent(usage);
+  // Keep the ring visually compact while leaving a balanced touch target around it.
+  const radius = 15.25;
+  const circumference = 2 * Math.PI * radius;
+  const progress = percentage === undefined ? 0 : percentage / 100;
+  const tone = percentage !== undefined && percentage >= 85 ? "warning" : "normal";
+  const percentLabel = percentage === undefined ? "--" : `${percentage.toFixed(1)}%`;
+  const usedLabel = usage === undefined ? "未知" : ModelUsages.formatTokens(usage.used);
+  const sizeLabel = usage === undefined ? "未知" : ModelUsages.formatTokens(usage.size);
+  const exact = usage?.exact;
+  const description = `Context ${usedLabel} / ${sizeLabel} tokens，使用率 ${percentLabel}`;
+
+  return (
+    <div className={`context-meter context-meter--${tone}`} tabIndex={0} role="img" aria-label={description}>
+      <svg className="context-meter__ring" viewBox="0 0 40 40" aria-hidden="true">
+        <circle className="context-meter__track" cx="20" cy="20" r={radius} />
+        <circle
+          className="context-meter__progress"
+          cx="20"
+          cy="20"
+          r={radius}
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - progress)}
+        />
+      </svg>
+      <div className="context-meter__tooltip" role="tooltip">
+        <strong>Context</strong>
+        <span>{usedLabel} / {sizeLabel} tokens</span>
+        <span>使用率 {percentLabel}</span>
+        {exact === undefined ? null : <small>
+          输入 {ModelUsages.formatTokens(exact.inputTokens)} · 输出 {ModelUsages.formatTokens(exact.outputTokens)}<br />
+          缓存读取 {ModelUsages.formatTokens(exact.cacheReadTokens)} · 缓存写入 {ModelUsages.formatTokens(exact.cacheWriteTokens)}
+        </small>}
+      </div>
+    </div>
+  );
+}
+
 const SUPPORTED_IMAGE_MIME_TYPES: readonly ImageMimeType[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const MAX_IMAGE_COUNT = 5;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** Returns a stable display name for an image supplied by the system clipboard. */
+function clipboardImageName(mimeType: ImageMimeType): string {
+  return `clipboard-image.${mimeType.slice("image/".length)}`;
+}
 
 const DraftCodec = {
   parse(raw: string | null): StoredDraft {
@@ -48,8 +114,9 @@ const DraftCodec = {
 } as const;
 
 /** Composes drafts with an explicit delivery choice while the current task is running. */
-export function Composer({ productSlug, sessionId, running, outcomeUnknown, pending, availableCommands, initialDraft, controller }: ComposerProps) {
+export function Composer({ productSlug, sessionId, running, contextUsage, outcomeUnknown, pending, availableCommands, initialDraft, controller }: ComposerProps) {
   const storageKey = `${productSlug}:agent-draft:${sessionId}`;
+  const planMode = useWorkspaceStore((state) => sessionWorkspace(state, sessionId).configOptions.some((option) => option.configId === "mode" && option.currentValue === "plan"));
   const stored = DraftCodec.parse(sessionStorage.getItem(storageKey));
   const initial = initialDraft ?? { ...stored, images: [] };
   const [text, setText] = useState(initial.text);
@@ -72,6 +139,60 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
   const paletteOpen = commandQuery !== undefined && !paletteDismissed;
   const activeCommandIndex = matchingCommands.length === 0 ? 0 : selectedCommandIndex % matchingCommands.length;
   const canSubmit = !readingImages && (text.trim().length > 0 || resources.length > 0 || images.length > 0);
+
+  /** Validates and reads selected or pasted image files into the composer state. */
+  const importImages = (files: readonly File[]) => {
+    if (files.length === 0) return;
+    if (imageReadInProgress.current) {
+      setError("图片仍在读取，请稍候");
+      return;
+    }
+    const currentImages = imagesRef.current;
+    if (currentImages.length + files.length > MAX_IMAGE_COUNT) {
+      setError(`每条消息最多选择 ${MAX_IMAGE_COUNT} 张图片`);
+      return;
+    }
+    const unsupported = files.find((file) => !SUPPORTED_IMAGE_MIME_TYPES.includes(file.type as ImageMimeType));
+    if (unsupported !== undefined) {
+      setError(`不支持图片格式：${unsupported.name || unsupported.type}`);
+      return;
+    }
+    const oversized = files.find((file) => file.size > MAX_IMAGE_BYTES);
+    if (oversized !== undefined) {
+      setError(`图片不能超过 10 MiB：${oversized.name || "剪贴板图片"}`);
+      return;
+    }
+    if (currentImages.reduce((total, image) => total + image.size, 0) + files.reduce((total, file) => total + file.size, 0) > MAX_TOTAL_IMAGE_BYTES) {
+      setError("图片总大小不能超过 20 MiB");
+      return;
+    }
+    imageReadInProgress.current = true;
+    setReadingImages(true);
+    void Promise.all(files.map((file) => new Promise<PromptImage>((resolve, reject) => {
+      const reader = new FileReader();
+      const name = file.name || clipboardImageName(file.type as ImageMimeType);
+      reader.addEventListener("error", () => reject(new Error(`无法读取图片：${name}`)), { once: true });
+      reader.addEventListener("load", () => {
+        if (typeof reader.result !== "string") {
+          reject(new Error(`无法读取图片：${name}`));
+          return;
+        }
+        const separator = reader.result.indexOf(",");
+        if (separator < 0) {
+          reject(new Error(`图片编码无效：${name}`));
+          return;
+        }
+        resolve({ id: crypto.randomUUID(), name, size: file.size, data: reader.result.slice(separator + 1), mimeType: file.type as ImageMimeType });
+      }, { once: true });
+      reader.readAsDataURL(file);
+    }))).then((selected) => {
+      persist({ text, resources, images: [...imagesRef.current, ...selected] });
+      setError(undefined);
+    }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason))).finally(() => {
+      imageReadInProgress.current = false;
+      setReadingImages(false);
+    });
+  };
 
   const persist = (draft: PromptInput) => {
     sessionStorage.setItem(storageKey, JSON.stringify({ text: draft.text, resources: draft.resources } satisfies StoredDraft));
@@ -120,6 +241,7 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
 
   return (
     <div className="composer-area">
+      <PlanPanel sessionId={sessionId} />
       {pending.steering.length + pending.followUp.length === 0 ? null : <PendingQueue pending={pending} controller={controller} onError={queueError} onHint={setHint} />}
       <div className="composer-card">
         {running ? <div className="composer-delivery">
@@ -165,6 +287,16 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
             setSelectedCommandIndex(0);
             setPaletteDismissed(false);
           }}
+          onPaste={(event) => {
+            const files = [...event.clipboardData.items]
+              .filter((item) => item.kind === "file" && SUPPORTED_IMAGE_MIME_TYPES.includes(item.type as ImageMimeType))
+              .map((item) => item.getAsFile())
+              .filter((file): file is File => file !== null);
+            if (files.length === 0) return;
+            // Preserve text when a clipboard payload contains both text and an image.
+            if (event.clipboardData.getData("text/plain").length === 0) event.preventDefault();
+            importImages(files);
+          }}
           onKeyDown={(event) => {
             // IME confirmation and command selection take precedence over the
             // Composer's Enter-to-send shortcut to prevent accidental prompts.
@@ -205,59 +337,14 @@ export function Composer({ productSlug, sessionId, running, outcomeUnknown, pend
           <input ref={imageInput} className="visually-hidden" type="file" accept={SUPPORTED_IMAGE_MIME_TYPES.join(",")} multiple disabled={readingImages} onChange={(event) => {
             const files = [...(event.target.files ?? [])];
             event.target.value = "";
-            if (files.length === 0) return;
-            if (imageReadInProgress.current) {
-              setError("图片仍在读取，请稍候");
-              return;
-            }
-            if (images.length + files.length > MAX_IMAGE_COUNT) {
-              setError(`每条消息最多选择 ${MAX_IMAGE_COUNT} 张图片`);
-              return;
-            }
-            const unsupported = files.find((file) => !SUPPORTED_IMAGE_MIME_TYPES.includes(file.type as ImageMimeType));
-            if (unsupported !== undefined) {
-              setError(`不支持图片格式：${unsupported.name}`);
-              return;
-            }
-            const oversized = files.find((file) => file.size > MAX_IMAGE_BYTES);
-            if (oversized !== undefined) {
-              setError(`图片不能超过 10 MiB：${oversized.name}`);
-              return;
-            }
-            if (images.reduce((total, image) => total + image.size, 0) + files.reduce((total, file) => total + file.size, 0) > MAX_TOTAL_IMAGE_BYTES) {
-              setError("图片总大小不能超过 20 MiB");
-              return;
-            }
-            imageReadInProgress.current = true;
-            setReadingImages(true);
-            void Promise.all(files.map((file) => new Promise<PromptImage>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.addEventListener("error", () => reject(new Error(`无法读取图片：${file.name}`)), { once: true });
-              reader.addEventListener("load", () => {
-                if (typeof reader.result !== "string") {
-                  reject(new Error(`无法读取图片：${file.name}`));
-                  return;
-                }
-                const separator = reader.result.indexOf(",");
-                if (separator < 0) {
-                  reject(new Error(`图片编码无效：${file.name}`));
-                  return;
-                }
-                resolve({ id: crypto.randomUUID(), name: file.name, size: file.size, data: reader.result.slice(separator + 1), mimeType: file.type as ImageMimeType });
-              }, { once: true });
-              reader.readAsDataURL(file);
-            }))).then((selected) => {
-              persist({ text, resources, images: [...imagesRef.current, ...selected] });
-              setError(undefined);
-            }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason))).finally(() => {
-              imageReadInProgress.current = false;
-              setReadingImages(false);
-            });
+            importImages(files);
           }} />
           <button className="icon-button" type="button" title={readingImages ? "正在读取图片" : "添加图片"} disabled={readingImages} onClick={() => imageInput.current?.click()}><ImagePlus size={17} /></button>
           <button className="icon-button" type="button" title="添加资源链接" onClick={() => setShowResourceForm((value) => !value)}><Link2 size={17} /></button>
+          {planMode ? <span className="mode-badge" title="Plan 模式：只能调研，不会修改文件">Plan · 只读</span> : null}
           <span>{readingImages ? "正在读取图片…" : running ? `Enter ${steering ? "补充" : "排队"} · Alt+Enter ${steering ? "排队" : "补充"} · Shift+Enter 换行` : "Enter 发送 · Shift+Enter 换行"}</span>
           {running ? <button className="danger-button" type="button" onClick={() => controller.cancel()}><Square size={13} /> 停止</button> : null}
+          <ContextMeter usage={contextUsage} />
           <button aria-keyshortcuts="Enter" className="primary-button" type="button" disabled={!canSubmit} onClick={() => void submit({ text, resources, images })}><Send size={14} /> {running ? steering ? "补充本轮" : "加入队列" : "发送"}</button>
         </div>
       </div>

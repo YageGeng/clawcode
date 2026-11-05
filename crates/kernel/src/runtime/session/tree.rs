@@ -5,10 +5,12 @@ use protocol::{
 use store::{EntryKind, NewEntry, SessionEntry};
 use tokio_util::sync::CancellationToken;
 
+use super::settings::SessionSettingsUpdate;
 use super::transcript::{
     TranscriptNavigationCommit, TranscriptNavigationSnapshot,
 };
 use crate::runtime::compaction::{SummaryGeneration, SummaryProtocol};
+use crate::runtime::plan::SessionPlanState;
 use crate::runtime::{Kernel, KernelError, tools};
 
 const BRANCH_SUMMARY_INSTRUCTION: &str = "Summarize the abandoned conversation branch for another agent. Preserve user requirements, decisions, completed work, unresolved problems, exact identifiers, and important technical details. Return only the summary.";
@@ -122,6 +124,10 @@ impl Kernel {
                 let old_leaf_id = session.tools.update(|next| {
                     let old = session.transcript.clear_navigation()?;
                     next.selection = protocol::ToolSelection::default();
+                    // The root has no switches, so the mode follows it back to Default.
+                    session
+                        .plan
+                        .replace_mode(protocol::SessionMode::Default)?;
                     Ok(old)
                 })?;
                 session.notify_mcp_change(
@@ -259,6 +265,7 @@ impl Kernel {
                 })
             })
             .transpose()?;
+        let previous_mode = session.plan.mode()?;
         // Apply the lane move, optional summary, label, history rebuild, and
         // durability checkpoint under one transcript lock after all awaits.
         let committed = session.tools.update(|next| {
@@ -276,10 +283,24 @@ impl Kernel {
                     .build(),
             )?;
             next.selection = selection;
+            // The mode is a branch setting, so it follows the lane to its new leaf.
+            session
+                .plan
+                .replace_mode(SessionPlanState::branch_mode(&entries))?;
             Ok(committed)
         })?;
         session
             .notify_mcp_change(protocol::McpSessionChange::Selection, None)?;
+        // The new branch may end in another mode; clients show the current one.
+        if session.plan.mode()? != previous_mode {
+            SessionSettingsUpdate::builder()
+                .kernel(self)
+                .session_id(session_id)
+                .session(&session)
+                .build()
+                .publish()
+                .await;
+        }
         let summary_entry = committed.summary_entry.map(|entry| {
             SessionTreeEntry::builder()
                 .entry_id(entry.id)

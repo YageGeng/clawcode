@@ -17,6 +17,8 @@ pub enum IdKind {
     Record,
     /// Persisted pending-message identifier.
     Queue,
+    /// Identifier of one request waiting on a client's answer.
+    Request,
 }
 
 impl IdKind {
@@ -32,6 +34,7 @@ impl IdKind {
             Self::Entry => "entry",
             Self::Record => "record",
             Self::Queue => "queue",
+            Self::Request => "request",
         }
     }
 }

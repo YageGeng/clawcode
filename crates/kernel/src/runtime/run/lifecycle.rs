@@ -1,7 +1,10 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use protocol::{PendingMessages, QueueId, RunId, Sequence, TurnId};
+use protocol::{
+    AgentEvent, AgentEventPayload, EventMetadata, PendingMessages, QueueId,
+    RunId, Sequence, TimestampMs, TurnId,
+};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +52,9 @@ pub(in crate::runtime) struct SessionExecution {
     waiters: Mutex<CancellationToken>,
     #[builder(default)]
     active_run: Mutex<Option<ActiveRunContext>>,
+    /// Client prompts, such as MCP elicitations and plan approvals, the Run waits on.
+    #[builder(default)]
+    user_waits: AtomicUsize,
     idle_notify: Notify,
     pub(super) cancellation: Mutex<CancellationToken>,
     pub(super) queue: Mutex<PendingQueue>,
@@ -280,10 +286,32 @@ impl SessionExecution {
         }
         let run_id = context.run_id.clone();
         *active_run = Some(context);
+        // A wait whose future was dropped with an earlier Run never settled.
+        self.user_waits.store(0, Ordering::SeqCst);
         Ok(ActiveRunLease {
             execution: Arc::clone(self),
             run_id,
         })
+    }
+
+    /// Counts one more client prompt the Run waits on.
+    ///
+    /// Returns true for the first, which is when the client learns the Run
+    /// requires action; MCP elicitations and plan approvals share the count.
+    pub(in crate::runtime) fn begin_user_wait(&self) -> bool {
+        self.user_waits.fetch_add(1, Ordering::SeqCst) == 0
+    }
+
+    /// Counts one client prompt as settled.
+    ///
+    /// Returns true when no other prompt still waits, which is when the client
+    /// learns the Run is running again.
+    pub(in crate::runtime) fn end_user_wait(&self) -> bool {
+        self.user_waits.try_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |waits| waits.checked_sub(1),
+        ) == Ok(1)
     }
 
     /// Returns one owned active-Run snapshot without retaining the state lock.
@@ -294,6 +322,32 @@ impl SessionExecution {
             .lock()
             .map(|active_run| active_run.clone())
             .map_err(KernelError::from)
+    }
+
+    /// Sends one event raised inside a tool, such as a client prompt, through
+    /// the active Run's sink so it stays ordered with the Run's own events.
+    pub(in crate::runtime) async fn emit_to_run(
+        &self,
+        turn_id: TurnId,
+        timestamp_ms: TimestampMs,
+        payload: AgentEventPayload,
+    ) -> Result<(), KernelError> {
+        let active_run = self.active_run()?.ok_or_else(|| {
+            KernelError::Protocol("Session has no active Run".to_string())
+        })?;
+        let sequence = self.next_sequence()?;
+        active_run
+            .sink
+            .emit(AgentEvent {
+                metadata: EventMetadata {
+                    turn_id,
+                    timestamp_ms,
+                    sequence,
+                },
+                payload,
+            })
+            .await?;
+        Ok(())
     }
 
     /// Advances the diagnostic Turn for the currently installed Run.
@@ -631,6 +685,27 @@ mod tests {
         drop(lease);
         waiter.await.expect("idle waiter");
         assert!(execution.active_run().expect("active run").is_none());
+    }
+
+    /// The Run requires action from the first waiting prompt until the last
+    /// settles, and a new Run never inherits a wait whose future was dropped.
+    #[test]
+    fn user_waits_report_only_the_first_and_the_last() {
+        let execution = execution();
+        assert!(execution.begin_user_wait());
+        assert!(!execution.begin_user_wait());
+        assert!(!execution.end_user_wait());
+        assert!(execution.end_user_wait());
+        assert!(!execution.end_user_wait());
+        assert!(execution.begin_user_wait());
+        let _lease = execution
+            .install_run(ActiveRunContext {
+                run_id: RunId::try_from("run-1").expect("run id"),
+                turn_id: TurnId::try_from("turn-1").expect("turn id"),
+                sink: Arc::new(TestSink),
+            })
+            .expect("install run");
+        assert!(execution.begin_user_wait());
     }
 
     /// Rejects an operation that was queued before shutdown changed lifecycle state.

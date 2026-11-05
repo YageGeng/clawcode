@@ -41,6 +41,7 @@ nix = { workspace = true }
 # misc
 base64 = { workspace = true }
 image = { workspace = true }
+shlex = { workspace = true }
 similar = { workspace = true }
 unicode-normalization = { workspace = true }
 url = { workspace = true }

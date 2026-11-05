@@ -3,10 +3,12 @@ use std::sync::Arc;
 use protocol::{
     AgentEvent, AgentEventPayload, EntryId, EventMetadata, ExtensionInvocation,
     IdKind, ModelProfile, ModelSelectEvent, ModelSelectSource, SessionId,
-    SessionSettings, ThinkingLevel, ThinkingLevelSelectEvent, TurnId,
+    SessionMode, SessionSettings, ThinkingLevel, ThinkingLevelSelectEvent,
+    TurnId,
 };
 use store::{EntryKind, NewEntry, SessionEntry};
 
+use crate::runtime::plan::ModeChange;
 use crate::runtime::{Kernel, KernelError, Session};
 
 /// Borrows one live Session for persisted model or thinking changes.
@@ -21,6 +23,9 @@ pub(in crate::runtime) struct SessionSettingsUpdate<'a> {
     /// Extension call that made the change; `None` for client requests.
     #[builder(default)]
     invocation: Option<&'a ExtensionInvocation>,
+    /// Turn of a kernel tool that made the change, such as an approved plan.
+    #[builder(default)]
+    turn_id: Option<&'a TurnId>,
 }
 
 impl SessionSettingsUpdate<'_> {
@@ -116,6 +121,52 @@ impl SessionSettingsUpdate<'_> {
         Ok(level)
     }
 
+    /// Persists and selects one mode for future Turn snapshots.
+    pub(in crate::runtime) async fn mode(
+        &self,
+        mode: SessionMode,
+    ) -> Result<SessionMode, KernelError> {
+        let _serial = self.session.settings_changes.lock().await;
+        if self.session.plan.mode()? == mode {
+            return Ok(mode);
+        }
+        let change = ModeChange {
+            mode,
+            turn_id: self.turn_id()?,
+        };
+        let entry_id =
+            EntryId::try_from(self.kernel.id_generator.next(IdKind::Entry))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        // The entry and its model-facing note are written together so a rebuild
+        // from the Store reproduces the context the live Session holds.
+        self.session
+            .transcript
+            .append_mode_note(entry_id, &change)?;
+        self.session.sync_store()?;
+        self.session.plan.replace_mode(mode)?;
+        tracing::info!(
+            "changed mode for Session {} to {:?}",
+            self.session_id,
+            mode
+        );
+        self.publish().await;
+        Ok(mode)
+    }
+
+    /// Returns the invoking Turn, or a fresh identity for a client request.
+    fn turn_id(&self) -> Result<TurnId, KernelError> {
+        match self.turn_id.cloned().or_else(|| {
+            self.invocation
+                .and_then(|invocation| invocation.turn_id.clone())
+        }) {
+            Some(turn_id) => Ok(turn_id),
+            None => {
+                TurnId::try_from(self.kernel.id_generator.next(IdKind::Turn))
+                    .map_err(|error| KernelError::Protocol(error.to_string()))
+            }
+        }
+    }
+
     /// Appends one durable setting entry before the in-memory selection changes.
     fn persist(&self, change: &SettingChange) -> Result<(), KernelError> {
         let (kind, payload) = change.into();
@@ -144,7 +195,7 @@ impl SessionSettingsUpdate<'_> {
     }
 
     /// Reports both current values; the change is already durable, so a sink failure only warns.
-    async fn publish(&self) {
+    pub(in crate::runtime) async fn publish(&self) {
         let event = match self.settings_event() {
             Ok(event) => event,
             Err(error) => {
@@ -169,16 +220,7 @@ impl SessionSettingsUpdate<'_> {
 
     /// Snapshots the current selection into one `SettingsChanged` event.
     fn settings_event(&self) -> Result<AgentEvent, KernelError> {
-        let turn_id = match self
-            .invocation
-            .and_then(|invocation| invocation.turn_id.clone())
-        {
-            Some(turn_id) => turn_id,
-            None => {
-                TurnId::try_from(self.kernel.id_generator.next(IdKind::Turn))
-                    .map_err(|error| KernelError::Protocol(error.to_string()))?
-            }
-        };
+        let turn_id = self.turn_id()?;
         Ok(AgentEvent {
             metadata: EventMetadata {
                 turn_id,
@@ -202,6 +244,7 @@ impl Session {
             model: model.profile().clone(),
             thinking_level,
             models: self.model.profiles(),
+            mode: self.plan.mode()?,
         })
     }
 }
@@ -229,6 +272,22 @@ impl Kernel {
             .session(&session)
             .build()
             .model(provider_id, model_id)
+            .await
+    }
+
+    /// Selects a mode; a running Turn keeps its snapshot and the next Turn uses it.
+    pub async fn set_session_mode(
+        &self,
+        session_id: &SessionId,
+        mode: SessionMode,
+    ) -> Result<SessionMode, KernelError> {
+        let session = self.session(session_id)?;
+        SessionSettingsUpdate::builder()
+            .kernel(self)
+            .session_id(session_id)
+            .session(&session)
+            .build()
+            .mode(mode)
             .await
     }
 

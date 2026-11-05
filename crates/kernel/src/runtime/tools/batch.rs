@@ -9,6 +9,7 @@ use protocol::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::runtime::plan::PlanModeGate;
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
 use super::update::{ToolExecutionUpdate, ToolUpdateChannel};
@@ -24,6 +25,8 @@ pub(in crate::runtime) struct ToolBatch<'a> {
     pub(in crate::runtime) emitter: &'a EventEmitter,
     pub(in crate::runtime) cancellation: &'a CancellationToken,
     pub(in crate::runtime) tools: Arc<ToolRegistry>,
+    /// Plan-mode policy captured with the Turn's tool snapshot.
+    pub(in crate::runtime) gate: &'a PlanModeGate,
     pub(in crate::runtime) calls: Vec<ToolCall>,
 }
 
@@ -179,6 +182,31 @@ impl Kernel {
                     )));
                 }
             }
+            // Plan mode judges the call as hooks left it, before any validation.
+            let gated_tool = batch.tools.tool(&call.name);
+            if immediate_result.is_none()
+                && let Err(reason) = batch.gate.check(
+                    &call,
+                    gated_tool.as_ref().map(|tool| tool.metadata()),
+                )
+            {
+                tracing::warn!(
+                    "blocked Tool call {} ({}) in plan mode for session {}, Run {}, Turn {}, trace {}",
+                    call.tool_call_id,
+                    call.name,
+                    batch.session_id,
+                    batch.run_id,
+                    batch.turn_id,
+                    batch.trace_id
+                );
+                immediate_result = Some(ToolResult::from((
+                    call.tool_call_id.clone(),
+                    protocol::ToolBlock::builder()
+                        .reason(reason)
+                        .terminate(false)
+                        .build(),
+                )));
+            }
             if immediate_result.is_none() && call.invalid_arguments.is_some() {
                 immediate_result = Some(ToolResult::builder()
                     .tool_call_id(call.tool_call_id.clone())
@@ -317,6 +345,14 @@ impl Kernel {
             result = transformed;
             // Extensions may rebuild the result; cancellation is not theirs to erase.
             result.cancelled |= cancelled_call;
+            // A plan the user did not approve ends the Run so they can give feedback.
+            terminate |= matches!(
+                result.details,
+                Some(protocol::ToolResultDetails::PlanApproval {
+                    approved: false,
+                    ..
+                })
+            );
             if executed && let Some(tool) = batch.tools.tool(&call.name) {
                 let policy = tool.metadata().output_policy;
                 if policy != protocol::ToolOutputPolicy::Preserve {

@@ -10,7 +10,9 @@ use ::extension::{
     HandlerRegistry,
 };
 use ::tools::ToolRegistry;
-use protocol::{ExtensionFlagDefinition, LaneId, SessionId, ThinkingLevel};
+use protocol::{
+    ExtensionFlagDefinition, LaneId, SessionId, SessionMode, ThinkingLevel,
+};
 use store::{EntryKind, SessionStore};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -22,6 +24,7 @@ use crate::runtime::extension::{
     KernelExtensionDiagnostics, SessionExtensions,
 };
 use crate::runtime::mcp::SessionMcpRuntime;
+use crate::runtime::plan::SessionPlanState;
 use crate::runtime::run::lifecycle::{SessionExecution, SessionLifecycle};
 use crate::runtime::run::queue::PendingQueue;
 use crate::runtime::tools::SessionToolState;
@@ -32,6 +35,7 @@ use crate::{Model, ModelCatalog};
 struct RestoredSessionSettings {
     model: Arc<dyn Model>,
     thinking_level: ThinkingLevel,
+    mode: SessionMode,
 }
 
 impl RestoredSessionSettings {
@@ -45,11 +49,14 @@ impl RestoredSessionSettings {
             model: models.active(),
             // Sessions without a persisted choice use the product default level.
             thinking_level: ThinkingLevel::default(),
+            mode: SessionMode::default(),
         };
         let Some(leaf) = store.lane(lane) else {
             return Ok(settings);
         };
-        for entry in store.branch(leaf)? {
+        let branch = store.branch(leaf)?;
+        settings.mode = SessionPlanState::branch_mode(&branch);
+        for entry in branch {
             if !matches!(
                 entry.kind,
                 EntryKind::ModelChange | EntryKind::ThinkingLevelChange
@@ -111,7 +118,8 @@ impl SessionAssembly<'_> {
             &lane,
             &session_models,
         )?;
-        let history = Kernel::history_from_store(self.store.as_ref(), &lane)?;
+        // Owned Sessions are subagents, whose plan-mode notes use their own wording.
+        let delegated = self.ownership.is_some();
         // Resume starts above both shared Store mutations and the extra
         // Usage events synthesized from persisted Assistant messages.
         let initial_event_sequence =
@@ -137,7 +145,7 @@ impl SessionAssembly<'_> {
         // Diagnostics share the transcript component without retaining the
         // Session and creating a reference cycle through ExtensionRuntime.
         let transcript =
-            Arc::new(SessionTranscript::new(self.store, lane, history));
+            Arc::new(SessionTranscript::restored(self.store, lane, delegated)?);
         let extension_runtime = Arc::new(ExtensionRuntime::new(
             self.extensions,
             Arc::new(
@@ -178,14 +186,19 @@ impl SessionAssembly<'_> {
                     settings.model,
                     settings.thinking_level,
                 ))
+                .plan(SessionPlanState::new(settings.mode))
                 .execution(execution)
                 .build(),
         );
-        runtime.tools.register(Arc::new(tools::ToolSearchTool::new(
-            Arc::downgrade(&runtime),
-            Arc::clone(&kernel.id_generator),
-        )))?;
+        runtime
+            .tools
+            .register_kernel(Arc::new(tools::ToolSearchTool::new(
+                Arc::downgrade(&runtime),
+                Arc::clone(&kernel.id_generator),
+            )))?;
         crate::runtime::subagent::register(&runtime, kernel)?;
+        crate::runtime::plan::register_exit_plan_mode(&runtime, kernel)?;
+        crate::runtime::plan::register_todo_write(&runtime)?;
         if let Some(host) = mcp_host
             && let Err(error) = host.attach(&runtime)
         {
@@ -232,6 +245,14 @@ impl SessionAssembly<'_> {
         let mut extension_tool_names = BTreeSet::new();
         for (_extension_id, tool) in self.extensions.tools() {
             let name = tool.definition().name;
+            if tools::RESERVED_TOOL_NAMES.contains(&name.as_str()) {
+                // Refusing only the tool keeps the Session creatable.
+                tracing::warn!(
+                    "rejected extension tool {} because the name is reserved",
+                    name
+                );
+                continue;
+            }
             // The first extension registration wins while still overriding built-ins.
             if extension_tool_names.insert(name) {
                 extension_tools.upsert(tool);

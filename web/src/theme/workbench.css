@@ -1438,6 +1438,12 @@
   box-shadow: var(--focus-ring), var(--shadow-soft);
 }
 
+/* Let the context tooltip float above the composer without being clipped. */
+.composer-card:has(.context-meter:hover),
+.composer-card:has(.context-meter:focus-visible) {
+  overflow: visible;
+}
+
 /* Make delivery timing visible without repeating technical queue names in the draft. */
 .composer-delivery {
   display: flex;
@@ -1600,6 +1606,113 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+}
+
+.context-meter {
+  position: relative;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: var(--accent);
+  background: transparent;
+  cursor: help;
+  outline: none;
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+
+.context-meter:hover,
+.context-meter:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring), 0 4px 12px rgb(43 62 101 / 10%);
+  transform: translateY(-1px);
+}
+
+.context-meter--warning {
+  color: var(--warning);
+  border-color: var(--warning-border);
+}
+
+.context-meter__ring {
+  position: absolute;
+  inset: 0;
+  width: 36px;
+  height: 36px;
+  transform: rotate(-90deg);
+}
+
+.context-meter__track,
+.context-meter__progress {
+  fill: none;
+  stroke-width: 3.5;
+}
+
+.context-meter__track {
+  stroke: var(--surface-sunken);
+}
+
+.context-meter__progress {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 420ms cubic-bezier(.2, .8, .2, 1);
+}
+
+.context-meter__tooltip {
+  position: absolute;
+  right: -8px;
+  bottom: calc(100% + 10px);
+  z-index: 20;
+  display: grid;
+  min-width: 218px;
+  gap: 5px;
+  padding: 11px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-floating);
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(.98);
+  transform-origin: bottom right;
+  transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+
+.context-meter__tooltip::after {
+  position: absolute;
+  right: 17px;
+  bottom: -5px;
+  width: 9px;
+  height: 9px;
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+  background: var(--surface-raised);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.context-meter__tooltip strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.context-meter__tooltip small {
+  padding-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.context-meter:hover .context-meter__tooltip,
+.context-meter:focus-visible .context-meter__tooltip {
+  opacity: 1;
+  transform: translateY(0) scale(1);
 }
 
 /* Queue limits and neutral surfaces keep ordinary waiting from looking like a warning. */
@@ -2791,14 +2904,16 @@
   font-size: 9px;
 }
 
-.elicitation-dialog header {
+.elicitation-dialog header,
+.permission-dialog header {
   display: flex;
   align-items: center;
   gap: 9px;
 }
 
 .elicitation-dialog header h2,
-.elicitation-dialog header p {
+.elicitation-dialog header p,
+.permission-dialog header h2 {
   margin: 0;
 }
 
@@ -2842,6 +2957,87 @@
 .sign-in-status {
   color: var(--text-secondary);
   text-align: center;
+}
+
+/* A long plan scrolls inside the dialog so the choices stay visible. */
+.permission-dialog {
+  width: min(680px, 100%);
+}
+
+.permission-plan {
+  max-height: 55vh;
+  margin-top: 14px;
+  padding: 10px 12px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-sunken);
+}
+
+.plan-panel {
+  margin-bottom: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.plan-panel > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--surface-muted);
+  cursor: pointer;
+}
+
+.plan-panel__progress {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.plan-panel__todos {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 6px 8px;
+  list-style: none;
+}
+
+.plan-panel__todos li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plan-panel__todos li[data-status="completed"] span {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.plan-panel__todos li[data-status="in_progress"] {
+  color: var(--accent-strong);
+}
+
+.plan-panel__approved {
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.plan-panel__approved > summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.mode-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--accent-strong);
+  border-radius: 999px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .elicitation-form {

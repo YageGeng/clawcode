@@ -553,6 +553,31 @@ export type ElicitationPrompt = Readonly<{
   login?: Readonly<{ userCode: string; name: string }>;
 }>;
 
+/** One todo item as the agent's plan update shows it. */
+export type PlanTodo = Readonly<{ content: string; status: string }>;
+
+/** The plans the agent published for one Session, keyed by their stable plan ids. */
+export type SessionPlans = Readonly<{
+  /** The `todos` plan: the agent's current todo list. */
+  todos?: readonly PlanTodo[];
+  /** The `plan-mode` plan: Markdown of the plan the user last approved. */
+  approvedPlan?: string;
+}>;
+
+/** One option the agent offers in a `session/request_permission`. */
+export type PermissionOption = Readonly<{ optionId: string; name: string; kind: string }>;
+
+/** One standard `session/request_permission` waiting for the user, oldest first. */
+export type PermissionPrompt = Readonly<{
+  key: string;
+  sessionId: SessionId;
+  title: string;
+  description?: string;
+  /** Present when the request approves a plan submitted with `exit_plan_mode`. */
+  plan?: string;
+  options: readonly PermissionOption[];
+}>;
+
 /** The user's answer, serialized as the standard elicitation response. */
 export type ElicitationAnswer =
   | Readonly<{ action: "accept"; content?: Readonly<Record<string, unknown>> }>

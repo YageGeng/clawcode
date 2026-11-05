@@ -324,6 +324,20 @@ pub enum AgentEventPayload {
         /// User disposition returned to the MCP Server.
         result: McpElicitationResult,
     },
+
+    /// A plan submitted through `exit_plan_mode` is waiting for the user.
+    PlanApprovalRequested {
+        /// The plan and the identities that route the answer.
+        request: crate::PlanApprovalRequest,
+    },
+
+    /// A pending plan approval was answered or withdrawn.
+    PlanApprovalResolved {
+        /// Request previously published to clients.
+        request_id: String,
+        /// What happened to the plan.
+        decision: crate::PlanApprovalDecision,
+    },
 }
 
 /// Streamed runtime event with mandatory turn, timestamp, and sequence fields.

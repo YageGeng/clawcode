@@ -181,6 +181,19 @@ pub struct TruncationDetails {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultDetails {
+    /// Outcome of a plan submitted through `exit_plan_mode`.
+    PlanApproval {
+        /// Whether the user approved and plan mode ended.
+        approved: bool,
+        /// The approved plan; absent when the user kept planning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
+    },
+    /// The complete todo list a `todo_write` call set.
+    TodoList {
+        /// Items in the order the agent gave them.
+        todos: Vec<crate::TodoItem>,
+    },
     /// Session delegated by a foreground or background subagent call.
     Subagent {
         /// Stable child Session used for live projection and replay navigation.

@@ -12,6 +12,7 @@ import type {
   PendingMessages,
   RetryStatus,
   SessionEvent,
+  SessionPlans,
   SessionTree,
   SkillListResult,
   ToolCallEntity,
@@ -73,6 +74,7 @@ export class SessionWorkspaceStager {
   private running: boolean;
   private contextUsage: ContextUsage | undefined;
   private configOptions: readonly ConfigSelect[];
+  private plans: SessionPlans;
   private retry: RetryStatus | undefined;
   private compaction: CompactionStatus;
   private outcomeUnknown: boolean;
@@ -99,6 +101,7 @@ export class SessionWorkspaceStager {
     this.running = base.running;
     this.contextUsage = base.contextUsage;
     this.configOptions = base.configOptions;
+    this.plans = base.plans;
     this.retry = base.retry;
     this.compaction = base.compaction;
     this.outcomeUnknown = base.outcomeUnknown;
@@ -131,6 +134,7 @@ export class SessionWorkspaceStager {
         this.skillDiagnostics = initialSessionWorkspaceState.skillDiagnostics;
         this.availableCommands = initialSessionWorkspaceState.availableCommands;
         this.configOptions = initialSessionWorkspaceState.configOptions;
+        this.plans = initialSessionWorkspaceState.plans;
         this.mcpSnapshot = initialSessionWorkspaceState.mcpSnapshot;
         this.running = false;
         this.contextUsage = undefined;
@@ -275,6 +279,8 @@ export class SessionWorkspaceStager {
         return;
       case "usage/changed": this.contextUsage = action.usage; return;
       case "config/replaced": this.configOptions = action.options; return;
+      case "plans/todos": this.plans = { ...this.plans, todos: action.todos }; return;
+      case "plans/approved": this.plans = { ...this.plans, approvedPlan: action.plan }; return;
       case "retry/changed": this.retry = action.retry; return;
       case "compaction/changed": this.compaction = action.compaction; return;
       case "outcome/unknown": this.outcomeUnknown = action.value; return;
@@ -306,6 +312,7 @@ export class SessionWorkspaceStager {
       running: this.running,
       contextUsage: this.contextUsage,
       configOptions: this.configOptions,
+      plans: this.plans,
       retry: this.retry,
       compaction: this.compaction,
       outcomeUnknown: this.outcomeUnknown,
@@ -341,6 +348,7 @@ export class SessionWorkspaceStager {
       running: this.running,
       contextUsage: this.contextUsage,
       configOptions: this.configOptions,
+      plans: this.plans,
       retry: this.retry,
       compaction: this.compaction,
       outcomeUnknown: this.outcomeUnknown,

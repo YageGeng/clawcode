@@ -66,3 +66,20 @@ impl ToolFactory for BuiltinToolFactory {
         Ok(registry)
     }
 }
+
+/// Metadata shared by built-in tools that only read the workspace.
+///
+/// Plan mode lets a tool run only when it is known not to change anything.
+fn read_only_metadata() -> &'static protocol::ToolMetadata {
+    static READ_ONLY: std::sync::OnceLock<protocol::ToolMetadata> =
+        std::sync::OnceLock::new();
+    READ_ONLY.get_or_init(|| {
+        protocol::ToolMetadata::builder()
+            .annotations(
+                protocol::ToolAnnotations::builder()
+                    .read_only_hint(Some(true))
+                    .build(),
+            )
+            .build()
+    })
+}

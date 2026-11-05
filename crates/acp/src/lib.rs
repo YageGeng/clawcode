@@ -10,6 +10,8 @@ mod extension;
 mod input;
 mod login;
 mod mapping;
+mod permission;
+mod plan;
 mod projection;
 mod recovery;
 mod server;

@@ -79,6 +79,10 @@ pub enum ToolError {
     #[error("tool already registered: {0}")]
     Duplicate(String),
 
+    /// The name belongs to a kernel tool that extensions may not replace.
+    #[error("tool name is reserved: {0}")]
+    ReservedName(String),
+
     /// A dynamic registry lock was poisoned by a panicking writer.
     #[error("tool registry lock poisoned")]
     RegistryPoisoned,

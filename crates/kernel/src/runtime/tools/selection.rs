@@ -294,11 +294,12 @@ mod tests {
             },
         )
         .expect("store");
-        let transcript = SessionTranscript::new(
+        let transcript = SessionTranscript::restored(
             store,
             protocol::LaneId::try_from("main").expect("lane"),
-            Vec::new(),
-        );
+            false,
+        )
+        .expect("restore transcript");
         let mut registry = ToolRegistry::default();
         for name in ["first", "second", "huge"] {
             registry

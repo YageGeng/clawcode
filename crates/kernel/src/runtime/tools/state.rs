@@ -6,6 +6,10 @@ use protocol::{ToolExposure, ToolSelection};
 
 use crate::KernelError;
 
+/// Tool names only the kernel may register; plan mode depends on their behavior.
+pub(in crate::runtime) const RESERVED_TOOL_NAMES: [&str; 2] =
+    [protocol::EXIT_PLAN_MODE_TOOL, protocol::TODO_WRITE_TOOL];
+
 /// Immutable catalog partitions and explicit preferences captured for one model request.
 #[derive(Clone, typed_builder::TypedBuilder)]
 #[builder(builder_method(vis = ""), builder_type(vis = ""))]
@@ -17,6 +21,9 @@ pub(in crate::runtime) struct SessionToolSnapshot {
     revision: u64,
     #[builder(default)]
     pub(super) search_index: Arc<super::search::ToolSearchIndex>,
+    /// Names whose registered implementation is the kernel's own.
+    #[builder(default)]
+    pub(in crate::runtime) kernel_owned: BTreeSet<String>,
 }
 
 impl SessionToolSnapshot {
@@ -254,16 +261,48 @@ impl SessionToolState {
         Ok(result)
     }
 
-    /// Registers a catalog entry without implicitly loading Deferred or Hidden tools.
+    /// Registers an extension's catalog entry without implicitly loading Deferred
+    /// or Hidden tools; names reserved for kernel tools are refused.
     pub(in crate::runtime) fn register(
         &self,
         tool: Arc<dyn AgentTool>,
+    ) -> Result<(), ToolError> {
+        let name = tool.definition().name;
+        if RESERVED_TOOL_NAMES.contains(&name.as_str()) {
+            tracing::warn!(
+                "rejected extension tool {} because the name is reserved",
+                name
+            );
+            return Err(ToolError::ReservedName(name));
+        }
+        self.publish(tool, false)
+    }
+
+    /// Registers a kernel tool and remembers that its name is the kernel's.
+    pub(in crate::runtime) fn register_kernel(
+        &self,
+        tool: Arc<dyn AgentTool>,
+    ) -> Result<(), ToolError> {
+        self.publish(tool, true)
+    }
+
+    /// Publishes one catalog entry in the extension partition.
+    fn publish(
+        &self,
+        tool: Arc<dyn AgentTool>,
+        kernel_owned: bool,
     ) -> Result<(), ToolError> {
         let mut current = self
             .current
             .write()
             .map_err(|_poison_error| ToolError::RegistryPoisoned)?;
         let mut next = current.as_ref().clone();
+        let name = tool.definition().name;
+        if kernel_owned {
+            next.kernel_owned.insert(name);
+        } else {
+            next.kernel_owned.remove(&name);
+        }
         next.extensions.upsert(tool);
         next.rebuild_search_index();
         next.revision = next.revision.saturating_add(1);

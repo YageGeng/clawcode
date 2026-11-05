@@ -10,6 +10,7 @@ use protocol::{
     ToolCallEvent, ToolCallResult, UserBashDisposition, UserBashEvent,
     UserBashResult,
 };
+use tools::{CommandInvocation, ShellCommandLine};
 
 /// Stable identifier shared by build configuration and runtime metadata.
 pub const EXTENSION_ID: &str = "command-guard";
@@ -54,102 +55,19 @@ impl CommandPolicy {
     /// Detects direct recursive and forced rm invocations in shell segments.
     fn rejects(command: &str) -> bool {
         ShellCommandLine::from(command)
-            .invocations
+            .invocations()
             .iter()
-            .any(CommandInvocation::is_recursive_forced_remove)
+            .any(Self::is_recursive_forced_remove)
     }
-}
 
-/// Parsed direct commands separated outside shell quotes.
-struct ShellCommandLine {
-    invocations: Vec<CommandInvocation>,
-}
-
-impl From<&str> for ShellCommandLine {
-    /// Splits shell control segments before applying shlex word parsing.
-    fn from(command: &str) -> Self {
-        let mut segments = Vec::new();
-        let mut current = String::new();
-        let mut quote = None;
-        let mut escaped = false;
-        for character in command.chars() {
-            if escaped {
-                current.push(character);
-                escaped = false;
-                continue;
-            }
-            if character == '\\' {
-                current.push(character);
-                escaped = true;
-                continue;
-            }
-            if let Some(active_quote) = quote {
-                current.push(character);
-                if character == active_quote {
-                    quote = None;
-                }
-                continue;
-            }
-            if matches!(character, '\'' | '"') {
-                quote = Some(character);
-                current.push(character);
-                continue;
-            }
-            if matches!(character, ';' | '|' | '&' | '\n') {
-                if !current.trim().is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-                continue;
-            }
-            current.push(character);
-        }
-        if !current.trim().is_empty() {
-            segments.push(current);
-        }
-        Self {
-            invocations: segments
-                .into_iter()
-                .filter_map(|segment| {
-                    CommandInvocation::try_from(segment.as_str()).ok()
-                })
-                .collect(),
-        }
-    }
-}
-
-/// One directly executable shell command and its parsed arguments.
-struct CommandInvocation {
-    executable: String,
-    arguments: Vec<String>,
-}
-
-impl TryFrom<&str> for CommandInvocation {
-    type Error = ();
-
-    /// Parses one shell segment without evaluating expansions or substitutions.
-    fn try_from(segment: &str) -> Result<Self, Self::Error> {
-        let mut words = shlex::split(segment).ok_or(())?.into_iter();
-        let executable = words.next().ok_or(())?;
-        Ok(Self {
-            executable,
-            arguments: words.collect(),
-        })
-    }
-}
-
-impl CommandInvocation {
-    /// Returns whether this direct invocation combines recursive and force rm flags.
-    fn is_recursive_forced_remove(&self) -> bool {
-        if std::path::Path::new(&self.executable)
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            != Some("rm")
-        {
+    /// Returns whether one direct invocation combines recursive and force rm flags.
+    fn is_recursive_forced_remove(invocation: &CommandInvocation) -> bool {
+        if invocation.program() != "rm" {
             return false;
         }
         let mut recursive = false;
         let mut forced = false;
-        for argument in &self.arguments {
+        for argument in &invocation.arguments {
             if argument == "--" {
                 break;
             }

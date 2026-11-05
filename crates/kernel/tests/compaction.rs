@@ -2029,3 +2029,121 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
         .expect("user message event");
     assert!(compaction_index < user_index);
 }
+
+/// Returns scripted events for one plain textual answer.
+fn plan_answer(text: &str) -> Result<Vec<ModelStreamEvent>, ModelError> {
+    Ok(vec![
+        ModelStreamEvent::TextDelta(text.to_string()),
+        ScriptedModel::finished(StopReason::EndTurn),
+    ])
+}
+
+/// Returns whether a context message is the kernel's plan-mode note.
+fn is_plan_note(message: &AgentMessage) -> bool {
+    matches!(
+        &message.content,
+        MessageContent::Extension { extension }
+            if extension.custom_type == "session_mode"
+                && extension.extension_id.as_str() == "clawcode"
+    )
+}
+
+/// Runs one prompt and returns the provider request it produced.
+async fn plan_prompt(fixture: &CompactionFixture, input: &str) -> ModelRequest {
+    fixture
+        .kernel
+        .run(
+            RunRequest {
+                session_id: fixture.session_id.clone(),
+                input: input.into(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("prompt");
+    fixture
+        .model
+        .requests
+        .lock()
+        .expect("request lock")
+        .last()
+        .expect("request")
+        .clone()
+}
+
+/// Compacting away the note that entered plan mode restates it after the summary,
+/// live and after the Session is reopened.
+#[tokio::test]
+async fn compaction_keeps_the_plan_note() {
+    let fixture = CompactionFixture::new_with_scripted_history(
+        [plan_answer("historical answer")],
+        [
+            plan_answer("summary"),
+            plan_answer("after"),
+            plan_answer("reopened"),
+        ],
+        false,
+        0,
+    )
+    .await;
+    fixture
+        .kernel
+        .set_session_mode(&fixture.session_id, protocol::SessionMode::Plan)
+        .await
+        .expect("set mode");
+    plan_prompt(&fixture, "plan this").await;
+    fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact");
+
+    let live = plan_prompt(&fixture, "after compaction").await;
+    assert!(live.messages.get(1).is_some_and(|message| matches!(
+        message.content,
+        MessageContent::CompactionSummary { .. }
+    )));
+    assert!(live.messages.get(2).is_some_and(is_plan_note));
+
+    fixture
+        .kernel
+        .close_session(&fixture.session_id)
+        .await
+        .expect("close Session");
+    fixture
+        .kernel
+        .resume_session(
+            fixture.session_id.clone(),
+            fixture._store_root.path().join("workspace/compact"),
+        )
+        .await
+        .expect("resume Session");
+    let rebuilt = plan_prompt(&fixture, "reopened").await;
+    assert_eq!(live.messages.get(1..3), rebuilt.messages.get(1..3));
+}
+
+/// Compaction outside plan mode adds no note.
+#[tokio::test]
+async fn compaction_without_plan_mode_adds_no_note() {
+    let fixture = CompactionFixture::new_with_scripted_history(
+        [plan_answer("historical answer")],
+        [plan_answer("summary"), plan_answer("after")],
+        false,
+        0,
+    )
+    .await;
+    plan_prompt(&fixture, "plan this").await;
+    fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact");
+    let live = plan_prompt(&fixture, "after compaction").await;
+    assert!(!live.messages.iter().any(is_plan_note));
+}

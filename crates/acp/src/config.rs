@@ -1,12 +1,38 @@
 use std::fmt;
 
 use agent_client_protocol::v2::schema as wire;
-use protocol::{ModelProfile, SessionSettings, ThinkingLevel};
+use protocol::{ModelProfile, SessionMode, SessionSettings, ThinkingLevel};
 
 /// Config id of the model select.
 const MODEL: &str = "model";
 /// Config id of the thinking-level select.
 const THINKING_LEVEL: &str = "thinking_level";
+/// Config id of the session-mode select.
+const MODE: &str = "mode";
+
+/// Borrows one session mode for its wire value and display name.
+struct ModeValue(SessionMode);
+
+impl ModeValue {
+    /// Every mode in the order the select offers them.
+    const ALL: [SessionMode; 2] = [SessionMode::Default, SessionMode::Plan];
+
+    /// Returns the serde name clients send back.
+    fn id(&self) -> &'static str {
+        match self.0 {
+            SessionMode::Default => "default",
+            SessionMode::Plan => "plan",
+        }
+    }
+
+    /// Returns the human-readable option name.
+    fn name(&self) -> &'static str {
+        match self.0 {
+            SessionMode::Default => "Default",
+            SessionMode::Plan => "Plan",
+        }
+    }
+}
 
 /// Borrows one model profile for its `"{provider_id}/{model_id}"` option value.
 struct ModelValue<'a>(&'a ModelProfile);
@@ -47,7 +73,7 @@ impl ThinkingValue {
 pub(crate) struct ConfigOptionsOf<'a>(pub(crate) &'a SessionSettings);
 
 impl From<ConfigOptionsOf<'_>> for Vec<wire::SessionConfigOption> {
-    /// Lists the model select first, then thinking level.
+    /// Lists the model select first, then thinking level, then mode.
     fn from(settings: ConfigOptionsOf<'_>) -> Self {
         let settings = settings.0;
         let models = settings
@@ -88,6 +114,22 @@ impl From<ConfigOptionsOf<'_>> for Vec<wire::SessionConfigOption> {
                 levels,
             )
             .category(wire::SessionConfigOptionCategory::ThoughtLevel),
+            wire::SessionConfigOption::select(
+                MODE,
+                "Mode",
+                ModeValue(settings.mode).id(),
+                ModeValue::ALL
+                    .into_iter()
+                    .map(|mode| {
+                        let value = ModeValue(mode);
+                        wire::SessionConfigSelectOption::new(
+                            value.id(),
+                            value.name(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .category(wire::SessionConfigOptionCategory::Mode),
         ]
     }
 }
@@ -97,6 +139,7 @@ impl From<ConfigOptionsOf<'_>> for Vec<wire::SessionConfigOption> {
 pub(crate) enum ConfigChange {
     Model { provider: String, model_id: String },
     ThinkingLevel(ThinkingLevel),
+    Mode(SessionMode),
 }
 
 impl TryFrom<(&SessionSettings, &wire::SetSessionConfigOptionRequest)>
@@ -139,6 +182,13 @@ impl TryFrom<(&SessionSettings, &wire::SetSessionConfigOptionRequest)>
                 .map(Self::ThinkingLevel)
                 .ok_or_else(|| {
                     invalid(format!("thinking level is not offered: {value}"))
+                }),
+            MODE => ModeValue::ALL
+                .into_iter()
+                .find(|mode| ModeValue(*mode).id() == value)
+                .map(Self::Mode)
+                .ok_or_else(|| {
+                    invalid(format!("mode is not offered: {value}"))
                 }),
             other => Err(invalid(format!("unknown config option: {other}"))),
         }

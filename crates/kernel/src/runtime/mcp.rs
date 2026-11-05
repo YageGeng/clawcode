@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use ::tools::ToolRegistry;
 use protocol::{
-    AgentEvent, AgentEventPayload, EventMetadata, McpElicitationAction,
-    McpElicitationRequest, McpElicitationResponseRequest, McpElicitationResult,
+    AgentEventPayload, McpElicitationAction, McpElicitationRequest,
+    McpElicitationResponseRequest, McpElicitationResult,
     McpElicitationSnapshot, SessionId, TimestampMs, TurnId,
 };
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
@@ -465,36 +465,15 @@ impl Session {
         Ok(())
     }
 
-    /// Emits one MCP Host event through the active Turn sink and Session sequence.
+    /// Emits one MCP Host event through the active Run, as an MCP Host error.
     async fn emit_mcp_event(
         &self,
         turn_id: TurnId,
         timestamp_ms: TimestampMs,
         payload: AgentEventPayload,
     ) -> Result<(), ::mcp::McpError> {
-        let active_run = self
-            .execution
-            .active_run()
-            .map_err(|error| ::mcp::McpError::Host(error.to_string()))?
-            .ok_or_else(|| {
-                ::mcp::McpError::Host(
-                    "active Turn has no ACP event sink".to_string(),
-                )
-            })?;
-        let sequence = self
-            .execution
-            .next_sequence()
-            .map_err(|error| ::mcp::McpError::Host(error.to_string()))?;
-        active_run
-            .sink
-            .emit(AgentEvent {
-                metadata: EventMetadata {
-                    turn_id,
-                    timestamp_ms,
-                    sequence,
-                },
-                payload,
-            })
+        self.execution
+            .emit_to_run(turn_id, timestamp_ms, payload)
             .await
             .map_err(|error| ::mcp::McpError::Host(error.to_string()))
     }
@@ -513,8 +492,7 @@ impl Session {
                 "MCP is disabled for this Session".to_string(),
             )
         })?;
-        // The first pending request blocks the Run on the user.
-        let first_pending = {
+        {
             let mut elicitations =
                 state.elicitations.lock().map_err(|_poison_error| {
                     ::mcp::McpError::Host(
@@ -534,7 +512,6 @@ impl Session {
                     )));
                 }
             }
-            elicitations.len() == 1
         };
         if let Err(error) = self
             .emit_mcp_event(
@@ -557,7 +534,8 @@ impl Session {
                 .remove(&request_id);
             return Err(error);
         }
-        if first_pending {
+        // The first prompt the Run waits on, MCP or plan approval, blocks it on the user.
+        if self.execution.begin_user_wait() {
             tracing::info!(
                 "Run requires user action for MCP elicitation {}",
                 request_id
@@ -586,16 +564,15 @@ impl Session {
                 ))
             })?,
         };
-        let last_resolved = {
-            let mut elicitations =
-                state.elicitations.lock().map_err(|_poison_error| {
-                    ::mcp::McpError::Host(
-                        "MCP elicitation lock poisoned".to_string(),
-                    )
-                })?;
-            elicitations.remove(&request_id);
-            elicitations.is_empty()
-        };
+        state
+            .elicitations
+            .lock()
+            .map_err(|_poison_error| {
+                ::mcp::McpError::Host(
+                    "MCP elicitation lock poisoned".to_string(),
+                )
+            })?
+            .remove(&request_id);
         self.emit_mcp_event(
             turn_id.clone(),
             TimestampMs::now(),
@@ -605,8 +582,9 @@ impl Session {
             },
         )
         .await?;
-        // The Run is still waiting on this tool, so it resumes foreground work.
-        if last_resolved {
+        // The Run is still waiting on this tool, so it resumes foreground work
+        // once no other prompt still waits.
+        if self.execution.end_user_wait() {
             tracing::info!(
                 "Run resumed after MCP elicitation {} was resolved",
                 request_id

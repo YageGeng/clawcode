@@ -29,6 +29,7 @@ use crate::runtime::compaction::{
     CompactionExecution, CompactionPolicyExt, ContextUsageEstimate,
     OverflowRecovery,
 };
+use crate::runtime::plan::PlanModeGate;
 use crate::runtime::session::rename::SessionRename;
 use crate::runtime::tools::{ToolBatch, ToolBatchResult};
 use crate::runtime::{
@@ -250,7 +251,8 @@ impl RunScope<'_> {
         let turn = self.begin_turn(turn_loop, queued_item.as_ref()).await?;
         self.insert_user_message(&turn, turn_loop, queued_item)
             .await?;
-        let (request, tools) = self.model_request(&turn, turn_loop).await?;
+        let (request, tools, gate) =
+            self.model_request(&turn, turn_loop).await?;
         let (assistant_id, attempt) =
             self.stream_assistant(&turn, request).await?;
         let (assistant, mut settled) = self
@@ -265,7 +267,7 @@ impl RunScope<'_> {
             .await?;
         let has_tool_calls = !settled.tool_calls.is_empty();
         let tool_turn = self
-            .run_tools(&turn, turn_loop, &mut settled, tools)
+            .run_tools(&turn, turn_loop, &mut settled, tools, &gate)
             .await?;
         self.record_turn(&turn, turn_loop, &settled, tool_turn.results)
             .await?;
@@ -456,7 +458,8 @@ impl RunScope<'_> {
         &self,
         turn: &TurnContext,
         turn_loop: &mut TurnLoop<'_>,
-    ) -> Result<(ModelRequest, Arc<ToolRegistry>), KernelError> {
+    ) -> Result<(ModelRequest, Arc<ToolRegistry>, PlanModeGate), KernelError>
+    {
         let kernel = self.kernel;
         let turn_id = &turn.turn_id;
         let mut history = self.session.transcript.history()?;
@@ -470,8 +473,13 @@ impl RunScope<'_> {
             )
         });
         // One immutable registry snapshot defines the complete Turn.
-        let turn_tools =
-            Arc::new(self.session.tools.snapshot()?.active_registry()?);
+        let snapshot = self.session.tools.snapshot()?;
+        let turn_tools = Arc::new(snapshot.active_registry()?);
+        // The mode is read with the snapshot, so a switch applies from the next Turn.
+        let gate = PlanModeGate::new(
+            self.session.plan.mode()?,
+            snapshot.kernel_owned.clone(),
+        );
         let mut system_prompt = kernel.system_prompt_message(
             self.session,
             turn_id.clone(),
@@ -556,7 +564,7 @@ impl RunScope<'_> {
                 turn.model.profile().model_id
             );
         }
-        Ok((request, turn_tools))
+        Ok((request, turn_tools, gate))
     }
 
     /// Streams one Assistant attempt, publishing incremental updates while
@@ -877,6 +885,7 @@ impl RunScope<'_> {
         turn_loop: &mut TurnLoop<'_>,
         settled: &mut SettledAssistant,
         tools: Arc<ToolRegistry>,
+        gate: &PlanModeGate,
     ) -> Result<ToolTurn, KernelError> {
         let turn_id = &turn.turn_id;
         let tool_batch = if settled.cancelled {
@@ -893,6 +902,7 @@ impl RunScope<'_> {
                         .emitter(self.emitter)
                         .cancellation(self.cancellation)
                         .tools(tools)
+                        .gate(gate)
                         .calls(std::mem::take(&mut settled.tool_calls))
                         .build(),
                 )

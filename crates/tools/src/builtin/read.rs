@@ -83,6 +83,11 @@ pub(super) struct ReadTool;
 
 #[async_trait]
 impl AgentTool for ReadTool {
+    /// Marks the tool read-only so plan mode keeps it available.
+    fn metadata(&self) -> &protocol::ToolMetadata {
+        super::read_only_metadata()
+    }
+
     /// Returns pi's read schema and truncation contract.
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {

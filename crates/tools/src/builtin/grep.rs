@@ -357,6 +357,11 @@ pub(super) struct GrepTool;
 
 #[async_trait]
 impl AgentTool for GrepTool {
+    /// Marks the tool read-only so plan mode keeps it available.
+    fn metadata(&self) -> &protocol::ToolMetadata {
+        super::read_only_metadata()
+    }
+
     /// Returns pi's grep schema and truncation contract.
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {

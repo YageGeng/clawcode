@@ -209,6 +209,19 @@ export class SessionUpdateDecoder {
       const previous = typeof update.terminalId === "string" ? state.terminals.get(update.terminalId) : undefined;
       const terminal = kind === "terminal_update" ? this.terminals.update(previous, update) : this.terminals.chunk(previous, update);
       if (terminal !== undefined) actions.push({ type: "terminal/upserted", terminal });
+    } else if (kind === "plan_update" && typeof update.plan === "object" && update.plan !== null && !Array.isArray(update.plan)) {
+      // Plans are replaced whole per stable id; unknown ids and content types are ignored.
+      const plan = update.plan as Readonly<Record<string, unknown>>;
+      if (plan.planId === "todos" && plan.type === "items" && Array.isArray(plan.entries)) {
+        const todos = plan.entries.flatMap((entry: unknown) => {
+          if (typeof entry !== "object" || entry === null) return [];
+          const { content, status } = entry as Readonly<Record<string, unknown>>;
+          return typeof content === "string" && typeof status === "string" ? [{ content, status }] : [];
+        });
+        actions.push({ type: "plans/todos", todos });
+      } else if (plan.planId === "plan-mode" && plan.type === "markdown" && typeof plan.content === "string") {
+        actions.push({ type: "plans/approved", plan: plan.content });
+      }
     } else if (kind === "config_option_update") {
       const options = AcpProtocol.configOptions(update.configOptions);
       if (options !== undefined) actions.push({ type: "config/replaced", options });

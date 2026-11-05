@@ -1038,11 +1038,11 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
- "shlex",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "toml",
+ "tools",
 ]
 
 [[package]]
@@ -3951,6 +3951,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
+ "shlex",
  "similar",
  "tempfile",
  "thiserror 2.0.21",

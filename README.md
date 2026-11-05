@@ -398,6 +398,39 @@ For frontend development, start the Rust server on port 3000, then run
 Browser acceptance runs against the production `app` backend and the configured
 provider. It therefore requires a valid model configuration and credentials.
 
+## Plan mode
+
+Every Session has a `Mode` option (ACP `session/set_config_option`, category
+`mode`) with the values `default` and `plan`. The WebUI shows it next to the
+model select. The mode is stored per branch in the Session file and is
+restored when the Session reopens.
+
+In plan mode the agent researches and plans but changes nothing:
+
+- `read`, `grep`, `tool_search`, subagents (which start in plan mode too),
+  `todo_write`, and any tool whose metadata sets `readOnlyHint: true` run.
+  `edit`, `write`, and other tools are refused with a message telling the
+  model to finish the plan.
+- `bash` runs only read-only commands: `ls`, `cat`, `grep`, `rg`, `find`, read
+  `git` subcommands such as `log`, `diff`, and `status`, and a few others.
+  Command substitution, output redirection to files, and options that write or
+  execute (`find -delete`, `rg --pre`, `sort -o`, `git -c`, ...) are refused.
+  This allowlist prevents mistakes; it is not a sandbox.
+- Tool definitions and the system prompt stay the same in both modes, so
+  switching keeps the provider's prompt cache. A short note in the history
+  tells the model when plan mode starts and ends.
+
+When the plan is ready the model calls `exit_plan_mode` with the plan as
+Markdown. Clients receive a standard `session/request_permission` about a
+`switch_mode` tool call. **Approve and execute** returns the Session to
+`default` and the agent starts working in the same run. **Keep planning**, or
+dismissing the dialog, ends the run; write your feedback as the next message.
+
+Approved plans are published as an ACP `plan_update` of type `markdown` with
+the stable id `plan-mode`. The `todo_write` tool keeps the agent's todo list,
+published as `items` under the id `todos`. The WebUI shows both in a panel above
+the composer.
+
 ## Logging
 
 Rig model spans write one local `Rig telemetry closed` summary to stderr when

@@ -6,7 +6,7 @@ import { AcpProtocol } from "../acp/protocol";
 import type { InitializeRecovery, InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionRecoveryPlan, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
 import type { BranchEditPlan } from "../domain/messageActions";
-import type { ElicitationAnswer, ElicitationPrompt, McpCompletionResult, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import type { ElicitationAnswer, ElicitationPrompt, McpCompletionResult, PermissionPrompt, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
 import { ElicitationForm, UnrenderableSchema } from "../features/mcp/elicitationForm";
 import { useWorkspaceStore } from "./store";
 import type { SessionWorkspaceAction } from "./sessionState";
@@ -51,6 +51,8 @@ export class WorkspaceController {
   private readonly attachingSessions = new Map<SessionId, Promise<void>>();
   // Resolvers for queued elicitation dialogs, keyed like their store prompts.
   private readonly elicitationAnswers = new Map<string, (answer: ElicitationAnswer) => void>();
+  // Resolvers for queued permission dialogs; `undefined` dismisses without choosing.
+  private readonly permissionAnswers = new Map<string, (optionId: string | undefined) => void>();
   private elicitationSequence = 0;
   // One request per method, so a model switch and a prompt share the same sign-in.
   private readonly logins = new Map<string, Promise<boolean>>();
@@ -482,6 +484,52 @@ export class WorkspaceController {
     resolve?.(answer);
   }
 
+  /** Sends the user's choice for one queued permission request; `undefined` dismisses it. */
+  answerPermission(key: string, optionId: string | undefined): void {
+    const resolve = this.permissionAnswers.get(key);
+    this.permissionAnswers.delete(key);
+    this.dispatch({ type: "permission/settled", key });
+    resolve?.(optionId);
+  }
+
+  /** Queues one agent `session/request_permission` and resolves with the user's outcome. */
+  private async requestPermission(params: unknown, signal: AbortSignal): Promise<unknown> {
+    const request = AcpProtocol.decodeRecord(params, "session/request_permission params");
+    const options = Array.isArray(request.options)
+      ? request.options.flatMap((option: unknown) => {
+        if (typeof option !== "object" || option === null) return [];
+        const { optionId, name, kind } = option as Readonly<Record<string, unknown>>;
+        return typeof optionId === "string" && typeof name === "string" && typeof kind === "string" ? [{ optionId, name, kind }] : [];
+      })
+      : [];
+    if (typeof request.sessionId !== "string" || typeof request.title !== "string" || options.length === 0) {
+      throw new AcpRequestError({ code: -32602, message: "session/request_permission needs a Session, a title, and options" });
+    }
+    const key = `permission-${++this.elicitationSequence}`;
+    const plan = PermissionSubject.plan(request.subject);
+    const prompt: PermissionPrompt = {
+      key,
+      sessionId: request.sessionId as SessionId,
+      title: request.title,
+      ...(typeof request.description === "string" ? { description: request.description } : {}),
+      ...(plan === undefined ? {} : { plan }),
+      options
+    };
+    const outcome = (optionId: string | undefined) => ({
+      outcome: optionId === undefined ? { outcome: "cancelled" } : { outcome: "selected", optionId }
+    });
+    return new Promise((resolve) => {
+      this.permissionAnswers.set(key, (optionId) => resolve(outcome(optionId)));
+      // Answered elsewhere, or the work stopped: withdraw the dialog and report it dismissed.
+      signal.addEventListener("abort", () => {
+        if (!this.permissionAnswers.delete(key)) return;
+        this.dispatch({ type: "permission/settled", key });
+        resolve(outcome(undefined));
+      }, { once: true });
+      this.dispatch({ type: "permission/asked", prompt });
+    });
+  }
+
   /** Queues one agent `elicitation/create` and resolves with the user's answer. */
   private async elicit(params: unknown, signal: AbortSignal): Promise<ElicitationAnswer> {
     const request = AcpProtocol.decodeRecord(params, "elicitation/create params");
@@ -627,6 +675,7 @@ export class WorkspaceController {
       closed: (reason) => this.disconnected(generation, connection, reason)
     });
     connection.handle("elicitation/create", (params, signal) => this.elicit(params, signal));
+    connection.handle(AcpProtocol.methods.sessionRequestPermission, (params, signal) => this.requestPermission(params, signal));
     this.connection = connection;
     try {
       await connection.connect();
@@ -1173,3 +1222,23 @@ export class WorkspaceController {
     useWorkspaceStore.getState().dispatch(action);
   }
 }
+
+/** Reads what a permission request is about, for the parts the WebUI renders specially. */
+const PermissionSubject = {
+  /** Returns the plan text when the request approves a `switch_mode` call. */
+  plan(subject: unknown): string | undefined {
+    if (typeof subject !== "object" || subject === null) return undefined;
+    const { type, toolCall } = subject as Readonly<Record<string, unknown>>;
+    if (type !== "tool_call" || typeof toolCall !== "object" || toolCall === null) return undefined;
+    const { kind, content } = toolCall as Readonly<Record<string, unknown>>;
+    if (kind !== "switch_mode" || !Array.isArray(content)) return undefined;
+    const text = content.flatMap((item: unknown) => {
+      if (typeof item !== "object" || item === null) return [];
+      const block = (item as Readonly<Record<string, unknown>>).content;
+      if (typeof block !== "object" || block === null) return [];
+      const { type: blockType, text: blockText } = block as Readonly<Record<string, unknown>>;
+      return blockType === "text" && typeof blockText === "string" ? [blockText] : [];
+    }).join("\n");
+    return text === "" ? undefined : text;
+  }
+};

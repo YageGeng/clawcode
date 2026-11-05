@@ -349,6 +349,33 @@ health 仍可用。
 会代理 bootstrap 和 ACP WebSocket 流量。浏览器验收只连接正式 `app` 后端及配置的
 provider，因此必须提供有效模型配置和凭据。
 
+## Plan 模式
+
+每个会话都有 `Mode` 配置项（ACP `session/set_config_option`，类别为 `mode`），取值
+`default` 或 `plan`，WebUI 把它显示在模型下拉框旁边。模式按分支保存在会话文件中，
+重新打开会话时恢复。
+
+plan 模式下 Agent 只调研、写计划，不做修改：
+
+- 可以运行 `read`、`grep`、`tool_search`、子代理（子代理同样以 plan 模式启动）、
+  `todo_write`，以及元数据标注了 `readOnlyHint: true` 的工具；`edit`、`write`
+  等其他工具会被拒绝，并提示模型先完成计划。
+- `bash` 只允许只读命令：`ls`、`cat`、`grep`、`rg`、`find`、`git` 的只读子命令
+  （如 `log`、`diff`、`status`）等。命令替换、写入文件的输出重定向，以及会写文件或
+  执行程序的参数（`find -delete`、`rg --pre`、`sort -o`、`git -c` 等）都会被拒绝。
+  这个白名单用来防止误操作，不是沙箱。
+- 两种模式下工具定义和系统提示词完全相同，切换模式不会让服务商的 prompt cache
+  失效；模式的开始和结束由历史中的一条简短说明告知模型。
+
+计划写好后，模型调用 `exit_plan_mode`，参数是 Markdown 格式的计划。客户端收到一个
+标准的 `session/request_permission`，指向一次 `switch_mode` 类型的工具调用。选择
+**批准并执行**，会话回到 `default`，Agent 在同一次运行中开始执行；选择**继续规划**
+或关闭弹窗，运行结束，在下一条消息里写反馈即可。
+
+已批准的计划以 ACP `plan_update`（`markdown` 类型，固定 id `plan-mode`）发布；
+`todo_write` 工具维护 Agent 的待办清单，以 `items` 类型、固定 id `todos` 发布。
+WebUI 在输入框上方的面板中显示这两者。
+
 ## 日志
 
 rig 的 model span 关闭时会向 stderr 写入一条本地 `Rig telemetry closed` 摘要。

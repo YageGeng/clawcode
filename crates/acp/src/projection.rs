@@ -12,6 +12,8 @@ use tokio::sync::broadcast;
 
 use crate::AcpEventMapper;
 use crate::elicitation::ElicitationChange;
+use crate::permission::PlanApprovalChange;
+use crate::plan::HiddenToolCalls;
 use crate::recovery::{
     GroupMeta, OperationPhase, RecoveryMode, RecoveryPlan, SessionCursor,
 };
@@ -37,6 +39,9 @@ pub(crate) struct EventGroup {
     /// Elicitation change for live watchers; replay drops it so settled requests are not re-sent.
     #[builder(default)]
     pub(crate) elicitation: Option<ElicitationChange>,
+    /// Plan approval change for live watchers; replay drops it like an elicitation.
+    #[builder(default)]
+    pub(crate) plan_approval: Option<PlanApprovalChange>,
     /// Namespaced snapshot key; a newer queue or terminal view replaces it in the journal.
     #[builder(default)]
     pub(crate) snapshot_of: Option<String>,
@@ -78,6 +83,7 @@ impl EventGroup {
             operation_phase: self.operation_phase,
             operation_kind: self.operation_kind,
             elicitation: None,
+            plan_approval: None,
             snapshot_of: self.snapshot_of.clone(),
         })
     }
@@ -180,6 +186,8 @@ struct ProjectionState {
     last_sequence: Option<Sequence>,
     /// Foreground state left by the newest broadcast state update.
     foreground: ForegroundState,
+    /// `todo_write` calls whose tool card updates are never sent.
+    hidden_tool_calls: HiddenToolCalls,
 }
 
 impl ProjectionState {
@@ -479,6 +487,20 @@ impl SessionProjection {
             .state(state.foreground)
             .running(journal.running)
             .build())
+    }
+
+    /// Drops tool card updates for this Session's `todo_write` calls.
+    pub(crate) fn hide_tool_calls(
+        &self,
+        payload: &protocol::AgentEventPayload,
+        updates: &mut Vec<wire::SessionUpdate>,
+    ) -> Result<(), ProjectionError> {
+        self.state
+            .lock()
+            .map_err(|_poison_error| ProjectionError::Poisoned)?
+            .hidden_tool_calls
+            .apply(payload, updates);
+        Ok(())
     }
 
     /// Returns the active Operation identifier used by events without one in their payload.
@@ -925,8 +947,19 @@ impl EventSink for ProjectionSink {
             }),
             _ => None,
         };
+        let plan_approval = match &event.payload {
+            AgentEventPayload::PlanApprovalRequested { request } => {
+                Some(PlanApprovalChange::Requested(Box::new(request.clone())))
+            }
+            AgentEventPayload::PlanApprovalResolved { request_id, .. } => {
+                Some(PlanApprovalChange::Resolved {
+                    request_id: request_id.clone(),
+                })
+            }
+            _ => None,
+        };
         let metadata = mapper.metadata();
-        let updates = mapper.updates().map_err(|error| {
+        let mut updates = mapper.updates().map_err(|error| {
             tracing::error!(
                 "failed to map ACP updates for Session {} at sequence {}: {}",
                 self.session_id,
@@ -935,6 +968,9 @@ impl EventSink for ProjectionSink {
             );
             SinkError::Consumer(error.to_string())
         })?;
+        projection
+            .hide_tool_calls(&event.payload, &mut updates)
+            .map_err(|error| SinkError::Consumer(error.to_string()))?;
         // Release native event payloads before publishing or waiting for downstream capacity.
         drop(mapper);
         drop(event);
@@ -943,6 +979,7 @@ impl EventSink for ProjectionSink {
             .metadata(metadata)
             .updates(updates)
             .elicitation(elicitation)
+            .plan_approval(plan_approval)
             .snapshot_of(snapshot_of);
         let group = match (run_id, operation_phase, operation_kind) {
             (Some(run_id), Some(operation_phase), Some(operation_kind)) => {

@@ -9,6 +9,7 @@ use protocol::{
 
 use crate::config::ConfigOptionsOf;
 use crate::content::AcpContentMapper;
+use crate::plan::PlanUpdateOf;
 use crate::terminal::{
     ShellStatusOf, TerminalExit, TerminalSnapshot, TerminalText,
 };
@@ -163,6 +164,13 @@ impl<'a> AcpEventMapper<'a> {
                         cancelled,
                         ..
                     } => {
+                        let plan = PlanUpdateOf(details.as_ref());
+                        if plan.is_todo_list() {
+                            return Ok(plan
+                                .update(&metadata)
+                                .into_iter()
+                                .collect());
+                        }
                         let status = wire::ToolCallStatus::from(ToolStatusOf {
                             cancelled: *cancelled,
                             is_error: *is_error,
@@ -185,15 +193,19 @@ impl<'a> AcpEventMapper<'a> {
                                 details.as_ref(),
                                 &metadata,
                             )?;
-                            vec![wire::SessionUpdate::ToolCallUpdate(
-                                wire::ToolCallUpdate::new(
-                                    tool_call_id.to_string(),
-                                )
-                                .status(status)
-                                .content(content)
-                                .raw_output(serde_json::to_value(message)?)
-                                .meta(metadata),
-                            )]
+                            let mut updates =
+                                vec![wire::SessionUpdate::ToolCallUpdate(
+                                    wire::ToolCallUpdate::new(
+                                        tool_call_id.to_string(),
+                                    )
+                                    .status(status)
+                                    .content(content)
+                                    .raw_output(serde_json::to_value(message)?)
+                                    .meta(metadata.clone()),
+                                )];
+                            // An approved plan follows the result that approved it.
+                            updates.extend(plan.update(&metadata));
+                            updates
                         }
                     }
                     MessageContent::BashExecution { bash } => {
@@ -377,6 +389,11 @@ impl<'a> AcpEventMapper<'a> {
                     ),
                     None => Vec::new(),
                 }
+            }
+            AgentEventPayload::ToolExecutionEnd { result, .. }
+                if PlanUpdateOf(result.details.as_ref()).is_todo_list() =>
+            {
+                Vec::new()
             }
             AgentEventPayload::ToolExecutionEnd { result, .. } => {
                 let content = Self::tool_result_content(
@@ -687,7 +704,9 @@ impl<'a> AcpEventMapper<'a> {
                 ),
             ],
             AgentEventPayload::McpElicitationRequested { .. }
-            | AgentEventPayload::McpElicitationResolved { .. } => {
+            | AgentEventPayload::McpElicitationResolved { .. }
+            | AgentEventPayload::PlanApprovalRequested { .. }
+            | AgentEventPayload::PlanApprovalResolved { .. } => {
                 vec![self.extension_update()?]
             }
             AgentEventPayload::TurnStart { .. }
@@ -822,6 +841,8 @@ impl<'a> AcpEventMapper<'a> {
             | AgentEventPayload::SkillDiagnostic { .. }
             | AgentEventPayload::McpElicitationRequested { .. }
             | AgentEventPayload::McpElicitationResolved { .. }
+            | AgentEventPayload::PlanApprovalRequested { .. }
+            | AgentEventPayload::PlanApprovalResolved { .. }
             | AgentEventPayload::UserBashFinished { .. }
             | AgentEventPayload::UserBashOutput { .. }
             | AgentEventPayload::ActionRequired { .. }

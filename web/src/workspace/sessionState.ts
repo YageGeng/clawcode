@@ -13,9 +13,11 @@ import type {
   McpSessionSnapshot,
   MessageEntity,
   PendingMessages,
+  PlanTodo,
   RecoveryNotice,
   RetryStatus,
   SessionEvent,
+  SessionPlans,
   SessionTree,
   SkillListResult,
   ToolCallEntity,
@@ -40,6 +42,7 @@ export type SessionWorkspaceState = Readonly<{
   skillDiagnostics: SkillListResult["diagnostics"];
   availableCommands: readonly AvailableCommandEntity[];
   configOptions: readonly ConfigSelect[];
+  plans: SessionPlans;
   mcpSnapshot: McpSessionSnapshot;
   running: boolean;
   contextUsage: ContextUsage | undefined;
@@ -71,6 +74,8 @@ export type SessionWorkspaceAction =
   | { readonly type: "running/changed"; readonly running: boolean }
   | { readonly type: "usage/changed"; readonly usage: ContextUsage | undefined }
   | { readonly type: "config/replaced"; readonly options: readonly ConfigSelect[] }
+  | { readonly type: "plans/todos"; readonly todos: readonly PlanTodo[] }
+  | { readonly type: "plans/approved"; readonly plan: string }
   | { readonly type: "retry/changed"; readonly retry: RetryStatus | undefined }
   | { readonly type: "compaction/changed"; readonly compaction: CompactionStatus }
   | { readonly type: "outcome/unknown"; readonly value: boolean }
@@ -116,6 +121,7 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   skillDiagnostics: [],
   availableCommands: [],
   configOptions: [],
+  plans: {},
   mcpSnapshot: { revision: 0, servers: [], catalog: { tools: [], prompts: [], resources: [], resourceTemplates: [] } },
   running: false,
   contextUsage: undefined,
@@ -299,6 +305,8 @@ export function reduceSessionWorkspace(
         };
     case "usage/changed": return { ...state, contextUsage: action.usage };
     case "config/replaced": return { ...state, configOptions: action.options };
+    case "plans/todos": return { ...state, plans: { ...state.plans, todos: action.todos } };
+    case "plans/approved": return { ...state, plans: { ...state.plans, approvedPlan: action.plan } };
     case "retry/changed": return { ...state, retry: action.retry };
     case "compaction/changed": return { ...state, compaction: action.compaction };
     case "outcome/unknown": return { ...state, outcomeUnknown: action.value };

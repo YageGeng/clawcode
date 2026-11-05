@@ -10,6 +10,7 @@ mod login;
 mod mcp;
 mod message;
 mod model;
+mod plan;
 mod prompt;
 mod queue;
 mod scalar;
@@ -95,6 +96,10 @@ pub use message::{
 pub use model::{
     ModelFailure, ModelFinal, ModelRequest, ModelRequestOptions,
     ModelRetryDisposition, ModelStreamEvent, PromptCache, PromptCacheRetention,
+};
+pub use plan::{
+    EXIT_PLAN_MODE_TOOL, PlanApprovalDecision, PlanApprovalRequest,
+    PlanApprovalResponse, SessionMode, TODO_WRITE_TOOL, TodoItem, TodoStatus,
 };
 pub use prompt::{
     ProjectInstruction, PromptCollision, PromptContentSource, PromptDiagnostic,

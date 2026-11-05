@@ -3,6 +3,7 @@
 mod fixture;
 mod insertion;
 mod message_end;
+mod plan_mode;
 mod queue;
 mod settings;
 mod title;

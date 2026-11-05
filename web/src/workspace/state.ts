@@ -1,5 +1,5 @@
 import type { SessionId } from "../acp/protocol";
-import type { ElicitationPrompt, PromptInput, SessionNotice, SessionSummary } from "../domain/model";
+import type { ElicitationPrompt, PermissionPrompt, PromptInput, SessionNotice, SessionSummary } from "../domain/model";
 import {
   initialSessionWorkspaceState,
   reduceSessionWorkspace
@@ -25,6 +25,7 @@ export type WorkspaceState = Readonly<{
   diagnostics: readonly string[];
   notices: readonly SessionNotice[];
   elicitations: readonly ElicitationPrompt[];
+  permissions: readonly PermissionPrompt[];
 }>;
 
 export type WorkspaceAction =
@@ -42,7 +43,9 @@ export type WorkspaceAction =
   | { readonly type: "notice/added"; readonly notice: SessionNotice }
   | { readonly type: "notice/dismissed"; readonly id: string }
   | { readonly type: "elicitation/asked"; readonly prompt: ElicitationPrompt }
-  | { readonly type: "elicitation/settled"; readonly key: string };
+  | { readonly type: "elicitation/settled"; readonly key: string }
+  | { readonly type: "permission/asked"; readonly prompt: PermissionPrompt }
+  | { readonly type: "permission/settled"; readonly key: string };
 
 export const initialWorkspaceState: WorkspaceState = {
   connection: { type: "disconnected" },
@@ -54,7 +57,8 @@ export const initialWorkspaceState: WorkspaceState = {
   composerRevision: 0,
   diagnostics: [],
   notices: [],
-  elicitations: []
+  elicitations: [],
+  permissions: []
 };
 
 /** Returns the current projection for one Session, or a shared empty projection before loading. */
@@ -140,5 +144,7 @@ export function reduceWorkspace(
     // Requests queue and the dialog shows the oldest one.
     case "elicitation/asked": return { ...state, elicitations: [...state.elicitations, action.prompt] };
     case "elicitation/settled": return { ...state, elicitations: state.elicitations.filter((prompt) => prompt.key !== action.key) };
+    case "permission/asked": return { ...state, permissions: [...state.permissions, action.prompt] };
+    case "permission/settled": return { ...state, permissions: state.permissions.filter((prompt) => prompt.key !== action.key) };
   }
 }

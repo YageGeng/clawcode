@@ -2,6 +2,7 @@
 
 mod bash;
 mod builtin;
+mod command_line;
 mod contract;
 mod output;
 mod truncation;
@@ -11,6 +12,9 @@ pub use bash::{
     BashOutputSnapshot, BashTermination,
 };
 pub use builtin::BuiltinToolFactory;
+pub use command_line::{
+    CommandInvocation, ReadOnlyViolation, ShellCommandLine,
+};
 pub use contract::{
     AgentTool, DiscardToolUpdates, ToolError, ToolExecutionContext,
     ToolFactory, ToolRegistry, ToolUpdateSink,

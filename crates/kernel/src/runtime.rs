@@ -10,6 +10,7 @@ mod command;
 mod compaction;
 mod extension;
 mod mcp;
+mod plan;
 mod run;
 mod session;
 mod subagent;
@@ -136,6 +137,9 @@ pub enum KernelError {
     /// The elicitation was already answered, cancelled, or never pending.
     #[error("MCP elicitation is already resolved: {0}")]
     ElicitationResolved(String),
+    /// The plan approval was already answered, withdrawn, or never pending.
+    #[error("plan approval is already resolved: {0}")]
+    PlanApprovalResolved(String),
     /// The active branch has no model-visible history before its retention boundary.
     #[error("there is no context to compact")]
     NoContextToCompact,
@@ -595,6 +599,8 @@ struct Session {
     extensions: SessionExtensions,
     tools: Arc<SessionToolState>,
     model: SessionModelState,
+    /// Plan-mode state that settings changes and tool batches consult.
+    plan: plan::SessionPlanState,
     /// Serializes settings changes so reported snapshots follow change order.
     #[builder(default)]
     settings_changes: tokio::sync::Mutex<()>,

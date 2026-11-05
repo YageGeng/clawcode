@@ -12,6 +12,8 @@ impl From<ToolKindOf<'_>> for wire::ToolKind {
             "write" | "edit" => Self::Edit,
             "bash" => Self::Execute,
             "grep" | "tool_search" => Self::Search,
+            // The approval card is a mode switch, so clients can render it as one.
+            protocol::EXIT_PLAN_MODE_TOOL => Self::SwitchMode,
             _ => Self::Other,
         }
     }

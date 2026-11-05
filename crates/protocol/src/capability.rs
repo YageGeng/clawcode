@@ -229,7 +229,7 @@ pub struct ModelProfile {
     pub prompt_cache: Option<crate::PromptCacheRetention>,
 }
 
-/// Current model, thinking level, and the configured models a client may pick.
+/// Current model, thinking level, mode, and the configured models a client may pick.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
     /// Model future Turns will use.
@@ -238,6 +238,9 @@ pub struct SessionSettings {
     pub thinking_level: crate::ThinkingLevel,
     /// Every configured model in catalog order.
     pub models: Vec<ModelProfile>,
+    /// How freely the agent may act; absent in older payloads means `Default`.
+    #[serde(default)]
+    pub mode: crate::SessionMode,
 }
 
 /// Cause that initiated a context compaction operation.
