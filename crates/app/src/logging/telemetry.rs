@@ -33,39 +33,47 @@ impl RigSpan {
     }
 
     /// Restricts arbitrary string/Debug values to the SDK's public identity fields.
-    fn text_label(name: &str) -> Option<&'static str> {
-        match name {
-            "gen_ai.operation.name" => Some("operation"),
-            "gen_ai.provider.name" => Some("provider"),
-            "gen_ai.request.model" => Some("request_model"),
-            "gen_ai.response.model" => Some("response_model"),
-            "gen_ai.response.id" => Some("response_id"),
-            "rig.provider_request_id" => Some("provider_request_id"),
-            _ => None,
-        }
+    fn is_text_label(name: &str) -> bool {
+        matches!(
+            name,
+            "gen_ai.operation.name"
+                | "gen_ai.provider.name"
+                | "gen_ai.request.model"
+                | "gen_ai.response.model"
+                | "gen_ai.response.id"
+                | "rig.provider_request_id"
+        )
     }
 }
 
 impl Visit for RigSpan {
     /// Quotes identity strings so embedded newlines cannot forge additional log lines.
     fn record_str(&mut self, field: &Field, value: &str) {
-        if let Some(label) = Self::text_label(field.name()) {
-            self.fields.insert(label, format!("{value:?}"));
+        if Self::is_text_label(field.name()) {
+            // Preserve semantic-convention names and normalize the legacy Rig key.
+            let name = if field.name() == "rig.provider_request_id" {
+                "gen_ai.provider_request_id"
+            } else {
+                field.name()
+            };
+            self.fields.insert(name, format!("{value:?}"));
         }
     }
 
     /// Retains only native unsigned counters; absent fields remain absent rather than zero.
     fn record_u64(&mut self, field: &Field, value: u64) {
-        let label = match field.name() {
-            "gen_ai.usage.input_tokens" => "input_tokens",
-            "gen_ai.usage.output_tokens" => "output_tokens",
-            "gen_ai.usage.cache_read.input_tokens" => "cache_read_tokens",
-            "gen_ai.usage.cache_creation.input_tokens" => "cache_write_tokens",
-            "gen_ai.usage.tool_use_prompt_tokens" => "tool_use_prompt_tokens",
-            "gen_ai.usage.reasoning_tokens" => "reasoning_tokens",
+        // Keep an explicit allowlist so future SDK fields do not expand the
+        // safe local summary without an intentional review.
+        let name = match field.name() {
+            "gen_ai.usage.input_tokens"
+            | "gen_ai.usage.output_tokens"
+            | "gen_ai.usage.cache_read.input_tokens"
+            | "gen_ai.usage.cache_creation.input_tokens"
+            | "gen_ai.usage.tool_use_prompt_tokens"
+            | "gen_ai.usage.reasoning_tokens" => field.name(),
             _ => return,
         };
-        self.fields.insert(label, value.to_string());
+        self.fields.insert(name, value.to_string());
     }
 
     /// Accepts nonnegative integer literals on adopted parent spans without inventing counts.
@@ -84,9 +92,22 @@ impl Visit for RigSpan {
 
     /// Ignores arbitrary content fields even when a caller opts into SDK content telemetry.
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if Self::text_label(field.name()).is_some() {
+        if Self::is_text_label(field.name()) {
             self.record_str(field, &format!("{value:?}"));
         }
+    }
+}
+
+impl RigSpan {
+    /// Writes the collected fields without adding a lifecycle-specific prefix.
+    pub(super) fn write_fields<W: fmt::Write>(
+        &self,
+        formatter: &mut W,
+    ) -> fmt::Result {
+        for (name, value) in &self.fields {
+            write!(formatter, " {name}={value}")?;
+        }
+        Ok(())
     }
 }
 
@@ -95,20 +116,17 @@ impl fmt::Display for RigSpan {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "Rig telemetry closed; elapsed_ms={}",
+            "model request done; elapsed_ms={}",
             self.started.elapsed().as_millis()
         )?;
-        for (name, value) in &self.fields {
-            write!(formatter, " {name}={value}")?;
-        }
-        Ok(())
+        self.write_fields(formatter)
     }
 }
 
 /// Keeps metadata in its own span; the existing formatter handles output and Trace correlation.
-pub(super) struct RigTelemetryLayer;
+pub(super) struct ModelTracingLayer;
 
-impl<S> Layer<S> for RigTelemetryLayer
+impl<S> Layer<S> for ModelTracingLayer
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {

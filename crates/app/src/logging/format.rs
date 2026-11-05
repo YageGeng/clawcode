@@ -52,7 +52,7 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
-        // CLOSE events retain span metadata; ordinary spans stay silent.
+        // NEW and CLOSE events retain model metadata; ordinary spans stay silent.
         let telemetry = if event.metadata().is_span() {
             if !RigSpan::accepts(event.metadata()) {
                 return Ok(());
@@ -64,6 +64,13 @@ where
                 return Ok(());
             }
             Some(span)
+        } else {
+            None
+        };
+        let lifecycle = if telemetry.is_some() {
+            let mut lifecycle = ModelLifeCycle::default();
+            event.record(&mut lifecycle);
+            Some(lifecycle)
         } else {
             None
         };
@@ -95,7 +102,12 @@ where
         write!(writer, "] {} | ", EventSource::from(event.metadata()))?;
         if let Some(span) = telemetry {
             if let Some(record) = span.extensions().get::<RigSpan>() {
-                write!(writer, "{record}")?;
+                if lifecycle.as_ref().is_some_and(|event| event.start) {
+                    write!(writer, "model request start")?;
+                    record.write_fields(&mut writer)?;
+                } else {
+                    write!(writer, "{record}")?;
+                }
             }
         } else if event.metadata().target() == ACP_INCOMING_ACTOR_TARGET {
             // The ACP SDK recursively Debug-formats its handler chain, so the
@@ -109,6 +121,28 @@ where
             context.format_fields(writer.by_ref(), event)?;
         }
         writeln!(writer)
+    }
+}
+
+/// Identifies synthesized span lifecycle events emitted by the formatter layer.
+#[derive(Default)]
+struct ModelLifeCycle {
+    start: bool,
+}
+
+impl Visit for ModelLifeCycle {
+    /// Recognizes the formatter's synthetic lifecycle marker.
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" && value == "new" {
+            self.start = true;
+        }
+    }
+
+    /// Accepts debug-formatted lifecycle markers from alternate subscribers.
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" && format!("{value:?}") == "\"new\"" {
+            self.start = true;
+        }
     }
 }
 

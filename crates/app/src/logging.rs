@@ -11,7 +11,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 
 use self::format::CompactEventFormat;
-use self::telemetry::RigTelemetryLayer;
+use self::telemetry::ModelTracingLayer;
 use self::trace::TraceContextLayer;
 
 const RUST_LOG_ENV: &str = "RUST_LOG";
@@ -73,14 +73,14 @@ impl LoggingFactory {
         let formatter = tracing_subscriber::fmt::layer()
             // The custom formatter owns timestamps; avoid timing every span enter/exit.
             .without_time()
-            .with_span_events(FmtSpan::CLOSE)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .event_format(CompactEventFormat::default())
             .with_writer(writer)
             .with_ansi(color);
         tracing_subscriber::registry()
             .with(filter)
             .with(TraceContextLayer)
-            .with(RigTelemetryLayer)
+            .with(ModelTracingLayer)
             .with(formatter)
     }
 

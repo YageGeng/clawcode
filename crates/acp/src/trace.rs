@@ -69,6 +69,8 @@ impl AcpTraceFactory {
                 self.transport
             ),
             AcpLogParameters::capture(parameters),
+            responder.method()
+                == protocol::AcpExtensionMethod::SessionRuntime.as_str(),
         )
     }
 
@@ -84,6 +86,7 @@ impl AcpTraceFactory {
         self.operation(
             format!("ACP notification {} over {}", method, self.transport),
             AcpLogParameters::capture(parameters),
+            false,
         )
     }
 
@@ -92,6 +95,7 @@ impl AcpTraceFactory {
         &self,
         description: String,
         parameters: AcpLogParameters,
+        quiet_success: bool,
     ) -> Result<AcpOperationTrace, agent_client_protocol::Error> {
         let trace_id = TraceId::try_from(self.id_generator.next(IdKind::Trace))
             .map_err(agent_client_protocol::Error::into_internal_error)?;
@@ -100,6 +104,7 @@ impl AcpTraceFactory {
             identity: AcpOperationIdentity {
                 description,
                 parameters,
+                quiet_success,
             },
             trace_id,
             span,
@@ -113,6 +118,7 @@ impl AcpTraceFactory {
 struct AcpOperationIdentity {
     description: String,
     parameters: AcpLogParameters,
+    quiet_success: bool,
 }
 
 /// Root span and readable lifecycle description for one ACP operation.
@@ -135,7 +141,11 @@ impl AcpOperationTrace {
         self.span.in_scope(|| {
             // The process formatter reads Trace ID from the active span, so
             // lifecycle text must not duplicate the same identifier.
-            tracing::info!("started {}", self.identity.description);
+            if self.identity.quiet_success {
+                tracing::debug!("started {}", self.identity.description);
+            } else {
+                tracing::info!("started {}", self.identity.description);
+            }
             self.identity.parameters.log(&self.identity.description);
         });
     }
@@ -197,6 +207,11 @@ impl AcpOperationTrace {
         E: fmt::Display,
     {
         match result {
+            Ok(_) if self.identity.quiet_success => tracing::debug!(
+                "completed {} in {} ms",
+                self.identity.description,
+                self.started_at.elapsed().as_millis()
+            ),
             Ok(_) => tracing::info!(
                 "completed {} in {} ms",
                 self.identity.description,

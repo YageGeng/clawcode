@@ -27,7 +27,7 @@ export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessio
         if (!stopped) setError(undefined);
       }
       catch (reason: unknown) { if (!stopped) setError(reason instanceof Error ? reason.message : String(reason)); }
-      if (!stopped && keepPolling) timer = window.setTimeout(() => { void refresh(); }, 2_000);
+      if (!stopped && keepPolling) timer = window.setTimeout(() => { void refresh(); }, 5_000);
     };
     void refresh();
     return () => { stopped = true; window.clearTimeout(timer); };

@@ -263,29 +263,47 @@ async fn rig_telemetry_logs_final_metadata_without_content() {
     let output = logs.content();
     let summaries = output
         .lines()
-        .filter(|line| line.contains("Rig telemetry closed"))
+        .filter(|line| line.contains("model request "))
         .collect::<Vec<_>>();
-    assert_eq!(summaries.len(), 2, "{output}");
-    for summary in summaries {
+    assert_eq!(summaries.len(), 4, "{output}");
+    let starts = summaries
+        .iter()
+        .filter(|summary| summary.contains("model request start"))
+        .collect::<Vec<_>>();
+    let dones = summaries
+        .iter()
+        .filter(|summary| summary.contains("model request done"))
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 2, "{output}");
+    assert_eq!(dones.len(), 2, "{output}");
+    for summary in starts {
         assert!(
-            summary.contains("provider=\"openai\"")
-                && summary.contains("request_model=\"request-model\"")
-                && summary.contains("response_model=\"response-model\""),
+            summary.contains("gen_ai.operation.name=\"chat\""),
+            "{summary}"
+        );
+        assert!(!summary.contains("elapsed_ms="), "{summary}");
+    }
+    for summary in dones {
+        assert!(
+            summary.contains("gen_ai.operation.name=\"chat\"")
+                && summary.contains("gen_ai.provider.name=\"openai\"")
+                && summary.contains("gen_ai.request.model=\"request-model\"")
+                && summary.contains("gen_ai.response.model=\"response-model\""),
             "{summary}"
         );
         assert!(
-            summary.contains("input_tokens=12")
-                && summary.contains("output_tokens=3")
-                && summary.contains("cache_read_tokens=0")
-                && summary.contains("reasoning_tokens=1"),
+            summary.contains("gen_ai.usage.input_tokens=12")
+                && summary.contains("gen_ai.usage.output_tokens=3")
+                && summary.contains("gen_ai.usage.cache_read.input_tokens=0")
+                && summary.contains("gen_ai.usage.reasoning_tokens=1"),
             "{summary}"
         );
         assert!(
-            summary.contains("response_id=\"reply-audit\"")
+            summary.contains("gen_ai.response.id=\"reply-audit\"")
                 && summary.contains("elapsed_ms="),
             "{summary}"
         );
-        assert!(!summary.contains("cache_write_tokens="));
+        assert!(!summary.contains("gen_ai.usage.cache_creation.input_tokens="));
     }
     assert!(
         output.contains("[trace-native]") && output.contains("[trace-adopted]"),
@@ -302,7 +320,7 @@ async fn rig_telemetry_logs_final_metadata_without_content() {
     }
 }
 
-/// Empty or interrupted spans retain unknown usage and emit only after their last handle closes.
+/// Empty or interrupted spans emit start immediately and final usage after their last handle closes.
 #[test]
 fn rig_telemetry_waits_for_close_and_preserves_unknown_usage() {
     let logs = CapturedLogs::default();
@@ -322,15 +340,17 @@ fn rig_telemetry_waits_for_close_and_preserves_unknown_usage() {
         }
         drop(span);
         assert!(
-            logs.content().is_empty(),
-            "polling/partial ownership must not log summaries"
+            logs.content().contains("model request start"),
+            "start must be logged immediately"
         );
+        assert!(!logs.content().contains("model request done"));
         drop(other);
         tracing::info_span!("ordinary_operation").in_scope(|| {});
     });
     let output = logs.content();
-    assert_eq!(output.lines().count(), 1, "{output}");
-    assert!(output.contains("Rig telemetry closed"), "{output}");
+    assert_eq!(output.lines().count(), 2, "{output}");
+    assert!(output.contains("model request start"), "{output}");
+    assert!(output.contains("model request done"), "{output}");
     assert!(
         !output.contains("input_tokens=") && !output.contains("output_tokens=")
     );
@@ -362,11 +382,7 @@ fn rig_telemetry_respects_existing_log_filters() {
             tracing::warn!("ordinary warning");
         });
         let output = logs.content();
-        assert_eq!(
-            output.contains("Rig telemetry closed"),
-            expected,
-            "{output}"
-        );
+        assert_eq!(output.contains("model request done"), expected, "{output}");
         assert!(output.contains("ordinary warning"), "{output}");
     }
 }
