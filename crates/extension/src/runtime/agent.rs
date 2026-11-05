@@ -67,8 +67,9 @@ impl ExtensionRuntime {
         event.request
     }
 
-    /// Chains final message replacements, reporting and discarding any that change
-    /// the message's identity or role.
+    /// Chains final message replacements, restoring a changed identity and
+    /// discarding a changed role. Both are reported and the Run continues, because
+    /// failing it would return a queued message to its queue for every later Run.
     pub async fn emit_message_end(
         &self,
         mut event: MessageEndEvent,
@@ -77,21 +78,27 @@ impl ExtensionRuntime {
         for registered in self.handlers::<MessageEndPoint>() {
             let handler_context = context.for_extension(registered.source());
             match registered.handler.handle(&event, &handler_context).await {
-                Ok(Some(message)) => {
-                    // Announced events and queue entries correlate on this identity.
-                    // Failing the Run instead would return a queued message to its
-                    // queue, where the same handler would fail every later Run.
-                    if message.identity == event.message.identity
-                        && message.content.same_role(&event.message.content)
-                    {
-                        event.message = message;
-                    } else {
+                Ok(Some(mut message)) => {
+                    if !message.content.same_role(&event.message.content) {
                         self.report::<MessageEndPoint>(
                             registered,
-                            &ExtensionError::InvalidMessageReplacement,
+                            &ExtensionError::MessageRoleChanged,
+                        )
+                        .await;
+                        continue;
+                    }
+                    // Announced events and queue entries correlate on the original
+                    // identity. The content stays, because a hook that builds a
+                    // fresh message may be redacting it.
+                    if message.identity != event.message.identity {
+                        message.identity = event.message.identity.clone();
+                        self.report::<MessageEndPoint>(
+                            registered,
+                            &ExtensionError::MessageIdentityChanged,
                         )
                         .await;
                     }
+                    event.message = message;
                 }
                 Ok(None) => {}
                 Err(error) => {

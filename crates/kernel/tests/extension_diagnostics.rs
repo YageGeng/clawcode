@@ -412,4 +412,6 @@ async fn diagnostic_infrastructure_failures_are_logged() {
     assert!(output.contains("during persist"));
     assert!(output.contains("during sink"));
     assert!(!output.contains("prompt-secret-must-not-be-logged"));
+    // Handler error text is free-form and may quote the prompt it failed on.
+    assert!(!output.contains("diagnostic fixture failure"));
 }

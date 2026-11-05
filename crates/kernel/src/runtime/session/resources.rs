@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 /// Immutable Prompt and optional Skill resources published together at startup.
-pub(super) struct SessionResources {
+pub(in crate::runtime) struct SessionResources {
     prompt: Arc<::prompt::PromptSession>,
     skills: Option<Arc<skill::SkillCatalog>>,
 }

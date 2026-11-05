@@ -69,7 +69,7 @@ impl ExtensionModule for MyExtension {
 | Agent | `turn_end` | Turn 和源顺序 Tool Result 完成后触发。 |
 | Message | `message_start` | 一条流式消息开始时触发。 |
 | Message | `message_update` | 接收强类型 Text、Reasoning 或 Tool Call 增量。 |
-| Message | `message_end` | 持久化前可替换完整消息，但必须保留身份和角色；违反时丢弃本次替换并上报诊断，Run 继续。 |
+| Message | `message_end` | 持久化前可替换完整消息，但应保留身份和角色。改了身份时恢复原身份并保留替换内容；改了角色时丢弃本次替换。两种情况都会上报诊断，Run 继续。 |
 | Context | `context` | 仅替换本次 Provider 请求的上下文，不修改持久化历史。 |
 | Provider | `before_provider_request` | Provider 私有 JSON Body 序列化后可整体替换。 |
 | Provider | `before_provider_headers` | 最终 Header 组装后按顺序 Set/Remove。 |

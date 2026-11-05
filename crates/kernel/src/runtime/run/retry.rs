@@ -2,14 +2,14 @@ use protocol::{ModelFailure, RetryPolicy};
 
 /// One checked retry schedule produced from the current state and policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RetrySchedule {
+pub(in crate::runtime) struct RetrySchedule {
     pub(super) attempt: u32,
     pub(super) max_attempts: u32,
-    pub(super) delay_ms: u64,
+    pub(in crate::runtime) delay_ms: u64,
 }
 
 /// A logical generation borrows immutable policy while owning its single retry budget.
-pub(super) struct RetryState<'a> {
+pub(in crate::runtime) struct RetryState<'a> {
     attempts: u32,
     policy: &'a RetryPolicy,
     provider_delay_limit_ms: u64,
@@ -17,7 +17,7 @@ pub(super) struct RetryState<'a> {
 
 impl<'a> RetryState<'a> {
     /// Starts a budget shared by request acquisition and response-stream failures.
-    pub(super) fn new(
+    pub(in crate::runtime) fn new(
         policy: &'a RetryPolicy,
         provider_delay_limit_ms: u64,
     ) -> Self {
@@ -29,7 +29,7 @@ impl<'a> RetryState<'a> {
     }
 
     /// Reserves one retry, honoring server waits without nesting another retry loop.
-    pub(super) fn schedule(
+    pub(in crate::runtime) fn schedule(
         &mut self,
         failure: &ModelFailure,
     ) -> Option<RetrySchedule> {

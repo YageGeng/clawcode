@@ -26,7 +26,7 @@ use protocol::{
 use store::{EntryKind, NewEntry, RecordKind};
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::retry::RetryState;
+use crate::runtime::run::retry::RetryState;
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 use crate::{EventSink, ModelError};
 

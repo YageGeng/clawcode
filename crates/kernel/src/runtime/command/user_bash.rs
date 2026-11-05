@@ -10,9 +10,9 @@ use protocol::{
 use tokio_util::sync::CancellationToken;
 
 use crate::EventSink;
-use crate::runtime::admission::AdmissionTicket;
-use crate::runtime::insertion::{InsertionNotice, WaiterCancellation};
-use crate::runtime::lifecycle::ActiveRunContext;
+use crate::runtime::run::admission::AdmissionTicket;
+use crate::runtime::run::insertion::{InsertionNotice, WaiterCancellation};
+use crate::runtime::run::lifecycle::ActiveRunContext;
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
 /// Internal correlated result shared by prefixed prompts and direct ACP requests.
@@ -24,7 +24,7 @@ pub(super) struct UserBashExecution {
 
 impl Kernel {
     /// Routes a prefixed run request into user-bash before ordinary input hooks.
-    pub(super) async fn try_execute_user_bash_request(
+    pub(in crate::runtime) async fn try_execute_user_bash_request(
         &self,
         request: &RunRequest,
         sink: Arc<dyn EventSink>,

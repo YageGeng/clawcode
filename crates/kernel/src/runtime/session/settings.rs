@@ -7,7 +7,7 @@ use protocol::{
 };
 use store::{EntryKind, NewEntry, SessionEntry};
 
-use super::{Kernel, KernelError, Session};
+use crate::runtime::{Kernel, KernelError, Session};
 
 /// Borrows one live Session for persisted model or thinking changes.
 ///

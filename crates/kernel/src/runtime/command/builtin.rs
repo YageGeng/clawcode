@@ -6,10 +6,10 @@ use protocol::{
     SlashCommandStatus,
 };
 
-use super::super::rename::SessionRename;
 use super::super::{EventEmitter, Kernel, KernelError};
 use super::execution::SlashCommandExecution;
 use super::session_stats::SessionStatistics;
+use crate::runtime::session::rename::SessionRename;
 use tokio_util::sync::CancellationToken;
 
 /// Kernel-owned commands available without an Extension or resource catalog.

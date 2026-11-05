@@ -1,3 +1,14 @@
+//! From input to settlement: admission, queueing, the Turn loop, and its outcome.
+
+pub(super) mod admission;
+mod attempt;
+mod input;
+pub(super) mod insertion;
+pub(super) mod lifecycle;
+pub(super) mod queue;
+pub(super) mod retry;
+mod settlement;
+pub(super) mod submit;
 mod turn;
 
 use std::sync::Arc;
@@ -11,15 +22,14 @@ use store::RecordKind;
 use tokio_util::sync::CancellationToken;
 use turn::{RunScope, TurnLoop};
 
-use super::input::PromptInputExpansion;
 use crate::EventSink;
-use crate::runtime::admission::AdmissionTicket;
-use crate::runtime::insertion::{InsertionNotice, WaiterCancellation};
-use crate::runtime::lifecycle::ActiveRunContext;
-use crate::runtime::retry::RetryState;
-use crate::runtime::settlement::RunSettlement;
-use crate::runtime::submit::SubmissionAnswer;
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session, command};
+use admission::AdmissionTicket;
+use input::PromptInputExpansion;
+use insertion::{InsertionNotice, SubmissionAnswer, WaiterCancellation};
+use lifecycle::ActiveRunContext;
+use retry::RetryState;
+use settlement::RunSettlement;
 
 impl Kernel {
     /// Executes one run with an explicit input source for trusted host callers.

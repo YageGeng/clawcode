@@ -5,10 +5,10 @@ use protocol::{
 use store::{EntryKind, NewEntry, SessionEntry};
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::compaction::{SummaryGeneration, SummaryProtocol};
-use crate::runtime::transcript::{
+use super::transcript::{
     TranscriptNavigationCommit, TranscriptNavigationSnapshot,
 };
+use crate::runtime::compaction::{SummaryGeneration, SummaryProtocol};
 use crate::runtime::{Kernel, KernelError, tools};
 
 const BRANCH_SUMMARY_INSTRUCTION: &str = "Summarize the abandoned conversation branch for another agent. Preserve user requirements, decisions, completed work, unresolved problems, exact identifiers, and important technical details. Return only the summary.";

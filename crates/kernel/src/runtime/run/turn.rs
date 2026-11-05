@@ -18,18 +18,18 @@ use protocol::{
 use store::RecordKind;
 use tokio_util::sync::CancellationToken;
 
-use crate::runtime::attempt::{
+use super::attempt::{
     AssistantAttempt, AssistantAttemptResult, AssistantAttemptSettlement,
 };
+use super::insertion::SubmissionAnswer;
+use super::queue::{ClaimedItem, QueueCancellationReason};
+use super::retry::RetryState;
+use super::settlement::{RunCompletion, RunSettlement};
 use crate::runtime::compaction::{
     CompactionExecution, CompactionPolicyExt, ContextUsageEstimate,
     OverflowRecovery,
 };
-use crate::runtime::queue::{ClaimedItem, QueueCancellationReason};
-use crate::runtime::rename::SessionRename;
-use crate::runtime::retry::RetryState;
-use crate::runtime::settlement::{RunCompletion, RunSettlement};
-use crate::runtime::submit::SubmissionAnswer;
+use crate::runtime::session::rename::SessionRename;
 use crate::runtime::tools::{ToolBatch, ToolBatchResult};
 use crate::runtime::{
     EventEmitter, InsertionNotice, Kernel, KernelError, Session,
@@ -751,9 +751,16 @@ impl RunScope<'_> {
             model_message,
         } = &mut assistant.content
         else {
-            unreachable!(
-                "AssistantAttempt produces an Assistant and message_end keeps its role"
-            )
+            // ExtensionRuntime keeps the role, but that guarantee lives in another
+            // crate, so a broken one must fail this Run instead of panicking.
+            tracing::error!(
+                "Assistant message {} lost its role before settlement in Kernel Run {}",
+                assistant_id,
+                self.run_id
+            );
+            return Err(KernelError::Protocol(
+                "settled Assistant message lost its role".to_string(),
+            ));
         };
         // Hooks may stop a successful turn, but cannot revive a failed/cancelled provider attempt.
         cancelled |= metadata.stop_reason == StopReason::Cancelled;

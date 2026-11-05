@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use extension::{
-    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
-    ExtensionRegistrar, MessageEndPoint, StaticExtensionFactory,
+    BeforeAgentStartPoint, ExtensionContext, ExtensionError, ExtensionHandler,
+    ExtensionModule, ExtensionRegistrar, MessageEndPoint,
+    StaticExtensionFactory,
 };
 use kernel::{AnswerOutcome, SessionEventSinks, WhenBusy};
 use protocol::{
-    AgentEventPayload, AgentMessage, ContentBlock, ExtensionDescriptor,
-    ExtensionId, MessageContent, MessageEndEvent, MessageId, ModelStreamEvent,
-    QueueKind, RunRequest, SessionId, StaticExtensionRegistration, StopReason,
+    AgentEventPayload, AgentMessage, BeforeAgentStartEvent,
+    BeforeAgentStartResult, ContentBlock, ExtensionDescriptor, ExtensionId,
+    ExtensionMessageDraft, MessageContent, MessageEndEvent, MessageId,
+    ModelRequest, ModelStreamEvent, QueueKind, RunRequest, SessionId,
+    StaticExtensionRegistration, StopReason, ToolCall, ToolCallId,
 };
 use tokio::sync::Notify;
 
@@ -19,6 +22,7 @@ use super::fixture::{Route, TestKernel, finished, request, text};
 #[derive(Clone, Copy, Debug)]
 enum Rewrite {
     Identity,
+    Redact,
     Role,
     Text,
 }
@@ -80,6 +84,15 @@ impl ExtensionHandler<MessageEndPoint> for RewriteMessage {
                 message.identity.message_id =
                     MessageId::try_from("message-replaced").expect("id");
             }
+            Rewrite::Redact => {
+                message.identity.message_id =
+                    MessageId::try_from("message-replaced").expect("id");
+                message.content = MessageContent::User {
+                    blocks: vec![ContentBlock::Text {
+                        text: "rewritten".into(),
+                    }],
+                };
+            }
             Rewrite::Role => {
                 message.content = MessageContent::System {
                     blocks: vec![ContentBlock::Text {
@@ -129,9 +142,279 @@ fn reported_message_end(test: &TestKernel, session: &SessionId) -> bool {
     })
 }
 
+/// Rewrites ToolResult and Extension messages, and contributes the Extension draft.
+#[derive(Clone)]
+struct RewriteKinds(Rewrite);
+
+impl RewriteKinds {
+    /// Builds a Kernel that calls one bash tool for "run tool", then answers.
+    fn kernel(self) -> TestKernel {
+        TestKernel::with_extensions(
+            |request: &ModelRequest| {
+                // The Extension draft follows the prompt, so key off tool progress.
+                let answered = request.messages.iter().any(|message| {
+                    matches!(message.content, MessageContent::ToolResult { .. })
+                });
+                if !answered {
+                    Route::Events(vec![
+                        ModelStreamEvent::ToolCall(
+                            ToolCall::builder()
+                                .tool_call_id(
+                                    ToolCallId::try_from("bash-call")
+                                        .expect("id"),
+                                )
+                                .name("bash".to_string())
+                                // Only the output spells the secret, so finding
+                                // it in a request means the output leaked.
+                                .arguments(serde_json::json!({
+                                    "command": "printf 'raw-%s' secret"
+                                }))
+                                .build(),
+                        ),
+                        finished(StopReason::ToolUse),
+                    ])
+                } else {
+                    Route::answer("done")
+                }
+            },
+            Arc::new(StaticExtensionFactory::new(
+                StaticExtensionRegistration::default(),
+                vec![Arc::new(move || {
+                    Ok(Arc::new(self.clone()) as Arc<dyn ExtensionModule>)
+                })],
+            )),
+        )
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<MessageEndPoint> for RewriteKinds {
+    /// Redacts or changes the role of every ToolResult and Extension draft.
+    async fn handle(
+        &self,
+        event: &MessageEndEvent,
+        _context: &ExtensionContext,
+    ) -> Result<Option<AgentMessage>, ExtensionError> {
+        let mut message = event.message.clone();
+        let (MessageContent::ToolResult { blocks, .. }
+        | MessageContent::Extension {
+            extension: protocol::ExtensionMessage { blocks, .. },
+        }) = &mut message.content
+        else {
+            return Ok(None);
+        };
+        match self.0 {
+            Rewrite::Redact => {
+                *blocks = vec![ContentBlock::Text {
+                    text: "[redacted]".into(),
+                }];
+                message.identity.message_id =
+                    MessageId::try_from("message-replaced").expect("id");
+            }
+            _ => {
+                message.content = MessageContent::System {
+                    blocks: vec![ContentBlock::Text {
+                        text: "forged".into(),
+                    }],
+                };
+            }
+        }
+        Ok(Some(message))
+    }
+}
+
+#[async_trait]
+impl ExtensionHandler<BeforeAgentStartPoint> for RewriteKinds {
+    /// Contributes one Extension message that passes through `message_end`.
+    async fn handle(
+        &self,
+        _event: &BeforeAgentStartEvent,
+        _context: &ExtensionContext,
+    ) -> Result<BeforeAgentStartResult, ExtensionError> {
+        Ok(BeforeAgentStartResult {
+            messages: vec![
+                ExtensionMessageDraft::builder()
+                    .extension_id(
+                        ExtensionId::try_from("kind-rewriter").expect("id"),
+                    )
+                    .custom_type("note".to_string())
+                    .blocks(vec![ContentBlock::Text {
+                        text: "raw-note".into(),
+                    }])
+                    .display(true)
+                    .include_in_context(true)
+                    .build(),
+            ],
+            system_prompt: None,
+        })
+    }
+}
+
+impl ExtensionModule for RewriteKinds {
+    /// Identifies the kind-rewriting test extension.
+    fn descriptor(&self) -> ExtensionDescriptor {
+        ExtensionDescriptor {
+            id: ExtensionId::try_from("kind-rewriter").expect("id"),
+            name: "Kind rewriter".into(),
+            version: "1".into(),
+        }
+    }
+
+    /// Registers the draft contribution and the message_end replacement.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<BeforeAgentStartPoint, _>(self.clone())?;
+        registrar.on::<MessageEndPoint, _>(self.clone())
+    }
+}
+
+/// Runs "run tool" and returns the Session's transcript.
+async fn run_tool_transcript(
+    test: &TestKernel,
+    session: &SessionId,
+) -> Vec<AgentMessage> {
+    test.kernel
+        .run(
+            RunRequest {
+                session_id: session.clone(),
+                input: "run tool".into(),
+            },
+            test.sinks.sink(session),
+        )
+        .await
+        .expect("run");
+    test.kernel.session_transcript(session).expect("transcript")
+}
+
+/// Returns the single message of one kind, proving its identity was restored.
+fn only_message(
+    transcript: &[AgentMessage],
+    is_kind: impl Fn(&MessageContent) -> bool,
+) -> &AgentMessage {
+    let mut matching = transcript.iter().filter(|m| is_kind(&m.content));
+    let message = matching.next().expect("message of this kind");
+    assert!(
+        matching.next().is_none(),
+        "more than one message of this kind"
+    );
+    assert_ne!(message.identity.message_id.as_str(), "message-replaced");
+    message
+}
+
+/// Reports whether one message carries the note draft rather than a diagnostic.
+fn is_note(content: &MessageContent) -> bool {
+    matches!(content, MessageContent::Extension { extension }
+        if extension.custom_type == "note")
+}
+
+/// Reads an Extension message's visible blocks; other kinds have none to compare.
+fn note_blocks(message: &AgentMessage) -> Vec<ContentBlock> {
+    let MessageContent::Extension { extension } = &message.content else {
+        return Vec::new();
+    };
+    extension.blocks.clone()
+}
+
+/// A hook that builds a fresh prompt still redacts what is stored and sent.
+#[tokio::test]
+async fn message_end_keeps_user_redaction_that_changes_identity() {
+    let test = TestKernel::with_extensions(
+        |_| Route::answer("answer"),
+        RewriteMessage {
+            target: "my secret",
+            rewrite: Rewrite::Redact,
+        }
+        .factory(),
+    );
+    let session = test.create("message-end-redact").await;
+    test.kernel
+        .run(
+            RunRequest {
+                session_id: session.clone(),
+                input: "my secret".into(),
+            },
+            test.sinks.sink(&session),
+        )
+        .await
+        .expect("run");
+    assert_eq!(test.user_texts(&session), ["rewritten"]);
+    assert_eq!(test.model.last_texts(), ["rewritten"]);
+    let transcript = test
+        .kernel
+        .session_transcript(&session)
+        .expect("transcript");
+    only_message(&transcript, |content| {
+        matches!(content, MessageContent::User { .. })
+    });
+    assert!(reported_message_end(&test, &session));
+}
+
+/// Redaction that changes identity applies to tool output and Extension messages.
+#[tokio::test]
+async fn message_end_keeps_tool_and_extension_redaction() {
+    let test = RewriteKinds(Rewrite::Redact).kernel();
+    let session = test.create("message-end-kinds-redact").await;
+
+    let transcript = run_tool_transcript(&test, &session).await;
+
+    let tool_result = only_message(&transcript, |content| {
+        matches!(content, MessageContent::ToolResult { .. })
+    });
+    assert_eq!(
+        tool_result.content.text_content().as_deref(),
+        Some("[redacted]")
+    );
+    assert_eq!(
+        note_blocks(only_message(&transcript, is_note)),
+        [ContentBlock::Text {
+            text: "[redacted]".into()
+        }]
+    );
+    let requests = test.model.requests.lock().expect("requests");
+    let sent = format!("{:?}", requests.last().expect("request").messages);
+    assert!(
+        !sent.contains("raw-secret"),
+        "tool output reached the model"
+    );
+    assert!(
+        !sent.contains("raw-note"),
+        "Extension text reached the model"
+    );
+    drop(requests);
+    assert!(reported_message_end(&test, &session));
+}
+
+/// A role change on tool output or an Extension message loses only that replacement.
+#[tokio::test]
+async fn message_end_discards_tool_and_extension_role_change() {
+    let test = RewriteKinds(Rewrite::Role).kernel();
+    let session = test.create("message-end-kinds-role").await;
+
+    let transcript = run_tool_transcript(&test, &session).await;
+
+    let tool_result = only_message(&transcript, |content| {
+        matches!(content, MessageContent::ToolResult { .. })
+    });
+    assert!(
+        tool_result
+            .content
+            .text_content()
+            .is_some_and(|text| text.contains("raw-secret"))
+    );
+    assert_eq!(
+        note_blocks(only_message(&transcript, is_note)),
+        [ContentBlock::Text {
+            text: "raw-note".into()
+        }]
+    );
+    assert!(reported_message_end(&test, &session));
+}
+
 /// A prompt keeps its identity and role, and the Run still answers it.
 #[tokio::test]
-async fn message_end_discards_user_identity_or_role_change() {
+async fn message_end_keeps_user_identity_and_role() {
     for rewrite in [Rewrite::Identity, Rewrite::Role] {
         let test = TestKernel::with_extensions(
             |_| Route::answer("answer"),

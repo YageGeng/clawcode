@@ -1,37 +1,27 @@
-mod admission;
-mod attempt;
+//! The Kernel and its Sessions. `Kernel` and `Session` are defined here so every
+//! domain below can reach their private fields:
+//!
+//! - `session`: Session state and lifecycle (create, resume, fork, close, history).
+//! - `run`: from input to settlement (admission, queueing, the Turn loop).
+//! - `command`: direct operations that bypass the Turn loop (Slash Commands, user bash).
+//! - `compaction`, `tools`, `extension`, `mcp`, `subagent`: capabilities a Session uses.
+
 mod command;
 mod compaction;
 mod extension;
-mod input;
-mod insertion;
-mod lifecycle;
 mod mcp;
-mod model_state;
-mod ownership;
-mod prompt;
-mod queue;
-mod rename;
-mod resources;
-mod retry;
 mod run;
 mod session;
-mod settings;
-mod settlement;
 mod subagent;
-mod submit;
 mod tools;
-mod transcript;
-mod tree;
-mod user_bash;
 
 use extension::SessionExtensions;
-use insertion::WaiterCancellation;
-use lifecycle::SessionExecution;
 use mcp::SessionMcpRuntime;
-use model_state::SessionModelState;
-use resources::SessionResources;
 use run::RunInvocation;
+use run::insertion::WaiterCancellation;
+use run::lifecycle::SessionExecution;
+use session::model_state::SessionModelState;
+use session::resources::SessionResources;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,14 +41,17 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::{EventSink, ModelError, ModelFactory, SinkError};
-pub use admission::{AdmissionTicket, PromptOutcome, PromptRequest};
 pub use compaction::ContextUsageEstimate;
 use compaction::{CompactionExecution, CompactionIdentity};
-pub use insertion::{InsertionNotice, InsertionReceiver};
-use queue::PendingQueue;
-pub use submit::{AnswerOutcome, SubmissionAnswer, SubmitRequest, WhenBusy};
+pub use run::admission::{AdmissionTicket, PromptOutcome, PromptRequest};
+pub use run::insertion::{
+    AnswerOutcome, InsertionNotice, InsertionReceiver, SubmissionAnswer,
+};
+use run::queue::PendingQueue;
+pub use run::queue::WhenBusy;
+pub use run::submit::SubmitRequest;
+use session::transcript::SessionTranscript;
 use tools::SessionToolState;
-use transcript::SessionTranscript;
 
 /// Errors surfaced by kernel construction, persistence, extensions, and Turns.
 #[derive(Debug, thiserror::Error)]

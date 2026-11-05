@@ -6,12 +6,12 @@ use protocol::{
     MessageTiming, SessionId, TimestampMs, TurnId,
 };
 
-use crate::runtime::resources::SessionResources;
+use super::resources::SessionResources;
 use crate::runtime::{Kernel, KernelError, Session};
 
 impl Session {
     /// Returns the initialized immutable Prompt snapshot for this Session.
-    pub(super) fn prompt_session(
+    pub(in crate::runtime) fn prompt_session(
         &self,
     ) -> Result<&Arc<::prompt::PromptSession>, KernelError> {
         self.resources
@@ -25,7 +25,7 @@ impl Session {
     }
 
     /// Returns the initialized optional Skill snapshot for this Session.
-    pub(super) fn skill_catalog(
+    pub(in crate::runtime) fn skill_catalog(
         &self,
     ) -> Result<Option<&Arc<skill::SkillCatalog>>, KernelError> {
         self.resources
@@ -39,7 +39,7 @@ impl Session {
     }
 
     /// Builds the current Turn System Prompt from one active Tool snapshot.
-    pub(super) fn build_system_prompt(
+    pub(in crate::runtime) fn build_system_prompt(
         &self,
         tools: &ToolRegistry,
         include_skill_instructions: bool,
@@ -59,7 +59,7 @@ impl Session {
 
 impl Kernel {
     /// Materializes one rendered System Prompt with Turn identity and timing.
-    pub(super) fn system_prompt_message(
+    pub(in crate::runtime) fn system_prompt_message(
         &self,
         session: &Session,
         turn_id: TurnId,

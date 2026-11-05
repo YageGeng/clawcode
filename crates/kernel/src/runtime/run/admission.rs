@@ -9,14 +9,14 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::queue::{QueueRequest, QueueWaiter};
-use super::{
+use crate::runtime::{
     EventEmitter, EventSink, InsertionNotice, Kernel, KernelError,
     RunInvocation, SessionExecution, WhenBusy,
 };
 
 /// Admission counters and abandoned positions share one synchronous lock.
 #[derive(typed_builder::TypedBuilder)]
-pub(super) struct AdmissionState {
+pub(in crate::runtime) struct AdmissionState {
     issued: u64,
     next: watch::Sender<u64>,
     released: BTreeSet<u64>,
@@ -38,7 +38,7 @@ impl Default for AdmissionState {
 pub struct AdmissionTicket {
     execution: Arc<SessionExecution>,
     number: u64,
-    pub(super) cancellation: CancellationToken,
+    pub(in crate::runtime) cancellation: CancellationToken,
     released: Mutex<bool>,
 }
 
@@ -62,7 +62,7 @@ impl AdmissionTicket {
     }
 
     /// Releases admission at queueing, handling, or operation-gate acquisition, exactly once.
-    pub(super) fn release(&self) {
+    pub(in crate::runtime) fn release(&self) {
         let mut released = self
             .released
             .lock()
@@ -170,7 +170,7 @@ impl Kernel {
             {
                 !matches!(
                     session.resolve_direct_slash_command(&command)?,
-                    super::command::DirectSlashCommandResolution::NotFound
+                    crate::runtime::command::DirectSlashCommandResolution::NotFound
                 )
             } else {
                 false

@@ -9,10 +9,10 @@ use store::{
     EntryKind, NewEntry, NewRecord, SessionEntry, SessionRecord, SessionStore,
 };
 
-use super::KernelError;
+use crate::runtime::KernelError;
 
 /// Owns one lane's durable Store and its compaction-aware model context.
-pub(super) struct SessionTranscript {
+pub(in crate::runtime) struct SessionTranscript {
     lane: LaneId,
     state: Mutex<SessionTranscriptState>,
 }
@@ -76,13 +76,15 @@ impl SessionTranscript {
     }
 
     /// Refuses every later write once the Session finished closing.
-    pub(super) fn seal(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn seal(&self) -> Result<(), KernelError> {
         self.state.lock()?.sealed = true;
         Ok(())
     }
 
     /// Rejects ingress before hooks or command side effects when prior writes were uncertain.
-    pub(super) fn ensure_writable(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn ensure_writable(
+        &self,
+    ) -> Result<(), KernelError> {
         drop(self.writable()?);
         Ok(())
     }
@@ -99,7 +101,7 @@ impl SessionTranscript {
             .unwrap_or_default())
     }
     /// Keeps a setting append and its durability checkpoint under the same transcript lock.
-    pub(super) fn commit_setting(
+    pub(in crate::runtime) fn commit_setting(
         &self,
         entry: NewEntry,
     ) -> Result<(), KernelError> {
@@ -120,7 +122,7 @@ impl SessionTranscript {
         Ok(())
     }
     /// Commits a queue mutation and its durability checkpoint under one transcript lock.
-    pub(super) fn commit_records(
+    pub(in crate::runtime) fn commit_records(
         &self,
         records: Vec<NewRecord>,
     ) -> Result<(), KernelError> {
@@ -151,7 +153,7 @@ impl SessionTranscript {
     }
 
     /// Appends the reserved message and consumption record as one insertion boundary.
-    pub(super) fn commit_consumed(
+    pub(in crate::runtime) fn commit_consumed(
         &self,
         entry_id: EntryId,
         message: &AgentMessage,
@@ -193,7 +195,7 @@ impl SessionTranscript {
     }
 
     /// Creates a transcript from one opened Store and its reconstructed context.
-    pub(super) fn new(
+    pub(in crate::runtime) fn new(
         store: Box<dyn SessionStore>,
         lane: LaneId,
         history: Vec<AgentMessage>,
@@ -210,7 +212,9 @@ impl SessionTranscript {
     }
 
     /// Returns the stable Session identifier as an owned value.
-    pub(super) fn session_id(&self) -> Result<SessionId, KernelError> {
+    pub(in crate::runtime) fn session_id(
+        &self,
+    ) -> Result<SessionId, KernelError> {
         self.state
             .lock()
             .map(|state| state.store.session_id().clone())
@@ -226,12 +230,14 @@ impl SessionTranscript {
     }
 
     /// Returns the active lane identifier as an owned value.
-    pub(super) fn lane(&self) -> LaneId {
+    pub(in crate::runtime) fn lane(&self) -> LaneId {
         self.lane.clone()
     }
 
     /// Returns the latest optional Session name as an owned value.
-    pub(super) fn name(&self) -> Result<Option<String>, KernelError> {
+    pub(in crate::runtime) fn name(
+        &self,
+    ) -> Result<Option<String>, KernelError> {
         self.state
             .lock()
             .map(|state| state.store.name().map(ToOwned::to_owned))
@@ -239,7 +245,9 @@ impl SessionTranscript {
     }
 
     /// Returns a defensive copy of the model-visible context.
-    pub(super) fn history(&self) -> Result<Vec<AgentMessage>, KernelError> {
+    pub(in crate::runtime) fn history(
+        &self,
+    ) -> Result<Vec<AgentMessage>, KernelError> {
         self.state
             .lock()
             .map(|state| state.history.clone())
@@ -247,7 +255,7 @@ impl SessionTranscript {
     }
 
     /// Inspects model-visible context under the transcript lock without cloning it.
-    pub(super) fn inspect_history<R>(
+    pub(in crate::runtime) fn inspect_history<R>(
         &self,
         inspect: impl FnOnce(&[AgentMessage]) -> R,
     ) -> Result<R, KernelError> {
@@ -258,7 +266,9 @@ impl SessionTranscript {
     }
 
     /// Returns the current lane leaf as an owned value.
-    pub(super) fn leaf_id(&self) -> Result<Option<EntryId>, KernelError> {
+    pub(in crate::runtime) fn leaf_id(
+        &self,
+    ) -> Result<Option<EntryId>, KernelError> {
         self.state
             .lock()
             .map(|state| state.store.lane(&self.lane).cloned())
@@ -266,7 +276,7 @@ impl SessionTranscript {
     }
 
     /// Returns the active branch as owned Store entries.
-    pub(super) fn active_branch(
+    pub(in crate::runtime) fn active_branch(
         &self,
     ) -> Result<Vec<SessionEntry>, KernelError> {
         let state = self.state.lock()?;
@@ -285,7 +295,7 @@ impl SessionTranscript {
     }
 
     /// Builds the public tree snapshot from one consistent Store view.
-    pub(super) fn tree_snapshot(
+    pub(in crate::runtime) fn tree_snapshot(
         &self,
     ) -> Result<SessionTreeSnapshot, KernelError> {
         let state = self.state.lock()?;
@@ -313,7 +323,7 @@ impl SessionTranscript {
     }
 
     /// Appends a context message and publishes it to history under one lock.
-    pub(super) fn append_context_message(
+    pub(in crate::runtime) fn append_context_message(
         &self,
         entry_id: EntryId,
         message: &AgentMessage,
@@ -348,7 +358,7 @@ impl SessionTranscript {
     }
 
     /// Appends a compaction boundary and replaces context under one lock.
-    pub(super) fn commit_compaction(
+    pub(in crate::runtime) fn commit_compaction(
         &self,
         entry: NewEntry,
         context: Vec<AgentMessage>,
@@ -360,7 +370,7 @@ impl SessionTranscript {
     }
 
     /// Flushes all buffered transcript mutations to durable storage.
-    pub(super) fn sync(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn sync(&self) -> Result<(), KernelError> {
         let mut state = self.state.lock()?;
         if let Err(error) = state.store.sync() {
             tracing::error!(
@@ -397,7 +407,7 @@ impl SessionTranscript {
     }
 
     /// Sets or clears one durable entry label.
-    pub(super) fn set_label(
+    pub(in crate::runtime) fn set_label(
         &self,
         entry_id: EntryId,
         label: Option<String>,
@@ -407,7 +417,7 @@ impl SessionTranscript {
     }
 
     /// Appends one typed extension entry without changing model history.
-    pub(super) fn append_extension_entry(
+    pub(in crate::runtime) fn append_extension_entry(
         &self,
         entry_id: EntryId,
         entry: ExtensionEntryData,
@@ -627,7 +637,7 @@ impl SessionTranscript {
         store: &dyn SessionStore,
         lane: &LaneId,
     ) -> Result<Vec<AgentMessage>, KernelError> {
-        super::Kernel::history_from_store(store, lane)
+        crate::runtime::Kernel::history_from_store(store, lane)
     }
 }
 

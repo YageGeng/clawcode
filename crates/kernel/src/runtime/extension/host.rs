@@ -12,10 +12,10 @@ use protocol::{
 };
 
 use super::super::EventEmitter;
-use super::super::rename::SessionRename;
-use super::super::settings::SessionSettingsUpdate;
 use super::super::{RunInvocation, Session};
 use super::context::ExtensionMessageMaterializer;
+use crate::runtime::session::rename::SessionRename;
+use crate::runtime::session::settings::SessionSettingsUpdate;
 
 /// Event sink used when an out-of-band extension command has no ACP stream.
 struct DiscardEventSink;
@@ -312,7 +312,7 @@ impl ExtensionHost for SessionExtensionHost {
             .kernel
             .enqueue(
                 &invocation.session_id,
-                super::super::queue::QueueRequest::builder()
+                crate::runtime::run::queue::QueueRequest::builder()
                     .kind(delivery)
                     .input(text.clone().into())
                     .input_processed(true)

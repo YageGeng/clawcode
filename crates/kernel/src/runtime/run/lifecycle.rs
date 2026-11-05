@@ -5,13 +5,13 @@ use protocol::{PendingMessages, QueueId, RunId, Sequence, TurnId};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard, Notify};
 use tokio_util::sync::CancellationToken;
 
-use super::{
+use crate::runtime::{
     EventSink, KernelError, PendingQueue, Session, WaiterCancellation,
 };
 
 /// Serialized lifecycle state for one live session runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SessionLifecycle {
+pub(in crate::runtime) enum SessionLifecycle {
     /// Startup hooks and resource publication are still in progress.
     Starting,
     /// The session accepts normal agent and maintenance operations.
@@ -24,17 +24,17 @@ pub(super) enum SessionLifecycle {
 
 /// Correlation data that must become visible and disappear as one active-Run value.
 #[derive(Clone)]
-pub(super) struct ActiveRunContext {
-    pub(super) run_id: RunId,
-    pub(super) turn_id: TurnId,
-    pub(super) sink: Arc<dyn EventSink>,
+pub(in crate::runtime) struct ActiveRunContext {
+    pub(in crate::runtime) run_id: RunId,
+    pub(in crate::runtime) turn_id: TurnId,
+    pub(in crate::runtime) sink: Arc<dyn EventSink>,
 }
 
 /// Owns serialized operation, cancellation, queue, and event sequencing state.
 #[derive(typed_builder::TypedBuilder)]
-pub(super) struct SessionExecution {
+pub(in crate::runtime) struct SessionExecution {
     #[builder(default)]
-    submissions: Mutex<Vec<Arc<super::submit::SubmissionReceipt>>>,
+    submissions: Mutex<Vec<Arc<super::insertion::SubmissionReceipt>>>,
     #[builder(default)]
     pub(super) admission: Mutex<super::admission::AdmissionState>,
     lifecycle: RwLock<SessionLifecycle>,
@@ -166,7 +166,7 @@ impl SessionExecution {
     }
 
     /// Acquires shutdown's gate without queueing behind work rejected by the close signal.
-    pub(super) async fn acquire_close(
+    pub(in crate::runtime) async fn acquire_close(
         &self,
     ) -> Result<MutexGuard<'_, ()>, KernelError> {
         self.request_close()?;
@@ -176,7 +176,7 @@ impl SessionExecution {
     }
 
     /// Installs a fresh cancellation token for one serialized operation.
-    pub(super) fn install_cancellation(
+    pub(in crate::runtime) fn install_cancellation(
         &self,
         parent: Option<&CancellationToken>,
     ) -> Result<CancellationToken, KernelError> {
@@ -192,7 +192,7 @@ impl SessionExecution {
     }
 
     /// Returns the current operation cancellation token without retaining its lock.
-    pub(super) fn cancellation(
+    pub(in crate::runtime) fn cancellation(
         &self,
     ) -> Result<CancellationToken, KernelError> {
         self.cancellation
@@ -202,7 +202,7 @@ impl SessionExecution {
     }
 
     /// Returns a defensive snapshot of all pending messages.
-    pub(super) fn pending_snapshot(
+    pub(in crate::runtime) fn pending_snapshot(
         &self,
     ) -> Result<PendingMessages, KernelError> {
         self.queue
@@ -220,7 +220,7 @@ impl SessionExecution {
     }
 
     /// Reports whether any steering or follow-up message is pending.
-    pub(super) fn has_pending(&self) -> Result<bool, KernelError> {
+    pub(in crate::runtime) fn has_pending(&self) -> Result<bool, KernelError> {
         self.queue
             .lock()
             .map(|queue| !queue.is_empty())
@@ -230,7 +230,7 @@ impl SessionExecution {
     /// Transfers a consumed receipt to the Run holding the execution gate.
     pub(super) fn accept_receipt(
         &self,
-        receipt: Arc<super::submit::SubmissionReceipt>,
+        receipt: Arc<super::insertion::SubmissionReceipt>,
     ) -> Result<(), KernelError> {
         self.submissions.lock()?.push(receipt);
         Ok(())
@@ -239,7 +239,7 @@ impl SessionExecution {
     /// Publishes one authoritative answer to every input consumed by the current Run.
     pub(super) fn settle_submissions(
         &self,
-        answer: Arc<super::SubmissionAnswer>,
+        answer: Arc<crate::runtime::SubmissionAnswer>,
     ) -> Result<(), KernelError> {
         let submissions = std::mem::take(&mut *self.submissions.lock()?);
         for receipt in submissions {
@@ -256,7 +256,7 @@ impl SessionExecution {
     }
 
     /// Cancels the current operation and rejects client prompts waiting for the gate.
-    pub(super) fn cancel(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn cancel(&self) -> Result<(), KernelError> {
         let current = self.cancellation.lock()?;
         current.cancel();
         // Waiters are replaced under the admission lock so a cancel cannot fall
@@ -268,7 +268,7 @@ impl SessionExecution {
     }
 
     /// Publishes all active-Run correlation fields under one lock.
-    pub(super) fn install_run(
+    pub(in crate::runtime) fn install_run(
         self: &Arc<Self>,
         context: ActiveRunContext,
     ) -> Result<ActiveRunLease, KernelError> {
@@ -287,7 +287,7 @@ impl SessionExecution {
     }
 
     /// Returns one owned active-Run snapshot without retaining the state lock.
-    pub(super) fn active_run(
+    pub(in crate::runtime) fn active_run(
         &self,
     ) -> Result<Option<ActiveRunContext>, KernelError> {
         self.active_run
@@ -316,12 +316,14 @@ impl SessionExecution {
     }
 
     /// Reports whether no Run currently owns this execution component.
-    pub(super) fn is_idle(&self) -> Result<bool, KernelError> {
+    pub(in crate::runtime) fn is_idle(&self) -> Result<bool, KernelError> {
         self.active_run().map(|active_run| active_run.is_none())
     }
 
     /// Waits until the current active Run lease has been released.
-    pub(super) async fn wait_for_idle(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) async fn wait_for_idle(
+        &self,
+    ) -> Result<(), KernelError> {
         loop {
             let notified = self.idle_notify.notified();
             if self.is_idle()? {
@@ -332,7 +334,9 @@ impl SessionExecution {
     }
 
     /// Allocates the next positive event sequence for this Session.
-    pub(super) fn next_sequence(&self) -> Result<Sequence, KernelError> {
+    pub(in crate::runtime) fn next_sequence(
+        &self,
+    ) -> Result<Sequence, KernelError> {
         let raw_sequence = self
             .sequence
             .fetch_add(1, Ordering::Relaxed)
@@ -386,7 +390,9 @@ impl SessionExecution {
     }
 
     /// Subscribes to shutdown progress: `true` while a close is in progress.
-    pub(super) fn closing(&self) -> tokio::sync::watch::Receiver<bool> {
+    pub(in crate::runtime) fn closing(
+        &self,
+    ) -> tokio::sync::watch::Receiver<bool> {
         self.closing.subscribe()
     }
 
@@ -407,7 +413,7 @@ impl SessionExecution {
     }
 
     /// Whether shutdown finished, so the Store may already belong to a new runtime.
-    pub(super) fn is_closed(&self) -> Result<bool, KernelError> {
+    pub(in crate::runtime) fn is_closed(&self) -> Result<bool, KernelError> {
         Ok(*self.lifecycle.read()? == SessionLifecycle::Closed)
     }
 
@@ -427,7 +433,9 @@ impl SessionExecution {
 /// Reports a Session's shutdown as settled when the closing operation ends on
 /// any path: completion, an abort back to active, or a dropped close future.
 #[must_use = "dropping the guard immediately reports the shutdown as settled"]
-pub(super) struct ClosingGuard<'a>(&'a tokio::sync::watch::Sender<bool>);
+pub(in crate::runtime) struct ClosingGuard<'a>(
+    &'a tokio::sync::watch::Sender<bool>,
+);
 
 impl Drop for ClosingGuard<'_> {
     /// Wakes callers, such as title changes, waiting for this shutdown to end.
@@ -437,7 +445,7 @@ impl Drop for ClosingGuard<'_> {
 }
 
 /// Clears active-Run correlation when one serialized Run exits any path.
-pub(super) struct ActiveRunLease {
+pub(in crate::runtime) struct ActiveRunLease {
     execution: Arc<SessionExecution>,
     run_id: RunId,
 }
@@ -448,10 +456,10 @@ impl Drop for ActiveRunLease {
         let _ = self.execution.close_queue();
         // Fail only receipts left unresolved by an operational error or a dropped Run future.
         if let Err(error) = self.execution.settle_submissions(Arc::new(
-            super::SubmissionAnswer {
+            crate::runtime::SubmissionAnswer {
                 message_id: None,
                 text: String::new(),
-                outcome: super::AnswerOutcome::Failed(
+                outcome: crate::runtime::AnswerOutcome::Failed(
                     "run ended before settlement".into(),
                 ),
             },
@@ -475,26 +483,26 @@ impl Drop for ActiveRunLease {
 
 impl Session {
     /// Forces all buffered session mutations to durable storage.
-    pub(super) fn sync_store(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn sync_store(&self) -> Result<(), KernelError> {
         self.transcript.sync()
     }
 
     /// Acquires the run gate only while this runtime remains active.
-    pub(super) async fn acquire_operation(
+    pub(in crate::runtime) async fn acquire_operation(
         &self,
     ) -> Result<MutexGuard<'_, ()>, KernelError> {
         self.execution.acquire_operation().await
     }
 
     /// Attempts to acquire the run gate without silently queueing direct commands.
-    pub(super) fn try_acquire_operation(
+    pub(in crate::runtime) fn try_acquire_operation(
         &self,
     ) -> Result<Option<MutexGuard<'_, ()>>, KernelError> {
         self.execution.try_acquire_operation()
     }
 
     /// Acquires the run gate for prompt input and installs its cancellation atomically.
-    pub(super) async fn acquire_operation_for_prompt(
+    pub(in crate::runtime) async fn acquire_operation_for_prompt(
         &self,
         cancellation_parent: Option<&CancellationToken>,
         waiters: WaiterCancellation,
@@ -505,37 +513,39 @@ impl Session {
     }
 
     /// Transitions an active runtime into closing while holding its run gate.
-    pub(super) fn begin_closing(
+    pub(in crate::runtime) fn begin_closing(
         &self,
     ) -> Result<ClosingGuard<'_>, KernelError> {
         self.execution.begin_closing()
     }
 
     /// Restores an active runtime when shutdown stops before resource teardown.
-    pub(super) fn abort_closing(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn abort_closing(&self) -> Result<(), KernelError> {
         self.execution.abort_closing()
     }
 
     /// Marks a closing runtime closed before its final map removal, sealing
     /// its transcript first so a stale handle cannot write after a Resume.
-    pub(super) fn finish_closing(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn finish_closing(&self) -> Result<(), KernelError> {
         let sealed = self.transcript.seal();
         self.execution.finish_closing()?;
         sealed
     }
 
     /// Publishes this runtime for ordinary operations after startup is durable.
-    pub(super) fn finish_starting(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn finish_starting(
+        &self,
+    ) -> Result<(), KernelError> {
         self.execution.finish_starting()
     }
 
     /// Rejects ordinary kernel work before startup completes or after shutdown starts.
-    pub(super) fn ensure_active(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) fn ensure_active(&self) -> Result<(), KernelError> {
         self.execution.ensure_active()
     }
 
     /// Preserves a typed extension-host error for run-gated shutdown reentry.
-    pub(super) fn ensure_extension_operation(
+    pub(in crate::runtime) fn ensure_extension_operation(
         &self,
     ) -> Result<(), extension::ExtensionHostError> {
         match self.ensure_active() {

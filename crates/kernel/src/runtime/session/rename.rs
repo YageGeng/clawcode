@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use protocol::{
     AgentEventPayload, ExtensionInvocation, SessionId, SessionInfoChangedEvent,
-    TurnId,
+    SessionTitle, TurnId,
 };
 
-use super::{EventEmitter, Kernel, KernelError, Session};
+use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
 /// Borrows one live Session for a name change.
 ///
@@ -176,6 +176,111 @@ impl SessionRename<'_> {
                 self.session_id,
                 error
             );
+        }
+    }
+}
+
+impl Kernel {
+    /// Stores a title on a live Session without announcing it, for internal
+    /// callers such as owned child creation that no client asked to see.
+    pub async fn rename_session(
+        &self,
+        session_id: &SessionId,
+        title: SessionTitle,
+    ) -> Result<(), KernelError> {
+        let session = self.session(session_id)?;
+        SessionRename::builder()
+            .kernel(self)
+            .session_id(session_id)
+            .session(&session)
+            .build()
+            .silent(Some(title.as_str().to_string()))
+            .await
+    }
+
+    /// Stores a client-chosen title and announces it to every Session observer.
+    pub async fn set_session_title(
+        &self,
+        session_id: &SessionId,
+        title: SessionTitle,
+    ) -> Result<(), KernelError> {
+        // Any listed Session may be retitled. A live runtime costs one map
+        // lookup; only a Session without one touches its persisted Store.
+        loop {
+            match self.session(session_id) {
+                // One runtime both stores and announces the title, so the event
+                // follows the runtime that actually took the name.
+                Ok(session) => {
+                    match SessionRename::builder()
+                        .kernel(self)
+                        .session_id(session_id)
+                        .session(&session)
+                        .build()
+                        .announced(Some(title.as_str().to_string()))
+                        .await
+                    {
+                        // The runtime closed while the rename waited for its
+                        // lock; its sealed transcript refused the write, so
+                        // retry and let the Store take the title.
+                        Err(
+                            KernelError::SessionNotFound(_)
+                            | KernelError::SessionClosing,
+                        ) => continue,
+                        result => return result,
+                    }
+                }
+                Err(
+                    KernelError::SessionNotFound(_)
+                    | KernelError::SessionStarting,
+                ) => {}
+                // Shutdown gives the id back when it ends; the Store, or the
+                // runtime restored by an aborted close, then takes the title.
+                Err(KernelError::SessionClosing) => {
+                    if self.wait_for_session_close(session_id).await? {
+                        continue;
+                    }
+                    return Err(KernelError::SessionClosing);
+                }
+                Err(error) => return Err(error),
+            }
+            match self.reserve_session_build(session_id) {
+                Ok(_reservation) => {
+                    // The build reservation keeps Resume from opening the same
+                    // file. Looking the file up under it reports a deletion that
+                    // finished first as SessionNotFound, not a raw I/O error.
+                    // Nothing observes an unloaded Session, so no event.
+                    let header =
+                        self.store_factory.header(session_id)?.ok_or_else(
+                            || KernelError::SessionNotFound(session_id.clone()),
+                        )?;
+                    // One appended fact, not a replay, keeps the reservation short.
+                    self.store_factory.set_name_at(
+                        &header.path,
+                        Some(title.as_str().to_string()),
+                    )?;
+                    tracing::info!(
+                        "renamed persisted Session {} without loading it",
+                        session_id
+                    );
+                    return Ok(());
+                }
+                // Construction or deletion owns the id; retry once it ends.
+                Err(KernelError::DuplicateSession(_)) => {
+                    if !self.wait_for_session_reservation(session_id).await? {
+                        // A cancelled startup can leave a Starting runtime with
+                        // no reservation to wait for; report its lifecycle error.
+                        match self.session(session_id) {
+                            Ok(_)
+                            | Err(
+                                KernelError::SessionNotFound(_)
+                                | KernelError::SessionClosing,
+                            ) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 }

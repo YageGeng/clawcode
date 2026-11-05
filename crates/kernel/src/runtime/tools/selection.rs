@@ -5,7 +5,7 @@ use store::{EntryKind, NewEntry, SessionEntry};
 
 use super::state::{SessionToolSnapshot, SessionToolState};
 use crate::KernelError;
-use crate::runtime::transcript::SessionTranscript;
+use crate::runtime::session::transcript::SessionTranscript;
 
 /// Actual outcome of an incremental search load, generated after commit-time validation.
 #[derive(Default, serde::Serialize)]

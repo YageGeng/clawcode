@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use protocol::{AgentEventPayload, AgentOutcome, RunId, SessionId, TurnId};
 
-use super::{
+use crate::runtime::{
     CompactionExecution, CompactionReason, EventEmitter, Kernel, KernelError,
     RecordKind, RunResult, Session,
 };
@@ -62,8 +62,8 @@ impl RunSettlement<'_> {
     /// Persists and publishes the complete terminal lifecycle in protocol order.
     pub(super) async fn settle(
         self,
-    ) -> Result<Arc<super::SubmissionAnswer>, KernelError> {
-        let answer = Arc::new(super::SubmissionAnswer::from((
+    ) -> Result<Arc<crate::runtime::SubmissionAnswer>, KernelError> {
+        let answer = Arc::new(crate::runtime::SubmissionAnswer::from((
             self.outcome,
             self.messages.as_slice(),
         )));

@@ -195,15 +195,19 @@ impl CompactionPreparation {
             .iter()
             .enumerate()
             .filter_map(|(index, message)| {
-                matches!(
-                    message.content,
+                let valid = match &message.content {
                     MessageContent::User { .. }
-                        | MessageContent::ExpandedUser { .. }
-                        | MessageContent::Assistant { .. }
-                        | MessageContent::BashExecution { .. }
-                        | MessageContent::Extension { .. }
-                )
-                .then_some(index)
+                    | MessageContent::ExpandedUser { .. }
+                    | MessageContent::Assistant { .. }
+                    | MessageContent::BashExecution { .. } => true,
+                    // A hidden diagnostic can sit between tool results, and cutting
+                    // there would strand the next result from its retained call.
+                    MessageContent::Extension { extension } => {
+                        extension.include_in_context
+                    }
+                    _ => false,
+                };
+                valid.then_some(index)
             })
             .collect::<Vec<_>>();
         let first_kept = if policy.keep_recent_tokens == 0 {
@@ -483,5 +487,136 @@ mod tests {
             policy.overflow_recovery(&metadata(9_000), &profile),
             Some(OverflowRecovery::CompactAndRetry)
         );
+    }
+
+    /// Wraps one content value in a fixed identity and timing for partition tests.
+    fn message(content: MessageContent) -> AgentMessage {
+        let timestamp = protocol::TimestampMs::from(1);
+        AgentMessage {
+            identity: protocol::MessageIdentity {
+                message_id: protocol::MessageId::try_from("message")
+                    .expect("message id"),
+                turn_id: protocol::TurnId::try_from("turn").expect("turn id"),
+            },
+            timing: protocol::MessageTiming::try_from((
+                timestamp, timestamp, timestamp,
+            ))
+            .expect("message timing"),
+            content,
+        }
+    }
+
+    /// Builds one text block of a chosen length, which drives the token estimate.
+    fn text_blocks(length: usize) -> Vec<ContentBlock> {
+        vec![ContentBlock::Text {
+            text: "x".repeat(length),
+        }]
+    }
+
+    /// Builds an Assistant message that only carries text.
+    fn assistant(length: usize) -> AgentMessage {
+        message(MessageContent::Assistant {
+            blocks: text_blocks(length),
+            metadata: AssistantMetadata::builder()
+                .provider_id("p".to_string())
+                .model_id("m".to_string())
+                .stop_reason(StopReason::ToolUse)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new().input_tokens(0).output_tokens(0),
+                ))
+                .build(),
+            model_message: None,
+        })
+    }
+
+    /// Builds a user message.
+    fn user() -> AgentMessage {
+        message(MessageContent::User {
+            blocks: text_blocks(8),
+        })
+    }
+
+    /// Builds a ToolResult with a chosen output length.
+    fn tool_result(length: usize) -> AgentMessage {
+        message(MessageContent::ToolResult {
+            tool_call_id: protocol::ToolCallId::try_from("call")
+                .expect("tool call id"),
+            blocks: text_blocks(length),
+            is_error: false,
+            details: None,
+            output: None,
+            cancelled: false,
+        })
+    }
+
+    /// Builds an Extension message that is or is not part of model context.
+    fn extension(length: usize, include_in_context: bool) -> AgentMessage {
+        message(MessageContent::Extension {
+            extension: protocol::ExtensionMessage {
+                extension_id: protocol::ExtensionId::try_from("ext")
+                    .expect("extension id"),
+                custom_type: "note".to_string(),
+                blocks: text_blocks(length),
+                display: true,
+                include_in_context,
+                details: None,
+            },
+        })
+    }
+
+    /// Builds a policy that keeps roughly `keep_recent_tokens` of recent context.
+    fn keep_recent(keep_recent_tokens: u64) -> CompactionPolicy {
+        CompactionPolicy::builder()
+            .enabled(true)
+            .reserve_tokens(16_384)
+            .keep_recent_tokens(keep_recent_tokens)
+            .build()
+    }
+
+    /// A hidden diagnostic between tool results cannot strand a result from its call.
+    #[test]
+    fn hidden_extension_is_not_a_compaction_cut_point() {
+        let history = [
+            user(),
+            assistant(16),
+            extension(16, false),
+            tool_result(200),
+            extension(16, false),
+            tool_result(200),
+        ];
+
+        let preparation =
+            CompactionPreparation::from_history(&history, keep_recent(60));
+
+        assert!(matches!(
+            preparation.retained_tail.first().map(|m| &m.content),
+            Some(MessageContent::User { .. })
+        ));
+        assert_eq!(
+            preparation
+                .retained_tail
+                .iter()
+                .filter(|m| matches!(
+                    m.content,
+                    MessageContent::ToolResult { .. }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    /// An Extension message the model reads stays a place compaction may cut.
+    #[test]
+    fn visible_extension_stays_a_compaction_cut_point() {
+        let history =
+            [user(), assistant(400), extension(400, true), assistant(40)];
+
+        let preparation =
+            CompactionPreparation::from_history(&history, keep_recent(60));
+
+        assert!(matches!(
+            preparation.retained_tail.first().map(|m| &m.content),
+            Some(MessageContent::Extension { .. })
+        ));
     }
 }

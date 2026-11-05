@@ -1,6 +1,9 @@
+//! Direct operations that bypass the Turn loop: Slash Commands and user bash.
+
 mod builtin;
 mod execution;
 mod session_stats;
+mod user_bash;
 pub(super) use builtin::BuiltinSlashCommand;
 pub(super) use execution::SlashCommandExecution;
 
@@ -57,6 +60,31 @@ impl DirectSlashCommandResolution {
 }
 
 impl Session {
+    /// Rejects input naming a direct Slash Command, which cannot wait in a Run queue.
+    pub(in crate::runtime) fn ensure_queueable(
+        &self,
+        input: &protocol::RunInput,
+    ) -> Result<(), KernelError> {
+        if let Some(text) = input.slash_command_text()
+            && let Ok(invocation) =
+                protocol::SlashCommandInvocation::try_from(text)
+        {
+            match self.resolve_direct_slash_command(&invocation)? {
+                DirectSlashCommandResolution::Command(command) => {
+                    return Err(KernelError::SlashCommandCannotQueue {
+                        name: invocation.name,
+                        command_source: command.source(),
+                    });
+                }
+                DirectSlashCommandResolution::Rejected { error, .. } => {
+                    return Err(KernelError::SlashCommandRejected(error));
+                }
+                DirectSlashCommandResolution::NotFound => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Resolves direct commands in Builtin then Extension precedence order.
     pub(super) fn resolve_direct_slash_command(
         &self,

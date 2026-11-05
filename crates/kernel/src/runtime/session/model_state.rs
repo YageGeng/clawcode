@@ -2,7 +2,7 @@ use std::sync::{Arc, RwLock};
 
 use protocol::{ModelProfile, ThinkingLevel};
 
-use super::KernelError;
+use crate::runtime::KernelError;
 use crate::{Model, ModelCatalog};
 
 /// Current model handle and thinking level published as one consistent snapshot.
@@ -12,7 +12,7 @@ struct ModelSelection {
 }
 
 /// Session-local model catalog and mutable selection state.
-pub(super) struct SessionModelState {
+pub(in crate::runtime) struct SessionModelState {
     catalog: Arc<ModelCatalog>,
     selection: RwLock<ModelSelection>,
 }
@@ -34,7 +34,9 @@ impl SessionModelState {
     }
 
     /// Returns the active model handle without retaining the selection lock.
-    pub(super) fn active(&self) -> Result<Arc<dyn Model>, KernelError> {
+    pub(in crate::runtime) fn active(
+        &self,
+    ) -> Result<Arc<dyn Model>, KernelError> {
         self.selection
             .read()
             .map(|selection| Arc::clone(&selection.model))
@@ -42,7 +44,9 @@ impl SessionModelState {
     }
 
     /// Returns the current thinking level.
-    pub(super) fn thinking_level(&self) -> Result<ThinkingLevel, KernelError> {
+    pub(in crate::runtime) fn thinking_level(
+        &self,
+    ) -> Result<ThinkingLevel, KernelError> {
         self.selection
             .read()
             .map(|selection| selection.thinking_level)
@@ -50,7 +54,7 @@ impl SessionModelState {
     }
 
     /// Captures the active model and thinking level under one read lock.
-    pub(super) fn snapshot(
+    pub(in crate::runtime) fn snapshot(
         &self,
     ) -> Result<(Arc<dyn Model>, ThinkingLevel), KernelError> {
         self.selection
@@ -74,7 +78,7 @@ impl SessionModelState {
     ///
     /// The error names the reference and lists every configured model so a model
     /// caller can correct itself.
-    pub(super) fn resolve_reference(
+    pub(in crate::runtime) fn resolve_reference(
         &self,
         reference: &str,
     ) -> Result<Arc<dyn Model>, String> {
@@ -100,7 +104,7 @@ impl SessionModelState {
     }
 
     /// Returns every configured model profile in catalog order.
-    pub(super) fn profiles(&self) -> Vec<ModelProfile> {
+    pub(in crate::runtime) fn profiles(&self) -> Vec<ModelProfile> {
         self.catalog.profiles()
     }
 

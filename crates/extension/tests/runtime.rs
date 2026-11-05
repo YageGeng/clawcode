@@ -276,11 +276,12 @@ impl ExtensionModule for ReplacementModule {
     }
 }
 
-/// One faulty handler loses only its own replacement and is reported by name.
+/// A new identity is reverted without losing the content, and a new role loses
+/// only that handler's replacement. Each surfaces its own diagnostic.
 #[tokio::test]
-async fn message_end_discards_identity_and_role_changes_per_handler() {
+async fn message_end_restores_identity_and_discards_role_changes() {
     let rewritten = user_message("message-1", "rewritten");
-    let new_identity = user_message("message-2", "forged");
+    let new_identity = user_message("message-2", "redacted");
     let mut new_role = user_message("message-1", "forged");
     new_role.content = MessageContent::System {
         blocks: vec![ContentBlock::Text {
@@ -290,7 +291,7 @@ async fn message_end_discards_identity_and_role_changes_per_handler() {
     let mut registrar = ExtensionRegistrar::new();
     registrar
         .register_module(&ReplacementModule(vec![
-            rewritten.clone(),
+            rewritten,
             new_identity,
             new_role,
         ]))
@@ -310,12 +311,13 @@ async fn message_end_discards_identity_and_role_changes_per_handler() {
         )
         .await;
 
-    assert_eq!(message, rewritten);
+    assert_eq!(message, user_message("message-1", "redacted"));
     let failures = diagnostics.failures.lock().expect("diagnostic mutex");
     assert_eq!(failures.len(), 2);
     assert!(failures.iter().all(|(extension_id, point, _message)| {
         extension_id == "replacer" && point == "message_end"
     }));
+    assert_ne!(failures[0].2, failures[1].2);
 }
 
 /// Runtime composition chains values and stops only on domain terminal decisions.
