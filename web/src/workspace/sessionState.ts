@@ -243,12 +243,15 @@ export function reduceSessionWorkspace(
       };
     }
     case "run/settled": {
+      // Plans published by this Run are done once it ends, so the panel
+      // collapses but keeps them; RunEnd replays, so a reload agrees.
+      const next = state.plans.settled === false ? { ...state, plans: { ...state.plans, settled: true } } : state;
       const previous = state.runUsages.get(action.runId);
-      if (previous === undefined || previous.settled) return state;
+      if (previous === undefined || previous.settled) return next;
       const runUsages = new Map(state.runUsages);
       runUsages.set(action.runId, { ...previous, settled: true });
       return {
-        ...state,
+        ...next,
         runUsages,
         transcript: [...state.transcript, { type: "agent_usage" as const, runId: action.runId, order: action.order }]
           .sort((left, right) => Ordering.compare(left.order, right.order))
@@ -305,8 +308,9 @@ export function reduceSessionWorkspace(
         };
     case "usage/changed": return { ...state, contextUsage: action.usage };
     case "config/replaced": return { ...state, configOptions: action.options };
-    case "plans/todos": return { ...state, plans: { ...state.plans, todos: action.todos } };
-    case "plans/approved": return { ...state, plans: { ...state.plans, approvedPlan: action.plan } };
+    // New plan content belongs to a Run in progress, so the panel opens again.
+    case "plans/todos": return { ...state, plans: { ...state.plans, todos: action.todos, settled: false } };
+    case "plans/approved": return { ...state, plans: { ...state.plans, approvedPlan: action.plan, settled: false } };
     case "retry/changed": return { ...state, retry: action.retry };
     case "compaction/changed": return { ...state, compaction: action.compaction };
     case "outcome/unknown": return { ...state, outcomeUnknown: action.value };

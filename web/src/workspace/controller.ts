@@ -49,6 +49,9 @@ export class WorkspaceController {
   private readonly missingSessionIds = new Set<SessionId>();
   private readonly attachedSessionIds = new Set<SessionId>();
   private readonly attachingSessions = new Map<SessionId, Promise<void>>();
+  // Per-Session Tree request counters: `issued` numbers each request and `applied`
+  // is the newest one shown, so an older answer that lands later never replaces it.
+  private readonly treeTickets = new Map<SessionId, { issued: number; applied: number }>();
   // Resolvers for queued elicitation dialogs, keyed like their store prompts.
   private readonly elicitationAnswers = new Map<string, (answer: ElicitationAnswer) => void>();
   // Resolvers for queued permission dialogs; `undefined` dismisses without choosing.
@@ -79,7 +82,8 @@ export class WorkspaceController {
     this.updateRouter = new SessionUpdateRouter(
       bootstrap.product.slug,
       store,
-      (sessionId) => this.refreshSessionRuntime(sessionId)
+      (sessionId) => this.refreshSessionRuntime(sessionId),
+      (sessionId) => this.refreshSessionTree(sessionId)
     );
   }
 
@@ -131,15 +135,16 @@ export class WorkspaceController {
       this.attachedSessionIds.add(sessionId);
     }
 
+    const treeRequest = this.requestTree(sessionId);
     const [tree, pending, skills, mcpSnapshot] = await Promise.all([
-      this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId),
+      treeRequest.tree,
       this.querySessionSnapshot<PendingMessages>(this.methods.pendingMessages, sessionId),
       this.querySessionSnapshot<SkillListResult>(this.methods.skillList, sessionId),
       this.querySessionSnapshot<McpSessionSnapshot>(this.methods.mcpStatus, sessionId)
     ]);
     if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)
       || tree === undefined || pending === undefined || skills === undefined || mcpSnapshot === undefined) return;
-    this.dispatchSession(sessionId, { type: "tree/replaced", tree });
+    this.applyTree(sessionId, treeRequest.ticket, tree);
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
     this.dispatchSession(sessionId, { type: "mcp/replaced", snapshot: mcpSnapshot });
@@ -820,6 +825,7 @@ export class WorkspaceController {
       this.missingSessionIds.add(id);
       this.updateRouter.resetRecovery(id);
       this.attachedSessionIds.delete(id);
+      this.treeTickets.delete(id);
       this.submissions.delete(id);
       const returned = this.returnedInputs.get(id);
       if (returned !== undefined) window.clearTimeout(returned.timer);
@@ -931,9 +937,10 @@ export class WorkspaceController {
   ): Promise<void> {
     if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)) return;
     this.attachedSessionIds.add(sessionId);
+    const treeRequest = this.requestTree(sessionId);
     const [runtime, tree, pending, skills, mcpSnapshot] = await Promise.all([
       this.querySessionSnapshot<SessionRuntimeSnapshot>(this.methods.sessionRuntime, sessionId),
-      this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId),
+      treeRequest.tree,
       this.querySessionSnapshot<PendingMessages>(this.methods.pendingMessages, sessionId),
       this.querySessionSnapshot<SkillListResult>(this.methods.skillList, sessionId),
       this.querySessionSnapshot<McpSessionSnapshot>(this.methods.mcpStatus, sessionId)
@@ -941,7 +948,7 @@ export class WorkspaceController {
     if (!this.isCurrentConnection(generation, connection) || !this.canRefreshSession(sessionId)
       || runtime === undefined || tree === undefined || pending === undefined || skills === undefined || mcpSnapshot === undefined) return;
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
-    this.dispatchSession(sessionId, { type: "tree/replaced", tree });
+    this.applyTree(sessionId, treeRequest.ticket, tree);
     this.dispatchSession(sessionId, { type: "queue/replaced", pending });
     this.reconcileSubmissions(sessionId, pending, true);
     this.dispatchSession(sessionId, { type: "skills/replaced", result: skills });
@@ -1019,6 +1026,42 @@ export class WorkspaceController {
     }
   }
 
+  /**
+   * Reloads only the active Session's Tree, so nodes a finished Turn persisted
+   * appear while the Run continues instead of after it settles. Other Sessions
+   * get theirs from the settle refresh or from activation, which reloads it.
+   */
+  private async refreshSessionTree(sessionId: SessionId): Promise<void> {
+    // ponytail: downloads the whole Tree on each Turn; add an incremental Tree
+    // endpoint if large Sessions make the per-Turn reload noticeable.
+    if (useWorkspaceStore.getState().activeSessionId !== sessionId) return;
+    // The snapshot query already drops answers from stale connections and gone Sessions.
+    const request = this.requestTree(sessionId);
+    const tree = await request.tree;
+    if (tree !== undefined) this.applyTree(sessionId, request.ticket, tree);
+  }
+
+  /** Starts one Session Tree request and numbers it after every earlier one. */
+  private requestTree(sessionId: SessionId): Readonly<{ ticket: number; tree: Promise<SessionTree | undefined> }> {
+    const tickets = this.treeTickets.get(sessionId) ?? { issued: 0, applied: 0 };
+    tickets.issued += 1;
+    this.treeTickets.set(sessionId, tickets);
+    return { ticket: tickets.issued, tree: this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId) };
+  }
+
+  /**
+   * Replaces the projected Tree unless a newer request's Tree is already shown;
+   * a newer request still pending or failed does not hold this one back.
+   * Checked at dispatch, not on arrival, because callers that batch the Tree
+   * with other snapshots dispatch only after every answer is in.
+   */
+  private applyTree(sessionId: SessionId, ticket: number, tree: SessionTree): void {
+    const tickets = this.treeTickets.get(sessionId);
+    if (tickets === undefined || ticket <= tickets.applied) return;
+    tickets.applied = ticket;
+    this.dispatchSession(sessionId, { type: "tree/replaced", tree });
+  }
+
   /** Refreshes terminal Run state plus mutable Session snapshots after settlement. */
   private async refreshSessionRuntime(sessionId: SessionId): Promise<void> {
     if (this.deletingSessionIds.has(sessionId) || this.missingSessionIds.has(sessionId)) return;
@@ -1030,13 +1073,14 @@ export class WorkspaceController {
       throw reason;
     }
     if (generation !== this.connectionGeneration || !this.canRefreshSession(sessionId)) return;
+    const treeRequest = this.requestTree(sessionId);
     const [runtime, tree] = await Promise.all([
       this.querySessionSnapshot<SessionRuntimeSnapshot>(this.methods.sessionRuntime, sessionId),
-      this.querySessionSnapshot<SessionTree>(this.methods.tree, sessionId)
+      treeRequest.tree
     ]);
     if (generation !== this.connectionGeneration || !this.canRefreshSession(sessionId) || runtime === undefined || tree === undefined) return;
     this.dispatchSession(sessionId, { type: "running/changed", running: runtime.running });
-    this.dispatchSession(sessionId, { type: "tree/replaced", tree });
+    this.applyTree(sessionId, treeRequest.ticket, tree);
   }
 
   /** Handles closure only when it belongs to the currently installed generation. */

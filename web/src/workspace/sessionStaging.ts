@@ -222,6 +222,8 @@ export class SessionWorkspaceStager {
         return;
       }
       case "run/settled": {
+        // Mirrors the reducer: plans collapse, but stay, when their Run ends.
+        if (this.plans.settled === false) this.plans = { ...this.plans, settled: true };
         const previous = this.runUsages.read().get(action.runId);
         if (previous === undefined || previous.settled) return;
         this.runUsages.write().set(action.runId, { ...previous, settled: true });
@@ -279,8 +281,9 @@ export class SessionWorkspaceStager {
         return;
       case "usage/changed": this.contextUsage = action.usage; return;
       case "config/replaced": this.configOptions = action.options; return;
-      case "plans/todos": this.plans = { ...this.plans, todos: action.todos }; return;
-      case "plans/approved": this.plans = { ...this.plans, approvedPlan: action.plan }; return;
+      // Mirrors the reducer: new plan content reopens the panel.
+      case "plans/todos": this.plans = { ...this.plans, todos: action.todos, settled: false }; return;
+      case "plans/approved": this.plans = { ...this.plans, approvedPlan: action.plan, settled: false }; return;
       case "retry/changed": this.retry = action.retry; return;
       case "compaction/changed": this.compaction = action.compaction; return;
       case "outcome/unknown": this.outcomeUnknown = action.value; return;

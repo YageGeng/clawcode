@@ -125,24 +125,32 @@ async function keepPlanningMode(page) {
   assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(COMPOSER)}).disabled`), false, 'the composer takes feedback');
 }
 
-/** Approval returns to default mode, the plan runs, and the plan panel survives a reload. */
+/**
+ * Approval returns to default mode and the plan runs; the plan panel is open
+ * while its Run executes and collapsed, still holding the plan, once the Run
+ * ends, also after a reload.
+ */
 async function approveMode(page) {
   await requestPlan(page);
   await page.click('批准并执行');
   await page.wait(`document.querySelector(${JSON.stringify(MODE_SELECT)})?.value==='default'`, 60_000);
+  // The plan is published with the approval, before the model edits anything.
+  await page.wait(`!!document.querySelector('.plan-panel__approved')&&document.querySelector('.plan-panel').open`);
   const until = Date.now() + MODEL_WAIT_MS;
   while (!(await readFile(join(project, 'notes.txt'), 'utf8')).includes(MARKER)) {
     assert(Date.now() < until, 'the approved plan edited notes.txt');
     await delay(500);
   }
   await waitIdle(page);
-  await page.wait(`!!document.querySelector('.plan-panel__approved')`);
+  await page.wait(`!!document.querySelector('.plan-panel__approved')&&!document.querySelector('.plan-panel').open`);
   if (await page.evaluate(`!!document.querySelector('.plan-panel__todos')`)) {
     assert.match(await page.evaluate(`document.querySelector('.plan-panel__progress')?.textContent ?? ''`), /^\d+\/\d+$/);
   }
-  // A full replay rebuilds the panel from the Session's history.
+  // A full replay reaches the Run's end too, so the executed plan is kept but collapsed.
   await page.call('Page.reload');
-  await page.wait(`!!document.querySelector('.plan-panel__approved')`, 60_000);
+  await page.wait(`!!document.querySelector('.tool-card[data-kind="switch_mode"]')&&!!document.querySelector('.agent-usage')`, 60_000);
+  assert.equal(await page.evaluate(`!!document.querySelector('.plan-panel__approved')`), true, 'replay keeps the executed plan');
+  assert.equal(await page.evaluate(`document.querySelector('.plan-panel').open`), false, 'replay collapses the executed plan');
 }
 
 let failed = false;

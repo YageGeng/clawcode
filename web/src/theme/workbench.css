@@ -1160,12 +1160,14 @@
 }
 
 .reasoning-block__chevron,
-.tool-card__chevron {
+.tool-card__chevron,
+.plan-panel__chevron {
   transition: transform 160ms ease;
 }
 
 .reasoning-block[open] .reasoning-block__chevron,
-.tool-card[open] .tool-card__chevron {
+.tool-card[open] .tool-card__chevron,
+.plan-panel[open] .plan-panel__chevron {
   transform: rotate(180deg);
 }
 
@@ -2959,8 +2961,9 @@
   text-align: center;
 }
 
-/* A long plan scrolls inside the dialog so the choices stay visible. */
-.permission-dialog {
+/* A long plan scrolls inside the dialog so the choices stay visible.
+   The compound selector outranks the later generic `.dialog` width. */
+.dialog.permission-dialog {
   width: min(680px, 100%);
 }
 
@@ -2974,16 +2977,26 @@
   background: var(--surface-sunken);
 }
 
+/* Cap the panel so a long approved plan scrolls instead of pushing the composer off-screen.
+   Isolation keeps the sticky summary's z-index inside the panel, so composer
+   popovers such as the context-meter tooltip still paint above it. The panel
+   scrolls only vertically, so its sticky summary never slides out sideways. */
 .plan-panel {
+  isolation: isolate;
+  max-height: 40vh;
   margin-bottom: 8px;
-  overflow: hidden;
+  overflow: hidden auto;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
   background: var(--surface-raised);
   font-size: 12px;
 }
 
+/* Keep the toggle reachable while the panel body scrolls. */
 .plan-panel > summary {
+  position: sticky;
+  z-index: 1;
+  top: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2992,8 +3005,12 @@
   cursor: pointer;
 }
 
+/* The title takes the free space so progress and the chevron sit at the right edge. */
+.plan-panel__title {
+  flex: 1;
+}
+
 .plan-panel__progress {
-  margin-left: auto;
   color: var(--text-secondary);
   font-family: var(--font-mono);
 }
@@ -3021,8 +3038,10 @@
   color: var(--accent-strong);
 }
 
+/* Wide tables and code lines in the approved plan scroll here, not the whole panel. */
 .plan-panel__approved {
   padding: 4px 8px 8px;
+  overflow-x: auto;
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -3088,7 +3107,8 @@
   gap: 5px;
 }
 
-.elicitation-dialog footer {
+.elicitation-dialog footer,
+.permission-dialog footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;

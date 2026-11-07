@@ -374,7 +374,8 @@ plan 模式下 Agent 只调研、写计划，不做修改：
 
 已批准的计划以 ACP `plan_update`（`markdown` 类型，固定 id `plan-mode`）发布；
 `todo_write` 工具维护 Agent 的待办清单，以 `items` 类型、固定 id `todos` 发布。
-WebUI 在输入框上方的面板中显示这两者。
+WebUI 在输入框上方的面板中显示这两者；发布它们的那次运行结束后面板自动折叠，
+之后的运行发布新的计划内容时重新展开。
 
 ## 日志
 

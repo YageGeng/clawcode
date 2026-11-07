@@ -9,7 +9,7 @@ export type SessionTreeProps = Readonly<{
   tree?: SessionTreeModel;
   cwd?: string;
   focusEntryId?: EntryId;
-  /** Nodes on the active branch that render a row, so only they offer a locate button. */
+  /** Nodes on the active branch with a transcript row to locate, so only they offer a locate button. */
   revealableRows?: ReadonlyMap<EntryId, string>;
   onRevealRow?: (rowKey: string) => void;
   controller: WorkspaceController;
@@ -17,20 +17,23 @@ export type SessionTreeProps = Readonly<{
 
 type PresentedEntry = Readonly<{ entry: SessionTreeEntry; depth: number }>;
 
+/** Deepest indent the Tree draws; deeper nodes share it, so depth stops counting there. */
+const MAX_INDENT_DEPTH = 8;
+
 export function SessionTree({ tree, cwd, focusEntryId, revealableRows, onRevealRow, controller }: SessionTreeProps) {
   const [selected, setSelected] = useState<EntryId | null | undefined>(focusEntryId);
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const focusedEntryRef = useRef<HTMLButtonElement>(null);
+  const revealedRef = useRef(false);
   const entries = useMemo<readonly PresentedEntry[]>(() => {
     if (tree === undefined) return [];
     const parents = new Map(tree.entries.map((entry) => [entry.entryId, entry.parentId ?? null]));
     return tree.entries.map((entry) => {
+      // The cap bounds the walk, which also stops any parent cycle.
       let depth = 0;
       let parent = entry.parentId ?? null;
-      const seen = new Set<EntryId>();
-      while (parent !== null && depth < tree.entries.length && !seen.has(parent)) {
-        seen.add(parent);
+      while (parent !== null && depth < MAX_INDENT_DEPTH) {
         depth += 1;
         parent = parents.get(parent) ?? null;
       }
@@ -39,10 +42,11 @@ export function SessionTree({ tree, cwd, focusEntryId, revealableRows, onRevealR
   }, [tree]);
 
   useEffect(() => {
-    if (focusEntryId === undefined || tree === undefined) return;
-    // Inspector remounts for each locate request, so one effect can reveal the
-    // exact durable node without fighting later manual Tree selections.
-    focusedEntryRef.current?.scrollIntoView({
+    // Inspector remounts for each locate request. Reveal the node once, when it
+    // first renders, so per-Turn Tree refreshes leave the user's scrolling alone.
+    if (focusEntryId === undefined || revealedRef.current || focusedEntryRef.current === null) return;
+    revealedRef.current = true;
+    focusedEntryRef.current.scrollIntoView({
       behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
       block: "center"
     });
@@ -89,7 +93,7 @@ export function SessionTree({ tree, cwd, focusEntryId, revealableRows, onRevealR
                 data-revealable={rowKey !== undefined}
                 data-selected={entry.entryId === target}
                 {...(entry.entryId === focusEntryId ? { ref: focusedEntryRef } : {})}
-                style={{ paddingLeft: `${10 + Math.min(depth, 8) * 13}px` }}
+                style={{ paddingLeft: `${10 + depth * 13}px` }}
                 type="button"
                 onClick={() => setSelected(entry.entryId)}
               >

@@ -23,6 +23,7 @@ export class SessionUpdateRouter {
   private readonly decoder: SessionUpdateDecoder;
   private readonly store: WorkspaceStoreAccess;
   private readonly refreshSessionRuntime: (sessionId: SessionId) => Promise<void>;
+  private readonly refreshSessionTree: (sessionId: SessionId) => Promise<void>;
   private readonly recovery: SessionRecoveryBuffer;
   private readonly recoveryTrackers = new Map<SessionId, RecoveryTracker>();
   private receivedOrder = 0;
@@ -32,12 +33,14 @@ export class SessionUpdateRouter {
   constructor(
     namespace: string,
     store: WorkspaceStoreAccess,
-    refreshSessionRuntime: (sessionId: SessionId) => Promise<void>
+    refreshSessionRuntime: (sessionId: SessionId) => Promise<void>,
+    refreshSessionTree: (sessionId: SessionId) => Promise<void>
   ) {
     this.decoder = new SessionUpdateDecoder(namespace);
     this.recovery = new SessionRecoveryBuffer(namespace);
     this.store = store;
     this.refreshSessionRuntime = refreshSessionRuntime;
+    this.refreshSessionTree = refreshSessionTree;
   }
 
   /** Routes every update into its owning Session, including background Sessions. */
@@ -50,6 +53,7 @@ export class SessionUpdateRouter {
     const current = this.store.getState();
     let workspaceDraft = current;
     const refreshRuntime = new Set<SessionId>();
+    const refreshTree = new Set<SessionId>();
     const touchedSessions = new Set<SessionId>();
     const stagers = new Map<SessionId, SessionWorkspaceStager>();
     try {
@@ -71,6 +75,8 @@ export class SessionUpdateRouter {
             for (const action of decoded.actions) workspaceDraft = reduceWorkspace(workspaceDraft, action);
           } else {
             for (const action of decoded.actions) stager.apply(action);
+            // Recovery reloads the Tree once it completes, so its replayed Turns do not each fetch one.
+            if (decoded.refreshTree === true && !this.recoveryTrackers.has(batch.sessionId)) refreshTree.add(batch.sessionId);
           }
           if (decoded.refreshRuntime) refreshRuntime.add(batch.sessionId);
         }
@@ -104,14 +110,18 @@ export class SessionUpdateRouter {
       }
       throw reason;
     }
-    for (const sessionId of refreshRuntime) {
-      void this.refreshSessionRuntime(sessionId).catch((reason: unknown) => {
-        this.store.dispatch({
-          type: "session/updated",
-          sessionId,
-          action: { type: "diagnostic/added", message: reason instanceof Error ? reason.message : String(reason) }
-        });
+    // Background refresh failures surface as Session diagnostics instead of rejecting the frame.
+    const report = (sessionId: SessionId) => (reason: unknown) => {
+      this.store.dispatch({
+        type: "session/updated",
+        sessionId,
+        action: { type: "diagnostic/added", message: reason instanceof Error ? reason.message : String(reason) }
       });
+    };
+    for (const sessionId of refreshRuntime) void this.refreshSessionRuntime(sessionId).catch(report(sessionId));
+    // A runtime refresh reloads the Tree too, so one frame never fetches it twice.
+    for (const sessionId of refreshTree) {
+      if (!refreshRuntime.has(sessionId)) void this.refreshSessionTree(sessionId).catch(report(sessionId));
     }
   }
 

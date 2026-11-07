@@ -429,7 +429,8 @@ dismissing the dialog, ends the run; write your feedback as the next message.
 Approved plans are published as an ACP `plan_update` of type `markdown` with
 the stable id `plan-mode`. The `todo_write` tool keeps the agent's todo list,
 published as `items` under the id `todos`. The WebUI shows both in a panel above
-the composer.
+the composer; the panel collapses when the run that published them ends and
+reopens when a later run publishes plan content.
 
 ## Logging
 

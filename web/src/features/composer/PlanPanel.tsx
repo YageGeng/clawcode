@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, ClipboardList, LoaderCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, Circle, ClipboardList, LoaderCircle } from "lucide-react";
 
 import type { SessionId } from "../../acp/protocol";
 import type { PlanTodo } from "../../domain/model";
@@ -15,7 +15,12 @@ function TodoIcon({ status }: Readonly<{ status: string }>) {
   return <Circle size={14} aria-hidden="true" />;
 }
 
-/** Shows the agent's todo list and the plan the user approved, above the composer. */
+/**
+ * Shows the agent's todo list and the plan the user approved, above the composer.
+ *
+ * The panel collapses once the Run that published them ends and reopens when a
+ * later Run publishes plan content; the user's own toggles hold until then.
+ */
 export function PlanPanel({ sessionId }: PlanPanelProps) {
   const plans = useWorkspaceStore((state) => sessionWorkspace(state, sessionId).plans);
   const todos: readonly PlanTodo[] = plans.todos ?? [];
@@ -23,11 +28,12 @@ export function PlanPanel({ sessionId }: PlanPanelProps) {
   const done = todos.filter((todo) => todo.status === "completed").length;
 
   return (
-    <details className="plan-panel" open>
+    <details className="plan-panel" open={plans.settled !== true}>
       <summary>
         <ClipboardList size={14} aria-hidden="true" />
-        <span>计划</span>
+        <span className="plan-panel__title">计划</span>
         {todos.length === 0 ? null : <span className="plan-panel__progress">{done}/{todos.length}</span>}
+        <ChevronDown className="plan-panel__chevron" size={14} aria-hidden="true" />
       </summary>
       {todos.length === 0 ? null : (
         <ol className="plan-panel__todos">

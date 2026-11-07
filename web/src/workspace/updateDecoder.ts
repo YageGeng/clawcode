@@ -26,7 +26,7 @@ import type { WorkspaceAction } from "./state";
 
 export type DecodedSessionUpdate =
   | Readonly<{ scope: "global"; actions: readonly WorkspaceAction[]; refreshRuntime: false }>
-  | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean }>;
+  | Readonly<{ scope: "session"; actions: readonly SessionWorkspaceAction[]; refreshRuntime: boolean; refreshTree?: boolean }>;
 
 const TOOL_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"]);
 
@@ -254,6 +254,10 @@ export class SessionUpdateDecoder {
           if (turn.turn_id === meta.turnId && typeof turn.run_id === "string") {
             actions.push({ type: "turn/settled", turnId: meta.turnId, runId: turn.run_id as RunId });
           }
+          // The Turn's messages are durable once TurnEnd is published, so a live
+          // Run refreshes the Tree here; entries TurnEnd hooks write afterwards
+          // appear on the next refresh. Replays of an idle Session do not refresh.
+          return { scope: "session", actions, refreshRuntime: false, refreshTree: state.running };
         } else if (event === "run_end" && typeof payload.run_id === "string") {
           // RunEnd is Pi's agent_end boundary and therefore the only point that
           // publishes one complete Agent Usage row.

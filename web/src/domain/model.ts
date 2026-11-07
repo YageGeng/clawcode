@@ -562,6 +562,8 @@ export type SessionPlans = Readonly<{
   todos?: readonly PlanTodo[];
   /** The `plan-mode` plan: Markdown of the plan the user last approved. */
   approvedPlan?: string;
+  /** True once the Run that last published a plan has ended; the panel collapses then. */
+  settled?: boolean;
 }>;
 
 /** One option the agent offers in a `session/request_permission`. */

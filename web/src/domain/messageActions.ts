@@ -93,6 +93,10 @@ export const MessageActionModel = {
    * Maps each Tree node on the active branch to the row displaying it. Walking
    * from the leaf matters because a node on another branch can share a provider
    * tool call id with a row this transcript does render.
+   *
+   * A message that renders no row of its own, such as a hidden `todo_write`
+   * call or its result, maps to the nearest row above it instead. That row is
+   * in the same Run or an earlier one, never a later prompt.
    */
   revealableRows(tree: SessionTree | undefined, transcript: readonly TranscriptEntry[]): ReadonlyMap<EntryId, string> {
     const rows = new Map<EntryId, string>();
@@ -100,11 +104,19 @@ export const MessageActionModel = {
     const rendered = new Set(transcript.map((row) => TranscriptRowKeys.of(row)));
     const entries = new Map(tree.entries.map((entry) => [entry.entryId, entry]));
     const visited = new Set<EntryId>();
+    // The walk goes leaf to root, so hidden messages wait for the next rendered ancestor.
+    let hidden: EntryId[] = [];
     let entry = tree.leafId === null || tree.leafId === undefined ? undefined : entries.get(tree.leafId);
     while (entry !== undefined && !visited.has(entry.entryId)) {
       visited.add(entry.entryId);
       const rowKey = TreeEntryRows.rowKey(entry);
-      if (rowKey !== undefined && rendered.has(rowKey)) rows.set(entry.entryId, rowKey);
+      if (rowKey !== undefined && rendered.has(rowKey)) {
+        rows.set(entry.entryId, rowKey);
+        for (const entryId of hidden) rows.set(entryId, rowKey);
+        hidden = [];
+      } else if (entry.kind === "message") {
+        hidden.push(entry.entryId);
+      }
       entry = entry.parentId === null || entry.parentId === undefined ? undefined : entries.get(entry.parentId);
     }
     return rows;
