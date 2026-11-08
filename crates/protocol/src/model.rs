@@ -127,7 +127,8 @@ impl ModelRequest {
                 | MessageContent::BashExecution { .. }
                 | MessageContent::Extension { .. }
                 | MessageContent::SlashCommand { .. }
-                | MessageContent::CompactionSummary { .. } => continue,
+                | MessageContent::CompactionSummary { .. }
+                | MessageContent::BranchSummary { .. } => continue,
             };
             let mut previous_was_placeholder = false;
             let mut adapted = Vec::with_capacity(blocks.len());

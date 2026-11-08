@@ -40,7 +40,7 @@ pub use capability::{
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
 pub use extension::{
     AgentEndEvent, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
-    BeforeAgentStartResult, ContextEvent, ContextResult,
+    BeforeAgentStartResult, CompactionPreparation, ContextEvent, ContextResult,
     ExtensionCommandDefinition, ExtensionDescriptor, ExtensionEntryData,
     ExtensionEventData, ExtensionExecRequest, ExtensionExecResult,
     ExtensionFlagDefinition, ExtensionFlagKind, ExtensionInvocation,
@@ -53,14 +53,14 @@ pub use extension::{
     SessionBeforeCompactEvent, SessionBeforeCompactResult,
     SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCancelResult,
-    SessionCompactEvent, SessionForkPosition, SessionInfoChangedEvent,
-    SessionShutdownEvent, SessionShutdownReason, SessionStartEvent,
-    SessionStartReason, SessionSwitchReason, SessionTreeEvent,
-    StaticExtensionRegistration, ThinkingLevel, ThinkingLevelSelectEvent,
-    ToolBlock, ToolCallEvent, ToolCallResult, ToolExecutionEndEvent,
-    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
-    ToolResultPatch, TreeSummary, TurnEndEvent, TurnStartEvent,
-    UserBashDisposition, UserBashEvent, UserBashResult,
+    SessionCompactEvent, SessionCompactFailedEvent, SessionForkPosition,
+    SessionInfoChangedEvent, SessionShutdownEvent, SessionShutdownReason,
+    SessionStartEvent, SessionStartReason, SessionSwitchReason,
+    SessionTreeEvent, StaticExtensionRegistration, ThinkingLevel,
+    ThinkingLevelSelectEvent, ToolBlock, ToolCallEvent, ToolCallResult,
+    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent,
+    ToolResultEvent, ToolResultPatch, TreeSummary, TurnEndEvent,
+    TurnStartEvent, UserBashDisposition, UserBashEvent, UserBashResult,
 };
 
 pub use id::{IdGenerator, IdKind};
@@ -90,9 +90,9 @@ pub use mcp::{
 };
 pub use message::{
     AgentMessage, AssistantMetadata, BashExecutionMessage,
-    CompactionSummaryMessage, ContentBlock, EmbeddedResourceContent,
-    ExtensionMessage, MessageContent, MessageIdentity, MessageTiming,
-    MessageTimingError, Role,
+    BranchSummaryMessage, CompactionSummaryMessage, ContentBlock,
+    EmbeddedResourceContent, ExtensionMessage, MessageContent, MessageIdentity,
+    MessageTiming, MessageTimingError, Role,
 };
 pub use model::{
     ModelFailure, ModelFinal, ModelRequest, ModelRequestOptions,

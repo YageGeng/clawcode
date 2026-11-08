@@ -1,5 +1,7 @@
 //! Top-level application configuration types.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppSectionConfig;
@@ -14,8 +16,103 @@ use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
 use crate::subagent::SubagentConfig;
 use crate::tools::ToolsConfig;
-pub use protocol::CompactionPolicy as CompactionConfig;
-use protocol::ModelInputModalitiesError;
+use protocol::{CompactionPolicy, ModelInputModalitiesError, ModelProfile};
+
+/// Context compaction settings: global budgets plus pi-style per-model overrides.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CompactionConfig {
+    /// Global `enabled`, `reserve_tokens`, and `keep_recent_tokens` values.
+    #[serde(flatten)]
+    pub policy: CompactionPolicy,
+    /// Budgets for one model keyed by its exact `provider/model` identifier.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_overrides: BTreeMap<String, CompactionModelOverride>,
+}
+
+/// Budgets that replace the global compaction values for one model.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CompactionModelOverride {
+    /// Tokens kept free for the summary request and the next response.
+    #[serde(default)]
+    pub reserve_tokens: Option<u64>,
+    /// Recent tokens retained verbatim after summarization.
+    #[serde(default)]
+    pub keep_recent_tokens: Option<u64>,
+}
+
+impl CompactionConfig {
+    /// Returns the policy for one model: its override merged over the global
+    /// budgets. `enabled` always comes from the global value.
+    #[must_use]
+    pub fn resolve(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> CompactionPolicy {
+        let mut policy = self.policy;
+        if let Some(model_override) = self
+            .model_overrides
+            .get(&format!("{provider_id}/{model_id}"))
+        {
+            if let Some(reserve_tokens) = model_override.reserve_tokens {
+                policy.reserve_tokens = reserve_tokens;
+            }
+            if let Some(keep_recent_tokens) = model_override.keep_recent_tokens
+            {
+                policy.keep_recent_tokens = keep_recent_tokens;
+            }
+        }
+        policy
+    }
+
+    /// Returns the policy for the model a profile describes.
+    #[must_use]
+    pub fn for_profile(&self, profile: &ModelProfile) -> CompactionPolicy {
+        self.resolve(&profile.provider_id, &profile.model_id)
+    }
+}
+
+impl From<CompactionPolicy> for CompactionConfig {
+    /// Uses one policy for every model.
+    fn from(policy: CompactionPolicy) -> Self {
+        Self {
+            policy,
+            model_overrides: BTreeMap::new(),
+        }
+    }
+}
+
+/// Branch-summary settings matching pi's `branchSummary` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct BranchSummaryConfig {
+    /// Tokens kept free for the summary prompt and response when selecting
+    /// abandoned-branch messages.
+    #[serde(default = "BranchSummaryConfig::default_reserve_tokens")]
+    pub reserve_tokens: u64,
+}
+
+impl BranchSummaryConfig {
+    /// Returns pi's default branch-summary reserve.
+    const fn default_reserve_tokens() -> u64 {
+        16_384
+    }
+}
+
+impl Default for BranchSummaryConfig {
+    /// Uses pi's 16,384-token reserve.
+    fn default() -> Self {
+        Self {
+            reserve_tokens: Self::default_reserve_tokens(),
+        }
+    }
+}
+
+/// Splits a `provider/model` identifier whose two parts are both non-empty.
+fn split_model_key(value: &str) -> Option<(&str, &str)> {
+    value.split_once('/').filter(|(provider_id, model_id)| {
+        !provider_id.is_empty() && !model_id.is_empty()
+    })
+}
 
 /// File-backed session persistence settings.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -37,6 +134,18 @@ pub enum ConfigValidationError {
     MalformedActiveModel {
         /// Invalid configured active model value.
         value: String,
+    },
+    /// A compaction override key did not contain a provider and model identifier.
+    #[error("compaction override '{key}' must use provider/model format")]
+    MalformedCompactionOverride {
+        /// Invalid configured override key.
+        key: String,
+    },
+    /// A compaction override named a model absent from the model catalog.
+    #[error("compaction override '{key}' names no configured model")]
+    UnknownCompactionOverride {
+        /// Override key without a matching model.
+        key: String,
     },
     /// No provider matched the active provider identifier.
     #[error("active provider '{provider_id}' is not configured")]
@@ -220,6 +329,9 @@ pub struct AppConfig {
     /// Manual context compaction configuration.
     #[serde(default)]
     pub compaction: CompactionConfig,
+    /// Abandoned-branch summary configuration.
+    #[serde(default)]
+    pub branch_summary: BranchSummaryConfig,
     /// Assistant and provider retry configuration.
     #[serde(default)]
     pub retry: RetryConfig,
@@ -247,6 +359,7 @@ impl Default for AppConfig {
             kernel: KernelConfig::default(),
             subagent: SubagentConfig::default(),
             compaction: CompactionConfig::default(),
+            branch_summary: BranchSummaryConfig::default(),
             retry: RetryConfig::default(),
         }
     }
@@ -265,12 +378,7 @@ impl AppConfig {
     pub fn resolve_active_model(
         &self,
     ) -> Result<(&LlmProvider, &LlmModel), ConfigValidationError> {
-        let (provider_id, model_id) = self
-            .active_model
-            .split_once('/')
-            .filter(|(provider_id, model_id)| {
-                !provider_id.is_empty() && !model_id.is_empty()
-            })
+        let (provider_id, model_id) = split_model_key(&self.active_model)
             .ok_or_else(|| ConfigValidationError::MalformedActiveModel {
                 value: self.active_model.clone(),
             })?;
@@ -316,6 +424,18 @@ impl AppConfig {
 
     /// Validate cross-field invariants that serde cannot express directly.
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        // Catalog models may come from extensions, so key existence is checked
+        // when the Kernel resolves its catalog; only the format is checked here.
+        if let Some(key) = self
+            .compaction
+            .model_overrides
+            .keys()
+            .find(|key| split_model_key(key).is_none())
+        {
+            return Err(ConfigValidationError::MalformedCompactionOverride {
+                key: key.clone(),
+            });
+        }
         for provider in &self.providers {
             provider.validate_names()?;
             provider.validate_models()?;
@@ -323,16 +443,20 @@ impl AppConfig {
             // Compaction keeps input below the window minus the reserve, so a budget
             // within the reserve keeps input plus output inside the window.
             for model in &provider.models {
+                let reserve_tokens = self
+                    .compaction
+                    .resolve(provider.id.as_str(), &model.id)
+                    .reserve_tokens;
                 if let Some(budget) = model
                     .request_max_tokens
-                    .filter(|budget| *budget > self.compaction.reserve_tokens)
+                    .filter(|budget| *budget > reserve_tokens)
                 {
                     return Err(
                         ConfigValidationError::RequestBudgetExceedsReserve {
                             provider_id: provider.id.as_str().to_owned(),
                             model_id: model.id.clone(),
                             request_max_tokens: budget,
-                            reserve_tokens: self.compaction.reserve_tokens,
+                            reserve_tokens,
                         },
                     );
                 }
@@ -491,9 +615,9 @@ enable_skill = false
     fn app_config_default_compaction_matches_pi() {
         let cfg = AppConfig::default();
 
-        assert!(cfg.compaction.enabled);
-        assert_eq!(cfg.compaction.reserve_tokens, 16_384);
-        assert_eq!(cfg.compaction.keep_recent_tokens, 20_000);
+        assert!(cfg.compaction.policy.enabled);
+        assert_eq!(cfg.compaction.policy.reserve_tokens, 16_384);
+        assert_eq!(cfg.compaction.policy.keep_recent_tokens, 20_000);
     }
 
     /// AppConfig reads pi-style compaction settings from TOML.
@@ -509,9 +633,9 @@ keep_recent_tokens = 25000
         )
         .expect("parse app config");
 
-        assert!(!cfg.compaction.enabled);
-        assert_eq!(cfg.compaction.reserve_tokens, 10_000);
-        assert_eq!(cfg.compaction.keep_recent_tokens, 25_000);
+        assert!(!cfg.compaction.policy.enabled);
+        assert_eq!(cfg.compaction.policy.reserve_tokens, 10_000);
+        assert_eq!(cfg.compaction.policy.keep_recent_tokens, 25_000);
     }
 
     /// AppConfig extracts the provider id from the active model setting.

@@ -149,6 +149,7 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::McpStatus.as_str()
             || method == AcpExtensionMethod::PendingMessageRemove.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
+            || method == AcpExtensionMethod::Navigate.as_str()
     }
 
     /// Returns the static ACP method associated with this request.
@@ -177,6 +178,9 @@ impl JsonRpcMessage for IntegrationRequest {
             }
             method if method == AcpExtensionMethod::UserBash.as_str() => {
                 AcpExtensionMethod::UserBash.as_str()
+            }
+            method if method == AcpExtensionMethod::Navigate.as_str() => {
+                AcpExtensionMethod::Navigate.as_str()
             }
             method if method == AcpExtensionMethod::Fork.as_str() => {
                 AcpExtensionMethod::Fork.as_str()
@@ -280,6 +284,14 @@ impl JsonRpcResponse for IntegrationResponse {
 
 /// Builds a production ACP component with local deterministic dependencies.
 fn integration_kernel(root: &Path) -> Arc<Kernel> {
+    integration_kernel_with(root, StaticExtensionFactory::default())
+}
+
+/// Builds the integration Kernel with explicit extensions.
+fn integration_kernel_with(
+    root: &Path,
+    extensions: StaticExtensionFactory,
+) -> Arc<Kernel> {
     let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(UnusedModelFactory))
@@ -298,7 +310,7 @@ fn integration_kernel(root: &Path) -> Arc<Kernel> {
                 .user_home(root.join("home"))
                 .build(),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .extension_factory(Arc::new(extensions))
         .clock(clock)
         .id_generator(Arc::new(NanoidIdGenerator))
         .build()
@@ -1649,4 +1661,169 @@ async fn compaction_card_replays_in_persisted_branch_order() {
         })
         .await
         .expect("Compaction ACP replay lifecycle");
+}
+
+/// Tree hook that records the caller's instructions and supplies a summary.
+#[derive(Default)]
+struct TreeSummaryHook(std::sync::Mutex<Vec<Option<String>>>);
+
+/// Handler sharing one recording hook.
+struct TreeSummaryHandler(Arc<TreeSummaryHook>);
+
+#[async_trait::async_trait]
+impl extension::ExtensionHandler<extension::SessionBeforeTreePoint>
+    for TreeSummaryHandler
+{
+    /// Records the requested instructions and returns a fixed summary.
+    async fn handle(
+        &self,
+        event: &protocol::SessionBeforeTreeEvent,
+        _context: &extension::ExtensionContext,
+    ) -> Result<protocol::SessionBeforeTreeResult, extension::ExtensionError>
+    {
+        self.0
+            .0
+            .lock()
+            .expect("hook lock")
+            .push(event.custom_instructions.clone());
+        Ok(protocol::SessionBeforeTreeResult::builder()
+            .summary(Some(protocol::TreeSummary {
+                summary: "hook branch summary".to_string(),
+                details: None,
+                usage: None,
+            }))
+            .build())
+    }
+}
+
+/// Extension module registering the tree hook.
+struct TreeSummaryModule(Arc<TreeSummaryHook>);
+
+impl extension::ExtensionModule for TreeSummaryModule {
+    /// Identifies the test hook owner.
+    fn descriptor(&self) -> protocol::ExtensionDescriptor {
+        protocol::ExtensionDescriptor {
+            id: protocol::ExtensionId::try_from("tree-summary")
+                .expect("extension id"),
+            name: "Tree summary".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers the tree hook.
+    fn register(
+        &self,
+        registrar: &mut extension::ExtensionRegistrar,
+    ) -> Result<(), extension::ExtensionError> {
+        registrar.on::<extension::SessionBeforeTreePoint, _>(
+            TreeSummaryHandler(Arc::clone(&self.0)),
+        )
+    }
+}
+
+/// ACP navigation can request a branch summary with custom instructions.
+#[tokio::test]
+async fn navigate_with_summary_writes_branch_summary() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let hook = Arc::new(TreeSummaryHook::default());
+    let module_hook = Arc::clone(&hook);
+    let kernel = integration_kernel_with(
+        state.path(),
+        StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(TreeSummaryModule(Arc::clone(&module_hook)))
+                    as Arc<dyn extension::ExtensionModule>)
+            })],
+        ),
+    );
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+    let session_id =
+        SessionId::try_from(session["sessionId"].as_str().expect("session id"))
+            .expect("session id");
+    // Two setting changes give the tree an entry to navigate back to.
+    for level in [protocol::ThinkingLevel::High, protocol::ThinkingLevel::Low] {
+        kernel
+            .set_session_thinking_level(&session_id, level)
+            .await
+            .expect("thinking level");
+    }
+    let first = kernel
+        .session_tree(&session_id)
+        .expect("tree")
+        .entries
+        .first()
+        .expect("first entry")
+        .entry_id
+        .clone();
+
+    send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::Navigate.as_str(),
+            serde_json::json!({
+                "sessionId": session_id,
+                "entryId": first,
+                "summarize": true,
+                "customInstructions": "x"
+            }),
+        ),
+    )
+    .await
+    .expect("navigate with summary");
+
+    assert_eq!(
+        hook.0.lock().expect("hook lock").as_slice(),
+        [Some("x".to_string())]
+    );
+    assert!(
+        kernel
+            .session_tree(&session_id)
+            .expect("tree")
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "branch_summary")
+    );
+}
+
+/// Root navigation has no abandoned branch to summarize.
+#[tokio::test]
+async fn root_navigation_with_summary_is_invalid_params() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let session = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            SESSION_NEW_METHOD,
+            serde_json::json!({ "cwd": workspace.path() }),
+        ),
+    )
+    .await
+    .expect("create session");
+
+    let error = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::Navigate.as_str(),
+            serde_json::json!({
+                "sessionId": session["sessionId"],
+                "entryId": null,
+                "summarize": true
+            }),
+        ),
+    )
+    .await
+    .expect_err("root summary must be rejected");
+
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 }

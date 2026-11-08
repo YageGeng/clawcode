@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CompactionReason, CompactionResult, EntryId, SessionId, SessionTreeEntry,
+    AgentMessage, CompactionPolicy, CompactionReason, CompactionResult,
+    EntryId, SessionId, SessionTreeEntry,
 };
 
 /// Reason a session runtime was created.
@@ -72,11 +73,41 @@ pub struct SessionBeforeForkEvent {
     pub position: SessionForkPosition,
 }
 
+/// Pi-compatible partition of model context prepared for one compaction.
+///
+/// Fields use snake_case like the enclosing `SessionBeforeCompactEvent`.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
+)]
+pub struct CompactionPreparation {
+    /// Messages that will be summarized and leave direct context.
+    pub messages_to_summarize: Vec<AgentMessage>,
+    /// Prefix of the Turn the cut splits, summarized separately.
+    pub turn_prefix_messages: Vec<AgentMessage>,
+    /// Newest messages kept verbatim; an extension-built compaction echoes them.
+    pub retained_tail: Vec<AgentMessage>,
+    /// Whether the cut falls inside a Turn.
+    pub is_split_turn: bool,
+    /// Effective context size before compaction.
+    pub tokens_before: u64,
+    /// Summary of the previous compaction, updated incrementally.
+    #[builder(default)]
+    pub previous_summary: Option<String>,
+    /// Files only read, cumulative across checkpoints.
+    pub read_files: Vec<String>,
+    /// Files created or changed, cumulative across checkpoints.
+    pub modified_files: Vec<String>,
+    /// Compaction budgets in effect for the summarizing model.
+    pub settings: CompactionPolicy,
+}
+
 /// Context compaction is about to occur and may be cancelled or replaced.
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,
 )]
 pub struct SessionBeforeCompactEvent {
+    /// Partition the default summary would use.
+    pub preparation: CompactionPreparation,
     /// Trigger for this compaction attempt.
     pub reason: CompactionReason,
     /// Whether overflow recovery retries the interrupted turn afterward.
@@ -101,6 +132,33 @@ pub struct SessionCompactEvent {
     pub reason: CompactionReason,
     /// Whether overflow recovery retries the interrupted turn afterward.
     pub will_retry: bool,
+}
+
+/// Context compaction ended without persisting a checkpoint.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+pub struct SessionCompactFailedEvent {
+    /// Trigger for the failed compaction.
+    pub reason: CompactionReason,
+    /// Failure text when compaction failed for a reason other than an abort.
+    #[builder(default)]
+    pub error_message: Option<String>,
+    /// Whether the compaction was cancelled or aborted.
+    #[builder(default)]
+    pub aborted: bool,
+    /// Whether the interrupted Turn would have been retried afterward.
+    #[builder(default)]
+    pub will_retry: bool,
+    /// Whether the failing compaction content came from an extension.
+    #[builder(default)]
+    pub from_extension: bool,
 }
 
 /// Session-runtime shutdown reason.

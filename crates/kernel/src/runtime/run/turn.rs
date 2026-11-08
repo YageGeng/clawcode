@@ -26,8 +26,7 @@ use super::queue::{ClaimedItem, QueueCancellationReason};
 use super::retry::RetryState;
 use super::settlement::{RunCompletion, RunSettlement};
 use crate::runtime::compaction::{
-    CompactionExecution, CompactionPolicyExt, ContextUsageEstimate,
-    OverflowRecovery,
+    CompactionExecution, CompactionPolicyExt, OverflowRecovery,
 };
 use crate::runtime::plan::PlanModeGate;
 use crate::runtime::session::rename::SessionRename;
@@ -831,6 +830,7 @@ impl RunScope<'_> {
             .overflow_recovery(
                 kernel
                     .compaction_policy
+                    .for_profile(turn.model.profile())
                     .overflow_recovery(metadata, turn.model.profile()),
             )
             .stop_reason(metadata.stop_reason)
@@ -1053,8 +1053,9 @@ impl RunScope<'_> {
         // Overflow recovery compacts and retries at most once per Run. With
         // nothing to compact, a retry would overflow again, so the failure
         // settles below instead.
+        let recovery_already_attempted = turn_loop.overflow_recovery_attempted;
         if settled.overflow_recovery == Some(OverflowRecovery::CompactAndRetry)
-            && !turn_loop.overflow_recovery_attempted
+            && !recovery_already_attempted
         {
             turn_loop.overflow_recovery_attempted = true;
             if kernel
@@ -1074,6 +1075,28 @@ impl RunScope<'_> {
                 turn_loop.next_turn_id = Some(kernel.new_turn_id()?);
                 return Ok(None);
             }
+        }
+        // A second overflow or truncation after the one recovery reports pi's
+        // failure text. No compaction ran, so no lifecycle event is paired.
+        if settled.overflow_recovery == Some(OverflowRecovery::CompactAndRetry)
+            && recovery_already_attempted
+        {
+            let message = if settled.stop_reason == StopReason::MaxTokens {
+                "Truncated response recovery failed after one compact-and-retry attempt."
+            } else {
+                "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model."
+            };
+            self.session
+                .extensions
+                .runtime_ref()
+                .emit_session_compact_failed(
+                    &protocol::SessionCompactFailedEvent::builder()
+                        .reason(CompactionReason::Overflow)
+                        .error_message(Some(message.to_string()))
+                        .build(),
+                    &turn.extension_context,
+                )
+                .await;
         }
 
         // Retryable provider failures use cancellable backoff before a
@@ -1190,16 +1213,16 @@ impl RunScope<'_> {
             kernel.publish_queue_changed(self.session_id);
         }
         if continue_for_tools || turn_loop.next_queued_item.is_some() {
-            return Ok(None);
+            return self
+                .compact_before_next_turn(turn, turn_loop, &settled)
+                .await;
         }
         // Post-Run compaction is scheduled only after no pending
         // continuation can consume the current context.
         let should_threshold_compact =
             self.session.transcript.inspect_history(|history| {
-                ContextUsageEstimate::from_history(history).should_compact(
-                    turn.model.profile().context_tokens,
-                    kernel.compaction_policy,
-                )
+                kernel
+                    .exceeds_compaction_threshold(history, turn.model.profile())
             })?;
         let auto_compaction_reason = match settled.overflow_recovery {
             Some(OverflowRecovery::CompactOnly) => {
@@ -1222,6 +1245,82 @@ impl RunScope<'_> {
 }
 
 impl RunScope<'_> {
+    /// Compacts before the next Turn of this Run when context needs it, like
+    /// pi before each post-Tool or follow-up model request.
+    ///
+    /// A silently over-window answer compacts for overflow; otherwise usage
+    /// above the threshold compacts. Failures leave the Run going on the
+    /// uncompacted context, except cancellation, which ends the Run.
+    async fn compact_before_next_turn(
+        &self,
+        turn: &TurnContext,
+        turn_loop: &mut TurnLoop<'_>,
+        settled: &SettledAssistant,
+    ) -> Result<Option<RunCompletion>, KernelError> {
+        let kernel = self.kernel;
+        let reason = if settled.overflow_recovery
+            == Some(OverflowRecovery::CompactOnly)
+        {
+            CompactionReason::Overflow
+        } else {
+            // The next Turn snapshots the current selection, so its window
+            // decides whether the context still fits.
+            let model = self.session.model.active()?;
+            let exceeds =
+                self.session.transcript.inspect_history(|history| {
+                    kernel
+                        .exceeds_compaction_threshold(history, model.profile())
+                })?;
+            if !exceeds {
+                return Ok(None);
+            }
+            CompactionReason::Threshold
+        };
+        match kernel
+            .perform_compaction(
+                CompactionExecution::builder()
+                    .session_id(self.session_id)
+                    .session(self.session)
+                    .sink(Arc::clone(&self.emitter.sink))
+                    .reason(reason)
+                    .cancellation(self.cancellation)
+                    .build(),
+            )
+            .await
+        {
+            // The next Turn reads the compacted history from the transcript.
+            Ok(_) => Ok(None),
+            Err(error)
+                if error.is_cancellation()
+                    || self.cancellation.is_cancelled() =>
+            {
+                Ok(Some(turn_loop.finish(
+                    self.run_id,
+                    turn.turn_id.clone(),
+                    AgentOutcome::Cancelled,
+                    None,
+                )))
+            }
+            // The cancelling extension was already logged, before any
+            // compaction lifecycle started.
+            Err(KernelError::ExtensionBlocked(_)) => {
+                tracing::debug!(
+                    "continuing Run with {:?} compaction cancelled by extension",
+                    reason
+                );
+                Ok(None)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "continuing Run without its {:?} compaction before the next Turn: {}",
+                    reason,
+                    error
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Passes text input through Extension input hooks before server-side
     /// Skill and Template expansion; structured blocks remain unchanged.
     ///

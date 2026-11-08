@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentMessage, CompactionOutcome, CompactionReason, ExtensionId,
+    AgentMessage, CompactionOutcome, CompactionReason, EntryId, ExtensionId,
     McpElicitationRequest, McpElicitationResult, MessageId, ModelUsage, RunId,
     Sequence, SessionSettings, SlashCommandDefinition, SlashCommandInvocation,
     SlashCommandStatus, TimestampMs, ToolCall, ToolLocation, ToolResult,
@@ -261,6 +261,14 @@ pub enum AgentEventPayload {
     SessionTitleChanged {
         /// New normalized session title; `None` when the name was cleared.
         title: Option<String>,
+    },
+
+    /// Tree navigation moved the active branch to another position.
+    BranchNavigated {
+        /// Leaf before the navigation, or `None` at the root.
+        old_leaf_id: Option<EntryId>,
+        /// Leaf after the navigation, or `None` at the root.
+        new_leaf_id: Option<EntryId>,
     },
 
     /// The Session's model or thinking level changed.

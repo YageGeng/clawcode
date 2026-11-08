@@ -571,6 +571,27 @@ impl SessionProjection {
             .is_some())
     }
 
+    /// Drops the retained Operation journal while keeping live subscribers.
+    ///
+    /// Tree navigation moves the active branch without an Operation, so the
+    /// journal's baseline no longer matches the Store; loads must replay it.
+    fn discard_journal(&self) -> Result<(), ProjectionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_poison_error| ProjectionError::Poisoned)?;
+        // A running journal began after the navigation released the Session,
+        // so its baseline already reflects the moved branch.
+        if state
+            .journal
+            .as_ref()
+            .is_some_and(|journal| !journal.running)
+        {
+            state.journal = None;
+        }
+        Ok(())
+    }
+
     /// Publishes an ungrouped Idle fallback and disables incremental recovery.
     fn publish_terminal_fallback(&self) -> Result<(), ProjectionError> {
         let mut state = self
@@ -809,6 +830,18 @@ impl EventSink for ProjectionSink {
                 );
                 SinkError::Consumer(error.to_string())
             })?;
+        // Tree navigation is not an Operation, so a retained journal still
+        // holds the branch before the move; loads must replay the Store.
+        if matches!(event.payload, AgentEventPayload::BranchNavigated { .. }) {
+            projection.discard_journal().map_err(|error| {
+                tracing::error!(
+                    "failed to discard ACP journal for Session {}: {}",
+                    self.session_id,
+                    error
+                );
+                SinkError::Consumer(error.to_string())
+            })?;
+        }
         let active_operation =
             projection.active_operation().map_err(|error| {
                 tracing::error!(
@@ -1277,6 +1310,54 @@ mod tests {
         );
     }
 
+    /// Discarding the journal sends the next load to the durable Store replay
+    /// while live subscribers keep receiving groups.
+    #[test]
+    fn discarded_journal_falls_back_to_durable_replay() {
+        let projection = SessionProjection::new(8);
+        let mut live = projection.subscribe_live().expect("live feed");
+        projection
+            .append_group(
+                group("run-1", 10, Some(OperationPhase::Start)),
+                Vec::new(),
+            )
+            .expect("append start");
+        projection
+            .append_group(
+                group("run-1", 11, Some(OperationPhase::End)),
+                Vec::new(),
+            )
+            .expect("append end");
+        assert!(projection.has_journal().expect("journal state"));
+
+        projection.discard_journal().expect("discard journal");
+
+        assert!(!projection.has_journal().expect("journal state"));
+        projection
+            .append_group(group("run-2", 12, None), Vec::new())
+            .expect("append after discard");
+        let received =
+            std::iter::from_fn(|| live.receiver.try_recv().ok()).count();
+        assert_eq!(received, 3, "live subscribers keep every group");
+    }
+
+    /// A running journal started after the navigation already has a fresh
+    /// baseline, so discarding leaves it in place.
+    #[test]
+    fn running_journal_survives_discard() {
+        let projection = SessionProjection::new(8);
+        projection
+            .append_group(
+                group("run-1", 10, Some(OperationPhase::Start)),
+                Vec::new(),
+            )
+            .expect("append start");
+
+        projection.discard_journal().expect("discard journal");
+
+        assert!(projection.has_journal().expect("journal state"));
+    }
+
     /// Cursor validation rejects gaps while accepting exactly tail plus one.
     #[test]
     fn validates_incremental_cursor_range() {
@@ -1422,6 +1503,67 @@ mod tests {
         assert_eq!(group.run_id.as_ref().map(RunId::as_str), Some("run-1"));
         assert_eq!(group.operation_phase, Some(OperationPhase::Start));
         assert!(!group.updates.is_empty());
+    }
+
+    /// A Kernel branch-navigation event drops the completed journal, so the
+    /// next load replays the moved branch from the Store.
+    #[tokio::test]
+    async fn branch_navigation_discards_completed_journal() {
+        let state = tempfile::tempdir().expect("store root");
+        let workspace = tempfile::tempdir().expect("workspace root");
+        let kernel = projection_kernel(state.path());
+        let session_id =
+            SessionId::try_from("session-navigated").expect("Session id");
+        kernel
+            .create_session(SessionCreateOptions {
+                session_id: session_id.clone(),
+                cwd: workspace.path().to_path_buf(),
+                parent_session_id: None,
+            })
+            .await
+            .expect("create Session");
+        let registry = Arc::new(ProjectionRegistry::new(kernel));
+        let sink = registry.sink(session_id.clone());
+        let event = |sequence: u64, payload: AgentEventPayload| AgentEvent {
+            metadata: EventMetadata {
+                turn_id: TurnId::try_from("turn-1").expect("Turn id"),
+                timestamp_ms: TimestampMs::from(sequence),
+                sequence: Sequence::try_from(sequence).expect("sequence"),
+            },
+            payload,
+        };
+        let run_id = RunId::try_from("run-1").expect("Run id");
+        sink.emit(event(
+            1,
+            AgentEventPayload::RunStart {
+                run_id: run_id.clone(),
+            },
+        ))
+        .await
+        .expect("emit start");
+        sink.emit(event(
+            2,
+            AgentEventPayload::AgentSettled {
+                run_id,
+                outcome: AgentOutcome::Succeeded,
+                usage: protocol::ModelUsage::default(),
+            },
+        ))
+        .await
+        .expect("emit settled");
+        assert!(registry.has_journal(&session_id).expect("journal state"));
+
+        sink.emit(event(
+            3,
+            AgentEventPayload::BranchNavigated {
+                old_leaf_id: None,
+                new_leaf_id: None,
+            },
+        ))
+        .await
+        .expect("emit navigation");
+
+        assert!(!registry.has_journal(&session_id).expect("journal state"));
     }
 
     /// Kernel-initiated runs use the same live projection and recovery journal as ACP prompts.

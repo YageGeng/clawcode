@@ -1198,3 +1198,122 @@ async fn idle_prompt_does_not_log_an_enqueue_error() {
         "normal idle prompt emitted an error"
     );
 }
+
+/// A silently over-window answer with a queued follow-up compacts before the follow-up Turn.
+#[tokio::test]
+async fn compact_only_runs_before_a_queued_follow_up() {
+    use kernel::{InsertionNotice, PromptOutcome, PromptRequest};
+    use protocol::{AgentEventPayload, CompactionPolicy, CompactionReason};
+    let release = Arc::new(Notify::new());
+    let held = Arc::clone(&release);
+    // A one-token budget makes the held Turn's user message compactable; the
+    // default 20,000-token budget would keep the whole short history.
+    let test = TestKernel::with_compaction(
+        move |request: &protocol::ModelRequest| {
+            let summarizing = request.messages.first().is_some_and(|m| {
+                super::fixture::text(&m.content)
+                    .starts_with("You are a context summarization assistant")
+            });
+            if summarizing {
+                return Route::answer("summary");
+            }
+            if request
+                .messages
+                .last()
+                .is_some_and(|m| super::fixture::text(&m.content) == "hold")
+            {
+                // The answer completes normally but reports more input than
+                // the 128k window, so pi only compacts and never repeats it.
+                return Route::Wait(
+                    Arc::clone(&held),
+                    vec![
+                        protocol::ModelStreamEvent::TextDelta(
+                            "held answer".into(),
+                        ),
+                        protocol::ModelStreamEvent::Finished(
+                            protocol::ModelFinal::builder()
+                                .stop_reason(StopReason::EndTurn)
+                                .raw_stop_reason(None)
+                                .usage(protocol::ModelUsage::from(
+                                    protocol::Usage::new()
+                                        .input_tokens(130_000)
+                                        .output_tokens(10)
+                                        .total_tokens(130_010),
+                                ))
+                                .build(),
+                        ),
+                    ],
+                );
+            }
+            Route::answer("answer")
+        },
+        CompactionPolicy::builder()
+            .enabled(true)
+            .reserve_tokens(16_384)
+            .keep_recent_tokens(1)
+            .build(),
+    );
+    let session = test.create("queue-compact-only").await;
+    let kernel = test.kernel.clone();
+    let sink = test.sinks.sink(&session);
+    let first = session.clone();
+    let run = tokio::spawn(async move {
+        kernel
+            .run_with_insertion(
+                RunRequest {
+                    session_id: first,
+                    input: "hold".into(),
+                },
+                sink,
+                None,
+            )
+            .await
+    });
+    test.wait_until(|| !test.model.last_texts().is_empty())
+        .await;
+    let ticket = test.kernel.admission_ticket(&session).unwrap();
+    let (notice, _receiver) = InsertionNotice::new();
+    let outcome = test
+        .kernel
+        .prompt(
+            PromptRequest::builder()
+                .run(RunRequest {
+                    session_id: session.clone(),
+                    input: "follow".into(),
+                })
+                .sink(test.sinks.sink(&session))
+                .ticket(ticket)
+                .insertion(notice)
+                .build(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PromptOutcome::Queued(_)));
+    release.notify_one();
+    run.await.unwrap().unwrap();
+
+    let payloads = test.sinks.payloads(&session);
+    let compaction = payloads
+        .iter()
+        .position(|payload| {
+            matches!(
+                payload,
+                AgentEventPayload::CompactionEnd {
+                    reason: CompactionReason::Overflow,
+                    ..
+                }
+            )
+        })
+        .expect("overflow compaction");
+    let turn_starts = payloads
+        .iter()
+        .enumerate()
+        .filter(|(_, payload)| {
+            matches!(payload, AgentEventPayload::TurnStart { .. })
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(turn_starts.len(), 2, "held Turn and follow-up Turn");
+    assert!(turn_starts[0] < compaction && compaction < turn_starts[1]);
+    assert_eq!(test.user_texts(&session), ["hold", "follow"]);
+}

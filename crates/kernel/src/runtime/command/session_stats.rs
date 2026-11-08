@@ -63,7 +63,8 @@ impl SessionStatistics {
                 | MessageContent::BashExecution { .. }
                 | MessageContent::Extension { .. }
                 | MessageContent::SlashCommand { .. }
-                | MessageContent::CompactionSummary { .. } => {}
+                | MessageContent::CompactionSummary { .. }
+                | MessageContent::BranchSummary { .. } => {}
             }
         }
         statistics

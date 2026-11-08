@@ -1158,7 +1158,14 @@ async fn navigation_uses_extension_branch_summary() {
         .entry_id;
 
     let tree = kernel
-        .navigate_session_with_summary(&session_id, target, true)
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
         .await
         .expect("navigate with summary");
     let summary = tree

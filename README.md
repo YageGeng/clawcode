@@ -94,6 +94,14 @@ max_retry_delay_ms = 60000
 enabled = true
 reserve_tokens = 65536
 keep_recent_tokens = 20000
+# Per-model budgets, keyed by the exact "provider/model" identifier:
+# [compaction.model_overrides."deepseek/deepseek-v4-flash"]
+# reserve_tokens = 32768
+# keep_recent_tokens = 12000
+
+[branch_summary]
+# Tokens kept free when selecting abandoned-branch messages to summarize.
+reserve_tokens = 16384
 
 [prompt]
 load_project_instructions = true
@@ -147,8 +155,8 @@ metadata, and model selection. When an upstream API expects a different
 Each model limit has one meaning. `context_tokens` is the model's input limit
 and `max_output_tokens` its output capability; both default to rig's catalog and
 are metadata only. `request_max_tokens` is the `max_tokens` every Turn sends. It
-must not exceed `max_output_tokens` or `compaction.reserve_tokens`, and defaults
-to the smaller of the two. Compaction keeps input below `context_tokens` minus
+must not exceed `max_output_tokens` or `compaction.reserve_tokens` (that model's
+override when one is set), and defaults to the smaller of the two. Compaction keeps input below `context_tokens` minus
 `reserve_tokens`, so a budget within the reserve keeps input plus output inside
 the window. For longer responses, raise `compaction.reserve_tokens` (compaction
 then starts earlier) together with `request_max_tokens`. With compaction
@@ -228,7 +236,8 @@ count counts as a miss, because some providers omit zero counts.
 
 The Session thinking level is sent as a portable reasoning effort that rig
 translates for each provider. Sessions without a persisted choice start at
-`medium`; compaction summaries and MCP sampling always send no reasoning option.
+`medium`; compaction summaries use the Session level, and MCP sampling always
+sends no reasoning option.
 `off` sends no reasoning option, leaving the model default and `extra_param` in
 charge. When rig's catalog lists the effort tiers a
 model takes, a level snaps to the highest listed tier at or below it, or the
@@ -494,8 +503,15 @@ retries. Server `Retry-After` is honored in full, or rejected when it exceeds
 the provider delay cap. `timeout_ms` is the upstream stream idle timeout
 (including the first frame); zero disables it and omission uses the upstream default.
 A Compaction checkpoint persists its `summary`, `tokensBefore`,
-`readFiles`, and `modifiedFiles` alongside full timing. Threshold compaction
-does not replay a successful Assistant. Explicit overflow and recoverable length
+`readFiles`, and `modifiedFiles` alongside full timing. Compaction keeps about
+`keep_recent_tokens` of the newest context and always keeps at least the newest
+message. `[compaction.model_overrides."provider/model"]` replaces
+`reserve_tokens` and/or `keep_recent_tokens` for one model; every key must name
+a catalog model. The threshold is checked before each new prompt, before each
+follow-up model request within a Run, and after a Run. Threshold compaction
+does not replay a successful Assistant. A tree-navigation branch summary selects
+the newest abandoned messages within `context_tokens` minus
+`branch_summary.reserve_tokens` and enters model context where it is attached. Explicit overflow and recoverable length
 stops remove the failed Assistant from active context and compact-and-retry at
 most once. The former Turn-count compaction fields are not backward compatible.
 

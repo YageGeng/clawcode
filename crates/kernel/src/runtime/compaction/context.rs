@@ -114,7 +114,8 @@ impl ContextUsageEstimate {
                     | MessageContent::BashExecution { .. }
                     | MessageContent::Extension { .. }
                     | MessageContent::SlashCommand { .. }
-                    | MessageContent::CompactionSummary { .. } => None,
+                    | MessageContent::CompactionSummary { .. }
+                    | MessageContent::BranchSummary { .. } => None,
                 });
 
         if let Some((index, usage_tokens)) = latest {
@@ -164,6 +165,8 @@ pub(in crate::runtime) struct CompactionPreparation {
     pub(super) tokens_before: u64,
     pub(super) previous_summary: Option<String>,
     pub(super) file_operations: CompactionFileOperations,
+    /// Budgets that selected this partition, reported to extensions.
+    pub(super) policy: CompactionPolicy,
 }
 
 impl CompactionPreparation {
@@ -190,64 +193,45 @@ impl CompactionPreparation {
         let compactable = previous_boundary
             .and_then(|index| history.get(index.saturating_add(1)..))
             .unwrap_or(history);
-        // Native provenance does not change the assistant role or its lifecycle.
         let valid_cut_points = compactable
             .iter()
             .enumerate()
             .filter_map(|(index, message)| {
-                let valid = match &message.content {
-                    MessageContent::User { .. }
-                    | MessageContent::ExpandedUser { .. }
-                    | MessageContent::Assistant { .. }
-                    | MessageContent::BashExecution { .. } => true,
-                    // A hidden diagnostic can sit between tool results, and cutting
-                    // there would strand the next result from its retained call.
-                    MessageContent::Extension { extension } => {
-                        extension.include_in_context
-                    }
-                    _ => false,
-                };
-                valid.then_some(index)
+                message.is_cut_point().then_some(index)
             })
             .collect::<Vec<_>>();
-        let first_kept = if policy.keep_recent_tokens == 0 {
-            compactable.len()
-        } else {
-            let mut selected = valid_cut_points.first().copied().unwrap_or(0);
-            let mut retained_tokens = 0_u64;
-            for (index, message) in compactable.iter().enumerate().rev() {
-                retained_tokens =
-                    retained_tokens.saturating_add(message.estimated_tokens());
-                if retained_tokens >= policy.keep_recent_tokens {
-                    selected = valid_cut_points
-                        .iter()
-                        .copied()
-                        .find(|cut| *cut >= index)
-                        .unwrap_or(selected);
-                    break;
-                }
+        // Walk newest to oldest like pi: once the recent budget is reached,
+        // cut at the nearest cut point at or after that message. When only
+        // trailing Tool results exceed the budget, keep their Assistant call
+        // instead of falling back to the oldest cut point. A budget that is
+        // never reached keeps everything from the first cut point.
+        let mut first_kept = valid_cut_points.first().copied().unwrap_or(0);
+        let mut retained_tokens = 0_u64;
+        for (index, message) in compactable.iter().enumerate().rev() {
+            let tokens = message.estimated_tokens();
+            if tokens == 0 {
+                continue;
             }
-            selected
-        };
-        let cut_starts_turn =
-            compactable.get(first_kept).is_some_and(|message| {
-                matches!(
-                    message.content,
-                    MessageContent::User { .. }
-                        | MessageContent::ExpandedUser { .. }
-                        | MessageContent::BashExecution { .. }
-                )
-            });
+            retained_tokens = retained_tokens.saturating_add(tokens);
+            if retained_tokens >= policy.keep_recent_tokens {
+                first_kept = valid_cut_points
+                    .iter()
+                    .copied()
+                    .find(|cut| *cut >= index)
+                    .or_else(|| valid_cut_points.last().copied())
+                    .unwrap_or(first_kept);
+                break;
+            }
+        }
+        let cut_starts_turn = compactable
+            .get(first_kept)
+            .is_some_and(CompactionBoundary::starts_turn);
         let turn_start = (!cut_starts_turn && first_kept < compactable.len())
             .then(|| {
-                compactable.get(..=first_kept)?.iter().rposition(|message| {
-                    matches!(
-                        message.content,
-                        MessageContent::User { .. }
-                            | MessageContent::ExpandedUser { .. }
-                            | MessageContent::BashExecution { .. }
-                    )
-                })
+                compactable
+                    .get(..=first_kept)?
+                    .iter()
+                    .rposition(CompactionBoundary::starts_turn)
             })
             .flatten();
         let history_end = turn_start.unwrap_or(first_kept);
@@ -274,20 +258,40 @@ impl CompactionPreparation {
             tokens_before: ContextUsageEstimate::from_history(history).tokens,
             previous_summary,
             file_operations,
+            policy,
         }
+    }
+}
+
+impl From<&CompactionPreparation> for protocol::CompactionPreparation {
+    /// Projects the partition into the extension event shape.
+    fn from(preparation: &CompactionPreparation) -> Self {
+        // ponytail: clones the partition once per compaction; borrow if
+        // extension events become hot.
+        protocol::CompactionPreparation::builder()
+            .messages_to_summarize(preparation.summarized.clone())
+            .turn_prefix_messages(preparation.turn_prefix.clone())
+            .retained_tail(preparation.retained_tail.clone())
+            .is_split_turn(!preparation.turn_prefix.is_empty())
+            .tokens_before(preparation.tokens_before)
+            .previous_summary(preparation.previous_summary.clone())
+            .read_files(preparation.file_operations.read_files())
+            .modified_files(preparation.file_operations.modified_files())
+            .settings(preparation.policy)
+            .build()
     }
 }
 
 /// Cumulative file access metadata retained across compaction boundaries.
 #[derive(Default)]
-pub(super) struct CompactionFileOperations {
+pub(in crate::runtime) struct CompactionFileOperations {
     read: BTreeSet<String>,
     modified: BTreeSet<String>,
 }
 
 impl CompactionFileOperations {
     /// Collects canonical pi file-tool paths from messages removed from direct context.
-    fn extend(&mut self, messages: &[AgentMessage]) {
+    pub(in crate::runtime) fn extend(&mut self, messages: &[AgentMessage]) {
         for block in messages
             .iter()
             .filter_map(|message| {
@@ -323,13 +327,39 @@ impl CompactionFileOperations {
     }
 
     /// Returns sorted read paths for deterministic storage and replay.
-    pub(super) fn read_files(&self) -> Vec<String> {
+    pub(in crate::runtime) fn read_files(&self) -> Vec<String> {
         self.read.difference(&self.modified).cloned().collect()
     }
 
     /// Returns sorted modified paths for deterministic storage and replay.
-    pub(super) fn modified_files(&self) -> Vec<String> {
+    pub(in crate::runtime) fn modified_files(&self) -> Vec<String> {
         self.modified.iter().cloned().collect()
+    }
+
+    /// Absorbs a nested branch summary's cumulative file lists.
+    pub(in crate::runtime) fn extend_branch_summary_files(
+        &mut self,
+        branch: &protocol::BranchSummaryMessage,
+    ) {
+        self.read.extend(branch.read_files.iter().cloned());
+        self.modified.extend(branch.modified_files.iter().cloned());
+    }
+
+    /// Renders pi's `<read-files>` and `<modified-files>` summary suffix.
+    pub(in crate::runtime) fn summary_suffix(&self) -> String {
+        let mut suffix = String::new();
+        for (tag, files) in [
+            ("read-files", self.read_files()),
+            ("modified-files", self.modified_files()),
+        ] {
+            if !files.is_empty() {
+                suffix.push_str(&format!(
+                    "\n\n<{tag}>\n{}\n</{tag}>",
+                    files.join("\n")
+                ));
+            }
+        }
+        suffix
     }
 }
 
@@ -344,6 +374,44 @@ impl From<&AgentMessage> for CompactionFileOperations {
             read: compaction.read_files.iter().cloned().collect(),
             modified: compaction.modified_files.iter().cloned().collect(),
         }
+    }
+}
+
+/// Pi-compatible message boundaries used to partition history for compaction.
+pub(in crate::runtime) trait CompactionBoundary {
+    /// Reports whether this message opens a new Turn of model context.
+    fn starts_turn(&self) -> bool;
+
+    /// Reports whether compaction may keep history starting at this message.
+    fn is_cut_point(&self) -> bool;
+}
+
+impl CompactionBoundary for AgentMessage {
+    fn starts_turn(&self) -> bool {
+        match &self.content {
+            // A branch summary opens a Turn like pi's branchSummary message.
+            MessageContent::User { .. }
+            | MessageContent::ExpandedUser { .. }
+            | MessageContent::BashExecution { .. }
+            | MessageContent::BranchSummary { .. } => true,
+            // Only model-visible extension messages act like user input; a
+            // hidden diagnostic can sit between Tool results, and cutting
+            // there would strand the next result from its retained call.
+            MessageContent::Extension { extension } => {
+                extension.include_in_context
+            }
+            MessageContent::System { .. }
+            | MessageContent::Assistant { .. }
+            | MessageContent::ToolResult { .. }
+            | MessageContent::SlashCommand { .. }
+            | MessageContent::CompactionSummary { .. } => false,
+        }
+    }
+
+    fn is_cut_point(&self) -> bool {
+        // Tool results must stay behind their call, so they are never cut points.
+        self.starts_turn()
+            || matches!(self.content, MessageContent::Assistant { .. })
     }
 }
 
@@ -381,6 +449,11 @@ impl EstimatedTokens for AgentMessage {
             }
             MessageContent::Extension { .. }
             | MessageContent::SlashCommand { .. } => return 0,
+            MessageContent::BranchSummary { branch } => {
+                let characters = branch.summary.chars().count();
+                return u64::try_from(characters.div_ceil(4))
+                    .unwrap_or(u64::MAX);
+            }
             MessageContent::CompactionSummary { compaction } => {
                 let characters = compaction.summary.chars().count();
                 return u64::try_from(characters.div_ceil(4))
@@ -588,10 +661,13 @@ mod tests {
         let preparation =
             CompactionPreparation::from_history(&history, keep_recent(60));
 
+        // No cut point follows the budget boundary, so the newest Assistant
+        // call is kept with its results and its user prefix is summarized.
         assert!(matches!(
             preparation.retained_tail.first().map(|m| &m.content),
-            Some(MessageContent::User { .. })
+            Some(MessageContent::Assistant { .. })
         ));
+        assert_eq!(preparation.turn_prefix.len(), 1);
         assert_eq!(
             preparation
                 .retained_tail
@@ -603,6 +679,70 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    /// A branch summary opens a Turn and is a place compaction may cut, like pi.
+    #[test]
+    fn branch_summary_starts_a_turn() {
+        let summary = message(MessageContent::BranchSummary {
+            branch: protocol::BranchSummaryMessage::builder()
+                .entry_id(protocol::EntryId::try_from("entry").expect("entry"))
+                .from_id("root".to_string())
+                .summary("branch".to_string())
+                .build(),
+        });
+
+        assert!(summary.starts_turn());
+        assert!(summary.is_cut_point());
+    }
+
+    /// Trailing Tool results larger than the budget keep their Assistant call instead of everything.
+    #[test]
+    fn oversized_trailing_tool_results_fall_back_to_last_cut_point() {
+        let history = [
+            user(),
+            assistant(40),
+            user(),
+            assistant(16),
+            tool_result(400),
+        ];
+
+        let preparation =
+            CompactionPreparation::from_history(&history, keep_recent(60));
+
+        assert_eq!(preparation.summarized.len(), 2);
+        assert_eq!(preparation.turn_prefix.len(), 1);
+        assert!(matches!(
+            preparation.retained_tail.first().map(|m| &m.content),
+            Some(MessageContent::Assistant { .. })
+        ));
+        assert_eq!(preparation.retained_tail.len(), 2);
+    }
+
+    /// A zero budget still keeps the newest cut point, matching pi.
+    #[test]
+    fn zero_keep_recent_keeps_the_last_cut_point() {
+        let history = [user(), assistant(40), user(), assistant(40)];
+
+        let preparation =
+            CompactionPreparation::from_history(&history, keep_recent(0));
+
+        assert_eq!(preparation.summarized.len(), 2);
+        assert_eq!(preparation.turn_prefix.len(), 1);
+        assert_eq!(preparation.retained_tail.len(), 1);
+    }
+
+    /// A visible Extension message starts a Turn, so cutting there is not a split Turn.
+    #[test]
+    fn visible_extension_starts_a_turn() {
+        let history =
+            [user(), assistant(400), extension(400, true), assistant(40)];
+
+        let preparation =
+            CompactionPreparation::from_history(&history, keep_recent(60));
+
+        assert!(preparation.turn_prefix.is_empty());
+        assert_eq!(preparation.summarized.len(), 2);
     }
 
     /// An Extension message the model reads stays a place compaction may cut.

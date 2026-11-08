@@ -2,15 +2,15 @@ use protocol::{
     SessionBeforeCompactEvent, SessionBeforeCompactResult,
     SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCancelResult,
-    SessionCompactEvent, SessionInfoChangedEvent, SessionShutdownEvent,
-    SessionStartEvent, SessionTreeEvent,
+    SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent,
+    SessionShutdownEvent, SessionStartEvent, SessionTreeEvent,
 };
 
 use crate::{
     ExtensionContext, ExtensionRuntime, SessionBeforeCompactPoint,
     SessionBeforeForkPoint, SessionBeforeSwitchPoint, SessionBeforeTreePoint,
-    SessionCompactPoint, SessionInfoChangedPoint, SessionShutdownPoint,
-    SessionStartPoint, SessionTreePoint,
+    SessionCompactFailedPoint, SessionCompactPoint, SessionInfoChangedPoint,
+    SessionShutdownPoint, SessionStartPoint, SessionTreePoint,
 };
 
 impl ExtensionRuntime {
@@ -150,6 +150,16 @@ impl ExtensionRuntime {
         context: &ExtensionContext,
     ) {
         self.observe::<SessionCompactPoint>(event, context).await;
+    }
+
+    /// Notifies extensions that a compaction ended without a checkpoint.
+    pub async fn emit_session_compact_failed(
+        &self,
+        event: &SessionCompactFailedEvent,
+        context: &ExtensionContext,
+    ) {
+        self.observe::<SessionCompactFailedPoint>(event, context)
+            .await;
     }
 
     /// Notifies extensions that session tree navigation completed.

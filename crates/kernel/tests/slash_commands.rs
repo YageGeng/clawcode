@@ -719,17 +719,21 @@ async fn session_command_reports_usage_without_calling_the_model() {
 async fn compact_command_uses_custom_instruction_and_one_turn() {
     let (_root, fixture) = fixture().await;
     let sink = Arc::new(RecordingSink::default());
-    fixture
-        .kernel
-        .run(
-            RunRequest {
-                session_id: fixture.session_id.clone(),
-                input: "context before compact".into(),
-            },
-            Arc::new(RecordingSink::default()),
-        )
-        .await
-        .expect("prepare model context");
+    // Two Turns leave a whole Turn before the retained newest Assistant, so
+    // the checkpoint summary request carries the custom instructions.
+    for input in ["context before compact", "more context"] {
+        fixture
+            .kernel
+            .run(
+                RunRequest {
+                    session_id: fixture.session_id.clone(),
+                    input: input.into(),
+                },
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+            .expect("prepare model context");
+    }
 
     let result = fixture
         .kernel

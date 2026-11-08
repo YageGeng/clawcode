@@ -27,6 +27,9 @@ type Submission = {
   state: "sent" | "queued" | "disconnected" | "orphaned" | "unknown";
 };
 
+/** Branch-summary choice sent with Tree navigation, as pi offers on navigate. */
+export type NavigationSummaryOptions = Readonly<{ summarize: boolean; customInstructions?: string }>;
+
 export class WorkspaceController {
   readonly bootstrap: UiBootstrap;
   readonly methods: AcpExtensionMethods;
@@ -335,18 +338,20 @@ export class WorkspaceController {
     await this.requireConnection().request(this.methods.clearQueue, { sessionId });
   }
 
-  async navigate(entryId: string | null): Promise<void> {
+  /** Moves the lane, optionally asking the backend to summarize the abandoned branch. */
+  async navigate(entryId: string | null, options?: NavigationSummaryOptions): Promise<void> {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
-    await this.requireConnection().request(this.methods.navigate, { sessionId, entryId });
+    await this.requireConnection().request(this.methods.navigate, { sessionId, entryId, ...options });
     this.dispatchSession(sessionId, { type: "transcript/cleared" });
     await this.openSession(sessionId);
   }
 
-  async branch(entryId: string | null): Promise<void> {
+  /** Starts a branch at the entry, optionally summarizing the abandoned branch. */
+  async branch(entryId: string | null, options?: NavigationSummaryOptions): Promise<void> {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
-    await this.requireConnection().request(this.methods.branch, { sessionId, entryId });
+    await this.requireConnection().request(this.methods.branch, { sessionId, entryId, ...options });
     this.dispatchSession(sessionId, { type: "transcript/cleared" });
     await this.openSession(sessionId);
   }

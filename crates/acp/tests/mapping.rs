@@ -1458,3 +1458,47 @@ fn queue_changed_maps_to_product_event_with_submission_identity() {
         "client-map"
     );
 }
+
+/// A replayed branch summary is a user message tagged with its origin.
+#[test]
+fn branch_summary_maps_to_user_message_with_origin() {
+    let turn_id = TurnId::try_from("branch-summary-entry-9").expect("turn id");
+    let event = AgentEvent {
+        metadata: EventMetadata {
+            turn_id: turn_id.clone(),
+            timestamp_ms: TimestampMs::from(3_000),
+            sequence: Sequence::try_from(6).expect("sequence"),
+        },
+        payload: AgentEventPayload::MessageEnd {
+            message: AgentMessage {
+                identity: MessageIdentity {
+                    message_id: MessageId::try_from("branch-summary-entry-9")
+                        .expect("message id"),
+                    turn_id,
+                },
+                timing: MessageTiming::try_from((
+                    TimestampMs::from(3_000),
+                    TimestampMs::from(3_000),
+                    TimestampMs::from(3_000),
+                ))
+                .expect("message timing"),
+                content: MessageContent::BranchSummary {
+                    branch: protocol::BranchSummaryMessage::builder()
+                        .entry_id(EntryId::try_from("entry-9").expect("entry"))
+                        .from_id("root".to_string())
+                        .summary("explored option A".to_string())
+                        .build(),
+                },
+            },
+        },
+    };
+
+    let updates = AcpEventMapper::map(event).expect("map branch summary");
+    let value = updates
+        .iter()
+        .map(|update| serde_json::to_value(update).expect("serialize update"))
+        .find(|value| value["sessionUpdate"] == "user_message")
+        .expect("branch summary user message");
+    assert_eq!(value["_meta"]["clawcode"]["origin"], "branch_summary");
+    assert_eq!(value["content"][0]["text"], "explored option A");
+}

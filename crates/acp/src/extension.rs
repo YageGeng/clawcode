@@ -149,6 +149,37 @@ pub(crate) struct AcpExtensionDispatcher {
 }
 
 impl AcpExtensionDispatcher {
+    /// Moves the lane for Navigate and Branch, optionally summarizing the
+    /// abandoned branch. The root has no branch to summarize, so asking for a
+    /// summary there is a parameter error rather than a Kernel failure.
+    async fn navigate(
+        &self,
+        input: AcpNavigateParameters,
+    ) -> Result<protocol::SessionTreeSnapshot, agent_client_protocol::Error>
+    {
+        let navigated = match input.entry_id {
+            None if input.summarize => {
+                return Err(invalid_parameters(
+                    "root navigation has no branch to summarize",
+                ));
+            }
+            None => self.kernel.navigate_session(&input.session_id, None).await,
+            Some(target) => {
+                self.kernel
+                    .navigate_session_with_summary(
+                        &input.session_id,
+                        kernel::TreeNavigationRequest {
+                            target,
+                            summarize: input.summarize,
+                            custom_instructions: input.custom_instructions,
+                        },
+                    )
+                    .await
+            }
+        };
+        navigated.map_err(agent_client_protocol::Error::into_internal_error)
+    }
+
     /// Validates method-specific parameters and invokes the corresponding kernel capability.
     pub async fn execute(
         &self,
@@ -168,39 +199,17 @@ impl AcpExtensionDispatcher {
                 .into_value()
                 .map_err(agent_client_protocol::Error::into_internal_error)?
             }
-            AcpExtensionMethod::Navigate => {
+            // Branch and Navigate both move the lane; only the client's
+            // intent differs.
+            AcpExtensionMethod::Navigate | AcpExtensionMethod::Branch => {
                 let input: AcpNavigateParameters =
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
-                let session_id = input.session_id;
-                let target = input.entry_id;
-                crate::mapping::SessionTreeOf(
-                    self.kernel
-                        .navigate_session(&session_id, target)
-                        .await
-                        .map_err(
-                            agent_client_protocol::Error::into_internal_error,
-                        )?,
-                )
-                .into_value()
-                .map_err(agent_client_protocol::Error::into_internal_error)?
-            }
-            AcpExtensionMethod::Branch => {
-                let input: AcpNavigateParameters =
-                    serde_json::from_value(request.parameters)
-                        .map_err(invalid_parameters)?;
-                let session_id = input.session_id;
-                let target = input.entry_id;
-                crate::mapping::SessionTreeOf(
-                    self.kernel
-                        .navigate_session(&session_id, target)
-                        .await
-                        .map_err(
-                            agent_client_protocol::Error::into_internal_error,
-                        )?,
-                )
-                .into_value()
-                .map_err(agent_client_protocol::Error::into_internal_error)?
+                crate::mapping::SessionTreeOf(self.navigate(input).await?)
+                    .into_value()
+                    .map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?
             }
             AcpExtensionMethod::Fork => {
                 let input: AcpForkParameters =

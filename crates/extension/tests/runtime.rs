@@ -515,6 +515,7 @@ fn public_point_catalog_contains_only_pi_non_ui_hooks() {
             "session_before_fork",
             "session_before_compact",
             "session_compact",
+            "session_compact_failed",
             "session_before_tree",
             "session_tree",
             "session_shutdown",

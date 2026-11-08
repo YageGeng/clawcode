@@ -140,3 +140,30 @@ fn message_update_represents_tool_calls_with_the_shared_type() {
         serde_json::to_value(call).expect("serialize tool call")
     );
 }
+
+/// The compaction preparation uses the same snake_case wire names as its
+/// enclosing `session_before_compact` event.
+#[test]
+fn compaction_preparation_matches_event_field_casing() {
+    let preparation = protocol::CompactionPreparation::builder()
+        .messages_to_summarize(Vec::new())
+        .turn_prefix_messages(Vec::new())
+        .retained_tail(Vec::new())
+        .is_split_turn(false)
+        .tokens_before(10)
+        .read_files(Vec::new())
+        .modified_files(Vec::new())
+        .settings(protocol::CompactionPolicy::default())
+        .build();
+
+    let value = serde_json::to_value(&preparation).expect("serialize");
+
+    for key in [
+        "messages_to_summarize",
+        "is_split_turn",
+        "tokens_before",
+        "read_files",
+    ] {
+        assert!(value.get(key).is_some(), "missing {key}: {value}");
+    }
+}

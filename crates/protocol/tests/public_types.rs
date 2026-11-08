@@ -34,6 +34,19 @@ fn acp_parameters_use_domain_identifiers() {
         navigation.entry_id.expect("entry identifier").as_str(),
         "entry-1"
     );
+    // Older clients that omit the summary fields navigate without a summary.
+    assert!(!navigation.summarize);
+    assert_eq!(navigation.custom_instructions, None);
+    let summarized: AcpNavigateParameters =
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "session-1",
+            "entryId": "entry-1",
+            "summarize": true,
+            "customInstructions": "focus api"
+        }))
+        .expect("summarizing navigation parameters");
+    assert!(summarized.summarize);
+    assert_eq!(summarized.custom_instructions.as_deref(), Some("focus api"));
 
     let skill: AcpSkillParameters = serde_json::from_value(serde_json::json!({
         "sessionId": "session-1",

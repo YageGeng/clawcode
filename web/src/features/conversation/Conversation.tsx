@@ -14,6 +14,7 @@ import { Composer } from "../composer/Composer";
 import { MessageView } from "./MessageView";
 import { ExtensionCard } from "./ExtensionCard";
 import { ToolCallCard } from "./ToolCallCard";
+import { BranchSummaryCard } from "./BranchSummaryCard";
 import { CompactionCard } from "./CompactionCard";
 import { useTranscriptScroll } from "./useTranscriptScroll";
 import { BackgroundSubagents } from "./BackgroundSubagents";
@@ -82,6 +83,12 @@ const ExtensionRow = memo(function ExtensionRow({ sessionId, id }: Readonly<{ se
 const CompactionRow = memo(function CompactionRow({ sessionId, entryId }: Readonly<{ sessionId: SessionId; entryId: EntryId }>) {
   const compaction = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.compactions.get(entryId));
   return compaction === undefined ? null : <CompactionCard compaction={compaction} />;
+});
+
+/** Branch summary row subscribes only to its replayed summary. */
+const BranchSummaryRow = memo(function BranchSummaryRow({ sessionId, messageId }: Readonly<{ sessionId: SessionId; messageId: MessageId }>) {
+  const branchSummary = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.branchSummaries.get(messageId));
+  return branchSummary === undefined ? null : <BranchSummaryCard branchSummary={branchSummary} />;
 });
 
 /** Agent Usage row subscribes only to its immutable Run settlement snapshot. */
@@ -201,6 +208,7 @@ export function Conversation({ bootstrap, controller, contextSelection, revealRo
           }
           if (entry.type === "extension") return <ExtensionRow sessionId={activeSessionId} key={TranscriptRowKeys.extension(entry.extensionEventId)} id={entry.extensionEventId} />;
           if (entry.type === "compaction") return <CompactionRow sessionId={activeSessionId} key={TranscriptRowKeys.compaction(entry.entryId)} entryId={entry.entryId} />;
+          if (entry.type === "branchSummary") return <BranchSummaryRow sessionId={activeSessionId} key={TranscriptRowKeys.branchSummary(entry.messageId)} messageId={entry.messageId} />;
           if (entry.type === "agent_usage") return <AgentUsageRow sessionId={activeSessionId} key={`agent-usage:${entry.runId}`} runId={entry.runId} />;
           return <ToolRow
             sessionId={activeSessionId}

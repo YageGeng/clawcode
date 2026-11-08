@@ -81,6 +81,13 @@ define_point!(
     "Completed compaction observer point."
 );
 define_point!(
+    SessionCompactFailedPoint,
+    SessionCompactFailedEvent,
+    (),
+    "session_compact_failed",
+    "Failed or aborted compaction observer point."
+);
+define_point!(
     SessionBeforeTreePoint,
     SessionBeforeTreeEvent,
     SessionBeforeTreeResult,
@@ -237,7 +244,7 @@ define_point!(
 );
 
 /// Ordered catalog of Pi's current non-UI extension hook names.
-pub const NON_UI_EXTENSION_POINT_NAMES: [&str; 30] = [
+pub const NON_UI_EXTENSION_POINT_NAMES: [&str; 31] = [
     ProjectTrustPoint::NAME,
     ResourcesDiscoverPoint::NAME,
     SessionStartPoint::NAME,
@@ -246,6 +253,7 @@ pub const NON_UI_EXTENSION_POINT_NAMES: [&str; 30] = [
     SessionBeforeForkPoint::NAME,
     SessionBeforeCompactPoint::NAME,
     SessionCompactPoint::NAME,
+    SessionCompactFailedPoint::NAME,
     SessionBeforeTreePoint::NAME,
     SessionTreePoint::NAME,
     SessionShutdownPoint::NAME,

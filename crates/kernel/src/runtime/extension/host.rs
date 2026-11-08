@@ -764,8 +764,11 @@ impl ExtensionHost for SessionExtensionHost {
         self.kernel
             .navigate_session_with_summary(
                 &invocation.session_id,
-                entry_id,
-                summarize,
+                crate::runtime::TreeNavigationRequest {
+                    target: entry_id,
+                    summarize,
+                    custom_instructions: None,
+                },
             )
             .await
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))

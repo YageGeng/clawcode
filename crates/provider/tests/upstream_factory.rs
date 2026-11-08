@@ -401,6 +401,16 @@ fn request_budget_defaults_to_reserve_bounded_output() {
     }
 }
 
+/// A model's compaction override bounds its default request budget.
+#[test]
+fn override_reserve_bounds_default_request_budget() {
+    let factory = budget_factory(
+        "max_output_tokens = 64000\n[compaction.model_overrides.\"corp/local\"]\nreserve_tokens = 4000",
+    );
+    let configured = factory.resolve("corp", "local").expect("model");
+    assert_eq!(configured.profile().request_max_tokens, 4_000);
+}
+
 /// A configured budget is sent as written.
 #[test]
 fn configured_request_budget_is_sent() {
@@ -544,7 +554,7 @@ fn repository_claw_toml_builds_every_model() {
                 Some(config::ApiKeyConfig::Plaintext("synthetic-key".into()));
         }
     }
-    let reserve = config.compaction.reserve_tokens;
+    let reserve = config.compaction.policy.reserve_tokens;
     let models = config
         .providers
         .iter()

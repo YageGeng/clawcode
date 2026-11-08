@@ -93,6 +93,14 @@ max_retry_delay_ms = 60000
 enabled = true
 reserve_tokens = 65536
 keep_recent_tokens = 20000
+# 按模型覆盖预算，key 为精确的 "provider/model" 标识：
+# [compaction.model_overrides."deepseek/deepseek-v4-flash"]
+# reserve_tokens = 32768
+# keep_recent_tokens = 12000
+
+[branch_summary]
+# 选取被放弃分支的消息做摘要时预留的 token 数。
+reserve_tokens = 16384
 
 [prompt]
 load_project_instructions = true
@@ -144,8 +152,8 @@ request_total_timeout_sec = 300
 
 每个模型上限只有一个含义。`context_tokens` 是模型的输入上限，`max_output_tokens`
 是输出能力，两者默认取自 rig 目录，且只是元数据。`request_max_tokens` 是每个 Turn
-发送的 `max_tokens`，不得大于 `max_output_tokens` 或 `compaction.reserve_tokens`，
-默认取两者中较小值。压缩会把输入控制在 `context_tokens` 减去 `reserve_tokens` 以下，
+发送的 `max_tokens`，不得大于 `max_output_tokens` 或 `compaction.reserve_tokens`
+（设置了该模型的覆盖时取覆盖值），默认取两者中较小值。压缩会把输入控制在 `context_tokens` 减去 `reserve_tokens` 以下，
 因此在 reserve 之内的预算能保证输入加输出仍在窗口内。需要更长响应时，同时提高
 `compaction.reserve_tokens`（压缩会更早触发）和 `request_max_tokens`。关闭压缩后
 输入不再受限，该保证不适用。
@@ -212,8 +220,8 @@ WebUI 按消息、Run 和 Session 展示缓存命中率（缓存读取 ÷ 输入
 汇总中，未报告缓存读取的请求按未命中计算，因为部分 provider 会省略为 0 的计数。
 
 Session 的 thinking 级别会作为可移植的推理强度发送，由 rig 翻译为各家参数。没有
-持久化选择的 Session 从 `medium` 开始；压缩摘要与 MCP sampling 始终不发送推理
-参数。`off` 不发送推理参数，交由模型默认值和 `extra_param` 决定。当 rig 目录列出
+持久化选择的 Session 从 `medium` 开始；压缩摘要使用 Session 的级别，MCP sampling
+始终不发送推理参数。`off` 不发送推理参数，交由模型默认值和 `extra_param` 决定。当 rig 目录列出
 模型支持的档位时，级别会吸附到不高于它的最高档，没有更低档时取最低档：在 DeepSeek
 （low、high、max）上 Minimal 与 Medium 发送 low，XHigh 发送 high，因此更高的级别
 永远不会发送更少的推理。目录未列出档位的模型，若提供方不接受所选级别，该参数会被
@@ -428,7 +436,12 @@ Session 使用 pi v4 兼容 JSONL，按 cwd 编码目录保存。项目不创建
 `Retry-After` 会被完整遵守，超出 provider 延迟上限时则被拒绝。`timeout_ms` 是上游
 流式空闲超时（含首帧）：设为 0 关闭，省略时使用上游默认值。Compaction 检查点会
 保存 `summary`、`tokensBefore`、`readFiles` 与 `modifiedFiles`，并带完整关联时间。
-阈值压缩不会重放成功的 Assistant。显式 overflow 与可恢复的 length stop 会移除失败
+压缩保留约 `keep_recent_tokens` 的最新上下文，且至少保留最新一条消息。
+`[compaction.model_overrides."provider/model"]` 为单个模型替换 `reserve_tokens`
+和/或 `keep_recent_tokens`，每个 key 都必须对应模型目录中的模型。阈值会在每个新
+prompt 之前、Run 内每次后续模型请求之前以及 Run 结束后检查。阈值压缩不会重放成功的
+Assistant。树导航生成的分支摘要会在 `context_tokens` 减去
+`branch_summary.reserve_tokens` 的预算内选取最新的被放弃消息，并在挂接位置进入模型上下文。显式 overflow 与可恢复的 length stop 会移除失败
 Assistant 的活动上下文，压缩后最多恢复一次。旧版按 Turn 数保留的 compaction 字段
 不兼容。
 

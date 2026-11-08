@@ -3,6 +3,7 @@ import type { TerminalEntity } from "./terminals";
 import type {
   AgentRunUsage,
   CacheTrail,
+  BranchSummaryEntity,
   CompactionEntity,
   CompactionStatus,
   ContextUsage,
@@ -56,6 +57,7 @@ export class SessionWorkspaceStager {
   private readonly terminals: MapDraft<string, TerminalEntity>;
   private readonly extensions: MapDraft<string, ExtensionEntity>;
   private readonly compactions: MapDraft<EntryId, CompactionEntity>;
+  private readonly branchSummaries: MapDraft<MessageId, BranchSummaryEntity>;
   private readonly turnRuns: MapDraft<TurnId, RunId>;
   private readonly runUsages: MapDraft<RunId, AgentRunUsage>;
   private cacheTrail: CacheTrail;
@@ -86,6 +88,7 @@ export class SessionWorkspaceStager {
     this.terminals = new MapDraft(base.terminals);
     this.extensions = new MapDraft(base.extensions);
     this.compactions = new MapDraft(base.compactions);
+    this.branchSummaries = new MapDraft(base.branchSummaries);
     this.turnRuns = new MapDraft(base.turnRuns);
     this.runUsages = new MapDraft(base.runUsages);
     this.cacheTrail = base.cacheTrail;
@@ -119,6 +122,7 @@ export class SessionWorkspaceStager {
         this.terminals.replace(new Map());
         this.extensions.replace(new Map());
         this.compactions.replace(new Map());
+        this.branchSummaries.replace(new Map());
         this.turnRuns.replace(new Map());
         this.runUsages.replace(new Map());
         this.cacheTrail = CacheMisses.empty;
@@ -205,6 +209,14 @@ export class SessionWorkspaceStager {
         this.compactions.write().set(action.compaction.entryId, action.compaction);
         if (!exists) {
           this.appendedTranscript.push({ type: "compaction", entryId: action.compaction.entryId, order: action.order });
+        }
+        return;
+      }
+      case "branch-summary/upserted": {
+        const exists = this.branchSummaries.read().has(action.branchSummary.messageId);
+        this.branchSummaries.write().set(action.branchSummary.messageId, action.branchSummary);
+        if (!exists) {
+          this.appendedTranscript.push({ type: "branchSummary", messageId: action.branchSummary.messageId, order: action.order });
         }
         return;
       }
@@ -302,6 +314,7 @@ export class SessionWorkspaceStager {
       terminals: this.terminals.read(),
       extensions: this.extensions.read(),
       compactions: this.compactions.read(),
+      branchSummaries: this.branchSummaries.read(),
       turnRuns: this.turnRuns.read(),
       runUsages: this.runUsages.read(),
       cacheTrail: this.cacheTrail,
@@ -338,6 +351,7 @@ export class SessionWorkspaceStager {
       terminals: this.terminals.read(),
       extensions: this.extensions.read(),
       compactions: this.compactions.read(),
+      branchSummaries: this.branchSummaries.read(),
       turnRuns: this.turnRuns.read(),
       runUsages: this.runUsages.read(),
       cacheTrail: this.cacheTrail,

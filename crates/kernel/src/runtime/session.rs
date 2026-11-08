@@ -14,6 +14,8 @@ pub(super) mod settings;
 pub(super) mod transcript;
 mod tree;
 
+pub use tree::TreeNavigationRequest;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

@@ -260,6 +260,19 @@ impl<'a> AcpEventMapper<'a> {
                     | MessageContent::CompactionSummary { .. } => {
                         vec![self.extension_update()?]
                     }
+                    // Clients render the summary as a card from its origin tag.
+                    MessageContent::BranchSummary { branch } => {
+                        vec![wire::SessionUpdate::UserMessage(
+                            wire::UserMessage::new(
+                                message.identity.message_id.to_string(),
+                            )
+                            .content(vec![wire::ContentBlock::Text(
+                                wire::TextContent::new(branch.summary.clone())
+                                    .meta(metadata.clone()),
+                            )])
+                            .meta(metadata.clone()),
+                        )]
+                    }
                     MessageContent::SlashCommand { message: command } => {
                         match command {
                             protocol::SlashCommandMessage::Invocation {
@@ -695,6 +708,11 @@ impl<'a> AcpEventMapper<'a> {
                     metadata,
                 ),
             ],
+            // No standard ACP update exists; clients reload the Session after
+            // navigating, so the product event only records the move.
+            AgentEventPayload::BranchNavigated { .. } => {
+                vec![self.extension_update()?]
+            }
             AgentEventPayload::SkillDiagnostic { diagnostic } => vec![
                 self.extension_update()?,
                 Self::warning_notice(
@@ -804,6 +822,12 @@ impl<'a> AcpEventMapper<'a> {
                     | MessageContent::ToolResult { .. }
                     | MessageContent::Extension { .. }
                     | MessageContent::CompactionSummary { .. } => {}
+                    MessageContent::BranchSummary { .. } => {
+                        product.insert(
+                            ProductIdentity::ACP_ORIGIN_METADATA.to_string(),
+                            ProductIdentity::ACP_BRANCH_SUMMARY_ORIGIN.into(),
+                        );
+                    }
                 }
             }
             AgentEventPayload::UsageUpdated {
@@ -838,6 +862,7 @@ impl<'a> AcpEventMapper<'a> {
             | AgentEventPayload::RetryEnd { .. }
             | AgentEventPayload::SettingsChanged { .. }
             | AgentEventPayload::ExtensionHandlerFailed { .. }
+            | AgentEventPayload::BranchNavigated { .. }
             | AgentEventPayload::SkillDiagnostic { .. }
             | AgentEventPayload::McpElicitationRequested { .. }
             | AgentEventPayload::McpElicitationResolved { .. }

@@ -5,7 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
-use extension::StaticExtensionFactory;
+use extension::{
+    ExtensionContext, ExtensionError, ExtensionHandler, ExtensionModule,
+    ExtensionRegistrar, SessionBeforeCompactPoint, SessionBeforeTreePoint,
+    SessionCompactFailedPoint, StaticExtensionFactory,
+};
 use futures::{Stream, stream};
 use kernel::{
     ContextUsageEstimate, EventSink, Kernel, KernelFactory, Model, ModelError,
@@ -495,8 +499,29 @@ impl CompactionFixture {
         >,
         prepare_history: bool,
     ) -> Self {
-        Self::new_with_keep_recent(compaction_responses, prepare_history, 0)
-            .await
+        // A lone Turn is always split because its last Assistant is kept as
+        // the newest cut point. Two Turns with a budget equal to the second
+        // Turn's estimate (4 + 4 tokens) cut on its user message, so the first
+        // Turn is summarized whole.
+        Self::with_history_prompts(
+            &["historical question", "recent question"],
+            [
+                Ok(vec![
+                    ModelStreamEvent::TextDelta(
+                        "historical answer".to_string(),
+                    ),
+                    ScriptedModel::finished(StopReason::EndTurn),
+                ]),
+                Ok(vec![
+                    ModelStreamEvent::TextDelta("recent answer".to_string()),
+                    ScriptedModel::finished(StopReason::EndTurn),
+                ]),
+            ],
+            compaction_responses,
+            prepare_history,
+            8,
+        )
+        .await
     }
 
     /// Builds the fixture with an explicit recent-tail budget for split-Turn coverage.
@@ -521,6 +546,28 @@ impl CompactionFixture {
 
     /// Builds the fixture with explicit historical Turns before summary responses.
     async fn new_with_scripted_history(
+        history_responses: impl IntoIterator<
+            Item = Result<Vec<ModelStreamEvent>, ModelError>,
+        >,
+        compaction_responses: impl IntoIterator<
+            Item = Result<Vec<ModelStreamEvent>, ModelError>,
+        >,
+        prepare_history: bool,
+        keep_recent_tokens: u64,
+    ) -> Self {
+        Self::with_history_prompts(
+            &["historical question"],
+            history_responses,
+            compaction_responses,
+            prepare_history,
+            keep_recent_tokens,
+        )
+        .await
+    }
+
+    /// Builds the fixture by running each history prompt in order before summary responses.
+    async fn with_history_prompts(
+        history_prompts: &[&str],
         history_responses: impl IntoIterator<
             Item = Result<Vec<ModelStreamEvent>, ModelError>,
         >,
@@ -591,16 +638,18 @@ impl CompactionFixture {
             .await
             .expect("create session");
         if prepare_history {
-            kernel
-                .run(
-                    RunRequest {
-                        session_id: session_id.clone(),
-                        input: "historical question".into(),
-                    },
-                    Arc::new(RecordingSink::default()),
-                )
-                .await
-                .expect("prepare history");
+            for prompt in history_prompts {
+                kernel
+                    .run(
+                        RunRequest {
+                            session_id: session_id.clone(),
+                            input: (*prompt).into(),
+                        },
+                        Arc::new(RecordingSink::default()),
+                    )
+                    .await
+                    .expect("prepare history");
+            }
         }
         let messages_before =
             kernel.session_messages(&session_id).expect("history");
@@ -695,11 +744,19 @@ async fn compact_builds_structured_summary_request_with_additional_focus() {
         .expect("compact command");
 
     let requests = fixture.model.requests.lock().expect("request lock");
-    let request = requests.get(1).expect("summary request");
+    // Two historical Turns precede the summary request.
+    let request = requests.get(2).expect("summary request");
     assert!(request.tools.is_empty());
     assert_eq!(request.options.max_tokens, Some(8_000));
-    // Summaries never inherit a reasoning level, whatever the default level is.
-    assert_eq!(request.options.thinking_level, protocol::ThinkingLevel::Off);
+    // Summaries reason at the Session's current level, as in pi.
+    assert_eq!(
+        request.options.thinking_level,
+        fixture
+            .kernel
+            .session_settings(&fixture.session_id)
+            .expect("settings")
+            .thinking_level
+    );
     assert_eq!(request.messages.len(), 2);
     let MessageContent::System { blocks } = &request.messages[0].content else {
         panic!("summary protocol must use a dedicated System message");
@@ -916,7 +973,10 @@ async fn compaction_lifecycle_is_logged_without_summary_content() {
 /// Compaction records pi's read/write/edit file metadata and carries it across checkpoints.
 #[tokio::test]
 async fn compaction_preserves_cumulative_file_operations() {
-    let fixture = CompactionFixture::new_with_scripted_history(
+    // The second Turn is retained, so the first Turn's file operations enter
+    // the checkpoint whole instead of through a split-Turn prefix.
+    let fixture = CompactionFixture::with_history_prompts(
+        &["historical question", "recent question"],
         [
             Ok(vec![
                 ModelStreamEvent::ToolCall(
@@ -964,6 +1024,10 @@ async fn compaction_preserves_cumulative_file_operations() {
                 ModelStreamEvent::TextDelta("historical answer".to_string()),
                 ScriptedModel::finished(StopReason::EndTurn),
             ]),
+            Ok(vec![
+                ModelStreamEvent::TextDelta("recent answer".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
         ],
         [
             Ok(vec![
@@ -980,7 +1044,7 @@ async fn compaction_preserves_cumulative_file_operations() {
             ]),
         ],
         true,
-        0,
+        8,
     )
     .await;
 
@@ -1035,7 +1099,7 @@ async fn compaction_preserves_cumulative_file_operations() {
         "updated summary\n\n<modified-files>\ninput.txt\noutput.txt\n</modified-files>"
     );
     let requests = fixture.model.requests.lock().expect("request lock");
-    let follow_up = requests.get(3).expect("follow-up provider request");
+    let follow_up = requests.get(4).expect("follow-up provider request");
     assert!(follow_up.messages.iter().any(|message| {
         message.content.text_content().is_some_and(|text| {
             text.contains(
@@ -1171,7 +1235,9 @@ async fn session_replay_includes_persisted_compaction_boundary() {
         .session_replay(&fixture.session_id)
         .expect("session replay");
 
-    assert_eq!(replay.len(), fixture.messages_before.len() + 3);
+    // Each of the two historical Runs replays a Turn and a RunEnd after its
+    // messages, followed by the compaction boundary.
+    assert_eq!(replay.len(), fixture.messages_before.len() + 5);
     assert!(matches!(
         replay.get(replay.len().saturating_sub(3)),
         Some(SessionReplayItem::Turn(_))
@@ -1229,6 +1295,89 @@ async fn compaction_summary_retries_transient_model_failure() {
             .filter(|entry| entry.kind == "compaction")
             .count(),
         1
+    );
+}
+
+/// A summary stopped by the output cap is incomplete and never becomes a checkpoint.
+#[tokio::test]
+async fn truncated_summary_is_rejected_and_not_persisted() {
+    let fixture = CompactionFixture::new(
+        [Ok(vec![
+            ModelStreamEvent::TextDelta("partial".to_string()),
+            ScriptedModel::finished(StopReason::MaxTokens),
+        ])],
+        true,
+    )
+    .await;
+
+    let error = fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect_err("truncated summary");
+
+    assert!(
+        error.to_string().contains(
+            "Summarization failed: generation hit the token cap and the summary is incomplete"
+        ),
+        "{error}"
+    );
+    assert!(
+        fixture
+            .kernel
+            .session_tree(&fixture.session_id)
+            .expect("tree")
+            .entries
+            .iter()
+            .all(|entry| entry.kind != "compaction")
+    );
+    assert_eq!(
+        fixture
+            .kernel
+            .session_messages(&fixture.session_id)
+            .expect("history"),
+        fixture.messages_before
+    );
+    // Two history answers and exactly one summary attempt: no retry.
+    assert_eq!(
+        fixture.model.requests.lock().expect("request lock").len(),
+        3
+    );
+}
+
+/// Summary requests use the model output limit and the Session's thinking level.
+#[tokio::test]
+async fn summary_request_uses_output_limit_and_session_thinking_level() {
+    let fixture =
+        CompactionFixture::with_history_and_summary("summary text").await;
+    // The default level is Off, which would make the assertion vacuous.
+    fixture
+        .kernel
+        .set_session_thinking_level(
+            &fixture.session_id,
+            protocol::ThinkingLevel::High,
+        )
+        .await
+        .expect("set thinking level");
+
+    fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact");
+
+    let requests = fixture.model.requests.lock().expect("request lock");
+    let request = requests.last().expect("summary request");
+    assert_eq!(request.options.max_tokens, Some(8_000));
+    assert_eq!(
+        request.options.thinking_level,
+        protocol::ThinkingLevel::High
     );
 }
 
@@ -1495,7 +1644,8 @@ async fn second_compaction_uses_previous_summary_and_new_messages() {
         .expect("second compaction");
 
     let requests = fixture.model.requests.lock().expect("request lock");
-    let request = requests.get(3).expect("second summary request");
+    // Two history answers, the first summary, and the follow-up answer precede it.
+    let request = requests.get(4).expect("second summary request");
     let MessageContent::User { blocks } = &request.messages[1].content else {
         panic!("summary prompt must be a User message");
     };
@@ -1504,8 +1654,11 @@ async fn second_compaction_uses_previous_summary_and_new_messages() {
         prompt
             .contains("<previous-summary>\nfirst summary\n</previous-summary>")
     );
-    assert!(prompt.contains("follow-up question"));
-    assert!(prompt.contains("follow-up answer"));
+    // Only the Turn retained by the first checkpoint is new to the summary;
+    // the follow-up Turn stays verbatim as the recent tail.
+    assert!(prompt.contains("recent question"));
+    assert!(prompt.contains("recent answer"));
+    assert!(!prompt.contains("follow-up question"));
     assert!(!prompt.contains("historical question"));
     assert!(!prompt.contains("historical answer"));
     assert!(prompt.contains("messages above are NEW conversation messages"));
@@ -1539,7 +1692,11 @@ async fn split_turn_compaction_preserves_prefix_context() {
         panic!("prefix summary prompt must be a User message");
     };
     let prompt = blocks[0].text().expect("prefix prompt text");
-    assert!(prompt.contains("This is the PREFIX of a turn"));
+    assert!(prompt.starts_with("# Conversation\n"), "{prompt}");
+    assert!(prompt.contains(
+        "\n\n# Instructions\nThe messages above are earlier context from an ongoing conversation."
+    ));
+    assert!(!prompt.contains("This is the PREFIX of a turn"));
     assert!(prompt.contains("historical question"));
     assert_eq!(
         result.summary,
@@ -1560,6 +1717,104 @@ async fn split_turn_compaction_preserves_prefix_context() {
                 if blocks.iter().any(|block| block.text() == Some("historical answer"))
         )
     }));
+}
+
+/// Custom compaction instructions also steer the split-Turn prefix summary.
+#[tokio::test]
+async fn split_turn_prefix_receives_custom_instructions() {
+    let fixture = CompactionFixture::new_with_keep_recent(
+        [Ok(vec![
+            ModelStreamEvent::TextDelta("turn prefix summary".to_string()),
+            ScriptedModel::finished(StopReason::EndTurn),
+        ])],
+        true,
+        1,
+    )
+    .await;
+
+    fixture
+        .kernel
+        .run(
+            RunRequest {
+                session_id: fixture.session_id.clone(),
+                input: "/compact keep the API names".into(),
+            },
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact command");
+
+    let requests = fixture.model.requests.lock().expect("request lock");
+    let request = requests.get(1).expect("prefix summary request");
+    let MessageContent::User { blocks } = &request.messages[1].content else {
+        panic!("prefix summary prompt must be a User message");
+    };
+    let prompt = blocks[0].text().expect("prefix prompt text");
+    assert!(
+        prompt.ends_with("\n\nAdditional focus: keep the API names"),
+        "{prompt}"
+    );
+}
+
+/// Summary input omits reasoning and formats Tool calls as key=value arguments.
+#[tokio::test]
+async fn summary_input_omits_thinking_and_formats_tool_arguments() {
+    // The cut lands on the final Assistant, so the only summary request is
+    // the split-Turn prefix covering the reasoning and the Tool call.
+    let fixture = CompactionFixture::new_with_scripted_history(
+        [
+            Ok(vec![
+                ModelStreamEvent::ReasoningDelta(
+                    "secret reasoning".to_string(),
+                ),
+                ModelStreamEvent::ToolCall(
+                    ToolCall::builder()
+                        .tool_call_id(
+                            ToolCallId::try_from("read-call")
+                                .expect("read call id"),
+                        )
+                        .name("read".to_string())
+                        .arguments(serde_json::json!({ "path": "input.txt" }))
+                        .build(),
+                ),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            Ok(vec![
+                ModelStreamEvent::TextDelta("historical answer".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+        ],
+        [Ok(vec![
+            ModelStreamEvent::TextDelta("prefix summary".to_string()),
+            ScriptedModel::finished(StopReason::EndTurn),
+        ])],
+        true,
+        1,
+    )
+    .await;
+
+    fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact");
+
+    let requests = fixture.model.requests.lock().expect("request lock");
+    assert_eq!(requests.len(), 3, "two history requests and one summary");
+    let MessageContent::User { blocks } = &requests[2].messages[1].content
+    else {
+        panic!("summary prompt must be a User message");
+    };
+    let prompt = blocks[0].text().expect("summary prompt text");
+    assert!(!prompt.contains("secret reasoning"), "{prompt}");
+    assert!(!prompt.contains("[Assistant thinking]"), "{prompt}");
+    assert!(
+        prompt.contains("[Assistant tool calls]: read(path=\"input.txt\")"),
+        "{prompt}"
+    );
 }
 
 /// Recent retention excludes direct command records from the persisted model tail.
@@ -1636,8 +1891,67 @@ async fn threshold_kernel(
     keep_recent_tokens: u64,
     session_id: &SessionId,
 ) -> Kernel {
+    threshold_kernel_with(
+        root,
+        model,
+        keep_recent_tokens,
+        session_id,
+        StaticExtensionFactory::default(),
+    )
+    .await
+}
+
+/// Builds `threshold_kernel` with explicit extensions; the Session cwd holds
+/// `input.txt` so scripted `read` calls succeed.
+async fn threshold_kernel_with(
+    root: &Path,
+    model: &Arc<ScriptedModel>,
+    keep_recent_tokens: u64,
+    session_id: &SessionId,
+    extensions: StaticExtensionFactory,
+) -> Kernel {
+    threshold_kernel_configured(
+        root,
+        model,
+        keep_recent_tokens,
+        session_id,
+        KernelOptions {
+            extensions,
+            ..KernelOptions::default()
+        },
+    )
+    .await
+}
+
+/// Collaborators a threshold test kernel can replace.
+struct KernelOptions {
+    extensions: StaticExtensionFactory,
+    branch_summary: config::BranchSummaryConfig,
+    id_generator: Arc<dyn IdGenerator>,
+}
+
+impl Default for KernelOptions {
+    /// Uses no extensions, the default branch reserve, and sequential ids.
+    fn default() -> Self {
+        Self {
+            extensions: StaticExtensionFactory::default(),
+            branch_summary: config::BranchSummaryConfig::default(),
+            id_generator: Arc::new(SequentialIds(AtomicU64::new(0))),
+        }
+    }
+}
+
+/// Builds `threshold_kernel_with` with explicit collaborators.
+async fn threshold_kernel_configured(
+    root: &Path,
+    model: &Arc<ScriptedModel>,
+    keep_recent_tokens: u64,
+    session_id: &SessionId,
+    options: KernelOptions,
+) -> Kernel {
     let cwd = root.join("workspace").join(session_id.as_str());
     std::fs::create_dir_all(&cwd).expect("create project cwd");
+    std::fs::write(cwd.join("input.txt"), "input").expect("write input");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(60_000)));
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(StaticModelFactory(
@@ -1652,9 +1966,10 @@ async fn threshold_kernel(
             root.join("config"),
             protocol::PromptPolicy::default(),
         )))
-        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .extension_factory(Arc::new(options.extensions))
+        .branch_summary(options.branch_summary)
         .clock(clock)
-        .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .id_generator(options.id_generator)
         .compaction_policy(
             CompactionPolicy::builder()
                 .enabled(true)
@@ -1876,12 +2191,36 @@ impl OverflowFixture {
         >,
         keep_recent_tokens: u64,
     ) -> Self {
+        Self::with_extensions(
+            responses,
+            keep_recent_tokens,
+            StaticExtensionFactory::default(),
+        )
+        .await
+    }
+
+    /// Creates the fixture like `with_keep_recent` with explicit extensions.
+    async fn with_extensions(
+        responses: impl IntoIterator<
+            Item = Result<Vec<ModelStreamEvent>, ModelError>,
+        >,
+        keep_recent_tokens: u64,
+        extensions: StaticExtensionFactory,
+    ) -> Self {
         let root = tempfile::tempdir().expect("store root");
         let cwd = root.path().join("workspace/overflow");
         std::fs::create_dir_all(&cwd).expect("create project cwd");
         let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(70_000)));
+        // One completed historical Turn precedes the overflowing prompt, so
+        // recovery has earlier context to compact: a lone user message is
+        // always retained as the newest cut point, as in pi.
+        let mut scripted = VecDeque::from([Ok(vec![
+            ModelStreamEvent::TextDelta("historical answer".to_string()),
+            ScriptedModel::finished(StopReason::EndTurn),
+        ])]);
+        scripted.extend(responses);
         let model = Arc::new(ScriptedModel {
-            responses: Mutex::new(responses.into_iter().collect()),
+            responses: Mutex::new(scripted),
             requests: Mutex::new(Vec::new()),
         });
         let kernel = KernelFactory::builder()
@@ -1897,7 +2236,7 @@ impl OverflowFixture {
                 root.path().join("config"),
                 protocol::PromptPolicy::default(),
             )))
-            .extension_factory(Arc::new(StaticExtensionFactory::default()))
+            .extension_factory(Arc::new(extensions))
             .clock(clock)
             .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
             .retry_policy(
@@ -1928,6 +2267,16 @@ impl OverflowFixture {
             })
             .await
             .expect("create session");
+        kernel
+            .run(
+                RunRequest {
+                    session_id: session_id.clone(),
+                    input: "historical question".into(),
+                },
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+            .expect("prepare overflow history");
         Self::builder()
             .kernel(kernel)
             .model(model)
@@ -1991,8 +2340,9 @@ async fn explicit_overflow_compacts_once_and_recovers_without_failed_context() {
         1
     );
     let requests = fixture.model.requests.lock().expect("request lock");
-    assert_eq!(requests.len(), 3);
-    assert!(requests[2].messages.iter().all(|message| !matches!(
+    // History answer, overflow, summary, and recovered answer.
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].messages.iter().all(|message| !matches!(
         &message.content,
         MessageContent::Assistant { metadata, .. }
             if metadata.error.is_some()
@@ -2018,9 +2368,52 @@ async fn overflow_without_compactable_context_fails_without_retrying() {
     ));
     assert_eq!(
         fixture.model.requests.lock().expect("request lock").len(),
-        1,
-        "no retry and no summary request"
+        2,
+        "the history answer and the overflow, with no retry and no summary request"
     );
+}
+
+/// A first prompt that overflows a fresh session has no earlier context to
+/// compact, so it fails with the provider error instead of retrying, as in pi.
+#[tokio::test]
+async fn first_prompt_overflow_fails_without_compaction() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([Err(
+            ScriptedModel::context_overflow(),
+        )])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-first-overflow").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+    let sink = Arc::new(RecordingSink::default());
+
+    let result = kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "oversized first prompt".into(),
+            },
+            sink.clone(),
+        )
+        .await
+        .expect("overflow run settles");
+
+    assert_eq!(result.turns.len(), 1);
+    assert!(matches!(
+        result.turns[0].outcome,
+        TurnOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        model.requests.lock().expect("request lock").len(),
+        1,
+        "no summary request and no retry"
+    );
+    assert!(!sink.events().iter().any(|event| matches!(
+        event.payload,
+        AgentEventPayload::CompactionStart { .. }
+    )));
 }
 
 /// A second overflow in the resumed Turn settles as failure without another summary call.
@@ -2057,9 +2450,10 @@ async fn second_overflow_does_not_compact_or_retry_again() {
             .count(),
         1
     );
+    // History answer, overflow, summary, and the second overflow.
     assert_eq!(
         fixture.model.requests.lock().expect("request lock").len(),
-        3
+        4
     );
 }
 
@@ -2268,15 +2662,21 @@ async fn plan_prompt(fixture: &CompactionFixture, input: &str) -> ModelRequest {
 /// live and after the Session is reopened.
 #[tokio::test]
 async fn compaction_keeps_the_plan_note() {
+    // A 5-token budget keeps the second plan Turn (3 + 4 tokens) but not its
+    // Assistant alone, so the cut lands on "plan more" and the note that
+    // entered plan mode is summarized away with the first Turn.
     let fixture = CompactionFixture::new_with_scripted_history(
-        [plan_answer("historical answer")],
+        [
+            plan_answer("historical answer"),
+            plan_answer("second answer"),
+        ],
         [
             plan_answer("summary"),
             plan_answer("after"),
             plan_answer("reopened"),
         ],
         false,
-        0,
+        5,
     )
     .await;
     fixture
@@ -2285,6 +2685,7 @@ async fn compaction_keeps_the_plan_note() {
         .await
         .expect("set mode");
     plan_prompt(&fixture, "plan this").await;
+    plan_prompt(&fixture, "plan more").await;
     fixture
         .kernel
         .compact_session(
@@ -2299,7 +2700,20 @@ async fn compaction_keeps_the_plan_note() {
         message.content,
         MessageContent::CompactionSummary { .. }
     )));
-    assert!(live.messages.get(2).is_some_and(is_plan_note));
+    // The note is restated after the summary and the retained tail, before
+    // the new prompt.
+    let note_index = live
+        .messages
+        .iter()
+        .position(is_plan_note)
+        .expect("restated plan note");
+    assert!(note_index > 1);
+    assert!(matches!(
+        live.messages
+            .get(note_index + 1)
+            .map(|message| &message.content),
+        Some(MessageContent::User { .. })
+    ));
 
     fixture
         .kernel
@@ -2315,7 +2729,10 @@ async fn compaction_keeps_the_plan_note() {
         .await
         .expect("resume Session");
     let rebuilt = plan_prompt(&fixture, "reopened").await;
-    assert_eq!(live.messages.get(1..3), rebuilt.messages.get(1..3));
+    assert_eq!(
+        live.messages.get(1..=note_index),
+        rebuilt.messages.get(1..=note_index)
+    );
 }
 
 /// Compaction outside plan mode adds no note.
@@ -2417,7 +2834,14 @@ async fn branch_summary_opens_a_top_level_run_span() {
         .entry_id;
     fixture
         .kernel
-        .navigate_session_with_summary(&fixture.session_id, target, true)
+        .navigate_session_with_summary(
+            &fixture.session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
         .await
         .expect("navigate with summary");
 
@@ -2442,4 +2866,1661 @@ async fn branch_summary_opens_a_top_level_run_span() {
         spans::run_fields(&line),
         "{start}"
     );
+}
+
+/// Extension observations and decisions shared by compaction hook tests.
+#[derive(Default)]
+struct HookState {
+    /// Cancels every compaction from `session_before_compact` when set.
+    cancel_compaction: AtomicBool,
+    /// Every `session_before_compact` event, in delivery order.
+    before_compact: Mutex<Vec<protocol::SessionBeforeCompactEvent>>,
+    /// Summary of an extension-built compaction that reuses the prepared tail.
+    replacement_summary: Mutex<Option<String>>,
+    /// Every `session_compact_failed` event, in delivery order.
+    compact_failed: Mutex<Vec<protocol::SessionCompactFailedEvent>>,
+    /// Branch summary an extension supplies on tree navigation, if any.
+    tree_summary: Mutex<Option<String>>,
+    /// Every `session_before_tree` event, in delivery order.
+    before_tree: Mutex<Vec<protocol::SessionBeforeTreeEvent>>,
+}
+
+impl HookState {
+    /// Wraps this state in a static extension factory with one hook module.
+    fn extensions(self: &Arc<Self>) -> StaticExtensionFactory {
+        let state = Arc::clone(self);
+        StaticExtensionFactory::new(
+            protocol::StaticExtensionRegistration::default(),
+            vec![Arc::new(move || {
+                Ok(Arc::new(HookModule(Arc::clone(&state)))
+                    as Arc<dyn ExtensionModule>)
+            })],
+        )
+    }
+}
+
+/// Extension module registering the compaction hooks under test.
+struct HookModule(Arc<HookState>);
+
+impl ExtensionModule for HookModule {
+    /// Identifies the test hook owner.
+    fn descriptor(&self) -> protocol::ExtensionDescriptor {
+        protocol::ExtensionDescriptor {
+            id: protocol::ExtensionId::try_from("compaction-hooks")
+                .expect("extension id"),
+            name: "Compaction hooks".to_string(),
+            version: "1".to_string(),
+        }
+    }
+
+    /// Registers every hook that shares this state.
+    fn register(
+        &self,
+        registrar: &mut ExtensionRegistrar,
+    ) -> Result<(), ExtensionError> {
+        registrar.on::<SessionBeforeCompactPoint, _>(HookHandler(
+            Arc::clone(&self.0),
+        ))?;
+        registrar.on::<SessionCompactFailedPoint, _>(HookHandler(
+            Arc::clone(&self.0),
+        ))?;
+        registrar
+            .on::<SessionBeforeTreePoint, _>(HookHandler(Arc::clone(&self.0)))
+    }
+}
+
+/// Handler that records hook events and applies the configured decisions.
+struct HookHandler(Arc<HookState>);
+
+#[async_trait]
+impl ExtensionHandler<SessionBeforeCompactPoint> for HookHandler {
+    /// Records the event and cancels when the test asks for it.
+    async fn handle(
+        &self,
+        event: &protocol::SessionBeforeCompactEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::SessionBeforeCompactResult, ExtensionError> {
+        self.0
+            .before_compact
+            .lock()
+            .expect("hook lock")
+            .push(event.clone());
+        // An extension can build a complete compaction from the prepared
+        // partition, echoing the retained tail back.
+        let compaction = self
+            .0
+            .replacement_summary
+            .lock()
+            .expect("hook lock")
+            .clone()
+            .map(|summary| {
+                protocol::CompactionData::builder()
+                    .summary(summary)
+                    .retained_tail(event.preparation.retained_tail.clone())
+                    .tokens_before(event.preparation.tokens_before)
+                    .build()
+            });
+        Ok(protocol::SessionBeforeCompactResult {
+            cancel: self.0.cancel_compaction.load(Ordering::Relaxed),
+            compaction,
+        })
+    }
+}
+
+/// One Tool Turn reading `input.txt` whose reported usage is `total_tokens`.
+fn tool_turn(call_id: &str, total_tokens: u64) -> Vec<ModelStreamEvent> {
+    vec![
+        ModelStreamEvent::ToolCall(
+            ToolCall::builder()
+                .tool_call_id(ToolCallId::try_from(call_id).expect("call id"))
+                .name("read".to_string())
+                .arguments(serde_json::json!({ "path": "input.txt" }))
+                .build(),
+        ),
+        ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(StopReason::ToolUse)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(total_tokens.saturating_sub(1_000))
+                        .output_tokens(1_000.min(total_tokens))
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(total_tokens),
+                ))
+                .build(),
+        ),
+    ]
+}
+
+/// One complete text answer with the default small usage.
+fn text_answer(text: &str) -> Result<Vec<ModelStreamEvent>, ModelError> {
+    Ok(vec![
+        ModelStreamEvent::TextDelta(text.to_string()),
+        ScriptedModel::finished(StopReason::EndTurn),
+    ])
+}
+
+/// Runs one prompt on a threshold kernel and returns the Run and its events.
+async fn run_prompt(
+    kernel: &Kernel,
+    session_id: &SessionId,
+    input: &str,
+) -> (Result<RunResult, kernel::KernelError>, Vec<AgentEvent>) {
+    let sink = Arc::new(RecordingSink::default());
+    let result = kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: input.into(),
+            },
+            sink.clone(),
+        )
+        .await;
+    (result, sink.events())
+}
+
+/// Returns the settled outcome reported by a Run's events.
+fn settled_outcome(events: &[AgentEvent]) -> Option<protocol::AgentOutcome> {
+    events.iter().find_map(|event| match &event.payload {
+        AgentEventPayload::AgentSettled { outcome, .. } => {
+            Some(outcome.clone())
+        }
+        _ => None,
+    })
+}
+
+/// Counts `CompactionStart` events in a Run.
+fn compaction_starts(events: &[AgentEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event.payload, AgentEventPayload::CompactionStart { .. })
+        })
+        .count()
+}
+
+/// A Tool Turn over the threshold compacts before the next model request of the same Run.
+#[tokio::test]
+async fn tool_turn_over_threshold_compacts_before_next_turn() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 84_000)),
+            text_answer("mid-run summary"),
+            text_answer("final answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-mid-run").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+
+    let (result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    assert_eq!(result.expect("run").turns.len(), 2);
+    let position = |matches: &dyn Fn(&AgentEventPayload) -> bool| {
+        events
+            .iter()
+            .position(|event| matches(&event.payload))
+            .expect("event")
+    };
+    let first_turn_end = position(&|payload| {
+        matches!(payload, AgentEventPayload::TurnEnd { .. })
+    });
+    let compaction = position(&|payload| {
+        matches!(
+            payload,
+            AgentEventPayload::CompactionStart {
+                reason: protocol::CompactionReason::Threshold,
+                ..
+            }
+        )
+    });
+    let second_turn_start = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(event.payload, AgentEventPayload::TurnStart { .. })
+        })
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("second TurnStart");
+    assert!(first_turn_end < compaction && compaction < second_turn_start);
+    let requests = model.requests.lock().expect("request lock");
+    assert_eq!(requests.len(), 3);
+    assert!(matches!(
+        requests[2].messages.get(1).map(|message| &message.content),
+        Some(MessageContent::CompactionSummary { .. })
+    ));
+}
+
+/// A Tool Turn below the threshold continues without compaction.
+#[tokio::test]
+async fn tool_turn_below_threshold_does_not_compact() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 1_000)),
+            text_answer("final answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-mid-run-small").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+
+    let (result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    assert_eq!(result.expect("run").turns.len(), 2);
+    assert_eq!(model.requests.lock().expect("request lock").len(), 2);
+    assert_eq!(compaction_starts(&events), 0);
+}
+
+/// A failed Run-internal summary is reported and the Run keeps going.
+#[tokio::test]
+async fn run_internal_summary_failure_keeps_the_run_going() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 84_000)),
+            Err(ModelError::Request(
+                ModelFailure::builder()
+                    .summary("summary failed".to_string())
+                    .status(None)
+                    .retry_disposition(ModelRetryDisposition::NonRetryable)
+                    .build(),
+            )),
+            text_answer("final answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-mid-run-failure").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+
+    let (result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    assert_eq!(result.expect("run").turns.len(), 2);
+    assert_eq!(
+        settled_outcome(&events),
+        Some(protocol::AgentOutcome::Succeeded)
+    );
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        AgentEventPayload::CompactionEnd {
+            outcome: protocol::CompactionOutcome::Failed { .. },
+            ..
+        }
+    )));
+}
+
+/// An extension that cancels a Run-internal compaction does not stop the Run
+/// or produce a second warning.
+#[tokio::test]
+async fn run_internal_extension_cancel_keeps_the_run_going_without_warn() {
+    let logs = CapturedLogs::default();
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 84_000)),
+            text_answer("final answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-mid-run-cancel-hook").expect("session id");
+    let hooks = Arc::new(HookState::default());
+    hooks.cancel_compaction.store(true, Ordering::Relaxed);
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+
+    let (result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    assert_eq!(result.expect("run").turns.len(), 2);
+    assert_eq!(
+        settled_outcome(&events),
+        Some(protocol::AgentOutcome::Succeeded)
+    );
+    assert!(!hooks.before_compact.lock().expect("hook lock").is_empty());
+    assert!(!logs.content().lines().any(|line| {
+        line.contains("continuing Run without")
+            && line.contains("session compaction cancelled")
+    }));
+}
+
+/// Cancelling a Run-internal compaction ends the Run as cancelled.
+#[tokio::test]
+async fn run_internal_cancellation_ends_the_run_cancelled() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 84_000)),
+            Err(ModelError::Cancelled),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-mid-run-cancelled").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+
+    let (_result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    assert_eq!(
+        settled_outcome(&events),
+        Some(protocol::AgentOutcome::Cancelled)
+    );
+    // The cancellation came from the Run-internal compaction, not a Turn.
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        AgentEventPayload::CompactionEnd {
+            reason: protocol::CompactionReason::Threshold,
+            outcome: protocol::CompactionOutcome::Cancelled,
+            ..
+        }
+    )));
+    assert!(
+        kernel
+            .session_tree(&session_id)
+            .expect("tree")
+            .entries
+            .iter()
+            .all(|entry| entry.kind != "compaction")
+    );
+}
+
+/// A Run-internal compaction is not repeated by the post-Run check.
+#[tokio::test]
+async fn run_internal_compaction_is_not_repeated_after_the_run() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 84_000)),
+            text_answer("mid-run summary"),
+            text_answer("final answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-mid-run-once").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+
+    let (result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    result.expect("run");
+    assert_eq!(compaction_starts(&events), 1);
+}
+
+/// A Tool loop with nothing compactable never loops or warns.
+#[tokio::test]
+async fn tool_loop_without_compactable_context_never_loops() {
+    let logs = CapturedLogs::default();
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(tool_turn("call-1", 84_000)),
+            Ok(tool_turn("call-2", 84_000)),
+            Ok(tool_turn("call-3", 84_000)),
+            // The last answer also crosses the threshold, so the post-Run
+            // check meets the same empty compaction.
+            Ok(large_usage_answer()),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-tool-loop").expect("session id");
+    // A recent window larger than the whole history leaves nothing to summarize.
+    let kernel =
+        threshold_kernel(root.path(), &model, 1_000_000, &session_id).await;
+
+    let (result, events) = run_prompt(&kernel, &session_id, "work").await;
+
+    assert_eq!(result.expect("run").turns.len(), 4);
+    assert_eq!(model.requests.lock().expect("request lock").len(), 4);
+    assert_eq!(compaction_starts(&events), 0);
+    assert!(!logs.content().lines().any(|line| {
+        line.contains("WARN")
+            && line.contains("session-tool-loop")
+            && line.contains("no model context to compact")
+    }));
+}
+
+/// Builds a threshold-style Kernel whose compaction config carries `overrides`
+/// and creates `session-override` when the build succeeds.
+async fn override_kernel(
+    root: &Path,
+    model: &Arc<ScriptedModel>,
+    overrides: &[(&str, u64)],
+) -> Result<Kernel, kernel::KernelError> {
+    let cwd = root.join("workspace/override");
+    std::fs::create_dir_all(&cwd).expect("create project cwd");
+    let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(80_000)));
+    let kernel = KernelFactory::builder()
+        .model_factory(Arc::new(StaticModelFactory(
+            Arc::clone(model) as Arc<dyn Model>
+        )))
+        .tool_factory(Arc::new(BuiltinToolFactory::new()))
+        .store_factory(Arc::new(JsonlStoreFactory::new(
+            root,
+            Arc::clone(&clock),
+        )))
+        .prompt_factory(Arc::new(FilesystemPromptFactory::new(
+            root.join("config"),
+            protocol::PromptPolicy::default(),
+        )))
+        .extension_factory(Arc::new(StaticExtensionFactory::default()))
+        .clock(clock)
+        .id_generator(Arc::new(SequentialIds(AtomicU64::new(0))))
+        .compaction_policy(config::CompactionConfig {
+            policy: CompactionPolicy::builder()
+                .enabled(true)
+                .reserve_tokens(16_384)
+                .keep_recent_tokens(0)
+                .build(),
+            model_overrides: overrides
+                .iter()
+                .map(|(key, reserve_tokens)| {
+                    (
+                        (*key).to_string(),
+                        config::CompactionModelOverride {
+                            reserve_tokens: Some(*reserve_tokens),
+                            keep_recent_tokens: None,
+                        },
+                    )
+                })
+                .collect(),
+        })
+        .build()
+        .build()?;
+    kernel
+        .create_session(SessionCreateOptions {
+            session_id: SessionId::try_from("session-override")
+                .expect("session id"),
+            cwd,
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    Ok(kernel)
+}
+
+/// An override naming no catalog model fails the Kernel build.
+#[tokio::test]
+async fn unknown_compaction_override_fails_kernel_build() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    let error =
+        override_kernel(root.path(), &model, &[("fixture/missing", 8_000)])
+            .await
+            .err()
+            .expect("unknown override");
+
+    assert!(error.to_string().contains("fixture/missing"), "{error}");
+}
+
+/// An overridden reserve that fills the window fails the Kernel build.
+#[tokio::test]
+async fn override_reserve_at_or_above_window_fails_kernel_build() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+
+    let error = override_kernel(
+        root.path(),
+        &model,
+        &[("fixture/compaction", 100_000)],
+    )
+    .await
+    .err()
+    .expect("reserve fills the window");
+
+    assert!(
+        error.to_string().contains("reserve_tokens=100000"),
+        "{error}"
+    );
+}
+
+/// An overridden reserve lowers the threshold for that model only.
+#[tokio::test]
+async fn override_reserve_changes_the_threshold() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(vec![
+                ModelStreamEvent::TextDelta("medium answer".to_string()),
+                ModelStreamEvent::Finished(
+                    ModelFinal::builder()
+                        .stop_reason(StopReason::EndTurn)
+                        .raw_stop_reason(None)
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
+                                .input_tokens(14_000)
+                                .output_tokens(1_000)
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(15_000),
+                        ))
+                        .build(),
+                ),
+            ]),
+            text_answer("override summary"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    // The 100k window minus a 90k reserve compacts above 10k tokens.
+    let kernel =
+        override_kernel(root.path(), &model, &[("fixture/compaction", 90_000)])
+            .await
+            .expect("build kernel");
+    let session_id = SessionId::try_from("session-override").expect("id");
+
+    let (result, events) = run_prompt(&kernel, &session_id, "context").await;
+
+    result.expect("run");
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        AgentEventPayload::CompactionEnd {
+            reason: protocol::CompactionReason::Threshold,
+            ..
+        }
+    )));
+    assert_eq!(model.requests.lock().expect("request lock").len(), 2);
+}
+
+/// The before-compact hook sees the prepared partition and the caller's instructions.
+#[tokio::test]
+async fn before_compact_event_carries_preparation_and_instructions() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("first answer"),
+            text_answer("second answer"),
+            text_answer("history summary"),
+            text_answer("prefix summary"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-hook-preparation").expect("session id");
+    let hooks = Arc::new(HookState::default());
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+    for input in ["first question", "second question", "/compact keep names"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+
+    let events = hooks.before_compact.lock().expect("hook lock");
+    let event = events.first().expect("before-compact event");
+    assert_eq!(event.custom_instructions.as_deref(), Some("keep names"));
+    let preparation = &event.preparation;
+    assert!(preparation.is_split_turn);
+    assert_eq!(preparation.turn_prefix_messages.len(), 1);
+    assert_eq!(preparation.retained_tail.len(), 1);
+    assert!(preparation.messages_to_summarize.iter().any(|message| {
+        message.content.text_content().as_deref() == Some("first question")
+    }));
+    assert_eq!(
+        preparation.settings,
+        CompactionPolicy::builder()
+            .enabled(true)
+            .reserve_tokens(16_384)
+            .keep_recent_tokens(0)
+            .build()
+    );
+}
+
+/// An extension compaction built from the prepared retained tail is persisted.
+#[tokio::test]
+async fn extension_compaction_built_from_preparation_is_persisted() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("first answer"),
+            text_answer("second answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-hook-replacement").expect("session id");
+    let hooks = Arc::new(HookState::default());
+    *hooks.replacement_summary.lock().expect("hook lock") =
+        Some("ext".to_string());
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+    for input in ["first question", "second question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+
+    let result = kernel
+        .compact_session(&session_id, Arc::new(RecordingSink::default()))
+        .await
+        .expect("extension compaction");
+
+    assert_eq!(result.summary, "ext");
+    let retained = hooks.before_compact.lock().expect("hook lock")[0]
+        .preparation
+        .retained_tail
+        .clone();
+    let active = kernel.session_messages(&session_id).expect("history");
+    assert!(matches!(
+        active.first().map(|message| &message.content),
+        Some(MessageContent::CompactionSummary { compaction })
+            if compaction.summary == "ext"
+    ));
+    assert_eq!(&active[1..], retained.as_slice());
+    assert_eq!(model.requests.lock().expect("request lock").len(), 2);
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionCompactFailedPoint> for HookHandler {
+    /// Records each failed or aborted compaction.
+    async fn handle(
+        &self,
+        event: &protocol::SessionCompactFailedEvent,
+        _context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        self.0
+            .compact_failed
+            .lock()
+            .expect("hook lock")
+            .push(event.clone());
+        Ok(())
+    }
+}
+
+/// Runs two Turns on a hooked threshold kernel, then compacts manually.
+async fn manual_compaction_with_hooks(
+    session: &str,
+    summary_response: Result<Vec<ModelStreamEvent>, ModelError>,
+    hooks: &Arc<HookState>,
+) -> Result<protocol::CompactionResult, kernel::KernelError> {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("first answer"),
+            text_answer("second answer"),
+            summary_response,
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id = SessionId::try_from(session).expect("session id");
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+    for input in ["first question", "second question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    kernel
+        .compact_session(&session_id, Arc::new(RecordingSink::default()))
+        .await
+}
+
+/// Returns the single recorded `session_compact_failed` event.
+fn only_compact_failed(
+    hooks: &HookState,
+) -> protocol::SessionCompactFailedEvent {
+    let events = hooks.compact_failed.lock().expect("hook lock");
+    assert_eq!(events.len(), 1, "{events:?}");
+    events.first().cloned().expect("one compact-failed event")
+}
+
+/// A failed summary reports a non-aborted compaction failure.
+#[tokio::test]
+async fn failed_summary_reports_compact_failed() {
+    let hooks = Arc::new(HookState::default());
+    let result = manual_compaction_with_hooks(
+        "session-failed-hook",
+        Err(ModelError::Request(
+            ModelFailure::builder()
+                .summary("summary failed".to_string())
+                .status(None)
+                .retry_disposition(ModelRetryDisposition::NonRetryable)
+                .build(),
+        )),
+        &hooks,
+    )
+    .await;
+
+    result.expect_err("compaction fails");
+    let event = only_compact_failed(&hooks);
+    assert_eq!(event.reason, protocol::CompactionReason::Manual);
+    assert!(!event.aborted);
+    assert!(!event.will_retry);
+    assert!(!event.from_extension);
+    assert!(
+        event
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("summary failed")),
+        "{event:?}"
+    );
+}
+
+/// A cancelled summary reports an aborted compaction.
+#[tokio::test]
+async fn cancelled_summary_reports_aborted_compact_failed() {
+    let hooks = Arc::new(HookState::default());
+    let result = manual_compaction_with_hooks(
+        "session-cancelled-hook",
+        Err(ModelError::Cancelled),
+        &hooks,
+    )
+    .await;
+
+    result.expect_err("compaction fails");
+    let event = only_compact_failed(&hooks);
+    assert!(event.aborted);
+    assert_eq!(event.error_message, None);
+}
+
+/// An extension cancelling the compaction reports an aborted compaction.
+#[tokio::test]
+async fn extension_cancel_reports_aborted_compact_failed() {
+    let hooks = Arc::new(HookState::default());
+    hooks.cancel_compaction.store(true, Ordering::Relaxed);
+    let result = manual_compaction_with_hooks(
+        "session-hook-cancel-report",
+        text_answer("unused summary"),
+        &hooks,
+    )
+    .await;
+
+    result.expect_err("compaction fails");
+    let event = only_compact_failed(&hooks);
+    assert!(event.aborted);
+    assert_eq!(event.reason, protocol::CompactionReason::Manual);
+}
+
+/// A manual compaction with nothing to compact reports a failure.
+#[tokio::test]
+async fn manual_empty_compaction_reports_compact_failed() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-empty-hook").expect("session id");
+    let hooks = Arc::new(HookState::default());
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+
+    let result = kernel
+        .compact_session(&session_id, Arc::new(RecordingSink::default()))
+        .await;
+
+    result.expect_err("compaction fails");
+    let event = only_compact_failed(&hooks);
+    assert_eq!(event.reason, protocol::CompactionReason::Manual);
+    assert!(!event.aborted);
+    assert!(event.error_message.is_some());
+}
+
+/// An automatic compaction with nothing to compact stays silent, as in pi.
+#[tokio::test]
+async fn automatic_empty_compaction_reports_nothing() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([Ok(large_usage_answer())])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-auto-empty-hook").expect("session id");
+    let hooks = Arc::new(HookState::default());
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        1_000_000,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+
+    run_prompt(&kernel, &session_id, "large context")
+        .await
+        .0
+        .expect("run");
+
+    assert!(hooks.compact_failed.lock().expect("hook lock").is_empty());
+}
+
+/// A second provider overflow after one recovery reports pi's recovery failure.
+#[tokio::test]
+async fn second_overflow_reports_recovery_failure_text() {
+    let hooks = Arc::new(HookState::default());
+    let fixture = OverflowFixture::with_extensions(
+        [
+            Err(ScriptedModel::context_overflow()),
+            text_answer("compact summary"),
+            Err(ScriptedModel::context_overflow()),
+        ],
+        0,
+        hooks.extensions(),
+    )
+    .await;
+
+    fixture.run().await;
+
+    let event = only_compact_failed(&hooks);
+    assert_eq!(event.reason, protocol::CompactionReason::Overflow);
+    assert!(!event.will_retry);
+    assert!(!event.aborted);
+    assert_eq!(
+        event.error_message.as_deref(),
+        Some(
+            "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model."
+        )
+    );
+}
+
+/// A second recoverable truncation after one recovery reports pi's truncation text.
+#[tokio::test]
+async fn second_truncation_reports_truncated_recovery_text() {
+    let hooks = Arc::new(HookState::default());
+    // Output below the request budget means the window, not the budget, ran out.
+    let truncated = || {
+        Ok(vec![
+            ModelStreamEvent::TextDelta("partial".to_string()),
+            ScriptedModel::finished(StopReason::MaxTokens),
+        ])
+    };
+    let fixture = OverflowFixture::with_extensions(
+        [truncated(), text_answer("compact summary"), truncated()],
+        0,
+        hooks.extensions(),
+    )
+    .await;
+
+    fixture.run().await;
+
+    let event = only_compact_failed(&hooks);
+    assert_eq!(event.reason, protocol::CompactionReason::Overflow);
+    assert_eq!(
+        event.error_message.as_deref(),
+        Some(
+            "Truncated response recovery failed after one compact-and-retry attempt."
+        )
+    );
+}
+
+/// An overflow with nothing to compact ends without a recovery-failure report.
+#[tokio::test]
+async fn overflow_without_compactable_context_reports_nothing() {
+    let hooks = Arc::new(HookState::default());
+    let fixture = OverflowFixture::with_extensions(
+        [Err(ScriptedModel::context_overflow())],
+        1_000_000,
+        hooks.extensions(),
+    )
+    .await;
+
+    fixture.run().await;
+
+    assert!(hooks.compact_failed.lock().expect("hook lock").is_empty());
+}
+
+#[async_trait]
+impl ExtensionHandler<SessionBeforeTreePoint> for HookHandler {
+    /// Records the event and supplies the configured branch summary.
+    async fn handle(
+        &self,
+        event: &protocol::SessionBeforeTreeEvent,
+        _context: &ExtensionContext,
+    ) -> Result<protocol::SessionBeforeTreeResult, ExtensionError> {
+        self.0
+            .before_tree
+            .lock()
+            .expect("hook lock")
+            .push(event.clone());
+        let summary = self.0.tree_summary.lock().expect("hook lock").clone();
+        Ok(protocol::SessionBeforeTreeResult::builder()
+            .summary(summary.map(|summary| protocol::TreeSummary {
+                summary,
+                // Extension details have an arbitrary shape.
+                details: Some(serde_json::json!({ "source": "x" })),
+                usage: None,
+            }))
+            .build())
+    }
+}
+
+/// Returns the id of the first persisted entry whose message content has `kind`.
+fn first_message_entry(
+    kernel: &Kernel,
+    session_id: &SessionId,
+    kind: &str,
+) -> protocol::EntryId {
+    kernel
+        .session_tree(session_id)
+        .expect("tree")
+        .entries
+        .into_iter()
+        .find(|entry| {
+            entry.kind == "message"
+                && entry
+                    .payload
+                    .get("content")
+                    .and_then(|content| content.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(kind)
+        })
+        .expect("message entry")
+        .entry_id
+}
+
+/// Returns the branch summaries in a Session's active model context.
+fn branch_summaries(messages: &[AgentMessage]) -> Vec<&AgentMessage> {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(message.content, MessageContent::BranchSummary { .. })
+        })
+        .collect()
+}
+
+/// Builds a hooked kernel with two Turns whose extension supplies "ext branch summary".
+async fn branch_summary_kernel(
+    root: &Path,
+    session: &str,
+    keep_recent_tokens: u64,
+    later_responses: impl IntoIterator<
+        Item = Result<Vec<ModelStreamEvent>, ModelError>,
+    >,
+) -> (Kernel, Arc<ScriptedModel>, SessionId, Arc<HookState>) {
+    let mut responses = VecDeque::from([
+        text_answer("first answer"),
+        text_answer("abandoned answer"),
+    ]);
+    responses.extend(later_responses);
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(responses),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id = SessionId::try_from(session).expect("session id");
+    let hooks = Arc::new(HookState::default());
+    *hooks.tree_summary.lock().expect("hook lock") =
+        Some("ext branch summary".to_string());
+    let kernel = threshold_kernel_with(
+        root,
+        &model,
+        keep_recent_tokens,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+    for input in ["first question", "abandoned question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    (kernel, model, session_id, hooks)
+}
+
+/// A navigation branch summary enters the next model request and the active context.
+#[tokio::test]
+async fn branch_summary_enters_the_next_model_request() {
+    let root = tempfile::tempdir().expect("store root");
+    let (kernel, model, session_id, _hooks) = branch_summary_kernel(
+        root.path(),
+        "session-branch-context",
+        0,
+        [text_answer("next answer")],
+    )
+    .await;
+    let target = first_message_entry(&kernel, &session_id, "assistant");
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate with summary");
+
+    run_prompt(&kernel, &session_id, "next question")
+        .await
+        .0
+        .expect("next prompt");
+
+    let requests = model.requests.lock().expect("request lock");
+    let request = requests.last().expect("next request");
+    assert!(request.messages.iter().any(|message| matches!(
+        &message.content,
+        MessageContent::BranchSummary { branch }
+            if branch.summary == "ext branch summary"
+    )));
+    let active = kernel.session_messages(&session_id).expect("history");
+    let summaries = branch_summaries(&active);
+    assert_eq!(summaries.len(), 1);
+    let summary = summaries.first().expect("branch summary");
+    let MessageContent::BranchSummary { branch } = &summary.content else {
+        unreachable!("filtered to branch summaries");
+    };
+    let expected = format!("branch-summary-{}", branch.entry_id);
+    assert_eq!(summary.identity.message_id.as_str(), expected);
+    assert_eq!(summary.identity.turn_id.as_str(), expected);
+}
+
+/// A reopened Session rebuilds the same branch summary context.
+#[tokio::test]
+async fn reopened_session_rebuilds_the_same_branch_summary_context() {
+    let root = tempfile::tempdir().expect("store root");
+    let (kernel, _model, session_id, _hooks) =
+        branch_summary_kernel(root.path(), "session-branch-reopen", 0, [])
+            .await;
+    let target = first_message_entry(&kernel, &session_id, "assistant");
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate with summary");
+    let live = kernel.session_messages(&session_id).expect("live history");
+
+    kernel.close_session(&session_id).await.expect("close");
+    kernel
+        .resume_session(
+            session_id.clone(),
+            root.path().join("workspace").join(session_id.as_str()),
+        )
+        .await
+        .expect("resume");
+
+    let rebuilt = kernel.session_messages(&session_id).expect("rebuilt");
+    assert_eq!(branch_summaries(&live).len(), 1);
+    assert_eq!(live, rebuilt);
+}
+
+/// A branch summary kept in a compaction's retained tail is not duplicated on replay.
+#[tokio::test]
+async fn branch_summary_in_retained_tail_is_not_duplicated_after_compaction() {
+    let root = tempfile::tempdir().expect("store root");
+    // A 10-token budget keeps the branch summary (5) and the next Turn (4 + 3)
+    // while summarizing the first Turn.
+    let (kernel, _model, session_id, _hooks) = branch_summary_kernel(
+        root.path(),
+        "session-branch-retained",
+        10,
+        [text_answer("next answer"), text_answer("checkpoint")],
+    )
+    .await;
+    let target = first_message_entry(&kernel, &session_id, "assistant");
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate with summary");
+    run_prompt(&kernel, &session_id, "next question")
+        .await
+        .0
+        .expect("next prompt");
+    kernel
+        .compact_session(&session_id, Arc::new(RecordingSink::default()))
+        .await
+        .expect("compact");
+    kernel.close_session(&session_id).await.expect("close");
+    kernel
+        .resume_session(
+            session_id.clone(),
+            root.path().join("workspace").join(session_id.as_str()),
+        )
+        .await
+        .expect("resume");
+
+    let active = kernel.session_messages(&session_id).expect("history");
+    assert!(matches!(
+        active.first().map(|message| &message.content),
+        Some(MessageContent::CompactionSummary { .. })
+    ));
+    assert_eq!(branch_summaries(&active).len(), 1);
+}
+
+/// An extension branch summary with arbitrary details loads with empty file lists.
+#[tokio::test]
+async fn legacy_branch_summary_entry_loads_with_empty_file_lists() {
+    let root = tempfile::tempdir().expect("store root");
+    let (kernel, _model, session_id, _hooks) =
+        branch_summary_kernel(root.path(), "session-branch-legacy", 0, [])
+            .await;
+    let target = first_message_entry(&kernel, &session_id, "assistant");
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate with summary");
+    kernel.close_session(&session_id).await.expect("close");
+    kernel
+        .resume_session(
+            session_id.clone(),
+            root.path().join("workspace").join(session_id.as_str()),
+        )
+        .await
+        .expect("resume");
+
+    let active = kernel.session_messages(&session_id).expect("history");
+    let summaries = branch_summaries(&active);
+    let MessageContent::BranchSummary { branch } =
+        &summaries.first().expect("branch summary").content
+    else {
+        unreachable!("filtered to branch summaries");
+    };
+    assert!(branch.read_files.is_empty());
+    assert!(branch.modified_files.is_empty());
+}
+
+/// Returns the persisted summary text of the newest branch-summary entry.
+fn last_branch_summary_payload(
+    kernel: &Kernel,
+    session_id: &SessionId,
+) -> serde_json::Value {
+    kernel
+        .session_tree(session_id)
+        .expect("tree")
+        .entries
+        .into_iter()
+        .rev()
+        .find(|entry| entry.kind == "branch_summary")
+        .expect("branch summary entry")
+        .payload
+}
+
+/// Returns the user text of the newest model request.
+fn last_request_text(model: &ScriptedModel) -> String {
+    let requests = model.requests.lock().expect("request lock");
+    let request = requests.last().expect("request");
+    request
+        .messages
+        .get(1)
+        .and_then(|message| message.content.text_content())
+        .expect("user prompt")
+}
+
+/// Generated branch summaries use pi's structured prompt and preamble.
+#[tokio::test]
+async fn branch_summary_prompt_uses_pi_structure() {
+    let fixture =
+        CompactionFixture::with_history_and_summary("branch body").await;
+    let target =
+        first_message_entry(&fixture.kernel, &fixture.session_id, "user");
+
+    fixture
+        .kernel
+        .navigate_session_with_summary(
+            &fixture.session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate with summary");
+
+    {
+        let requests = fixture.model.requests.lock().expect("request lock");
+        let request = requests.last().expect("summary request");
+        assert!(
+            request
+                .messages
+                .first()
+                .and_then(|message| message.content.text_content())
+                .is_some_and(|text| text
+                    .starts_with("You are a context summarization assistant"))
+        );
+    }
+    let prompt = last_request_text(&fixture.model);
+    assert!(prompt.starts_with("<conversation>\n"), "{prompt}");
+    assert!(
+        prompt.contains(
+            "Create a structured summary of this conversation branch"
+        )
+    );
+    let payload =
+        last_branch_summary_payload(&fixture.kernel, &fixture.session_id);
+    assert_eq!(
+        payload.get("summary").and_then(serde_json::Value::as_str),
+        Some(
+            "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\nbranch body"
+        )
+    );
+}
+
+/// The branch-summary reserve bounds which abandoned messages are summarized.
+#[tokio::test]
+async fn branch_summary_uses_configured_reserve() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("historical answer"),
+            text_answer("recent answer"),
+            text_answer("branch body"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-branch-reserve").expect("session id");
+    // The 100k window minus a 99,990-token reserve leaves a 10-token budget:
+    // the second Turn (4 + 4) fits, the first Turn's answer does not.
+    let kernel = threshold_kernel_configured(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        KernelOptions {
+            branch_summary: config::BranchSummaryConfig {
+                reserve_tokens: 99_990,
+            },
+            ..KernelOptions::default()
+        },
+    )
+    .await;
+    for input in ["historical question", "recent question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    let target = first_message_entry(&kernel, &session_id, "user");
+
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate with summary");
+
+    let prompt = last_request_text(&model);
+    assert!(prompt.contains("recent question"), "{prompt}");
+    assert!(!prompt.contains("historical question"), "{prompt}");
+}
+
+/// Branch summaries record files from Tool calls and nested branch summaries.
+#[tokio::test]
+async fn branch_summary_records_cumulative_files() {
+    let root = tempfile::tempdir().expect("store root");
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+        ModelStreamEvent::ToolCall(
+            ToolCall::builder()
+                .tool_call_id(ToolCallId::try_from(id).expect("call id"))
+                .name(name.to_string())
+                .arguments(arguments)
+                .build(),
+        )
+    };
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("start answer"),
+            Ok(vec![
+                call("read-a", "read", serde_json::json!({ "path": "a.rs" })),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            text_answer("first branch answer"),
+            text_answer("first summary"),
+            Ok(vec![
+                call(
+                    "read-input",
+                    "read",
+                    serde_json::json!({ "path": "input.txt" }),
+                ),
+                call(
+                    "write-out",
+                    "write",
+                    serde_json::json!({ "path": "out.txt", "content": "x" }),
+                ),
+                ScriptedModel::finished(StopReason::ToolUse),
+            ]),
+            text_answer("second branch answer"),
+            text_answer("second summary"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-branch-files").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+    std::fs::write(
+        root.path()
+            .join("workspace")
+            .join(session_id.as_str())
+            .join("a.rs"),
+        "fn main() {}",
+    )
+    .expect("write a.rs");
+    for input in ["start", "first branch"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    let start_answer = first_message_entry(&kernel, &session_id, "assistant");
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target: start_answer.clone(),
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("first navigation");
+    run_prompt(&kernel, &session_id, "second branch")
+        .await
+        .0
+        .expect("second branch");
+
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target: start_answer,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("second navigation");
+
+    let payload = last_branch_summary_payload(&kernel, &session_id);
+    assert_eq!(
+        payload.get("details"),
+        Some(&serde_json::json!({
+            "readFiles": ["a.rs", "input.txt"],
+            "modifiedFiles": ["out.txt"],
+        }))
+    );
+    assert!(
+        payload
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|summary| summary.ends_with(
+                "<read-files>\na.rs\ninput.txt\n</read-files>\n\n<modified-files>\nout.txt\n</modified-files>"
+            )),
+        "{payload}"
+    );
+}
+
+/// A truncated branch summary fails navigation and leaves the leaf in place.
+#[tokio::test]
+async fn truncated_branch_summary_fails_navigation() {
+    let fixture = CompactionFixture::new(
+        [Ok(vec![
+            ModelStreamEvent::TextDelta("partial".to_string()),
+            ScriptedModel::finished(StopReason::MaxTokens),
+        ])],
+        true,
+    )
+    .await;
+    let before = fixture
+        .kernel
+        .session_tree(&fixture.session_id)
+        .expect("tree")
+        .leaf_id;
+    let target =
+        first_message_entry(&fixture.kernel, &fixture.session_id, "user");
+
+    let error = fixture
+        .kernel
+        .navigate_session_with_summary(
+            &fixture.session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect_err("truncated branch summary");
+
+    assert!(
+        error.to_string().contains("Branch summarization failed:"),
+        "{error}"
+    );
+    assert_eq!(
+        fixture
+            .kernel
+            .session_tree(&fixture.session_id)
+            .expect("tree")
+            .leaf_id,
+        before
+    );
+}
+
+/// Caller instructions reach the tree hook and the generated summary prompt.
+#[tokio::test]
+async fn navigation_instructions_reach_hook_and_prompt() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("first answer"),
+            text_answer("second answer"),
+            text_answer("branch body"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-branch-instructions").expect("id");
+    let hooks = Arc::new(HookState::default());
+    let kernel = threshold_kernel_with(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        hooks.extensions(),
+    )
+    .await;
+    for input in ["first question", "second question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    let target = first_message_entry(&kernel, &session_id, "user");
+
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target,
+                summarize: true,
+                custom_instructions: Some("focus api".to_string()),
+            },
+        )
+        .await
+        .expect("navigate with summary");
+
+    let events = hooks.before_tree.lock().expect("hook lock");
+    assert_eq!(
+        events
+            .first()
+            .and_then(|event| event.custom_instructions.as_deref()),
+        Some("focus api")
+    );
+    assert!(
+        last_request_text(&model).ends_with("\n\nAdditional focus: focus api")
+    );
+}
+
+/// Navigating forward to a descendant abandons nothing, so no summary is written.
+#[tokio::test]
+async fn summarizing_navigation_to_a_descendant_writes_no_summary() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("first answer"),
+            text_answer("second answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-branch-descendant").expect("id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+    for input in ["first question", "second question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    let leaf = kernel
+        .session_tree(&session_id)
+        .expect("tree")
+        .leaf_id
+        .expect("leaf");
+    let first_answer = first_message_entry(&kernel, &session_id, "assistant");
+    kernel
+        .navigate_session(&session_id, Some(first_answer))
+        .await
+        .expect("navigate back without summary");
+
+    kernel
+        .navigate_session_with_summary(
+            &session_id,
+            kernel::TreeNavigationRequest {
+                target: leaf,
+                summarize: true,
+                custom_instructions: None,
+            },
+        )
+        .await
+        .expect("navigate forward");
+
+    assert!(
+        kernel
+            .session_tree(&session_id)
+            .expect("tree")
+            .entries
+            .iter()
+            .all(|entry| entry.kind != "branch_summary")
+    );
+    assert_eq!(model.requests.lock().expect("request lock").len(), 2);
+}
+
+/// Sequential ids whose Turn ids become invalid once `fail_turns` is set.
+struct FailingTurnIds {
+    inner: SequentialIds,
+    fail_turns: Arc<AtomicBool>,
+}
+
+impl IdGenerator for FailingTurnIds {
+    /// Returns an empty, invalid Turn id after the switch flips.
+    fn next(&self, kind: IdKind) -> String {
+        if kind == IdKind::Turn && self.fail_turns.load(Ordering::Relaxed) {
+            return String::new();
+        }
+        self.inner.next(kind)
+    }
+}
+
+/// A committed navigation still succeeds when its sink report cannot be built.
+#[tokio::test]
+async fn navigation_succeeds_when_branch_report_fails() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            text_answer("first answer"),
+            text_answer("second answer"),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id = SessionId::try_from("session-report-failure").expect("id");
+    let fail_turns = Arc::new(AtomicBool::new(false));
+    let kernel = threshold_kernel_configured(
+        root.path(),
+        &model,
+        0,
+        &session_id,
+        KernelOptions {
+            id_generator: Arc::new(FailingTurnIds {
+                inner: SequentialIds(AtomicU64::new(0)),
+                fail_turns: Arc::clone(&fail_turns),
+            }),
+            ..KernelOptions::default()
+        },
+    )
+    .await;
+    for input in ["first question", "second question"] {
+        run_prompt(&kernel, &session_id, input)
+            .await
+            .0
+            .expect(input);
+    }
+    let target = first_message_entry(&kernel, &session_id, "assistant");
+    fail_turns.store(true, Ordering::Relaxed);
+
+    let tree = kernel
+        .navigate_session(&session_id, Some(target.clone()))
+        .await
+        .expect("committed navigation succeeds");
+
+    assert_eq!(tree.leaf_id, Some(target));
 }

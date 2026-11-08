@@ -3,11 +3,12 @@ mod lifecycle;
 mod prompt;
 pub use context::ContextUsageEstimate;
 pub(in crate::runtime) use context::{
-    CompactionPolicyExt, CompactionPreparation, EstimatedTokens,
-    OverflowRecovery,
+    CompactionFileOperations, CompactionPolicyExt, CompactionPreparation,
+    EstimatedTokens, OverflowRecovery,
 };
 pub(in crate::runtime) use prompt::{
-    GeneratedSummary, SummaryGeneration, SummaryProtocol,
+    BRANCH_SUMMARY_PREAMBLE, GeneratedSummary, SummaryGeneration,
+    SummaryProtocol,
 };
 
 use std::sync::Arc;
@@ -74,6 +75,28 @@ impl CompactionIdentity {
     }
 }
 
+/// Sizes summary output like pi: the model's output limit, reduced to fit the
+/// window left after the summary request, with a safety margin for input
+/// counted higher than estimated.
+fn summary_max_tokens(profile: &ModelProfile, input_tokens: u64) -> u64 {
+    const CONTEXT_SAFETY_TOKENS: u64 = 4_096;
+    const MIN_OUTPUT_WITH_RATIO_MARGIN: u64 = 32_768;
+    let context = profile.context_tokens;
+    // The 15% margin stays only while it leaves at least 32,768 output tokens;
+    // otherwise only the fixed margin is kept and output is capped there.
+    let margin = CONTEXT_SAFETY_TOKENS
+        .max(input_tokens.saturating_mul(15).div_ceil(100));
+    let mut room = context.saturating_sub(input_tokens).saturating_sub(margin);
+    if room < MIN_OUTPUT_WITH_RATIO_MARGIN {
+        room = MIN_OUTPUT_WITH_RATIO_MARGIN.min(
+            context
+                .saturating_sub(input_tokens)
+                .saturating_sub(CONTEXT_SAFETY_TOKENS),
+        );
+    }
+    profile.max_output_tokens.min(room.max(1))
+}
+
 impl Kernel {
     /// Selects pre-prompt compaction from the persisted active history and model limits.
     pub(super) fn pre_prompt_compaction(
@@ -106,26 +129,36 @@ impl Kernel {
                     None
                 }
             });
+            let policy = self.compaction_policy.for_profile(profile);
             latest_assistant
                 .and_then(|(message, metadata)| {
-                    self.compaction_policy
-                        .overflow_recovery(metadata, profile)
-                        .map(|recovery| {
+                    policy.overflow_recovery(metadata, profile).map(
+                        |recovery| {
                             let excluded = (recovery
                                 == OverflowRecovery::CompactAndRetry)
                                 .then(|| message.identity.message_id.clone());
                             (CompactionReason::Overflow, excluded)
-                        })
+                        },
+                    )
                 })
                 .or_else(|| {
-                    ContextUsageEstimate::from_history(history)
-                        .should_compact(
-                            profile.context_tokens,
-                            self.compaction_policy,
-                        )
+                    self.exceeds_compaction_threshold(history, profile)
                         .then_some((CompactionReason::Threshold, None))
                 })
         })
+    }
+
+    /// Reports whether `history` crosses the compaction threshold of the
+    /// model `profile` describes, using that model's resolved budgets.
+    pub(super) fn exceeds_compaction_threshold(
+        &self,
+        history: &[AgentMessage],
+        profile: &ModelProfile,
+    ) -> bool {
+        ContextUsageEstimate::from_history(history).should_compact(
+            profile.context_tokens,
+            self.compaction_policy.for_profile(profile),
+        )
     }
 
     /// Generates and persists one model-backed pi v4 compaction atomically on failure.
@@ -238,10 +271,17 @@ impl Kernel {
                             .is_some_and(|id| id == &message.identity.message_id)
             )
         });
-        let preparation = CompactionPreparation::from_history(
-            &compacted_history,
-            self.compaction_policy,
-        );
+        // The model that will summarize decides the budgets.
+        let policy = self
+            .compaction_policy
+            .for_profile(session.model.active()?.profile());
+        let preparation =
+            CompactionPreparation::from_history(&compacted_history, policy);
+        let CompactionIdentity {
+            run_id,
+            turn_id,
+            started_at_ms,
+        } = identity;
         // Direct command records are intentionally model-invisible. Rejecting
         // before lifecycle hooks and records prevents a false compaction run.
         if !preparation
@@ -250,18 +290,43 @@ impl Kernel {
             .chain(&preparation.turn_prefix)
             .any(|message| message.estimated_tokens() > 0)
         {
-            tracing::warn!(
-                "rejected Compaction for session {} with reason {:?}: there is no model context to compact",
-                session_id,
-                reason
-            );
+            // Automatic checks can meet this every Turn of a long Tool loop,
+            // so only a user-requested compaction warns.
+            if reason == CompactionReason::Manual {
+                tracing::warn!(
+                    "rejected Compaction for session {} with reason {:?}: there is no model context to compact",
+                    session_id,
+                    reason
+                );
+                // Like pi, only a requested compaction reports this failure;
+                // automatic checks skip silently without building a context.
+                let extension_context = self.extension_context(
+                    session,
+                    Some(&run_id),
+                    Some(&turn_id),
+                )?;
+                session
+                    .extensions
+                    .runtime_ref()
+                    .emit_session_compact_failed(
+                        &protocol::SessionCompactFailedEvent::builder()
+                            .reason(reason)
+                            .error_message(Some(
+                                KernelError::NoContextToCompact.to_string(),
+                            ))
+                            .build(),
+                        &extension_context,
+                    )
+                    .await;
+            } else {
+                tracing::debug!(
+                    "skipped Compaction for session {} with reason {:?}: there is no model context to compact",
+                    session_id,
+                    reason
+                );
+            }
             return Err(KernelError::NoContextToCompact);
         }
-        let CompactionIdentity {
-            run_id,
-            turn_id,
-            started_at_ms,
-        } = identity;
         let entry_id = EntryId::try_from(self.id_generator.next(IdKind::Entry))
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let will_retry = reason == CompactionReason::Overflow
@@ -281,6 +346,8 @@ impl Kernel {
             .runtime_ref()
             .emit_session_before_compact(
                 &protocol::SessionBeforeCompactEvent::builder()
+                    .preparation((&preparation).into())
+                    .custom_instructions(instruction.clone())
                     .reason(reason)
                     .will_retry(will_retry)
                     .branch_entries(
@@ -296,6 +363,18 @@ impl Kernel {
                 turn_id,
                 reason
             );
+            session
+                .extensions
+                .runtime_ref()
+                .emit_session_compact_failed(
+                    &protocol::SessionCompactFailedEvent::builder()
+                        .reason(reason)
+                        .aborted(true)
+                        .will_retry(will_retry)
+                        .build(),
+                    &extension_context,
+                )
+                .await;
             return Err(KernelError::ExtensionBlocked(
                 "session compaction cancelled".to_string(),
             ));
@@ -359,6 +438,7 @@ impl Kernel {
                 tokens_before,
                 previous_summary,
                 file_operations,
+                policy: _,
             } = preparation;
             let (summary, retained_tail, tokens_before, summary_usage) =
                 if let Some(compaction) = extension_compaction {
@@ -422,7 +502,10 @@ impl Kernel {
                                     .timestamp(started_at_ms)
                                     .messages(turn_prefix)
                                     .cancellation(cancellation)
-                                    .protocol(SummaryProtocol::TurnPrefix)
+                                    .protocol(SummaryProtocol::TurnPrefix {
+                                        custom_instructions: instruction
+                                            .as_deref(),
+                                    })
                                     .build(),
                             )
                             .await?;
@@ -478,17 +561,7 @@ impl Kernel {
             let modified_files = file_operations.modified_files();
             // Pi keeps cumulative file operations in both typed details and the
             // model-visible summary so future Turns retain filesystem context.
-            let mut summary = summary;
-            if !read_files.is_empty() {
-                summary.push_str("\n\n<read-files>\n");
-                summary.push_str(&read_files.join("\n"));
-                summary.push_str("\n</read-files>");
-            }
-            if !modified_files.is_empty() {
-                summary.push_str("\n\n<modified-files>\n");
-                summary.push_str(&modified_files.join("\n"));
-                summary.push_str("\n</modified-files>");
-            }
+            let summary = summary + &file_operations.summary_suffix();
             let ended_at_ms = self.clock.now();
             let details = CompactionDetails::builder()
                 .reason(reason)
@@ -572,6 +645,24 @@ impl Kernel {
                         terminal_error
                     );
                 }
+                let aborted =
+                    matches!(error, KernelError::Model(ModelError::Cancelled));
+                session
+                    .extensions
+                    .runtime_ref()
+                    .emit_session_compact_failed(
+                        &protocol::SessionCompactFailedEvent::builder()
+                            .reason(reason)
+                            .error_message(
+                                (!aborted).then(|| error.to_string()),
+                            )
+                            .aborted(aborted)
+                            .will_retry(will_retry)
+                            .from_extension(from_extension)
+                            .build(),
+                        &extension_context,
+                    )
+                    .await;
                 return Err(error);
             }
         };
@@ -629,51 +720,40 @@ impl Kernel {
             cancellation,
             protocol,
         } = generation;
-        let (system_prompt, user_prompt, max_tokens) = match protocol {
+        // Captured before the protocol is consumed so a truncation names its request.
+        let failure_label = protocol.failure_label();
+        // Every summary is one serialized User prompt under a dedicated
+        // System prompt, so the model never continues the conversation.
+        let (previous_summary, custom_instructions, template) = match protocol {
             SummaryProtocol::Compaction {
                 previous_summary,
                 custom_instructions,
             } => (
-                SUMMARIZATION_SYSTEM_PROMPT,
-                Some(
-                    SummaryPrompt {
-                        messages: &messages,
-                        previous_summary,
-                        custom_instructions,
-                        template: SummaryTemplate::Checkpoint,
-                    }
-                    .render(),
-                ),
-                Some(
-                    self.compaction_policy
-                        .reserve_tokens
-                        .saturating_mul(8)
-                        .checked_div(10)
-                        .unwrap_or(0),
-                ),
+                previous_summary,
+                custom_instructions,
+                SummaryTemplate::Checkpoint,
             ),
-            SummaryProtocol::TurnPrefix => (
-                SUMMARIZATION_SYSTEM_PROMPT,
-                Some(
-                    SummaryPrompt {
-                        messages: &messages,
-                        previous_summary: None,
-                        custom_instructions: None,
-                        template: SummaryTemplate::TurnPrefix,
-                    }
-                    .render(),
-                ),
-                Some(
-                    self.compaction_policy
-                        .reserve_tokens
-                        .checked_div(2)
-                        .unwrap_or(0),
-                ),
+            SummaryProtocol::TurnPrefix {
+                custom_instructions,
+            } => (None, custom_instructions, SummaryTemplate::TurnPrefix),
+            SummaryProtocol::Branch {
+                custom_instructions,
+                replace_instructions,
+            } => (
+                None,
+                custom_instructions,
+                SummaryTemplate::Branch {
+                    replace_instructions,
+                },
             ),
-            SummaryProtocol::Branch { instruction } => {
-                (instruction, None, None)
-            }
         };
+        let user_prompt = SummaryPrompt {
+            messages: &messages,
+            previous_summary,
+            custom_instructions,
+            template,
+        }
+        .render();
         let system_message = AgentMessage {
             identity: MessageIdentity {
                 message_id: self.message_id()?,
@@ -683,43 +763,43 @@ impl Kernel {
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
             content: MessageContent::System {
                 blocks: vec![ContentBlock::Text {
-                    text: system_prompt.to_string(),
+                    text: SUMMARIZATION_SYSTEM_PROMPT.to_string(),
                 }],
             },
         };
-        let mut request_messages = Vec::with_capacity(messages.len() + 1);
-        request_messages.push(system_message);
-        if let Some(user_prompt) = user_prompt {
-            request_messages.push(AgentMessage {
-                identity: MessageIdentity {
-                    message_id: self.message_id()?,
-                    turn_id: turn_id.clone(),
-                },
-                timing: MessageTiming::try_from((
-                    timestamp, timestamp, timestamp,
-                ))
+        let user_message = AgentMessage {
+            identity: MessageIdentity {
+                message_id: self.message_id()?,
+                turn_id: turn_id.clone(),
+            },
+            timing: MessageTiming::try_from((timestamp, timestamp, timestamp))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?,
-                content: MessageContent::User {
-                    blocks: vec![ContentBlock::Text { text: user_prompt }],
-                },
-            });
-        } else {
-            request_messages.extend(messages);
-        }
+            content: MessageContent::User {
+                blocks: vec![ContentBlock::Text { text: user_prompt }],
+            },
+        };
+        let request_messages = vec![system_message, user_message];
         let completion_middleware =
             self.completion_middleware(session, run_id, turn_id)?;
-        // Compaction uses one immutable model snapshot just like a normal Turn.
-        let model = session.model.active()?;
+        // Compaction uses one immutable model and thinking-level snapshot,
+        // just like a normal Turn.
+        let (model, thinking_level) = session.model.snapshot()?;
         model.preflight().await?;
-        let max_tokens = max_tokens
-            .map(|tokens| tokens.min(model.profile().max_output_tokens));
+        // The provider would otherwise fill in the Turn request budget, which
+        // the reserve bounds; summaries size output from the request instead.
+        let input_tokens =
+            request_messages.iter().fold(0_u64, |total, message| {
+                total.saturating_add(message.estimated_tokens())
+            });
+        let max_tokens = summary_max_tokens(model.profile(), input_tokens);
         let mut request = ModelRequest {
             messages: request_messages,
             tools: Vec::new(),
-            // Summaries never reason and set no cache option: a one-off prompt is not reused.
+            // Summaries reason at the Session's level and set no cache option:
+            // a one-off prompt is not reused.
             options: ModelRequestOptions::builder()
-                .max_tokens(max_tokens)
-                .thinking_level(protocol::ThinkingLevel::Off)
+                .max_tokens(Some(max_tokens))
+                .thinking_level(thinking_level)
                 .build(),
         };
         if request.adapt_input(model.profile()) {
@@ -801,7 +881,14 @@ impl Kernel {
                                 .to_string(),
                         ));
                     }
-                    StopReason::EndTurn | StopReason::MaxTokens => {}
+                    // A length stop holds partial text that must never
+                    // become a checkpoint, so it fails without a retry.
+                    StopReason::MaxTokens => {
+                        return Err(ModelError::Protocol(format!(
+                            "{failure_label} failed: generation hit the token cap and the summary is incomplete"
+                        )));
+                    }
+                    StopReason::EndTurn => {}
                 }
                 Ok(GeneratedSummary {
                     text: summary,
@@ -834,5 +921,38 @@ impl Kernel {
                 () = &mut delay => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a profile with only the limits the output clamp reads.
+    fn profile(context_tokens: u64, max_output_tokens: u64) -> ModelProfile {
+        ModelProfile::builder()
+            .provider_id("p".to_string())
+            .model_id("m".to_string())
+            .display_name("m".to_string())
+            .context_tokens(context_tokens)
+            .max_output_tokens(max_output_tokens)
+            .build()
+    }
+
+    /// Summary output follows pi's context clamp instead of a reserve ratio.
+    #[test]
+    fn summary_max_tokens_follows_pi_context_clamp() {
+        assert_eq!(summary_max_tokens(&profile(100_000, 8_000), 1_000), 8_000);
+        assert_eq!(
+            summary_max_tokens(&profile(200_000, 64_000), 150_000),
+            32_768
+        );
+        assert_eq!(
+            summary_max_tokens(&profile(1_000_000, 128_000), 100_000),
+            128_000
+        );
+        // An input that already fills the window still requests one token
+        // instead of underflowing.
+        assert_eq!(summary_max_tokens(&profile(32_000, 8_000), 30_000), 1);
     }
 }

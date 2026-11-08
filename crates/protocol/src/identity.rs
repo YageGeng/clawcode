@@ -72,6 +72,9 @@ impl ProductIdentity {
     /// Origin of user messages accepted from a prefixed `!` or `!!` shell prompt.
     pub const ACP_USER_BASH_ORIGIN: &str = "user_bash";
 
+    /// Origin of user messages that replay an abandoned-branch summary.
+    pub const ACP_BRANCH_SUMMARY_ORIGIN: &str = "branch_summary";
+
     /// ACP v2 custom content discriminator for structured MCP Tool output.
     pub const ACP_STRUCTURED_CONTENT_BLOCK: &str =
         "_clawcode/structured_content";

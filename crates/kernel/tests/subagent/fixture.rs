@@ -326,6 +326,28 @@ impl TestKernel {
                 Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
             },
             KernelPolicy::default(),
+            protocol::CompactionPolicy::default(),
+        )
+    }
+
+    /// Uses the default extensions with an explicit compaction policy.
+    // Only the protocol_alignment target, which shares this fixture, tunes compaction.
+    #[allow(dead_code)]
+    pub fn with_compaction(
+        route: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
+        compaction: protocol::CompactionPolicy,
+    ) -> Self {
+        Self::with_factories(
+            route,
+            Arc::new(StaticExtensionFactory::new(
+                Default::default(),
+                vec![Arc::new(|| Ok(Arc::new(StateModule)))],
+            )),
+            |root, clock| {
+                Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
+            },
+            KernelPolicy::default(),
+            compaction,
         )
     }
 
@@ -342,6 +364,7 @@ impl TestKernel {
             Arc::new(StaticExtensionFactory::default()),
             store,
             KernelPolicy::default(),
+            protocol::CompactionPolicy::default(),
         )
     }
 
@@ -357,6 +380,7 @@ impl TestKernel {
                 Arc::new(JsonlStoreFactory::new(root.join("sessions"), clock))
             },
             policy,
+            protocol::CompactionPolicy::default(),
         )
     }
 
@@ -369,6 +393,7 @@ impl TestKernel {
             Arc<dyn Clock>,
         ) -> Arc<dyn store::StoreFactory>,
         policy: KernelPolicy,
+        compaction: protocol::CompactionPolicy,
     ) -> Self {
         let root = tempfile::tempdir().expect("root");
         let model = Arc::new(RoutedModel {
@@ -384,6 +409,7 @@ impl TestKernel {
             .max_turns(policy.max_turns)
             .when_busy(policy.when_busy)
             .subagent_reply_as(policy.subagent_reply_as)
+            .compaction_policy(compaction)
             .model_factory(Arc::new(StaticModelFactory(Arc::clone(&model))))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(store(root.path(), Arc::clone(&clock)))

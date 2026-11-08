@@ -381,6 +381,45 @@ impl CompactionSummaryMessage {
     }
 }
 
+/// Pi-compatible summary of a conversation branch the user navigated away from.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSummaryMessage {
+    /// Persisted branch-summary entry that owns this message.
+    pub entry_id: EntryId,
+    /// Entry the summary was attached to, or `root`.
+    pub from_id: String,
+    /// Summary text, including any preamble and file lists.
+    pub summary: String,
+    /// Files only read on the summarized branch, for cumulative tracking.
+    #[serde(default)]
+    #[builder(default)]
+    pub read_files: Vec<String>,
+    /// Files created or changed on the summarized branch.
+    #[serde(default)]
+    #[builder(default)]
+    pub modified_files: Vec<String>,
+}
+
+impl BranchSummaryMessage {
+    /// Projects the summary into model context with pi's branch wrapper.
+    #[must_use]
+    pub fn model_text(&self) -> String {
+        format!(
+            "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n{}</summary>",
+            self.summary
+        )
+    }
+}
+
 /// Pi-compatible transcript message produced by a user-authored `!` or `!!` command.
 #[derive(
     Debug,
@@ -519,6 +558,13 @@ pub enum MessageContent {
         #[serde(flatten)]
         compaction: CompactionSummaryMessage,
     },
+
+    /// Abandoned-branch summary converted to User content only at the provider boundary.
+    BranchSummary {
+        /// Typed summary data flattened to keep the wire payload compact.
+        #[serde(flatten)]
+        branch: BranchSummaryMessage,
+    },
 }
 
 impl MessageContent {
@@ -533,7 +579,8 @@ impl MessageContent {
             | Self::BashExecution { .. }
             | Self::Extension { .. }
             | Self::SlashCommand { .. }
-            | Self::CompactionSummary { .. } => None,
+            | Self::CompactionSummary { .. }
+            | Self::BranchSummary { .. } => None,
         }
     }
 
@@ -561,6 +608,9 @@ impl MessageContent {
             Self::SlashCommand { message } => return message.text_content(),
             Self::CompactionSummary { compaction } => {
                 return Some(compaction.summary.clone());
+            }
+            Self::BranchSummary { branch } => {
+                return Some(branch.summary.clone());
             }
         };
         let text = blocks
@@ -612,7 +662,8 @@ impl AgentMessage {
             | MessageContent::BashExecution { .. }
             | MessageContent::Extension { .. }
             | MessageContent::SlashCommand { .. }
-            | MessageContent::CompactionSummary { .. } => None,
+            | MessageContent::CompactionSummary { .. }
+            | MessageContent::BranchSummary { .. } => None,
         }
     }
 }

@@ -4,16 +4,16 @@ use async_trait::async_trait;
 use extension::{
     ExtensionContext, ExtensionError, ExtensionHandler, ExtensionRegistrar,
     SessionBeforeCompactPoint, SessionBeforeForkPoint,
-    SessionBeforeSwitchPoint, SessionBeforeTreePoint, SessionCompactPoint,
-    SessionInfoChangedPoint, SessionShutdownPoint, SessionStartPoint,
-    SessionTreePoint,
+    SessionBeforeSwitchPoint, SessionBeforeTreePoint,
+    SessionCompactFailedPoint, SessionCompactPoint, SessionInfoChangedPoint,
+    SessionShutdownPoint, SessionStartPoint, SessionTreePoint,
 };
 use protocol::{
     SessionBeforeCompactEvent, SessionBeforeCompactResult,
     SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCancelResult,
-    SessionCompactEvent, SessionInfoChangedEvent, SessionShutdownEvent,
-    SessionStartEvent, SessionTreeEvent,
+    SessionCompactEvent, SessionCompactFailedEvent, SessionInfoChangedEvent,
+    SessionShutdownEvent, SessionStartEvent, SessionTreeEvent,
 };
 
 struct SessionPolicy;
@@ -115,6 +115,19 @@ impl ExtensionHandler<SessionCompactPoint> for SessionObserver {
 }
 
 #[async_trait]
+impl ExtensionHandler<SessionCompactFailedPoint> for SessionObserver {
+    /// Observes a compaction that ended without a checkpoint.
+    async fn handle(
+        &self,
+        event: &SessionCompactFailedEvent,
+        _context: &ExtensionContext,
+    ) -> Result<(), ExtensionError> {
+        let _aborted = event.aborted;
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl ExtensionHandler<SessionTreePoint> for SessionObserver {
     /// Observes the final tree destination and optional summary entry.
     async fn handle(
@@ -150,6 +163,7 @@ pub(super) fn register(
     registrar.on::<SessionBeforeForkPoint, _>(SessionPolicy)?;
     registrar.on::<SessionBeforeCompactPoint, _>(SessionPolicy)?;
     registrar.on::<SessionCompactPoint, _>(SessionObserver)?;
+    registrar.on::<SessionCompactFailedPoint, _>(SessionObserver)?;
     registrar.on::<SessionBeforeTreePoint, _>(SessionPolicy)?;
     registrar.on::<SessionTreePoint, _>(SessionObserver)?;
     registrar.on::<SessionShutdownPoint, _>(SessionObserver)

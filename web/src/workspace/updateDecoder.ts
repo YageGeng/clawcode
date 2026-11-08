@@ -30,6 +30,14 @@ export type DecodedSessionUpdate =
 
 const TOOL_KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>(["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"]);
 
+/** Joins the text of ACP content blocks; a value that is not a block array has no text. */
+function contentText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block: unknown) => typeof block === "object" && block !== null && typeof (block as Record<string, unknown>).text === "string" ? (block as Record<string, unknown>).text as string : "")
+    .join("");
+}
+
 /** Narrows ACP wire updates into typed workspace actions without owning UI state. */
 export class SessionUpdateDecoder {
   readonly namespace: string;
@@ -120,6 +128,9 @@ export class SessionUpdateDecoder {
       }
     } else if (kind === "user_message" && productMeta?.origin === "user_bash") {
       // A `!bash` prompt is shown by its bash card, not as a separate user message.
+    } else if (kind === "user_message" && productMeta?.origin === "branch_summary" && typeof update.messageId === "string" && meta !== undefined) {
+      // A replayed branch summary is shown as its own card, not as user input.
+      actions.push({ type: "branch-summary/upserted", branchSummary: { messageId: update.messageId as MessageId, summary: contentText(update.content), timestampMs: meta.timestampMs }, order });
     } else if ((kind === "agent_message" || kind === "user_message") && typeof update.messageId === "string" && meta !== undefined) {
       const messageId = update.messageId as MessageId;
       const existing = state.messages.get(messageId);
@@ -128,9 +139,7 @@ export class SessionUpdateDecoder {
         : [];
       // ACP v2 whole-message updates preserve omitted content and replace
       // concrete content, including explicit clears.
-      const text = !("content" in update) ? existing?.text ?? "" : Array.isArray(update.content)
-        ? contentBlocks.map((block) => typeof block.text === "string" ? block.text : "").join("")
-        : "";
+      const text = !("content" in update) ? existing?.text ?? "" : contentText(update.content);
       const images: readonly ImageContentBlock[] = !("content" in update)
         ? existing?.images ?? []
         : contentBlocks.flatMap((block) => {
@@ -152,9 +161,7 @@ export class SessionUpdateDecoder {
       const previous = state.messages.get(messageId);
       const timing = this.decodeMessageTiming(productMeta?.messageTiming);
       // Thought upserts follow the same omitted/clear/replace contract as visible messages.
-      const reasoning = !("content" in update) ? previous?.reasoning ?? "" : Array.isArray(update.content)
-        ? update.content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null && !Array.isArray(block)).map((block) => typeof block.text === "string" ? block.text : "").join("")
-        : "";
+      const reasoning = !("content" in update) ? previous?.reasoning ?? "" : contentText(update.content);
       const message: MessageEntity = previous === undefined ? { messageId, turnId: meta.turnId, role: "assistant", text: "", images: [], reasoning, timestampMs: timing?.timestampMs ?? meta.timestampMs, startedAtMs: timing?.startedAtMs ?? meta.timestampMs, endedAtMs: timing?.endedAtMs ?? meta.timestampMs, streaming: false } : { ...previous, reasoning, ...(timing === undefined ? {} : timing) };
       actions.push({ type: "message/upserted", message, order });
     } else if (kind === "tool_call_update" && typeof update.toolCallId === "string") {
@@ -296,9 +303,7 @@ export class SessionUpdateDecoder {
       } else if (reason !== undefined && update.status === "completed" && typeof details?.result === "object" && details.result !== null && !Array.isArray(details.result)) {
         const result = details.result as Record<string, unknown>;
         const usage = result.usage === undefined ? undefined : this.decodeModelUsage(result.usage);
-        const summary = Array.isArray(update.summary)
-          ? update.summary.map((block) => typeof block === "object" && block !== null && typeof (block as Record<string, unknown>).text === "string" ? (block as Record<string, unknown>).text as string : "").join("")
-          : undefined;
+        const summary = Array.isArray(update.summary) ? contentText(update.summary) : undefined;
         if (summary !== undefined && typeof result.entryId === "string" && typeof result.turnId === "string" && typeof result.tokensBefore === "string" && typeof result.startedAtMs === "string" && typeof result.endedAtMs === "string" && (result.usage === undefined || usage !== undefined)) {
           const compaction: CompactionEntity = {
             entryId: result.entryId as EntryId,

@@ -90,9 +90,10 @@ fn defaults_match_pi_retry_and_compaction() {
     assert_eq!(config.retry.agent.base_delay_ms, 2_000);
     assert_eq!(config.retry.agent.max_retry_delay_ms, 60_000);
     assert_eq!(config.retry.provider.max_retry_delay_ms, 60_000);
-    assert!(config.compaction.enabled);
-    assert_eq!(config.compaction.reserve_tokens, 16_384);
-    assert_eq!(config.compaction.keep_recent_tokens, 20_000);
+    assert!(config.compaction.policy.enabled);
+    assert_eq!(config.compaction.policy.reserve_tokens, 16_384);
+    assert_eq!(config.compaction.policy.keep_recent_tokens, 20_000);
+    assert!(config.compaction.model_overrides.is_empty());
 }
 
 /// Missing Kernel configuration serializes the explicit unlimited Turn policy.
@@ -687,6 +688,78 @@ fn repository_claw_toml_loads() {
             .expect("load repository configuration");
         Ok(())
     });
+}
+
+/// Model overrides replace the global compaction budgets for one exact model.
+#[test]
+fn compaction_model_overrides_resolve_by_exact_provider_model_key() {
+    let document = format!(
+        "{}\n[compaction.model_overrides.\"deepseek/deepseek-v4-flash\"]\nreserve_tokens = 32768\n",
+        ConfigFixture::valid()
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse compaction overrides");
+
+    config.validate().expect("valid overrides");
+    let overridden = config.compaction.resolve("deepseek", "deepseek-v4-flash");
+    assert_eq!(overridden.reserve_tokens, 32_768);
+    assert_eq!(overridden.keep_recent_tokens, 20_000);
+    assert!(overridden.enabled);
+    let other = config.compaction.resolve("deepseek", "other");
+    assert_eq!(other.reserve_tokens, 16_384);
+}
+
+/// Override keys use the same provider/model form as the active model.
+#[test]
+fn malformed_compaction_override_key_is_rejected() {
+    let document = format!(
+        "{}\n[compaction.model_overrides.\"deepseek-v4-flash\"]\nreserve_tokens = 32768\n",
+        ConfigFixture::valid()
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse compaction overrides");
+
+    let error = config.validate().expect_err("malformed override key");
+
+    assert!(
+        matches!(
+            &error,
+            ConfigValidationError::MalformedCompactionOverride { key }
+                if key == "deepseek-v4-flash"
+        ),
+        "{error}"
+    );
+}
+
+/// A request budget is checked against the model's overridden reserve.
+#[test]
+fn request_budget_is_checked_against_the_overridden_reserve() {
+    let document = format!(
+        "{}\n[compaction.model_overrides.\"deepseek/deepseek-v4-flash\"]\nreserve_tokens = 32768\n",
+        ConfigFixture::valid().replace(
+            "max_output_tokens = 384000",
+            "max_output_tokens = 384000\nrequest_max_tokens = 20000",
+        )
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse request budget");
+
+    config
+        .validate()
+        .expect("budget within the overridden reserve");
+}
+
+/// Branch summaries reserve pi's 16,384 tokens unless configured.
+#[test]
+fn branch_summary_reserve_defaults_to_pi_value() {
+    assert_eq!(AppConfig::default().branch_summary.reserve_tokens, 16_384);
+    let document = format!(
+        "{}\n[branch_summary]\nreserve_tokens = 4096\n",
+        ConfigFixture::valid()
+    );
+    let config: AppConfig =
+        toml::from_str(&document).expect("parse branch summary");
+    assert_eq!(config.branch_summary.reserve_tokens, 4_096);
 }
 
 /// A request budget larger than the compaction reserve could overflow the window.

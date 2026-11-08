@@ -2247,6 +2247,25 @@
   margin-bottom: 10px;
 }
 
+/* Branch-summary choice shown before leaving the current branch. */
+.tree-summary-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.tree-summary-choice > span {
+  flex-basis: 100%;
+}
+
+.tree-summary-choice textarea {
+  flex-basis: 100%;
+  min-height: 56px;
+  resize: vertical;
+}
+
 .tree-toolbar button {
   display: flex;
   min-width: 0;

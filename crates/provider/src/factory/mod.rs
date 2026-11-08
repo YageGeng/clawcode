@@ -190,7 +190,10 @@ impl ConfiguredModel {
             model,
             spec,
             &format!("{}/{upstream_id}", provider.preset()),
-            app.compaction.reserve_tokens,
+            // A per-model compaction override bounds this model's budget.
+            app.compaction
+                .resolve(provider.id.as_str(), &model.id)
+                .reserve_tokens,
         )?;
         Ok(Self::builder()
             .profile(profile)

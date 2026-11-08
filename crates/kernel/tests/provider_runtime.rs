@@ -81,6 +81,36 @@ async fn model_options_and_compaction_summary_reach_provider() {
     );
 }
 
+/// A branch summary reaches the provider as pi's wrapped user text.
+#[tokio::test]
+async fn branch_summary_reaches_provider_as_user_text() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let server = Server::start(vec![(200, Server::completion())]).await;
+    let model = server.factory(false).create().unwrap();
+    let mut request = Server::request("hi");
+    request.messages[0].content = MessageContent::BranchSummary {
+        branch: protocol::BranchSummaryMessage::builder()
+            .entry_id(protocol::EntryId::try_from("entry").unwrap())
+            .from_id("root".into())
+            .summary("branch body".into())
+            .build(),
+    };
+    for event in model
+        .stream(request, CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+    {
+        event.unwrap();
+    }
+    let messages = server.requests()[0]["messages"].to_string();
+    assert!(messages.contains(
+        "The following is a summary of a branch that this conversation came back from:"
+    ));
+    assert!(messages.contains("branch body"));
+}
+
 /// Prompt-cache options reach OpenAI as its routing key and retention; defaults send neither.
 #[tokio::test]
 async fn prompt_cache_options_reach_openai_request() {

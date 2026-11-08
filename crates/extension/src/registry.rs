@@ -11,11 +11,12 @@ use crate::{
     InputPoint, MessageEndPoint, MessageStartPoint, MessageUpdatePoint,
     ModelSelectPoint, ProjectTrustPoint, ResourcesDiscoverPoint,
     SessionBeforeCompactPoint, SessionBeforeForkPoint,
-    SessionBeforeSwitchPoint, SessionBeforeTreePoint, SessionCompactPoint,
-    SessionInfoChangedPoint, SessionShutdownPoint, SessionStartPoint,
-    SessionTreePoint, ThinkingLevelSelectPoint, ToolCallPoint,
-    ToolExecutionEndPoint, ToolExecutionStartPoint, ToolExecutionUpdatePoint,
-    ToolResultPoint, TurnEndPoint, TurnStartPoint, UserBashPoint,
+    SessionBeforeSwitchPoint, SessionBeforeTreePoint,
+    SessionCompactFailedPoint, SessionCompactPoint, SessionInfoChangedPoint,
+    SessionShutdownPoint, SessionStartPoint, SessionTreePoint,
+    ThinkingLevelSelectPoint, ToolCallPoint, ToolExecutionEndPoint,
+    ToolExecutionStartPoint, ToolExecutionUpdatePoint, ToolResultPoint,
+    TurnEndPoint, TurnStartPoint, UserBashPoint,
 };
 
 /// One typed handler paired with the extension that registered it.
@@ -87,6 +88,7 @@ define_point_handlers!(
     session_before_fork: SessionBeforeForkPoint,
     session_before_compact: SessionBeforeCompactPoint,
     session_compact: SessionCompactPoint,
+    session_compact_failed: SessionCompactFailedPoint,
     session_before_tree: SessionBeforeTreePoint,
     session_tree: SessionTreePoint,
     session_shutdown: SessionShutdownPoint,

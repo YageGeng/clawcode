@@ -1089,7 +1089,15 @@ mod tests {
             transcript.leaf_id().expect("lane leaf"),
             result.new_leaf_id
         );
-        assert_eq!(transcript.history().expect("history"), vec![first]);
+        // The committed branch summary enters model context after the target.
+        let history = transcript.history().expect("history");
+        assert_eq!(history.first(), Some(&first));
+        assert!(matches!(
+            history.get(1).map(|message| &message.content),
+            Some(MessageContent::BranchSummary { branch })
+                if branch.summary == "branch"
+        ));
+        assert_eq!(history.len(), 2);
         assert_eq!(transcript.tree_snapshot().expect("tree").entries.len(), 3);
     }
 

@@ -591,6 +591,9 @@ impl ProviderMessage {
             MessageContent::CompactionSummary { compaction } => {
                 Message::from(compaction.model_text())
             }
+            MessageContent::BranchSummary { branch } => {
+                Message::from(branch.model_text())
+            }
             MessageContent::BashExecution { .. }
             | MessageContent::Extension { .. }
             | MessageContent::SlashCommand { .. } => return Ok(None),

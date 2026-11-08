@@ -32,10 +32,10 @@ use ::extension::ExtensionFactory;
 use ::tools::{ToolFactory, ToolRegistry};
 use config::TurnLimit;
 use protocol::{
-    AgentEvent, AgentEventPayload, CompactionPolicy, CompactionReason,
-    EventMetadata, ExtensionFlagDefinition, IdGenerator, IdKind,
-    McpSessionSnapshot, MessageId, QueueId, RetryPolicy, RunRequest, RunResult,
-    SessionId, TimestampMs, TurnId,
+    AgentEvent, AgentEventPayload, CompactionReason, EventMetadata,
+    ExtensionFlagDefinition, IdGenerator, IdKind, McpSessionSnapshot,
+    MessageId, QueueId, RetryPolicy, RunRequest, RunResult, SessionId,
+    TimestampMs, TurnId,
 };
 use store::{Clock, RecordKind, StoreFactory};
 use tokio::sync::broadcast;
@@ -52,6 +52,7 @@ use run::queue::PendingQueue;
 pub use run::queue::WhenBusy;
 pub use run::submit::SubmitRequest;
 pub use run::trace::{RunSpan, TraceOrigin};
+pub use session::TreeNavigationRequest;
 use session::transcript::SessionTranscript;
 use tools::SessionToolState;
 
@@ -222,9 +223,13 @@ pub struct KernelFactory {
     /// Lane a background subagent's reply joins while its owner is busy.
     #[builder(default)]
     subagent_reply_as: WhenBusy,
-    /// Controls how many recent user Turns remain verbatim after compaction.
+    /// Compaction budgets with pi-style per-model overrides. The field keeps
+    /// its historical name so builders that pass one policy still compile.
+    #[builder(default, setter(into))]
+    compaction_policy: config::CompactionConfig,
+    /// Reserve that bounds abandoned-branch summary input.
     #[builder(default)]
-    compaction_policy: CompactionPolicy,
+    branch_summary: config::BranchSummaryConfig,
     /// Controls transient Assistant retries across distinct Turns.
     #[builder(default)]
     retry_policy: RetryPolicy,
@@ -234,6 +239,69 @@ pub struct KernelFactory {
 }
 
 impl KernelFactory {
+    /// Checks compaction budgets against the resolved model catalog.
+    ///
+    /// Limits and extension models come from the catalog, so overrides and
+    /// reserves are checked here rather than at configuration load: every
+    /// override names a catalog model, and the active model and every
+    /// overridden model keep their reserve below the window and their request
+    /// budget within the reserve.
+    fn validate_compaction(
+        &self,
+        catalog: &crate::ModelCatalog,
+    ) -> Result<(), KernelError> {
+        let profiles = catalog.profiles();
+        let key = |profile: &protocol::ModelProfile| {
+            format!("{}/{}", profile.provider_id, profile.model_id)
+        };
+        let overrides = &self.compaction_policy.model_overrides;
+        if let Some(missing) = overrides.keys().find(|configured| {
+            !profiles.iter().any(|profile| key(profile) == **configured)
+        }) {
+            return Err(ModelError::Unavailable(
+                config::ConfigValidationError::UnknownCompactionOverride {
+                    key: missing.clone(),
+                }
+                .to_string(),
+            )
+            .into());
+        }
+        let active = catalog.active().profile().clone();
+        let overridden = profiles
+            .iter()
+            .filter(|profile| overrides.contains_key(&key(profile)));
+        for profile in std::iter::once(&active).chain(overridden) {
+            let reserve_tokens =
+                self.compaction_policy.for_profile(profile).reserve_tokens;
+            if reserve_tokens >= profile.context_tokens {
+                return Err(ModelError::Unavailable(
+                    config::ConfigValidationError::CompactionReserveOverflow {
+                        reserve_tokens,
+                        context_tokens: profile.context_tokens,
+                    }
+                    .to_string(),
+                )
+                .into());
+            }
+            // The budget default comes from the reserve; the invariant
+            // input + output <= window holds only against the reserve
+            // compaction really uses.
+            if profile.request_max_tokens > reserve_tokens {
+                return Err(ModelError::Unavailable(
+                    config::ConfigValidationError::RequestBudgetExceedsReserve {
+                        provider_id: profile.provider_id.clone(),
+                        model_id: profile.model_id.clone(),
+                        request_max_tokens: profile.request_max_tokens,
+                        reserve_tokens,
+                    }
+                    .to_string(),
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Resolves every factory once and returns a ready session-owning kernel.
     pub fn build(self) -> Result<Kernel, KernelError> {
         // Static declarations must be frozen before provider/model construction
@@ -242,35 +310,7 @@ impl KernelFactory {
             Arc::new(self.extension_factory.static_registration()?);
         // Validate definitions once; every Session builds its own catalog later.
         let catalog = self.model_factory.create_catalog(&static_extensions)?;
-        // Limits may come from the rig catalog, so this kernel's own reserve is checked
-        // against the resolved active model here rather than at configuration load.
-        let active = catalog.active();
-        let profile = active.profile();
-        let reserve_tokens = self.compaction_policy.reserve_tokens;
-        if reserve_tokens >= profile.context_tokens {
-            return Err(ModelError::Unavailable(
-                config::ConfigValidationError::CompactionReserveOverflow {
-                    reserve_tokens,
-                    context_tokens: profile.context_tokens,
-                }
-                .to_string(),
-            )
-            .into());
-        }
-        // The budget default comes from the configuration's reserve; the invariant
-        // input + output <= window holds only against the reserve compaction really uses.
-        if profile.request_max_tokens > reserve_tokens {
-            return Err(ModelError::Unavailable(
-                config::ConfigValidationError::RequestBudgetExceedsReserve {
-                    provider_id: profile.provider_id.clone(),
-                    model_id: profile.model_id.clone(),
-                    request_max_tokens: profile.request_max_tokens,
-                    reserve_tokens,
-                }
-                .to_string(),
-            )
-            .into());
-        }
+        self.validate_compaction(&catalog)?;
         let tools = Arc::new(self.tool_factory.create()?);
         Ok(Kernel::builder()
             .model_factory(self.model_factory)
@@ -288,7 +328,8 @@ impl KernelFactory {
             .max_turns(self.max_turns)
             .when_busy(self.when_busy)
             .subagent_reply_as(self.subagent_reply_as)
-            .compaction_policy(self.compaction_policy)
+            .compaction_policy(self.compaction_policy.clone())
+            .branch_summary(self.branch_summary)
             .retry_policy(self.retry_policy)
             .provider_retry_delay_limit_ms(self.provider_retry_delay_limit_ms)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
@@ -324,7 +365,8 @@ pub struct Kernel {
     when_busy: WhenBusy,
     #[builder(default)]
     subagent_reply_as: WhenBusy,
-    compaction_policy: CompactionPolicy,
+    compaction_policy: config::CompactionConfig,
+    branch_summary: config::BranchSummaryConfig,
     retry_policy: RetryPolicy,
     provider_retry_delay_limit_ms: u64,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,

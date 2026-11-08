@@ -26,6 +26,12 @@ pub struct AcpNavigateParameters {
     pub session_id: SessionId,
     /// Target entry, or the root when absent.
     pub entry_id: Option<EntryId>,
+    /// Whether to summarize the abandoned branch, as pi offers on navigation.
+    #[serde(default)]
+    pub summarize: bool,
+    /// Extra focus appended to the branch-summary prompt.
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
 }
 
 /// Errors produced while validating a client-supplied working directory.

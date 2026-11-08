@@ -8,6 +8,7 @@ mod queue;
 mod settings;
 mod title;
 mod tools;
+mod tree;
 mod usage;
 
 #[path = "../support/failing_queue_store.rs"]

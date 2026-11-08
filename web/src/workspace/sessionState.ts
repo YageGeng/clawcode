@@ -4,6 +4,7 @@ import type {
   AgentRunUsage,
   AvailableCommandEntity,
   CacheTrail,
+  BranchSummaryEntity,
   CompactionEntity,
   CompactionStatus,
   ContextUsage,
@@ -32,6 +33,7 @@ export type SessionWorkspaceState = Readonly<{
   terminals: ReadonlyMap<string, TerminalEntity>;
   extensions: ReadonlyMap<string, ExtensionEntity>;
   compactions: ReadonlyMap<EntryId, CompactionEntity>;
+  branchSummaries: ReadonlyMap<MessageId, BranchSummaryEntity>;
   turnRuns: ReadonlyMap<TurnId, RunId>;
   runUsages: ReadonlyMap<RunId, AgentRunUsage>;
   cacheTrail: CacheTrail;
@@ -61,6 +63,7 @@ export type SessionWorkspaceAction =
   | { readonly type: "terminal/upserted"; readonly terminal: TerminalEntity }
   | { readonly type: "extension/upserted"; readonly extension: ExtensionEntity; readonly order: EventOrder }
   | { readonly type: "compaction/upserted"; readonly compaction: CompactionEntity; readonly order: EventOrder }
+  | { readonly type: "branch-summary/upserted"; readonly branchSummary: BranchSummaryEntity; readonly order: EventOrder }
   | { readonly type: "turn/settled"; readonly turnId: TurnId; readonly runId: RunId }
   | { readonly type: "run/settled"; readonly runId: RunId; readonly order: EventOrder }
   | { readonly type: "recovery/completed"; readonly notice: RecoveryNotice; readonly order: EventOrder }
@@ -111,6 +114,7 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   terminals: new Map(),
   extensions: new Map(),
   compactions: new Map(),
+  branchSummaries: new Map(),
   turnRuns: new Map(),
   runUsages: new Map(),
   cacheTrail: CacheMisses.empty,
@@ -221,6 +225,14 @@ export function reduceSessionWorkspace(
       const transcript = exists ? state.transcript : [...state.transcript, { type: "compaction" as const, entryId: action.compaction.entryId, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order));
       return { ...state, compactions, transcript };
+    }
+    case "branch-summary/upserted": {
+      const branchSummaries = new Map(state.branchSummaries);
+      const exists = branchSummaries.has(action.branchSummary.messageId);
+      branchSummaries.set(action.branchSummary.messageId, action.branchSummary);
+      const transcript = exists ? state.transcript : [...state.transcript, { type: "branchSummary" as const, messageId: action.branchSummary.messageId, order: action.order }]
+        .sort((left, right) => Ordering.compare(left.order, right.order));
+      return { ...state, branchSummaries, transcript };
     }
     case "turn/settled": {
       if (state.turnRuns.has(action.turnId)) return state;

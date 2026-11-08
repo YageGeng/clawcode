@@ -200,7 +200,8 @@ impl ApplicationFactory {
             .max_turns(snapshot.kernel.max_turns)
             .when_busy(snapshot.kernel.when_busy.into())
             .subagent_reply_as(snapshot.subagent.reply_as.into())
-            .compaction_policy(snapshot.compaction)
+            .compaction_policy(snapshot.compaction.clone())
+            .branch_summary(snapshot.branch_summary)
             .retry_policy(snapshot.retry.model_policy())
             .provider_retry_delay_limit_ms(
                 snapshot.retry.provider.max_retry_delay_ms,

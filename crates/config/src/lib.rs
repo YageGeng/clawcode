@@ -19,8 +19,8 @@ pub mod tools;
 pub use app::{AppSectionConfig, RecoveryConfig};
 pub use approval::{ApprovalMode, AskForApproval, GranularApprovalConfig};
 pub use config::{
-    AppConfig, CompactionConfig, ConfigValidationError,
-    SessionPersistenceConfig,
+    AppConfig, BranchSummaryConfig, CompactionConfig, CompactionModelOverride,
+    ConfigValidationError, SessionPersistenceConfig,
 };
 pub use extensions::{DEFAULT_EXTENSION_ID, ExtensionsConfig};
 pub use hook::{HookEventsToml, HookHandlerConfig, HooksFile, MatcherGroup};

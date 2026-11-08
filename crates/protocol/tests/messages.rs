@@ -181,3 +181,32 @@ fn old_bash_message_defaults_missing_cwd_and_signal_to_none() {
     assert!(json.get("cwd").is_none());
     assert!(json["result"].get("signal").is_none());
 }
+
+/// A branch summary round-trips with camelCase fields and wraps itself like pi.
+#[test]
+fn branch_summary_round_trips_and_wraps_model_text() {
+    let branch = protocol::BranchSummaryMessage::builder()
+        .entry_id(protocol::EntryId::try_from("entry-7").expect("entry id"))
+        .from_id("root".to_string())
+        .summary("explored option A".to_string())
+        .read_files(vec!["a.rs".to_string()])
+        .build();
+    let content = MessageContent::BranchSummary {
+        branch: branch.clone(),
+    };
+
+    let value = serde_json::to_value(&content).expect("serialize");
+    assert_eq!(value["type"], "branch_summary");
+    assert_eq!(value["fromId"], "root");
+    assert_eq!(value["readFiles"], serde_json::json!(["a.rs"]));
+    assert_eq!(
+        serde_json::from_value::<MessageContent>(value).expect("deserialize"),
+        content
+    );
+    assert_eq!(content.role(), None);
+    assert_eq!(content.text_content().as_deref(), Some("explored option A"));
+    assert_eq!(
+        branch.model_text(),
+        "The following is a summary of a branch that this conversation came back from:\n\n<summary>\nexplored option A</summary>"
+    );
+}

@@ -14,6 +14,6 @@ pub use runtime::{
     AdmissionTicket, AnswerOutcome, ContextUsageEstimate, InsertionNotice,
     InsertionReceiver, Kernel, KernelError, KernelFactory, PromptOutcome,
     PromptRequest, RunSpan, SubmissionAnswer, SubmitRequest, TraceOrigin,
-    WhenBusy,
+    TreeNavigationRequest, WhenBusy,
 };
 pub use sink::{ChannelEventSink, EventSink, SessionEventSinks, SinkError};

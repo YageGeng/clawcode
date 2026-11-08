@@ -294,6 +294,13 @@ export type CompactionEntity = Readonly<{
   endedAtMs: TimestampMs;
 }>;
 
+/** Summary of an abandoned conversation branch, replayed where it enters context. */
+export type BranchSummaryEntity = Readonly<{
+  messageId: MessageId;
+  summary: string;
+  timestampMs: TimestampMs;
+}>;
+
 export type MessageEntity = Readonly<{
   messageId: MessageId;
   turnId: TurnId;
@@ -625,6 +632,7 @@ export type TranscriptEntry =
   | Readonly<{ type: "tool"; toolCallId: ToolCallId; order: EventOrder }>
   | Readonly<{ type: "extension"; extensionEventId: string; order: EventOrder }>
   | Readonly<{ type: "compaction"; entryId: EntryId; order: EventOrder }>
+  | Readonly<{ type: "branchSummary"; messageId: MessageId; order: EventOrder }>
   | Readonly<{ type: "agent_usage"; runId: RunId; order: EventOrder }>
   | Readonly<{ type: "recovery"; notice: RecoveryNotice; order: EventOrder }>;
 
@@ -637,6 +645,7 @@ export const TranscriptRowKeys = {
   tool: (toolCallId: ToolCallId) => `tool:${toolCallId}`,
   extension: (extensionEventId: string) => `extension:${extensionEventId}`,
   compaction: (entryId: EntryId) => `compaction:${entryId}`,
+  branchSummary: (messageId: MessageId) => `branchSummary:${messageId}`,
 
   /** Returns the key one row renders under; usage and recovery rows have no Tree node. */
   of(row: TranscriptEntry): string | undefined {
@@ -645,6 +654,7 @@ export const TranscriptRowKeys = {
       case "tool": return TranscriptRowKeys.tool(row.toolCallId);
       case "extension": return TranscriptRowKeys.extension(row.extensionEventId);
       case "compaction": return TranscriptRowKeys.compaction(row.entryId);
+      case "branchSummary": return TranscriptRowKeys.branchSummary(row.messageId);
       default: return undefined;
     }
   }

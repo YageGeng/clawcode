@@ -3,12 +3,127 @@ use std::collections::{HashMap, HashSet};
 use protocol::{
     AgentMessage, AgentOutcome, CompactionData, CompactionResult, LaneId,
     MessageContent, MessageId, MessageIdentity, MessageTiming, SessionId,
-    SessionMode, TurnRecord,
+    SessionMode, TurnId, TurnRecord,
 };
-use store::{EntryKind, RecordKind, SessionStore};
+use store::{EntryKind, RecordKind, SessionEntry, SessionStore};
 
 use crate::runtime::plan::{ModeChange, ModeNote, ModeNotes};
 use crate::runtime::{Kernel, KernelError};
+
+/// Summary entries projected into the messages they contribute to model context.
+pub(in crate::runtime) trait SummaryEntry {
+    /// Returns a Compaction entry's checkpoint message and its retained tail.
+    fn compaction_checkpoint(
+        &self,
+    ) -> Result<(AgentMessage, Vec<AgentMessage>), KernelError>;
+
+    /// Returns a BranchSummary entry as the message pi places in context.
+    fn branch_summary_message(&self) -> Result<AgentMessage, KernelError>;
+}
+
+/// Persisted branch-summary fields read back into model context.
+#[derive(serde::Deserialize, typed_builder::TypedBuilder)]
+#[serde(rename_all = "camelCase")]
+struct BranchSummaryPayload {
+    // Tolerated when absent so a session with a hand-written or older entry
+    // still loads; the summary alone drives model context.
+    #[serde(default)]
+    #[builder(default)]
+    from_id: String,
+    summary: String,
+    #[serde(default)]
+    #[builder(default)]
+    details: Option<serde_json::Value>,
+    #[serde(default)]
+    from_hook: bool,
+}
+
+impl SummaryEntry for SessionEntry {
+    fn compaction_checkpoint(
+        &self,
+    ) -> Result<(AgentMessage, Vec<AgentMessage>), KernelError> {
+        let data: CompactionData = serde_json::from_value(
+            serde_json::Value::Object(self.payload.clone()),
+        )?;
+        let details = data.details.ok_or_else(|| {
+            KernelError::Protocol("compaction details are required".to_string())
+        })?;
+        let summary_message = AgentMessage {
+            identity: MessageIdentity {
+                message_id: MessageId::try_from(format!(
+                    "compaction-summary-{}",
+                    self.id
+                ))
+                .map_err(|error| KernelError::Protocol(error.to_string()))?,
+                turn_id: details.turn_id,
+            },
+            timing: MessageTiming::try_from((
+                details.started_at_ms,
+                details.started_at_ms,
+                details.ended_at_ms,
+            ))
+            .map_err(|error| KernelError::Protocol(error.to_string()))?,
+            content: MessageContent::CompactionSummary {
+                compaction: protocol::CompactionSummaryMessage::builder()
+                    .entry_id(self.id.clone())
+                    .summary(data.summary)
+                    .tokens_before(data.tokens_before)
+                    .read_files(details.read_files)
+                    .modified_files(details.modified_files)
+                    .build(),
+            },
+        };
+        Ok((summary_message, data.retained_tail))
+    }
+
+    fn branch_summary_message(&self) -> Result<AgentMessage, KernelError> {
+        let payload: BranchSummaryPayload = serde_json::from_value(
+            serde_json::Value::Object(self.payload.clone()),
+        )?;
+        // Only kernel-generated summaries carry pi's file lists; extension
+        // details have an arbitrary shape and older entries have none.
+        let files = |field: &str| -> Vec<String> {
+            payload
+                .details
+                .as_ref()
+                .filter(|_| !payload.from_hook)
+                .and_then(|details| details.get(field))
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<String>>(value.clone()).ok()
+                })
+                .unwrap_or_default()
+        };
+        let read_files = files("readFiles");
+        let modified_files = files("modifiedFiles");
+        // Branch summaries belong to no Turn, so the entry names both ids.
+        let id = format!("branch-summary-{}", self.id);
+        Ok(AgentMessage {
+            identity: MessageIdentity {
+                message_id: MessageId::try_from(id.clone()).map_err(
+                    |error| KernelError::Protocol(error.to_string()),
+                )?,
+                turn_id: TurnId::try_from(id).map_err(|error| {
+                    KernelError::Protocol(error.to_string())
+                })?,
+            },
+            timing: MessageTiming::try_from((
+                self.timestamp_ms,
+                self.timestamp_ms,
+                self.timestamp_ms,
+            ))
+            .map_err(|error| KernelError::Protocol(error.to_string()))?,
+            content: MessageContent::BranchSummary {
+                branch: protocol::BranchSummaryMessage::builder()
+                    .entry_id(self.id.clone())
+                    .from_id(payload.from_id)
+                    .summary(payload.summary)
+                    .read_files(read_files)
+                    .modified_files(modified_files)
+                    .build(),
+            },
+        })
+    }
+}
 
 /// Model context rebuilt from a branch, with notes still waiting for tool results.
 pub(in crate::runtime) struct RebuiltHistory {
@@ -115,7 +230,8 @@ impl Kernel {
                         | MessageContent::BashExecution { .. }
                         | MessageContent::Extension { .. }
                         | MessageContent::SlashCommand { .. }
-                        | MessageContent::CompactionSummary { .. } => None,
+                        | MessageContent::CompactionSummary { .. }
+                        | MessageContent::BranchSummary { .. } => None,
                     };
                     replay.push((
                         sequence,
@@ -151,10 +267,19 @@ impl Kernel {
                         },
                     ));
                 }
+                // Clients show the branch summary where it enters context.
+                EntryKind::BranchSummary => {
+                    replay.push((
+                        sequence,
+                        protocol::SessionReplayItem::Message {
+                            message: entry.branch_summary_message()?,
+                            context_window: None,
+                        },
+                    ));
+                }
                 EntryKind::ModelChange
                 | EntryKind::ThinkingLevelChange
                 | EntryKind::ActiveToolsChange
-                | EntryKind::BranchSummary
                 | EntryKind::Custom => {}
             }
         }
@@ -283,49 +408,13 @@ impl Kernel {
                 }
                 EntryKind::Compaction => {
                     let compaction_entry_id = entry.id.clone();
-                    let data: CompactionData = serde_json::from_value(
-                        serde_json::Value::Object(entry.payload),
-                    )?;
-                    let details = data.details.ok_or_else(|| {
-                        KernelError::Protocol(
-                            "compaction details are required".to_string(),
-                        )
-                    })?;
-                    let summary_message = AgentMessage {
-                        identity: MessageIdentity {
-                            message_id: MessageId::try_from(format!(
-                                "compaction-summary-{}",
-                                compaction_entry_id
-                            ))
-                            .map_err(|error| {
-                                KernelError::Protocol(error.to_string())
-                            })?,
-                            turn_id: details.turn_id,
-                        },
-                        timing: MessageTiming::try_from((
-                            details.started_at_ms,
-                            details.started_at_ms,
-                            details.ended_at_ms,
-                        ))
-                        .map_err(|error| {
-                            KernelError::Protocol(error.to_string())
-                        })?,
-                        content: MessageContent::CompactionSummary {
-                            compaction:
-                                protocol::CompactionSummaryMessage::builder()
-                                    .entry_id(compaction_entry_id.clone())
-                                    .summary(data.summary)
-                                    .tokens_before(data.tokens_before)
-                                    .read_files(details.read_files)
-                                    .modified_files(details.modified_files)
-                                    .build(),
-                        },
-                    };
+                    let (summary_message, retained_tail) =
+                        entry.compaction_checkpoint()?;
                     history = Vec::with_capacity(
-                        data.retained_tail.len().saturating_add(2),
+                        retained_tail.len().saturating_add(2),
                     );
                     history.push(summary_message);
-                    history.extend(data.retained_tail);
+                    history.extend(retained_tail);
                     notes.clear();
                     ModeNote::new(mode, delegated).after_compaction(
                         &mut history,
@@ -345,10 +434,13 @@ impl Kernel {
                         notes.place(&mut history, note);
                     }
                 }
+                // Pi places a branch summary in context where it was attached.
+                EntryKind::BranchSummary => {
+                    notes.push(&mut history, entry.branch_summary_message()?);
+                }
                 EntryKind::ModelChange
                 | EntryKind::ThinkingLevelChange
-                | EntryKind::ActiveToolsChange
-                | EntryKind::BranchSummary => {}
+                | EntryKind::ActiveToolsChange => {}
             }
         }
         Ok(RebuiltHistory {
