@@ -105,24 +105,28 @@ impl Kernel {
     ) -> Result<SlashCommandOutcome, KernelError> {
         match command {
             BuiltinSlashCommand::Compact => {
-                self.perform_compaction(
-                    super::super::CompactionExecution::builder()
-                        .session_id(execution.session_id)
-                        .session(execution.session)
-                        .sink(Arc::clone(&execution.sink))
-                        .reason(protocol::CompactionReason::Manual)
-                        .cancellation(cancellation)
-                        .identity(Some(super::super::CompactionIdentity::new(
+                // `/compact` is this slash command's own Run, already inside its span.
+                Box::pin(
+                    self.compact_with_identity(
+                        super::super::CompactionExecution::builder()
+                            .session_id(execution.session_id)
+                            .session(execution.session)
+                            .sink(Arc::clone(&execution.sink))
+                            .reason(protocol::CompactionReason::Manual)
+                            .cancellation(cancellation)
+                            .instruction(
+                                (!execution.invocation.arguments.is_empty())
+                                    .then(|| {
+                                        execution.invocation.arguments.clone()
+                                    }),
+                            )
+                            .build(),
+                        super::super::CompactionIdentity::new(
                             execution.run_id.clone(),
                             execution.turn_id.clone(),
                             execution.started_at,
-                        )))
-                        .instruction(
-                            (!execution.invocation.arguments.is_empty()).then(
-                                || execution.invocation.arguments.clone(),
-                            ),
-                        )
-                        .build(),
+                        ),
+                    ),
                 )
                 .await?;
                 // The persisted compaction card is the single success result;

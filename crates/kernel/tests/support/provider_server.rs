@@ -118,6 +118,16 @@ impl Server {
 
     /// Exercises the production HTTP transport against a finite local response sequence.
     pub async fn start(replies: Vec<(u16, String)>) -> Self {
+        Self::start_with_header(replies, None).await
+    }
+
+    /// Like `start`, adding one raw header line such as `x-request-id: id` to every reply.
+    pub async fn start_with_header(
+        replies: Vec<(u16, String)>,
+        header: Option<&'static str>,
+    ) -> Self {
+        let extra =
+            header.map_or_else(String::new, |line| format!("{line}\r\n"));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("valid synthetic test state");
@@ -181,7 +191,7 @@ impl Server {
                     }
                 }
                 let response = format!(
-                    "HTTP/1.1 {status} response\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} response\r\nContent-Type: text/event-stream\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket

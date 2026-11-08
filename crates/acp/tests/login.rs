@@ -262,7 +262,6 @@ fn server(
     );
     let acp = Arc::new(AcpServerFactory::new(
         Arc::clone(&kernel),
-        Arc::new(NanoidIdGenerator),
         NonZeroUsize::new(128).expect("positive batch size"),
     ));
     (kernel, acp)

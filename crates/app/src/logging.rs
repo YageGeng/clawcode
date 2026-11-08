@@ -1,18 +1,10 @@
 //! Process-wide tracing subscriber construction.
 
-mod format;
-mod telemetry;
-mod trace;
+use std::io::IsTerminal;
 
 use config::LoggingConfig;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::SubscriberExt;
-
-use self::format::CompactEventFormat;
-use self::telemetry::ModelTracingLayer;
-use self::trace::TraceContextLayer;
 
 const RUST_LOG_ENV: &str = "RUST_LOG";
 
@@ -38,7 +30,7 @@ pub struct LoggingFactory {
 }
 
 impl LoggingFactory {
-    /// Parses an explicit tracing filter and retains its ANSI color policy.
+    /// Parses an explicit tracing filter; `color: false` turns ANSI color off.
     pub fn new(
         filter: impl AsRef<str>,
         color: bool,
@@ -49,14 +41,14 @@ impl LoggingFactory {
         })
     }
 
-    /// Reads `RUST_LOG` once while retaining the immutable TOML color policy.
+    /// Reads `RUST_LOG` once; color is allowed only when stderr is a terminal,
+    /// so redirected logs stay free of ANSI escape codes.
     pub fn from_config(config: &LoggingConfig) -> Result<Self, LoggingError> {
+        let color = config.color && std::io::stderr().is_terminal();
         match std::env::var(RUST_LOG_ENV) {
-            Ok(filter) if !filter.trim().is_empty() => {
-                Self::new(filter, config.color)
-            }
+            Ok(filter) if !filter.trim().is_empty() => Self::new(filter, color),
             Ok(_) | Err(std::env::VarError::NotPresent) => {
-                Self::new(&config.filter, config.color)
+                Self::new(&config.filter, color)
             }
             Err(std::env::VarError::NotUnicode(_)) => {
                 Err(LoggingError::InvalidEnvironment)
@@ -64,24 +56,21 @@ impl LoggingFactory {
         }
     }
 
-    /// Builds a filtered formatter with the supplied destination writer.
+    /// Builds tracing's default formatter with the filter and destination writer.
     pub fn build<W>(self, writer: W) -> impl tracing::Subscriber + Send + Sync
     where
         W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
     {
         let Self { filter, color } = self;
-        let formatter = tracing_subscriber::fmt::layer()
-            // The custom formatter owns timestamps; avoid timing every span enter/exit.
-            .without_time()
-            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-            .event_format(CompactEventFormat::default())
-            .with_writer(writer)
-            .with_ansi(color);
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(TraceContextLayer)
-            .with(ModelTracingLayer)
-            .with(formatter)
+        let builder = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer);
+        // tracing colors output unless `NO_COLOR` is set; the setting can only turn it off.
+        if color {
+            builder.finish()
+        } else {
+            builder.with_ansi(false).finish()
+        }
     }
 
     /// Installs a stderr subscriber so stdio stdout remains valid ACP framing.

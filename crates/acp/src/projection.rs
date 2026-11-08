@@ -1024,14 +1024,13 @@ impl EventSink for ProjectionSink {
                 );
                 SinkError::Consumer(error.to_string())
             })?;
-        if let (Some(run_id), Some(operation_phase)) =
-            (&group.run_id, group.operation_phase)
+        if group.run_id.is_some()
+            && let Some(operation_phase) = group.operation_phase
         {
             tracing::info!(
-                "recorded ACP Operation {:?} for Session {}, Run {}, sequence {}",
+                "recorded ACP Operation {:?} for Session {}, sequence {}",
                 operation_phase,
                 self.session_id,
-                run_id,
                 sequence
             );
         }

@@ -5,14 +5,15 @@ use ::tools::{AgentTool, ToolError, ToolExecutionContext};
 use async_trait::async_trait;
 use protocol::{
     ContentBlock, MessageId, SessionId, SessionOwnership, SessionTitle,
-    ToolCall, ToolDefinition, ToolResult, ToolResultDetails,
+    ToolCall, ToolDefinition, ToolResult, ToolResultDetails, TraceId,
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::subagent::SubagentError;
 use crate::runtime::{
-    AnswerOutcome, Kernel, KernelError, Session, SubmitRequest, WhenBusy,
+    AnswerOutcome, Kernel, KernelError, Session, SubmitRequest, TraceOrigin,
+    WhenBusy,
 };
 
 /// Reporters and answer deduplication owned by one live Session.
@@ -113,6 +114,8 @@ struct Reporter {
     message: Vec<ContentBlock>,
     when_busy: WhenBusy,
     background: Arc<SessionBackgroundWork>,
+    /// Trace of the owner's Run that started this delivery; the child links to it.
+    parent_trace: TraceId,
 }
 
 impl Reporter {
@@ -126,9 +129,10 @@ impl Reporter {
             );
             return;
         }
+        // This task runs outside any Run, so the line names both ends of the link.
         tracing::info!(
-            "started subagent report delivery {} -> {}",
-            self.owner,
+            "started subagent delivery from trace {} to session {}",
+            self.parent_trace,
             self.child
         );
         let answer = match Box::pin(
@@ -137,6 +141,7 @@ impl Reporter {
                     .session_id(self.child.clone())
                     .content(self.message)
                     .when_busy(self.when_busy)
+                    .trace(TraceOrigin::LinkFrom(self.parent_trace.clone()))
                     .build(),
             ),
         )
@@ -503,6 +508,7 @@ impl BackgroundAction<'_> {
                 .message(vec![ContentBlock::Text { text: body }])
                 .when_busy(when_busy)
                 .background(Arc::clone(&session.background))
+                .parent_trace(context.trace_id.clone())
                 .build(),
         )?;
         Ok((reply, Some(child)))

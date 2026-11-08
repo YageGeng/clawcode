@@ -99,9 +99,12 @@ impl RunSettlement<'_> {
                 &extension_context,
             )
             .await;
-        if let Some(reason) = self.auto_compaction_reason {
-            // Pi compacts after AgentEnd and before the final settled event.
-            self.kernel
+        // Pi compacts after AgentEnd and before the final settled event. The
+        // Run has already answered, so a failed compaction, which its own
+        // lifecycle reports, must not leave the Run without its end.
+        if let Some(reason) = self.auto_compaction_reason
+            && let Err(error) = self
+                .kernel
                 .perform_compaction(
                     CompactionExecution::builder()
                         .session_id(self.session_id)
@@ -111,7 +114,13 @@ impl RunSettlement<'_> {
                         .cancellation(self.cancellation)
                         .build(),
                 )
-                .await?;
+                .await
+        {
+            tracing::warn!(
+                "settling Kernel Run without its {:?} compaction: {}",
+                reason,
+                error
+            );
         }
         // AgentSettled maps to ACP Idle, so every AgentEnd and compaction write
         // must be durable before that externally visible transition.

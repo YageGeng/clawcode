@@ -379,19 +379,43 @@ WebUI 在输入框上方的面板中显示这两者；发布它们的那次运�
 
 ## 日志
 
-rig 的 model span 关闭时会向 stderr 写入一条本地 `Rig telemetry closed` 摘要。
-摘要继承请求的 Trace ID，并包含耗时毫秒数、provider/请求/响应的模型标识、可用的
-请求 ID、流式模式，以及上游报告的输入/输出/缓存/推理 token 计数。缺失的计数直接
-省略，报告为 0 的保持为 0。span 关闭本身不代表成功，结果请结合关联的 provider
-完成/错误/取消日志判断。
+日志以 tracing 默认格式写入 stderr，每个事件一行：
 
-现有的 `[logging] filter` 与覆盖用的 `RUST_LOG` 控制这些摘要。例如
-`info,rig::completions=off,rig::modalities=off` 关闭 rig 原生摘要；
-`warn,rig::completions=info` 在保留其他警告的同时开启完成摘要。需要 Trace 关联时
-请保持应用自身的 Trace span 开启。本实现不安装 OpenTelemetry collector、外部
-exporter 或额外运行时依赖。即使 SDK 调用方开启内容遥测，Prompt/响应正文、System
-指令、认证头和原生/加密载荷都不会被记录。其他应用 span 不会因此新增生命周期日志行。
-该排除只适用于 rig 摘要；既有 ACP DEBUG 参数日志仍遵循其独立的递归凭据脱敏策略。
+```text
+2026-11-07T05:51:28.651234Z  INFO run{trace_id=trace-HJWZ… run_id=run-umuQ…}: kernel::runtime::tools::batch: started Tool call call_45… (bash)
+```
+
+`run{…}` span 标明这一行所属的 Run，以最内层的 `run{…}` 为准：循环内压缩在同一个
+trace 下追加 `:run{run_id=…}`，前台子代理追加自己的 `run{trace_id=… run_id=…}`。一个 trace 就是一个顶层 Kernel Run，即一次完整的
+agent loop：包括它处理的排队消息、它的每个 Turn、模型调用、工具调用和循环内的
+压缩。按一个 trace id 过滤，就能看到整个循环。前台子代理的 Run 沿用父 trace，
+使用自己的 run id；后台子代理使用新 trace，其起始行写明父 trace
+（`as background subagent linked to trace …`）。独立压缩、用户 `!` 命令、直接
+斜杠命令和 Tree 分支摘要各自是独立的 Run。不在任何 Run 内的行没有 `run{…}` span：ACP
+请求、prompt 准入、会话 watcher，以及权限请求与 elicitation 的回复。Run 的会话
+id 只写在它的起始行，不在每一行重复。
+
+ACP 请求不生成 trace。只读查询（`session/list`，以及 Tree、排队消息、运行状态、
+技能列表、MCP 状态/prompt/资源/补全这些扩展方法）只在 DEBUG 记录；其他请求在
+完成时写一行 INFO，失败写 WARN。`session/prompt` 在响应发出（消息插入）时完成，
+而不是等它的 Run 结束。
+
+每次模型调用记一对 `started`/`completed Provider request`。完成行附带耗时、
+提供方报告的 token 数（未报告的不写，报告为 0 的照写 0），以及提供方返回的响应
+id 与模型。失败行在错误带有提供方请求 id 时一并写出。提示与响应正文、认证头和
+原生载荷始终不记录。
+
+`[logging] color` 只在 stderr 是终端时允许 tracing 输出 ANSI 颜色，重定向的日志
+保持纯文本；`NO_COLOR` 为非空值时同样关闭颜色。每一行都显示事件的 target（如
+`rig::completions`）。`[logging] filter` 与覆盖它的 `RUST_LOG` 决定输出哪些日志；
+`acp::trace=debug` 会输出 ACP 请求的 DEBUG 行（包括只读查询）以及完整请求参数，
+参数中的凭据字段会被递归脱敏。本实现不安装 OpenTelemetry exporter。
+
+Run span 是 target 为 `kernel::runtime::run::trace` 的 ERROR 级 span，只要过滤器
+以任一级别启用 `kernel`（该前缀覆盖这个 target），Run 内的每一行就保留 `run{…}`
+span。关闭 `kernel` 的过滤器（如 `info,kernel=off`），或只列出其他 target 而不写
+全局级别的过滤器（如 `acp=info`），也会丢弃 Run span，Run 内其他 target 写出的行
+将不再带有它。
 
 ## 存储
 

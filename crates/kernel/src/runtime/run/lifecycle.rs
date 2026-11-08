@@ -518,11 +518,7 @@ impl Drop for ActiveRunLease {
                 ),
             },
         )) {
-            tracing::warn!(
-                "failed to release submission waiters for run {}: {}",
-                self.run_id,
-                error
-            );
+            tracing::warn!("failed to release submission waiters: {}", error);
         }
         if let Ok(mut active_run) = self.execution.active_run.lock()
             && active_run

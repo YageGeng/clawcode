@@ -25,3 +25,7 @@ pub mod completion {
 pub mod streaming {
     pub use rig_core::streaming::{Item, StreamEvent};
 }
+
+/// Failure of one upstream call, read for its request id before it becomes a
+/// `ModelFailure`.
+pub use rig_core::ProviderError;

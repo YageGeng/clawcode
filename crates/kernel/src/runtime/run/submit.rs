@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use protocol::{
-    ContentBlock, IdKind, RunInput, RunRequest, SessionId, TraceId,
-};
+use protocol::{ContentBlock, RunInput, RunRequest, SessionId};
 use tokio_util::sync::CancellationToken;
 
 use super::RunInvocation;
 use super::insertion::{SubmissionAnswer, SubmissionReceipt};
 use super::queue::WhenBusy;
+use super::trace::TraceOrigin;
 use crate::EventSink;
 use crate::runtime::{Kernel, KernelError};
 
@@ -23,9 +22,9 @@ pub struct SubmitRequest {
     /// Parent Turn token; absent at a background boundary.
     #[builder(default)]
     pub cancellation: Option<CancellationToken>,
-    /// Calling tool's Trace, or a new Trace when absent.
+    /// Where a new Run's trace comes from; ignored when the input joins a running Run.
     #[builder(default)]
-    pub trace_id: Option<TraceId>,
+    pub trace: TraceOrigin,
 }
 
 impl Kernel {
@@ -59,11 +58,6 @@ impl Kernel {
         request: SubmitRequest,
     ) -> Result<SubmissionAnswer, KernelError> {
         let session = self.session(&request.session_id)?;
-        let trace_id = match request.trace_id {
-            Some(id) => id,
-            None => TraceId::try_from(self.id_generator.next(IdKind::Trace))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?,
-        };
         let cancellation = request.cancellation.clone().unwrap_or_default();
         let (receipt, mut answer) = SubmissionReceipt::new();
         let queued = self
@@ -92,7 +86,7 @@ impl Kernel {
                         self.session_sink(&request.session_id),
                         RunInvocation::builder()
                             .input_source(protocol::InputSource::Extension)
-                            .trace_id(trace_id.clone())
+                            .trace(request.trace.clone())
                             .cancellation_parent(request.cancellation.clone())
                             .build(),
                     ),

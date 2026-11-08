@@ -35,7 +35,7 @@ use protocol::{
     AgentEvent, AgentEventPayload, CompactionPolicy, CompactionReason,
     EventMetadata, ExtensionFlagDefinition, IdGenerator, IdKind,
     McpSessionSnapshot, MessageId, QueueId, RetryPolicy, RunRequest, RunResult,
-    SessionId, TimestampMs, TraceId, TurnId,
+    SessionId, TimestampMs, TurnId,
 };
 use store::{Clock, RecordKind, StoreFactory};
 use tokio::sync::broadcast;
@@ -51,6 +51,7 @@ pub use run::insertion::{
 use run::queue::PendingQueue;
 pub use run::queue::WhenBusy;
 pub use run::submit::SubmitRequest;
+pub use run::trace::{RunSpan, TraceOrigin};
 use session::transcript::SessionTranscript;
 use tools::SessionToolState;
 
@@ -339,20 +340,17 @@ impl Kernel {
         request: RunRequest,
         sink: Arc<dyn EventSink>,
     ) -> Result<RunResult, KernelError> {
-        let trace_id = TraceId::try_from(self.id_generator.next(IdKind::Trace))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        self.run_traced(request, sink, trace_id, None).await
+        self.run_with_insertion(request, sink, None).await
     }
 
-    /// Executes one run under an ingress Trace that remains stable through Tool calls.
+    /// Executes one run as a top-level Run with a new trace and reports its insertion.
     ///
     /// `insertion` resolves once the user message is inserted, or with the error that ended the
     /// Run first, so protocol adapters can accept a prompt exactly at insertion.
-    pub async fn run_traced(
+    pub async fn run_with_insertion(
         &self,
         request: RunRequest,
         sink: Arc<dyn EventSink>,
-        trace_id: TraceId,
         insertion: Option<Arc<InsertionNotice>>,
     ) -> Result<RunResult, KernelError> {
         self.run_with_source(
@@ -360,7 +358,6 @@ impl Kernel {
             sink,
             RunInvocation::builder()
                 .input_source(protocol::InputSource::Rpc)
-                .trace_id(trace_id)
                 .insertion(insertion)
                 .build(),
         )

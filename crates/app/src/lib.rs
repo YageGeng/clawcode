@@ -12,7 +12,7 @@ use kernel::{
 };
 use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
 use prompt::FilesystemPromptFactory;
-use protocol::{IdGenerator, ProductIdentity};
+use protocol::ProductIdentity;
 use skill::FilesystemSkillFactory;
 use store::{FileSecretStore, JsonlStoreFactory, SystemClock};
 use tools::BuiltinToolFactory;
@@ -75,8 +75,6 @@ pub enum ApplicationError {
 pub struct Application {
     /// Session-owning agent kernel.
     pub kernel: Arc<Kernel>,
-    /// Shared identifier policy used for independent ACP operation traces.
-    pub id_generator: Arc<dyn IdGenerator>,
     /// Immutable browser bootstrap response captured from startup config.
     pub ui_bootstrap: UiBootstrapResponse,
 }
@@ -179,7 +177,6 @@ impl ApplicationFactory {
             None
         };
         let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
-        let id_generator: Arc<dyn IdGenerator> = Arc::new(NanoidIdGenerator);
         let kernel = KernelFactory::builder()
             .model_factory(model_factory)
             .tool_factory(Arc::new(builtin_tools))
@@ -189,7 +186,7 @@ impl ApplicationFactory {
             )))
             .extension_factory(Arc::new(extension_factory))
             .clock(clock)
-            .id_generator(Arc::clone(&id_generator))
+            .id_generator(Arc::new(NanoidIdGenerator))
             .prompt_factory(Arc::new(FilesystemPromptFactory::new(
                 config_root,
                 snapshot.prompt.clone(),
@@ -212,7 +209,6 @@ impl ApplicationFactory {
             .build()?;
         Ok(Application {
             kernel: Arc::new(kernel),
-            id_generator,
             ui_bootstrap,
         })
     }

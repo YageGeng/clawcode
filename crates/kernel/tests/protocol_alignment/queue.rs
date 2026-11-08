@@ -1,5 +1,5 @@
 use kernel::{KernelError, SessionEventSinks};
-use protocol::{QueueId, QueueKind, RunRequest, TraceId};
+use protocol::{QueueId, QueueKind, RunRequest};
 
 use super::fixture::{KernelPolicy, Route, TestKernel};
 
@@ -29,13 +29,12 @@ async fn enqueue_after_run_settles_is_rejected() {
     let test = TestKernel::new(|_| Route::answer("done"));
     let session = test.create("queue-closed").await;
     test.kernel
-        .run_traced(
+        .run_with_insertion(
             RunRequest {
                 session_id: session.clone(),
                 input: "hello".into(),
             },
             test.sinks.sink(&session),
-            TraceId::try_from("trace-queue").unwrap(),
             None,
         )
         .await
@@ -67,13 +66,12 @@ async fn admission_order_and_stop_preserve_each_input_outcome() {
     let first = session.clone();
     let run = tokio::spawn(async move {
         kernel
-            .run_traced(
+            .run_with_insertion(
                 RunRequest {
                     session_id: first,
                     input: "hold".into(),
                 },
                 sink,
-                TraceId::try_from("trace-hold").unwrap(),
                 None,
             )
             .await
@@ -91,7 +89,6 @@ async fn admission_order_and_stop_preserve_each_input_outcome() {
                 input: input.into(),
             })
             .sink(test.sinks.sink(&session))
-            .trace_id(TraceId::try_from("trace-order").unwrap())
             .ticket(ticket)
             .insertion(notice)
             .build()
@@ -143,13 +140,12 @@ async fn promotion_is_one_durable_move() {
     let sink = test.sinks.sink(&session);
     let run = tokio::spawn(async move {
         kernel
-            .run_traced(
+            .run_with_insertion(
                 RunRequest {
                     session_id: first,
                     input: "hold".into(),
                 },
                 sink,
-                TraceId::try_from("trace-promote").unwrap(),
                 None,
             )
             .await
@@ -210,14 +206,7 @@ impl TestKernel {
             input: input.into(),
         };
         tokio::spawn(async move {
-            kernel
-                .run_traced(
-                    request,
-                    sink,
-                    TraceId::try_from("trace-queue-test").expect("trace id"),
-                    None,
-                )
-                .await
+            kernel.run_with_insertion(request, sink, None).await
         })
     }
 
@@ -236,9 +225,6 @@ impl TestKernel {
                     input: input.into(),
                 })
                 .sink(self.sinks.sink(session))
-                .trace_id(
-                    TraceId::try_from("trace-prompt-test").expect("trace id"),
-                )
                 .ticket(
                     self.kernel
                         .admission_ticket(session)
@@ -862,13 +848,12 @@ async fn close_waits_for_final_queue_delivery() {
     let id = session.clone();
     let run = tokio::spawn(async move {
         kernel
-            .run_traced(
+            .run_with_insertion(
                 RunRequest {
                     session_id: id,
                     input: "hold".into(),
                 },
                 sink,
-                TraceId::try_from("trace-close").unwrap(),
                 None,
             )
             .await
@@ -954,13 +939,12 @@ async fn failed_message_start_returns_the_claim() {
     let sink_run = Arc::clone(&sink);
     let run = tokio::spawn(async move {
         kernel
-            .run_traced(
+            .run_with_insertion(
                 RunRequest {
                     session_id: id,
                     input: "hold".into(),
                 },
                 sink_run,
-                TraceId::try_from("trace-sink").expect("trace"),
                 None,
             )
             .await

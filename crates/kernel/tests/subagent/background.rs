@@ -190,7 +190,7 @@ async fn background_management_only_reads_ownership_headers() {
 }
 
 /// Routes owner commands through the real background tool and scripts only child inference.
-fn background_test(
+pub(super) fn background_test(
     reply_as: WhenBusy,
     child: impl Fn(&str) -> Route + Send + Sync + 'static,
 ) -> TestKernel {
@@ -232,7 +232,7 @@ fn background_test(
 }
 
 /// Invokes one action and reads the persisted tool reply from its owner transcript.
-async fn invoke(
+pub(super) async fn invoke(
     test: &TestKernel,
     owner: &SessionId,
     arguments: serde_json::Value,

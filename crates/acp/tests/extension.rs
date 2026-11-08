@@ -317,7 +317,6 @@ async fn send_request(
         .connect_with(
             AcpServerFactory::new(
                 kernel,
-                Arc::new(NanoidIdGenerator),
                 NonZeroUsize::new(128).expect("positive batch size"),
             )
             .component(AcpTransportKind::Stdio),
@@ -469,7 +468,6 @@ async fn native_session_delete_is_advertised_and_idempotent() {
         .connect_with(
             AcpServerFactory::new(
                 kernel,
-                Arc::new(NanoidIdGenerator),
                 NonZeroUsize::new(128).expect("positive batch size"),
             )
             .component(AcpTransportKind::Stdio),
@@ -553,7 +551,6 @@ where
         .connect_with(
             AcpServerFactory::new(
                 kernel,
-                Arc::new(NanoidIdGenerator),
                 NonZeroUsize::new(128).expect("positive batch size"),
             )
             .component(AcpTransportKind::Stdio),
@@ -870,7 +867,6 @@ async fn session_activation_publishes_available_commands() {
     let kernel = integration_kernel(state.path());
     let server = AcpServerFactory::new(
         Arc::clone(&kernel),
-        Arc::new(NanoidIdGenerator),
         NonZeroUsize::new(128).expect("positive batch size"),
     )
     .component(AcpTransportKind::Stdio);
@@ -1027,7 +1023,6 @@ async fn slash_command_messages_round_trip_through_acp_replay() {
     let kernel = integration_kernel(state.path());
     let server = AcpServerFactory::new(
         Arc::clone(&kernel),
-        Arc::new(NanoidIdGenerator),
         NonZeroUsize::new(128).expect("positive batch size"),
     )
     .component(AcpTransportKind::Stdio);
@@ -1331,7 +1326,6 @@ async fn assistant_usage_replays_at_run_end() {
     let kernel = integration_kernel(state.path());
     let server = AcpServerFactory::new(
         kernel,
-        Arc::new(NanoidIdGenerator),
         NonZeroUsize::new(128).expect("positive batch size"),
     )
     .component(AcpTransportKind::Stdio);
@@ -1566,7 +1560,6 @@ async fn compaction_card_replays_in_persisted_branch_order() {
     let kernel = integration_kernel(state.path());
     let server = AcpServerFactory::new(
         kernel,
-        Arc::new(NanoidIdGenerator),
         NonZeroUsize::new(128).expect("positive batch size"),
     )
     .component(AcpTransportKind::Stdio);

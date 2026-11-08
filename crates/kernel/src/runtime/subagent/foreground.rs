@@ -8,7 +8,9 @@ use protocol::{
 };
 
 use crate::runtime::subagent::SubagentError;
-use crate::runtime::{AnswerOutcome, Kernel, Session, SubmitRequest, WhenBusy};
+use crate::runtime::{
+    AnswerOutcome, Kernel, Session, SubmitRequest, TraceOrigin, WhenBusy,
+};
 
 /// Delegates one self-contained task while holding its owner's tool invocation open.
 pub(super) struct SubagentTool {
@@ -136,7 +138,7 @@ impl AgentTool for SubagentTool {
                     .content(vec![ContentBlock::Text { text: task.into() }])
                     .when_busy(WhenBusy::FollowUp)
                     .cancellation(Some(context.cancellation.clone()))
-                    .trace_id(Some(context.trace_id.clone()))
+                    .trace(TraceOrigin::Inherit(context.trace_id.clone()))
                     .build(),
             ),
         )

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use protocol::{
     AgentEventPayload, AgentMessage, ContentBlock, MessageContent,
     MessageIdentity, MessageTiming, RunId, RunResult, SessionId, TimestampMs,
-    TraceId, TurnId,
+    TurnId,
 };
 
 use crate::EventSink;
@@ -21,7 +21,6 @@ pub(in crate::runtime) struct SlashCommandExecution<'a> {
     pub(super) session: &'a Arc<Session>,
     pub(super) run_id: &'a RunId,
     pub(super) turn_id: &'a TurnId,
-    pub(super) trace_id: &'a TraceId,
     pub(super) sink: Arc<dyn EventSink>,
     pub(super) started_at: TimestampMs,
     pub(super) invocation: protocol::SlashCommandInvocation,
@@ -156,13 +155,11 @@ impl Kernel {
                     &output_message,
                 )
                 .await?;
+                // No start line precedes this one, so it names the Session.
                 tracing::warn!(
-                    "rejected busy Slash Command /{} for session {}, Run {}, Turn {}, trace {}",
+                    "rejected busy Slash Command /{} for session {}",
                     execution.invocation.name,
-                    execution.session_id,
-                    execution.run_id,
-                    execution.turn_id,
-                    execution.trace_id
+                    execution.session_id
                 );
                 return Ok(Some(RunResult {
                     run_id: execution.run_id.clone(),
@@ -179,12 +176,9 @@ impl Kernel {
             return Err(KernelError::PromptCancelled);
         }
         tracing::info!(
-            "started Slash Command /{} for session {}, Run {}, Turn {}, trace {}",
+            "started Slash Command /{} for session {}",
             execution.invocation.name,
-            execution.session_id,
-            execution.run_id,
-            execution.turn_id,
-            execution.trace_id
+            execution.session_id
         );
         emitter
             .emit_at(
@@ -230,10 +224,8 @@ impl Kernel {
                     );
                 }
                 tracing::warn!(
-                    "failed to persist Slash Command /{} invocation for session {}, Run {}: {}",
+                    "failed to persist Slash Command /{} invocation: {}",
                     execution.invocation.name,
-                    execution.session_id,
-                    execution.run_id,
                     error
                 );
                 return Err(error);
@@ -289,12 +281,8 @@ impl Kernel {
                         }),
                         Err(error) => {
                             tracing::warn!(
-                                "failed Extension Slash Command /{} for session {}, Run {}, Turn {}, trace {}: {}",
+                                "failed Extension Slash Command /{}: {}",
                                 execution.invocation.name,
-                                execution.session_id,
-                                execution.run_id,
-                                execution.turn_id,
-                                execution.trace_id,
                                 error
                             );
                             Ok(protocol::SlashCommandOutcome::Rejected(
@@ -318,12 +306,8 @@ impl Kernel {
             Ok(outcome) => (outcome, false),
             Err(error) => {
                 tracing::warn!(
-                    "failed Slash Command /{} for session {}, Run {}, Turn {}, trace {}: {}",
+                    "failed Slash Command /{}: {}",
                     execution.invocation.name,
-                    execution.session_id,
-                    execution.run_id,
-                    execution.turn_id,
-                    execution.trace_id,
                     error
                 );
                 (
@@ -421,11 +405,8 @@ impl Kernel {
             )
             .await?;
         tracing::info!(
-            "settled Slash Command /{} for session {}, Run {}, Turn {} with status {:?}",
+            "settled Slash Command /{} with status {:?}",
             execution.invocation.name,
-            execution.session_id,
-            execution.run_id,
-            execution.turn_id,
             status
         );
         Ok(Some(RunResult {

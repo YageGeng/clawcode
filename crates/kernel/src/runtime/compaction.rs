@@ -27,7 +27,7 @@ use store::{EntryKind, NewEntry, RecordKind};
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::run::retry::RetryState;
-use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
+use crate::runtime::{EventEmitter, Kernel, KernelError, RunSpan, Session};
 use crate::{EventSink, ModelError};
 
 /// Borrowed execution context shared by manual, threshold, and overflow compaction paths.
@@ -46,9 +46,6 @@ pub(super) struct CompactionExecution<'a> {
     /// Failed or truncated Assistant omitted from recovered active context.
     #[builder(default)]
     excluded_message_id: Option<&'a MessageId>,
-    /// Optional identity supplied by a containing Slash Command operation.
-    #[builder(default)]
-    identity: Option<CompactionIdentity>,
     /// Optional caller-provided model instruction for manual compaction.
     #[builder(default)]
     instruction: Option<String>,
@@ -155,22 +152,70 @@ impl Kernel {
         let session = self.session(session_id)?;
         let _run_guard = session.acquire_operation().await?;
         let cancellation = session.execution.install_cancellation(None)?;
-        self.perform_compaction(
-            CompactionExecution::builder()
-                .session_id(session_id)
-                .session(&session)
-                .sink(sink)
-                .reason(reason)
-                .cancellation(&cancellation)
-                .build(),
-        )
-        .await
+        // A standalone compaction is a top-level Run with a trace of its own.
+        let identity = self.new_compaction_identity()?;
+        self.new_trace_span(&identity.run_id)?
+            .instrument(Box::pin(
+                self.compact_with_identity(
+                    CompactionExecution::builder()
+                        .session_id(session_id)
+                        .session(&session)
+                        .sink(sink)
+                        .reason(reason)
+                        .cancellation(&cancellation)
+                        .build(),
+                    identity,
+                ),
+            ))
+            .await
     }
 
-    /// Performs compaction under the caller-owned session run lock for manual and automatic paths.
+    /// Performs an automatic compaction inside the caller's Run, under the caller-owned run lock.
+    ///
+    /// The compaction mints a Run of its own, so it opens a nested span that
+    /// inherits the caller's trace. Returns `None` when there is nothing to
+    /// compact: usage can exceed the threshold through fixed overhead or a
+    /// recent window that is kept whole, and failing then would fail every
+    /// later prompt too, so the caller continues uncompacted.
     pub(super) async fn perform_compaction(
         &self,
         execution: CompactionExecution<'_>,
+    ) -> Result<Option<CompactionResult>, KernelError> {
+        let identity = self.new_compaction_identity()?;
+        // The compaction body is a large future; keep it off every caller's stack frame.
+        match RunSpan::nested(&identity.run_id)
+            .instrument(Box::pin(
+                self.compact_with_identity(execution, identity),
+            ))
+            .await
+        {
+            Ok(result) => Ok(Some(result)),
+            // The guard already logged the rejection.
+            Err(KernelError::NoContextToCompact) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Mints the Run, Turn, and start time of one compaction operation.
+    fn new_compaction_identity(
+        &self,
+    ) -> Result<CompactionIdentity, KernelError> {
+        Ok(CompactionIdentity::new(
+            self.new_run_id()?,
+            self.new_turn_id()?,
+            self.clock.now(),
+        ))
+    }
+
+    /// Generates and persists one compaction under an already resolved identity.
+    ///
+    /// The caller owns the span: standalone compaction opens a top-level Run,
+    /// `/compact` runs inside its slash command's Run, and automatic compaction
+    /// goes through `perform_compaction`.
+    pub(super) async fn compact_with_identity(
+        &self,
+        execution: CompactionExecution<'_>,
+        identity: CompactionIdentity,
     ) -> Result<CompactionResult, KernelError> {
         let CompactionExecution {
             session_id,
@@ -179,7 +224,6 @@ impl Kernel {
             reason,
             cancellation,
             excluded_message_id,
-            identity,
             instruction,
         } = execution;
         let mut compacted_history = session.transcript.history()?;
@@ -213,16 +257,6 @@ impl Kernel {
             );
             return Err(KernelError::NoContextToCompact);
         }
-        let identity = match identity {
-            Some(identity) => identity,
-            None => CompactionIdentity::new(
-                RunId::try_from(self.id_generator.next(IdKind::Run)).map_err(
-                    |error| KernelError::Protocol(error.to_string()),
-                )?,
-                self.new_turn_id()?,
-                self.clock.now(),
-            ),
-        };
         let CompactionIdentity {
             run_id,
             turn_id,
@@ -232,19 +266,14 @@ impl Kernel {
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let will_retry = reason == CompactionReason::Overflow
             && excluded_message_id.is_some();
-        let log_lifecycle = |stage: &str, elapsed_ms: u64| {
-            tracing::info!(
-                "{} Compaction Run {} Turn {} for session {} with reason {:?} in {} ms; will retry {}",
-                stage,
-                run_id,
-                turn_id,
-                session_id,
-                reason,
-                elapsed_ms,
-                will_retry
-            );
-        };
-        log_lifecycle("started", 0);
+        // Only the start line names the Session; the Run span carries it onward.
+        tracing::info!(
+            "started Compaction Turn {} for session {} with reason {:?}; will retry {}",
+            turn_id,
+            session_id,
+            reason,
+            will_retry
+        );
         let extension_context =
             self.extension_context(session, Some(&run_id), Some(&turn_id))?;
         let extension_result = session
@@ -263,10 +292,8 @@ impl Kernel {
             .await;
         if extension_result.cancel {
             tracing::warn!(
-                "cancelled Compaction Run {} Turn {} for session {} with reason {:?} by extension",
-                run_id,
+                "cancelled Compaction Turn {} with reason {:?} by extension",
                 turn_id,
-                session_id,
                 reason
             );
             return Err(KernelError::ExtensionBlocked(
@@ -533,17 +560,14 @@ impl Kernel {
             Ok(result) => result,
             Err(error) => {
                 tracing::error!(
-                    "failed Compaction Run {} Turn {} for session {} with reason {:?}: {}",
-                    run_id,
+                    "failed Compaction Turn {} with reason {:?}: {}",
                     turn_id,
-                    session_id,
                     reason,
                     error
                 );
                 if let Err(terminal_error) = lifecycle.fail(&error).await {
                     tracing::error!(
-                        "failed to settle compaction Run {} after execution failure {}: {}",
-                        run_id,
+                        "failed to settle compaction after execution failure {}: {}",
                         error,
                         terminal_error
                     );
@@ -567,21 +591,22 @@ impl Kernel {
             .await;
         match terminal_result {
             Ok(()) => {
-                log_lifecycle(
-                    "completed",
+                tracing::info!(
+                    "completed Compaction Turn {} with reason {:?} in {} ms; will retry {}",
+                    turn_id,
+                    reason,
                     result
                         .ended_at_ms
                         .get()
                         .saturating_sub(result.started_at_ms.get()),
+                    will_retry
                 );
                 Ok(result)
             }
             Err(error) => {
                 tracing::error!(
-                    "failed to settle Compaction Run {} Turn {} for session {} with reason {:?}: {}",
-                    run_id,
+                    "failed to settle Compaction Turn {} with reason {:?}: {}",
                     turn_id,
-                    session_id,
                     reason,
                     error
                 );

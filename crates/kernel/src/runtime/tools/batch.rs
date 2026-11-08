@@ -83,14 +83,7 @@ impl Kernel {
     ) -> Result<ToolBatchResult, KernelError> {
         let call_count = batch.calls.len();
         if call_count > 0 {
-            tracing::info!(
-                "started Tool batch of {} calls for session {}, Run {}, Turn {}, trace {}",
-                call_count,
-                batch.session_id,
-                batch.run_id,
-                batch.turn_id,
-                batch.trace_id
-            );
+            tracing::info!("started Tool batch of {} calls", call_count);
         }
         let mut pending = futures::stream::FuturesUnordered::new();
         let (update_channel, mut update_stream) = ToolUpdateChannel::new();
@@ -100,13 +93,9 @@ impl Kernel {
         for (index, mut call) in calls.into_iter().enumerate() {
             let started_at = self.clock.now();
             tracing::info!(
-                "started Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}",
+                "started Tool call {} ({})",
                 call.tool_call_id,
-                call.name,
-                batch.session_id,
-                batch.run_id,
-                batch.turn_id,
-                batch.trace_id
+                call.name
             );
             let extension_context = self.extension_context(
                 batch.session,
@@ -166,13 +155,9 @@ impl Kernel {
                 protocol::ToolCallResult::Block(block) => {
                     terminate |= block.terminate;
                     tracing::warn!(
-                        "blocked Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}",
+                        "blocked Tool call {} ({})",
                         call.tool_call_id,
-                        call.name,
-                        batch.session_id,
-                        batch.run_id,
-                        batch.turn_id,
-                        batch.trace_id
+                        call.name
                     );
                     // Preserve policy disposition so ACP clients can distinguish
                     // a blocked call from a tool implementation failure.
@@ -191,13 +176,9 @@ impl Kernel {
                 )
             {
                 tracing::warn!(
-                    "blocked Tool call {} ({}) in plan mode for session {}, Run {}, Turn {}, trace {}",
+                    "blocked Tool call {} ({}) in plan mode",
                     call.tool_call_id,
-                    call.name,
-                    batch.session_id,
-                    batch.run_id,
-                    batch.turn_id,
-                    batch.trace_id
+                    call.name
                 );
                 immediate_result = Some(ToolResult::from((
                     call.tool_call_id.clone(),
@@ -217,13 +198,9 @@ impl Kernel {
                 && let Err(error) = batch.tools.validate(&call)
             {
                 tracing::warn!(
-                    "rejected invalid Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}: {}",
+                    "rejected invalid Tool call {} ({}): {}",
                     call.tool_call_id,
                     call.name,
-                    batch.session_id,
-                    batch.run_id,
-                    batch.turn_id,
-                    batch.trace_id,
                     error
                 );
                 immediate_result = Some(
@@ -238,7 +215,6 @@ impl Kernel {
             }
 
             let tools = Arc::clone(&batch.tools);
-            let run_id = batch.run_id.clone();
             let context = ToolExecutionContext::builder()
                 .session_id(batch.session_id.clone())
                 .turn_id(batch.turn_id.clone())
@@ -255,13 +231,9 @@ impl Kernel {
                         Ok(result) => result,
                         Err(error) => {
                             tracing::warn!(
-                                "failed Tool call {} ({}) for session {}, Run {}, Turn {}, trace {}: {}",
+                                "failed Tool call {} ({}): {}",
                                 call.tool_call_id,
                                 call.name,
-                                context.session_id,
-                                run_id,
-                                context.turn_id,
-                                context.trace_id,
                                 error
                             );
                             ToolResult::builder()
@@ -303,11 +275,7 @@ impl Kernel {
                 () = batch.cancellation.cancelled(), if !cancelled => {
                     cancelled = true;
                     tracing::warn!(
-                        "cancelled Tool batch for session {}, Run {}, Turn {}, trace {}",
-                        batch.session_id,
-                        batch.run_id,
-                        batch.turn_id,
-                        batch.trace_id
+                        "cancelled Tool batch"
                     );
                     continue;
                 }
@@ -378,13 +346,9 @@ impl Kernel {
             }
             let timestamp = self.clock.now();
             tracing::info!(
-                "completed Tool call {} ({}) for session {}, Run {}, Turn {}, trace {} in {} ms with error {}",
+                "completed Tool call {} ({}) in {} ms with error {}",
                 call.tool_call_id,
                 call.name,
-                batch.session_id,
-                batch.run_id,
-                batch.turn_id,
-                batch.trace_id,
                 timestamp.get().saturating_sub(started_at.get()),
                 result.is_error
             );
@@ -441,12 +405,8 @@ impl Kernel {
             .unzip();
         if call_count > 0 {
             tracing::info!(
-                "completed Tool batch with {} results for session {}, Run {}, Turn {}, trace {}; cancelled {}, terminate {}",
+                "completed Tool batch with {} results; cancelled {}, terminate {}",
                 results.len(),
-                batch.session_id,
-                batch.run_id,
-                batch.turn_id,
-                batch.trace_id,
                 cancelled,
                 terminate
             );

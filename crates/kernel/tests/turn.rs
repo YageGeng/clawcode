@@ -1523,7 +1523,6 @@ async fn traced_run_propagates_trace_to_tools() {
         })
         .await
         .expect("create session");
-    let trace_id = TraceId::try_from("trace-ingress").expect("Trace id");
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -1533,13 +1532,12 @@ async fn traced_run_propagates_trace_to_tools() {
     let dispatch = tracing::Dispatch::new(subscriber);
 
     tracing_futures::WithSubscriber::with_subscriber(
-        kernel.run_traced(
+        kernel.run_with_insertion(
             RunRequest {
                 session_id,
                 input: "capture trace".into(),
             },
             Arc::new(RecordingSink::default()),
-            trace_id.clone(),
             None,
         ),
         dispatch,
@@ -1547,16 +1545,29 @@ async fn traced_run_propagates_trace_to_tools() {
     .await
     .expect("run Kernel");
 
-    assert_eq!(
-        captured.lock().expect("Trace capture lock").as_ref(),
-        Some(&trace_id)
-    );
+    // The Kernel mints the Run's trace; the Tool must see the one its Run span carries.
+    let trace_id = captured
+        .lock()
+        .expect("Trace capture lock")
+        .clone()
+        .expect("the Tool received a trace");
     let output = logs.content();
+    let span_field = format!("trace_id={trace_id}");
+    for lifecycle in [
+        "started Kernel Run for session session-traced-run",
+        "started Tool call trace-call (capture_trace)",
+        "completed Tool call trace-call (capture_trace)",
+    ] {
+        let line = output
+            .lines()
+            .find(|line| line.contains(lifecycle))
+            .unwrap_or_else(|| panic!("missing {lifecycle} in {output:?}"));
+        assert!(line.contains(&span_field), "{line}");
+    }
     for lifecycle in [
         "started Tool call trace-call (capture_trace)",
         "completed Tool call trace-call (capture_trace)",
         "session session-traced-run",
-        "trace trace-ingress",
     ] {
         assert!(
             output.contains(lifecycle),

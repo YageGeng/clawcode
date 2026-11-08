@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use protocol::{
     AgentEventPayload, ContentBlock, InputResult, MessageContent, QueueId,
-    RunRequest, RunResult, SessionId, TraceId, TurnId,
+    RunRequest, RunResult, SessionId, TurnId,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -97,7 +97,6 @@ impl Drop for AdmissionTicket {
 pub struct PromptRequest {
     pub run: RunRequest,
     pub sink: Arc<dyn EventSink>,
-    pub trace_id: TraceId,
     pub insertion: Arc<InsertionNotice>,
     pub ticket: AdmissionTicket,
     #[builder(default)]
@@ -273,7 +272,6 @@ impl Kernel {
                 request.sink,
                 RunInvocation::builder()
                     .input_source(protocol::InputSource::Rpc)
-                    .trace_id(request.trace_id)
                     .insertion(Some(request.insertion))
                     .input_processed(!direct)
                     .admission(Some(request.ticket))

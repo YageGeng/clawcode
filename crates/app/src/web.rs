@@ -106,7 +106,6 @@ impl Application {
         let bootstrap = self.ui_bootstrap.clone();
         let router = AcpServerFactory::http_router(
             Arc::clone(&self.kernel),
-            Arc::clone(&self.id_generator),
             options.max_batch_size,
             HttpTransportOptions {
                 path: options.acp_path,

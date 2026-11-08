@@ -1,6 +1,6 @@
 use protocol::{
-    AgentMessage, EntryId, IdKind, MessageContent, RunId, SessionId,
-    SessionTreeEntry, SessionTreeSnapshot,
+    AgentMessage, EntryId, IdKind, MessageContent, SessionId, SessionTreeEntry,
+    SessionTreeSnapshot,
 };
 use store::{EntryKind, NewEntry, SessionEntry};
 use tokio_util::sync::CancellationToken;
@@ -201,11 +201,7 @@ impl Kernel {
             if messages.is_empty() {
                 None
             } else {
-                let run_id =
-                    RunId::try_from(self.id_generator.next(IdKind::Run))
-                        .map_err(|error| {
-                            KernelError::Protocol(error.to_string())
-                        })?;
+                let run_id = self.new_run_id()?;
                 let turn_id = self.new_turn_id()?;
                 let cancellation = CancellationToken::new();
                 let instruction = match decision.custom_instructions.as_deref()
@@ -220,22 +216,32 @@ impl Kernel {
                     }
                     None => BRANCH_SUMMARY_INSTRUCTION.to_string(),
                 };
+                // The branch summary is a top-level Run with a trace of its
+                // own; its start line ties that trace to the Session.
                 Some(
-                    self.generate_compaction_summary(
-                        SummaryGeneration::builder()
-                            .session(&session)
-                            .run_id(&run_id)
-                            .turn_id(&turn_id)
-                            .timestamp(self.clock.now())
-                            .messages(messages)
-                            .cancellation(&cancellation)
-                            .protocol(SummaryProtocol::Branch {
-                                instruction: &instruction,
-                            })
-                            .build(),
-                    )
-                    .await?
-                    .text,
+                    self.new_trace_span(&run_id)?
+                        .instrument(async {
+                            tracing::info!(
+                                "started branch summary for session {}",
+                                session_id
+                            );
+                            self.generate_compaction_summary(
+                                SummaryGeneration::builder()
+                                    .session(&session)
+                                    .run_id(&run_id)
+                                    .turn_id(&turn_id)
+                                    .timestamp(self.clock.now())
+                                    .messages(messages)
+                                    .cancellation(&cancellation)
+                                    .protocol(SummaryProtocol::Branch {
+                                        instruction: &instruction,
+                                    })
+                                    .build(),
+                            )
+                            .await
+                        })
+                        .await?
+                        .text,
                 )
             }
         } else {

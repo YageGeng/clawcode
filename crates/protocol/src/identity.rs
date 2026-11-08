@@ -203,6 +203,35 @@ impl AcpExtensionMethod {
         }
     }
 
+    /// Reports whether the method only reads a snapshot, so its request logs stay at DEBUG.
+    ///
+    /// The match is exhaustive on purpose: a new method must choose its class.
+    #[must_use]
+    pub const fn is_query(self) -> bool {
+        match self {
+            Self::Tree
+            | Self::PendingMessages
+            | Self::SessionRuntime
+            | Self::SkillList
+            | Self::McpStatus
+            | Self::McpPromptGet
+            | Self::McpResourceRead
+            | Self::McpComplete => true,
+            Self::Navigate
+            | Self::Branch
+            | Self::Fork
+            | Self::Compact
+            | Self::PendingMessageRemove
+            | Self::PendingMessagePromote
+            | Self::ClearQueue
+            | Self::InvokeSkill
+            | Self::McpReconnect
+            | Self::McpOAuthContinue
+            | Self::ExtensionCommand
+            | Self::UserBash => false,
+        }
+    }
+
     /// Parses one product-scoped ACP extension method without accepting foreign namespaces.
     pub fn parse(method: &str) -> Option<Self> {
         [

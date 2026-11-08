@@ -1745,12 +1745,18 @@ async fn session_lifecycle_boundaries_are_logged_without_prompt_content() {
             "missing {lifecycle} in captured logs: {output:?}"
         );
     }
+    // The capture buffer is process-wide, so select this test's own Session.
     let run_start = output
         .lines()
-        .find(|line| line.contains("started Kernel Run"))
+        .find(|line| {
+            line.contains(
+                "started Kernel Run for session session-lifecycle-log",
+            )
+        })
         .unwrap_or_else(|| panic!("missing Kernel Run start in {output:?}"));
+    // The trace lives on the Run span, which the default formatter prints as a field.
     assert!(
-        run_start.contains("trace trace-"),
+        run_start.contains("trace_id=trace-"),
         "Kernel Run start lacks Trace correlation: {run_start:?}"
     );
     assert!(!output.contains("Tool batch of 0 calls"));

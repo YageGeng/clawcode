@@ -3,9 +3,9 @@ use std::sync::Arc;
 use ::tools::{BashExecutionRequest, BashExecutor};
 use protocol::{
     AgentEventPayload, AgentMessage, AgentOutcome, BashExecutionMessage,
-    IdKind, MessageContent, MessageId, MessageIdentity, MessageTiming, RunId,
-    RunRequest, RunResult, TimestampMs, TurnId, UserBashInput, UserBashRequest,
-    UserBashResult,
+    MessageContent, MessageId, MessageIdentity, MessageTiming, RunId,
+    RunRequest, RunResult, SessionId, TimestampMs, TurnId, UserBashInput,
+    UserBashRequest, UserBashResult,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +22,23 @@ pub(super) struct UserBashExecution {
     result: UserBashResult,
 }
 
+/// Inputs of one user-bash Run, from the `!` prompt path or a server-side request.
+#[derive(typed_builder::TypedBuilder)]
+pub(super) struct UserBashRun<'a> {
+    session_id: &'a SessionId,
+    session: Arc<Session>,
+    input: UserBashInput,
+    sink: Arc<dyn EventSink>,
+    /// Minted by the caller, which already opened this Run's span.
+    run_id: RunId,
+    /// Client acceptance report; absent for server-side requests.
+    #[builder(default)]
+    insertion: Option<&'a InsertionNotice>,
+    /// Admission ticket released once the shell owns the Session gate.
+    #[builder(default)]
+    admission: Option<&'a AdmissionTicket>,
+}
+
 impl Kernel {
     /// Routes a prefixed run request into user-bash before ordinary input hooks.
     pub(in crate::runtime) async fn try_execute_user_bash_request(
@@ -30,6 +47,7 @@ impl Kernel {
         sink: Arc<dyn EventSink>,
         insertion: Option<&InsertionNotice>,
         admission: Option<&AdmissionTicket>,
+        run_id: &RunId,
     ) -> Result<Option<RunResult>, KernelError> {
         let Some(input) = request
             .input
@@ -40,11 +58,15 @@ impl Kernel {
         };
         let execution = self
             .execute_user_bash_operation(
-                self.session(&request.session_id)?,
-                input,
-                sink,
-                insertion,
-                admission,
+                UserBashRun::builder()
+                    .session_id(&request.session_id)
+                    .session(self.session(&request.session_id)?)
+                    .input(input)
+                    .sink(sink)
+                    .run_id(run_id.clone())
+                    .insertion(insertion)
+                    .admission(admission)
+                    .build(),
             )
             .await?;
         Ok(Some(RunResult {
@@ -61,16 +83,23 @@ impl Kernel {
         sink: Arc<dyn EventSink>,
     ) -> Result<UserBashResult, KernelError> {
         let session = self.session(&request.session_id)?;
+        // A server-side shell request is a top-level Run with a trace of its own.
+        let run_id = self.new_run_id()?;
         let execution = self
-            .execute_user_bash_operation(
-                session,
-                UserBashInput {
-                    command: request.command,
-                    exclude_from_context: request.exclude_from_context,
-                },
-                sink,
-                None,
-                None,
+            .new_trace_span(&run_id)?
+            .instrument(
+                self.execute_user_bash_operation(
+                    UserBashRun::builder()
+                        .session_id(&request.session_id)
+                        .session(session)
+                        .input(UserBashInput {
+                            command: request.command,
+                            exclude_from_context: request.exclude_from_context,
+                        })
+                        .sink(sink)
+                        .run_id(run_id.clone())
+                        .build(),
+                ),
             )
             .await?;
         Ok(execution.result)
@@ -79,12 +108,17 @@ impl Kernel {
     /// Serializes one bash operation, runs its extension hook, and materializes its message.
     pub(super) async fn execute_user_bash_operation(
         &self,
-        session: Arc<Session>,
-        input: UserBashInput,
-        sink: Arc<dyn EventSink>,
-        insertion: Option<&InsertionNotice>,
-        admission: Option<&AdmissionTicket>,
+        run: UserBashRun<'_>,
     ) -> Result<UserBashExecution, KernelError> {
+        let UserBashRun {
+            session_id,
+            session,
+            input,
+            sink,
+            run_id,
+            insertion,
+            admission,
+        } = run;
         // A cancel or close while this shell waits for the gate must reject it
         // before any process is spawned.
         let (_run_guard, cancellation) = session
@@ -103,8 +137,7 @@ impl Kernel {
         if let Some(ticket) = admission {
             ticket.release();
         }
-        let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        // The caller minted this Run's id and already opened its span.
         let turn_id = self.new_turn_id()?;
         let _active_run = session.execution.install_run(ActiveRunContext {
             run_id: run_id.clone(),
@@ -139,8 +172,8 @@ impl Kernel {
             notice.inserted(&message_id);
         }
         tracing::info!(
-            "started user bash Run {} with message {}",
-            run_id,
+            "started user bash for session {} with message {}",
+            session_id,
             message_id
         );
         let execution = UserBashOperation::builder()
@@ -165,11 +198,7 @@ impl Kernel {
                 (AgentOutcome::Cancelled, false)
             }
             Err(error) => {
-                tracing::warn!(
-                    "user bash Run {} failed after acceptance: {}",
-                    run_id,
-                    error
-                );
+                tracing::warn!("user bash failed after acceptance: {}", error);
                 (
                     AgentOutcome::Failed {
                         message: error.to_string(),
@@ -178,11 +207,7 @@ impl Kernel {
                 )
             }
         };
-        tracing::info!(
-            "finished user bash Run {} with outcome {:?}",
-            run_id,
-            outcome
-        );
+        tracing::info!("finished user bash with outcome {:?}", outcome);
         emitter
             .emit(
                 turn_id.clone(),
@@ -282,8 +307,7 @@ impl UserBashOperation<'_> {
                             .await
                         {
                             tracing::warn!(
-                                "failed to report user bash output for Run {}: {}",
-                                self.run_id,
+                                "failed to report user bash output: {}",
                                 error
                             );
                         }

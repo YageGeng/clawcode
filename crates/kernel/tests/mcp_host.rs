@@ -861,13 +861,12 @@ async fn mcp_sampling_runs_through_current_session_model() {
         .expect("subscribe")
         .expect("MCP enabled");
     let result = kernel
-        .run_traced(
+        .run_with_insertion(
             RunRequest {
                 session_id: session_id.clone(),
                 input: "use sampling".into(),
             },
             Arc::new(DiscardSink),
-            TraceId::try_from("trace-sampling").expect("Trace id"),
             None,
         )
         .await
@@ -986,13 +985,12 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
     let (events, mut received) = tokio::sync::mpsc::channel(256);
     let run = tokio::spawn(async move {
         run_kernel
-            .run_traced(
+            .run_with_insertion(
                 RunRequest {
                     session_id: run_session_id,
                     input: "request elicitation".into(),
                 },
                 Arc::new(kernel::ChannelEventSink::new(events)),
-                TraceId::try_from("trace-elicit").expect("Trace id"),
                 None,
             )
             .await

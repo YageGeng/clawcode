@@ -64,7 +64,6 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
             );
             let server = AcpServerFactory::new(
                 Arc::clone(&application.kernel),
-                Arc::clone(&application.id_generator),
                 max_batch_size,
             );
             tokio::select! {

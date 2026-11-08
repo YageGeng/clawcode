@@ -2,55 +2,18 @@ use futures::StreamExt;
 use kernel::{ModelFactory, ProviderModelFactory};
 use protocol::{ContentBlock, MessageContent, ModelStreamEvent, StopReason};
 use serde_json::json;
-use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[path = "support/provider_server.rs"]
 mod provider_server;
 use provider_server::Server;
+#[path = "support/spans.rs"]
+mod spans;
+mod support;
 
 static PROVIDER_STREAM_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
-
-/// Shared in-memory writer used to inspect Provider lifecycle logs.
-#[derive(Clone, Default)]
-struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-impl CapturedLogs {
-    /// Returns all UTF-8 tracing output written by the subscriber.
-    fn content(&self) -> String {
-        String::from_utf8(self.0.lock().expect("log lock").clone())
-            .expect("UTF-8 logs")
-    }
-}
-
-/// One writer handle backed by the shared test buffer.
-struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-impl Write for CapturedLogWriter {
-    /// Appends one formatted tracing buffer to the shared capture.
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_poison_error| io::Error::other("log lock poisoned"))?
-            .write(buffer)
-    }
-
-    /// The in-memory capture has no buffered state to flush.
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
-    type Writer = CapturedLogWriter;
-
-    /// Creates a writer handle sharing the captured byte buffer.
-    fn make_writer(&'writer self) -> Self::Writer {
-        CapturedLogWriter(Arc::clone(&self.0))
-    }
-}
 
 /// Limits and normalized token usage survive the real upstream stream boundary.
 #[tokio::test]
@@ -412,47 +375,41 @@ async fn bounded_output_includes_provider_separators() {
 #[tokio::test]
 async fn provider_stream_lifecycle_is_logged_without_message_content() {
     let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
+    let logs = support::CapturedLogs::default();
     let server = Server::start(vec![(200, Server::completion())]).await;
     let model = server.factory(false).create().unwrap();
-    tracing_futures::WithSubscriber::with_subscriber(
-        async {
-            tracing::Instrument::instrument(
-                async {
-                    for event in model
-                        .stream(
-                            Server::request("private-prompt-sentinel"),
-                            CancellationToken::new(),
-                        )
-                        .await
-                        .unwrap()
-                        .collect::<Vec<_>>()
-                        .await
-                    {
-                        event.unwrap();
-                    }
-                },
-                tracing::info_span!(
-                    "acp_operation",
-                    trace_id = "trace-provider-test"
-                ),
-            )
-            .await;
-        },
-        tracing::Dispatch::new(subscriber),
+    kernel::RunSpan::top_level(
+        &protocol::TraceId::try_from("trace-provider-test").expect("trace ID"),
+        &protocol::RunId::try_from("run-provider-test").expect("Run ID"),
     )
+    .instrument(async {
+        for event in model
+            .stream(
+                Server::request("private-prompt-sentinel"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+        {
+            event.unwrap();
+        }
+    })
     .await;
+    // The capture is process-wide, so the Run span selects these lines.
     let output = logs.content();
-    assert!(
-        output.contains("started Provider request")
-            && output.contains("completed Provider request")
+    let expected = (
+        Some("trace-provider-test".to_string()),
+        Some("run-provider-test".to_string()),
     );
-    assert!(output.contains("trace-provider-test"));
+    let in_run = |needle: &str| {
+        output.lines().any(|line| {
+            line.contains(needle) && spans::run_fields(line) == expected
+        })
+    };
+    assert!(in_run("started Provider request"), "{output}");
+    assert!(in_run("completed Provider request"), "{output}");
     assert!(
         !output.contains("private-prompt-sentinel")
             && !output.contains("synthetic-key")
@@ -496,32 +453,29 @@ max_output_tokens=128
 #[tokio::test]
 async fn provider_failure_logs_safe_diagnostics() {
     let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
+    let logs = support::CapturedLogs::default();
     let server = Server::start(vec![(
         401,
         json!({"error":{"message":"PRIVATE_ERROR_SENTINEL"}}).to_string(),
     )])
     .await;
     let model = server.factory(false).create().unwrap();
-    let events = tracing_futures::WithSubscriber::with_subscriber(
-        async {
-            model
-                .stream(
-                    Server::request("PRIVATE_PROMPT_SENTINEL"),
-                    CancellationToken::new(),
-                )
-                .await
-                .unwrap()
-                .collect::<Vec<_>>()
-                .await
-        },
-        tracing::Dispatch::new(subscriber),
+    // The capture is process-wide, so a unique Run span selects these lines.
+    let events = kernel::RunSpan::top_level(
+        &protocol::TraceId::try_from("trace-provider-failure").expect("trace"),
+        &protocol::RunId::try_from("run-provider-failure").expect("Run ID"),
     )
+    .instrument(async {
+        model
+            .stream(
+                Server::request("PRIVATE_PROMPT_SENTINEL"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+    })
     .await;
     let failure = events
         .into_iter()
@@ -530,9 +484,16 @@ async fn provider_failure_logs_safe_diagnostics() {
     assert!(failure.to_string().contains("HTTP 401"));
     let output = logs.content();
     assert!(
-        output.contains("WARN")
-            && output.contains("openai/audit")
-            && output.contains("HTTP 401"),
+        output.lines().any(|line| {
+            [
+                "run_id=run-provider-failure",
+                "WARN",
+                "openai/audit",
+                "HTTP 401",
+            ]
+            .iter()
+            .all(|needle| line.contains(needle))
+        }),
         "{output}"
     );
     assert!(
@@ -637,19 +598,16 @@ async fn provider_auth_failure_is_classified_and_logged() {
     )
     .create()
     .unwrap();
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
-    let result = tracing_futures::WithSubscriber::with_subscriber(
-        model.stream(
-            Server::request("PRIVATE_PROMPT_SENTINEL"),
-            CancellationToken::new(),
-        ),
-        tracing::Dispatch::new(subscriber),
+    let logs = support::CapturedLogs::default();
+    // The capture is process-wide, so a unique Run span selects these lines.
+    let result = kernel::RunSpan::top_level(
+        &protocol::TraceId::try_from("trace-provider-auth").expect("trace"),
+        &protocol::RunId::try_from("run-provider-auth").expect("Run ID"),
     )
+    .instrument(model.stream(
+        Server::request("PRIVATE_PROMPT_SENTINEL"),
+        CancellationToken::new(),
+    ))
     .await;
     let error = result.err().expect("invalid auth record").to_string();
     assert!(
@@ -658,9 +616,11 @@ async fn provider_auth_failure_is_classified_and_logged() {
     );
     let output = logs.content();
     assert!(
-        output.contains("WARN")
-            && output.contains("chatgpt/audit")
-            && output.contains("JSON"),
+        output.lines().any(|line| {
+            ["run_id=run-provider-auth", "WARN", "chatgpt/audit", "JSON"]
+                .iter()
+                .all(|needle| line.contains(needle))
+        }),
         "{output}"
     );
     assert!(
@@ -893,12 +853,7 @@ async fn turn_request_sends_configured_budget() {
 /// Falling back to a generic dialect for a preset rig knows is logged; a custom gateway is not.
 #[test]
 fn generic_dialect_fallback_for_known_preset_is_logged() {
-    let logs = CapturedLogs::default();
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(logs.clone())
-        .finish();
+    let logs = support::CapturedLogs::default();
     let config: config::AppConfig = toml::from_str(
         r#"
 active_model="deepseek/m"
@@ -925,15 +880,19 @@ max_output_tokens=128
 "#,
     )
     .expect("config");
-    tracing::subscriber::with_default(subscriber, || {
-        drop(ProviderModelFactory::from_config(
-            config::ConfigHandle::from_config(config),
-        ));
-    });
+    drop(ProviderModelFactory::from_config(
+        config::ConfigHandle::from_config(config),
+    ));
+    // The capture is process-wide, so the fallback line is matched as a whole.
     let content = logs.content();
-    assert!(content.contains("generic"), "{content}");
-    assert!(content.contains("'deepseek'"), "{content}");
-    assert!(content.contains("'anthropic'"), "{content}");
+    assert!(
+        content.lines().any(|line| {
+            ["generic", "'deepseek'", "'anthropic'"]
+                .iter()
+                .all(|needle| line.contains(needle))
+        }),
+        "{content}"
+    );
     assert!(!content.contains("'corp'"), "{content}");
 }
 
@@ -993,4 +952,148 @@ id="deepseek-flash"
         .to_string();
     assert!(error.contains("request_max_tokens"), "{error}");
     assert!(error.contains(&budget.to_string()), "{error}");
+}
+
+/// Accepts every event; the provider log tests read logs, not events.
+struct DiscardSink;
+
+#[async_trait::async_trait]
+impl kernel::EventSink for DiscardSink {
+    /// Drops the event.
+    async fn emit(
+        &self,
+        _event: protocol::AgentEvent,
+    ) -> Result<(), kernel::SinkError> {
+        Ok(())
+    }
+}
+
+/// The completion line names the provider's usage and response, omitting unreported counters.
+#[tokio::test]
+async fn completed_provider_request_reports_response_and_usage() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = support::CapturedLogs::default();
+    let chunk = json!({"id":"resp_usage_log","object":"chat.completion.chunk","model":"audit","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]});
+    let usage = json!({"id":"resp_usage_log","object":"chat.completion.chunk","model":"audit","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}});
+    let body = format!("data: {chunk}\n\ndata: {usage}\n\ndata: [DONE]\n\n");
+    let server = Server::start(vec![(200, body)]).await;
+    let model = server.factory(false).create().unwrap();
+    for event in model
+        .stream(Server::request("hi"), CancellationToken::new())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await
+    {
+        event.unwrap();
+    }
+
+    let line = spans::line_with(&logs.content(), "response id resp_usage_log")
+        .expect("log line");
+    assert!(
+        line.contains(" ms; input 12, output 3; response id resp_usage_log"),
+        "{line}"
+    );
+    assert!(!line.contains("cache read"), "{line}");
+}
+
+/// A failed request names the provider's request id when the response carried one.
+#[tokio::test]
+async fn failed_provider_request_reports_provider_request_id() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = support::CapturedLogs::default();
+    let server = Server::start_with_header(
+        vec![(
+            500,
+            json!({"error":{"type":"server_error","message":"synthetic"}})
+                .to_string(),
+        )],
+        Some("x-request-id: req_failure_log"),
+    )
+    .await;
+    let model = server.factory(false).create().unwrap();
+    let failed = match model
+        .stream(Server::request("hi"), CancellationToken::new())
+        .await
+    {
+        Err(_) => true,
+        Ok(stream) => {
+            stream.collect::<Vec<_>>().await.iter().any(Result::is_err)
+        }
+    };
+    assert!(failed);
+
+    let line =
+        spans::line_with(&logs.content(), "; provider request req_failure_log")
+            .expect("log line");
+    assert!(line.contains("WARN"), "{line}");
+    assert!(
+        line.ends_with("; provider request req_failure_log"),
+        "{line}"
+    );
+}
+
+/// A failed attempt and its successful retry are logged under the same Run.
+#[tokio::test]
+async fn failed_and_retried_provider_requests_share_the_run_trace() {
+    let _guard = PROVIDER_STREAM_TEST_LOCK.lock().await;
+    let logs = support::CapturedLogs::default();
+    let root = tempfile::tempdir().expect("store root");
+    let server = Server::start(vec![
+        (
+            429,
+            json!({"error":{"type":"rate_limit_error","message":"synthetic"}})
+                .to_string(),
+        ),
+        (200, Server::completion()),
+    ])
+    .await;
+    let mut retry = config::RetryConfig::default();
+    retry.agent.enabled = true;
+    retry.agent.max_retries = 1;
+    retry.agent.base_delay_ms = 0;
+    let kernel = Server::kernel_with(
+        server.factory(false),
+        root.path(),
+        retry,
+        extension::StaticExtensionFactory::default(),
+    );
+    let session_id =
+        protocol::SessionId::try_from("provider-retry").expect("session id");
+    kernel
+        .create_session(store::SessionCreateOptions {
+            session_id: session_id.clone(),
+            cwd: root.path().to_path_buf(),
+            parent_session_id: None,
+        })
+        .await
+        .expect("create session");
+    kernel
+        .run(
+            protocol::RunRequest {
+                session_id: session_id.clone(),
+                input: "hi".into(),
+            },
+            Arc::new(DiscardSink),
+        )
+        .await
+        .expect("run");
+
+    // The capture is process-wide, so select this Run's lines by its span.
+    let output = logs.content();
+    let start = spans::line_with(
+        &output,
+        &format!("started Kernel Run for session {session_id}"),
+    )
+    .expect("log line");
+    let run = spans::run_fields(&start);
+    assert!(run.0.is_some(), "{start}");
+    let in_run = |needles: &[&str]| {
+        output.lines().any(|line| {
+            needles.iter().all(|needle| line.contains(needle))
+                && spans::run_fields(line) == run
+        })
+    };
+    assert!(in_run(&["WARN", "Provider request", "failed"]), "{output}");
+    assert!(in_run(&["completed Provider request"]), "{output}");
 }

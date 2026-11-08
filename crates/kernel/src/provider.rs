@@ -3,6 +3,7 @@ mod content;
 use async_trait::async_trait;
 use futures::StreamExt;
 use protocol::llm::{
+    ProviderError,
     completion::{CompletionRequest, ToolDefinition},
     message::{
         AssistantContent, AssistantMessage, CallId, ImageMediaType, Message,
@@ -231,40 +232,32 @@ impl ProviderModel {
                 self.connection_failure("authentication", error)
             })?,
         };
-        let identity = format!(
+        let target = ProviderTarget(format!(
             "{}/{}",
             self.profile().provider_id,
             self.profile().model_id
-        );
+        ));
         let mut upstream = model.stream(request).map_err(|error| {
-            let failure = ModelFailure::from(error);
-            tracing::warn!(
-                "Provider request {} preparation failed: {}",
-                identity,
-                failure.summary
-            );
-            ModelError::Request(failure)
+            ModelError::Request(target.failure("preparation", error))
         })?;
-        let span = tracing::info_span!("provider_request");
         // The first read is where a rejected credential surfaces, and only the
         // provider judges what the status means.
         let configured = Arc::clone(&self.configured);
         let stream = async_stream::try_stream! {
             let started = Instant::now();
-            tracing::info!("started Provider request {}", identity);
+            tracing::info!("started Provider request {}", target);
             loop {
                 let event = tokio::select! {
                     () = cancellation.cancelled() => {
-                        tracing::info!("cancelled Provider request {}", identity);
+                        tracing::info!("cancelled Provider request {}", target);
                         Err(ModelError::Cancelled)
                     }
                     event = upstream.next() => Ok(event),
                 }?;
                 let Some(event) = event else { break; };
                 let event = event.map_err(|error| {
-                    let failure = ModelFailure::from(error);
+                    let failure = target.failure("stream", error);
                     configured.note_failure_status(failure.status);
-                    tracing::warn!("Provider request {} stream failed: {}", identity, failure.summary);
                     ModelError::Stream(failure)
                 })?;
                 match event {
@@ -278,12 +271,10 @@ impl ProviderModel {
             }
             // EOF alone cannot prove success; finish checks the provider's terminal frame.
             let response = upstream.finish().await.map_err(|error| {
-                let failure = ModelFailure::from(error);
-                tracing::warn!("Provider request {} finalization failed: {}", identity, failure.summary);
-                ModelError::Stream(failure)
+                ModelError::Stream(target.failure("finalization", error))
             })?;
             if let Some(failure) = ModelFailure::from_response(&response) {
-                tracing::warn!("Provider request {} terminal response failed: {}", identity, failure.summary);
+                tracing::warn!("Provider request {} terminal response failed: {}", target, failure.summary);
                 Err(ModelError::Stream(failure))?;
             }
             let native = match response.message() {
@@ -300,14 +291,90 @@ impl ProviderModel {
                 // Preserve future upstream variants in stored diagnostics, not ordinary logs.
                 reason => format!("{reason:?}"),
             });
-            tracing::info!("completed Provider request {} in {} ms", identity, started.elapsed().as_millis());
+            let usage = ModelUsage::from(response.usage);
+            // The one completion line per model call: duration, reported usage, and response identity.
+            tracing::info!(
+                "completed Provider request {} in {} ms; {}{}",
+                target,
+                started.elapsed().as_millis(),
+                usage,
+                ResponseIdentity { id: response.response_id(), model: response.model() }
+            );
             yield ModelStreamEvent::Finished(ModelFinal::builder().stop_reason(stop_reason)
-                .raw_stop_reason(raw_stop_reason).usage(ModelUsage::from(response.usage))
+                .raw_stop_reason(raw_stop_reason).usage(usage)
                 .model_message(Some(Box::new(native))).build());
         };
-        Ok(Box::pin(tracing_futures::Instrument::instrument(
-            stream, span,
-        )))
+        // The Turn polls this stream inside its Run span, so the stream needs no span of its own.
+        Ok(Box::pin(stream))
+    }
+}
+
+/// The `provider/model` one request goes to, which names its lifecycle lines.
+struct ProviderTarget(String);
+
+impl ProviderTarget {
+    /// Logs one failed request stage with the provider's request id, then keeps only the failure.
+    fn failure(&self, stage: &str, error: ProviderError) -> ModelFailure {
+        // Read the id first: converting the error consumes it.
+        let request_id = ProviderRequestId::from(error.provider_request_id());
+        let failure = ModelFailure::from(error);
+        tracing::warn!(
+            "Provider request {} {} failed: {}{}",
+            self,
+            stage,
+            failure.summary,
+            request_id
+        );
+        failure
+    }
+}
+
+impl std::fmt::Display for ProviderTarget {
+    /// Writes `provider/model`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// The provider's request id, written after a failure summary when the error carried one.
+struct ProviderRequestId(Option<String>);
+
+impl From<Option<&str>> for ProviderRequestId {
+    /// Keeps an owned copy because the error is consumed right after it is read.
+    fn from(id: Option<&str>) -> Self {
+        Self(id.map(str::to_string))
+    }
+}
+
+impl std::fmt::Display for ProviderRequestId {
+    /// Writes `; provider request <id>`, or nothing when the provider sent no id.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(id) => write!(formatter, "; provider request {id}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The provider's own identity for one completed response.
+struct ResponseIdentity<'a> {
+    id: Option<&'a str>,
+    model: Option<&'a str>,
+}
+
+impl std::fmt::Display for ResponseIdentity<'_> {
+    /// Writes the response id and model the provider reported, or nothing when it reported neither.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.id, self.model) {
+            (Some(id), Some(model)) => {
+                write!(formatter, "; response id {id}, model {model}")
+            }
+            (Some(id), None) => write!(formatter, "; response id {id}"),
+            (None, Some(model)) => {
+                write!(formatter, "; response model {model}")
+            }
+            (None, None) => Ok(()),
+        }
     }
 }
 

@@ -434,23 +434,52 @@ reopens when a later run publishes plan content.
 
 ## Logging
 
-Rig model spans write one local `Rig telemetry closed` summary to stderr when
-the span closes. Summaries inherit the request Trace ID and include elapsed
-milliseconds, provider/request/response model identities, available request IDs,
-streaming mode, and reported input/output/cache/reasoning token counters. Missing
-counters are omitted; a reported zero remains zero. Closure alone does not mean
-success: use the correlated provider completion/error/cancellation logs for outcome.
+Logs go to stderr in tracing's default format, one line per event:
 
-The existing `[logging] filter` and overriding `RUST_LOG` control these summaries.
-For example, `info,rig::completions=off,rig::modalities=off` disables native Rig
-summaries; `warn,rig::completions=info` enables completion summaries while retaining
-warnings elsewhere. Keep the application Trace spans enabled when Trace correlation
-is needed. No OpenTelemetry collector, external exporter, or extra runtime dependency
-is installed. Prompt/response bodies, system instructions, authentication headers
-and native/encrypted payloads are excluded even if an SDK caller enables content
-telemetry. Other application spans do not gain lifecycle log lines.
-This exclusion applies to Rig summaries; existing ACP DEBUG parameter logging
-continues to follow its separate recursive credential-redaction policy.
+```text
+2026-11-07T05:51:28.651234Z  INFO run{trace_id=trace-HJWZ… run_id=run-umuQ…}: kernel::runtime::tools::batch: started Tool call call_45… (bash)
+```
+
+The `run{…}` span is the line's Run correlation, and the innermost one is the
+Run the line belongs to: in-loop compaction adds `:run{run_id=…}` under the same
+trace, and a foreground subagent adds a `run{trace_id=… run_id=…}` of its own. A trace is one top-level Kernel Run:
+one complete agent loop, including the queued messages it processes, its Turns,
+model calls, Tool calls, and in-loop compaction. Filter by a trace id to read the
+whole loop. Foreground subagent Runs keep their parent's trace under their own run
+id; a background subagent starts a new trace whose start line names the parent's
+(`as background subagent linked to trace …`). Standalone compaction, user `!`
+commands, direct slash commands, and Tree branch summaries are Runs of their own.
+Lines outside any Run have no `run{…}` span: ACP requests, prompt admission, Session watchers,
+and replies to permission and elicitation requests. A Run's Session id appears on
+its start line rather than on every line.
+
+ACP requests do not open traces. Read-only queries (`session/list` and the Tree,
+pending-message, runtime, skill-list, and MCP status/prompt/resource/completion
+extension methods) log only at DEBUG; every other request writes one INFO line
+when it completes, and failures are WARN. `session/prompt` completes when its
+response is sent, at insertion, not when its Run settles.
+
+Each model call logs one `started`/`completed Provider request` pair. The completed
+line adds the duration, the token counts the provider reported (unreported counts
+are omitted; a reported zero stays zero), and the response id and model when the
+provider sent them. Failure lines add the provider's request id when the error
+carries one. Prompt and response bodies, authentication headers, and native
+payloads are never logged.
+
+`[logging] color` allows tracing's ANSI color only when stderr is a terminal, so
+redirected logs stay plain; a non-empty `NO_COLOR` also turns it off. Every line
+shows its event's target, such as `rig::completions`. `[logging] filter` and an
+overriding `RUST_LOG` select what is written; `acp::trace=debug` enables the
+ACP request DEBUG lines, including read-only queries, and complete request
+parameters with credential fields recursively redacted. No OpenTelemetry exporter
+is installed.
+
+The Run span is an ERROR-level span with the `kernel::runtime::run::trace` target,
+so any filter that enables `kernel` (which covers that target) at some level keeps
+the `run{…}` span on every line inside a Run. A filter that turns `kernel` off,
+such as `info,kernel=off`, or names only other targets without a global level,
+such as `acp=info`, also drops the Run span, so lines from other targets written
+inside a Run lose it.
 
 ## Storage
 

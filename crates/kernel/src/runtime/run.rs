@@ -9,6 +9,7 @@ pub(super) mod queue;
 pub(super) mod retry;
 mod settlement;
 pub(super) mod submit;
+pub(super) mod trace;
 mod turn;
 
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use insertion::{InsertionNotice, SubmissionAnswer, WaiterCancellation};
 use lifecycle::ActiveRunContext;
 use retry::RetryState;
 use settlement::RunSettlement;
+use trace::{RunSpan, TraceOrigin};
 
 impl Kernel {
     /// Executes one run with an explicit input source for trusted host callers.
@@ -39,9 +41,24 @@ impl Kernel {
         sink: Arc<dyn EventSink>,
         invocation: RunInvocation,
     ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
-        // Keep the full generation state off every caller's async stack frame.
-        let result =
-            Box::pin(self.run_until_settled(request, sink, &invocation)).await;
+        // Every path below is one Run: mint its identity and open its span
+        // before any of them can log, so the whole operation shares one trace.
+        // A minting failure is a pre-insertion error like any other.
+        let result = async {
+            let trace_id = invocation.trace.trace_id(&*self.id_generator)?;
+            let run_id = self.new_run_id()?;
+            // Keep the full generation state off every caller's async stack frame.
+            RunSpan::top_level(&trace_id, &run_id)
+                .instrument(Box::pin(self.run_until_settled(
+                    request,
+                    sink,
+                    &invocation,
+                    run_id,
+                    &trace_id,
+                )))
+                .await
+        }
+        .await;
         // Every return path before insertion rejects the prompt; the notice
         // ignores this once the user message was already inserted.
         if let (Err(error), Some(notice)) =
@@ -58,9 +75,10 @@ impl Kernel {
         request: RunRequest,
         sink: Arc<dyn EventSink>,
         invocation: &RunInvocation,
+        run_id: RunId,
+        trace_id: &TraceId,
     ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
         let input_source = invocation.input_source;
-        let trace_id = &invocation.trace_id;
         let insertion = invocation.insertion.as_deref();
         // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
         if !invocation.input_processed
@@ -70,17 +88,15 @@ impl Kernel {
                     Arc::clone(&sink),
                     insertion,
                     invocation.admission.as_ref(),
+                    &run_id,
                 )
                 .await?
         {
             return Ok((result, None));
         }
 
-        // Resolve the Session and stable correlation identifiers before any
-        // command path can emit lifecycle events.
+        // Resolve the Session before any command path can emit lifecycle events.
         let session = self.session(&request.session_id)?;
-        let run_id = RunId::try_from(self.id_generator.next(IdKind::Run))
-            .map_err(|error| KernelError::Protocol(error.to_string()))?;
         let first_turn_id = self.new_turn_id()?;
         let operation_started_at = self.clock.now();
 
@@ -98,7 +114,6 @@ impl Kernel {
                         .session(&session)
                         .run_id(&run_id)
                         .turn_id(&first_turn_id)
-                        .trace_id(trace_id)
                         .sink(Arc::clone(&sink))
                         .started_at(operation_started_at)
                         .invocation(command_invocation)
@@ -123,10 +138,9 @@ impl Kernel {
             ticket.release();
         }
         tracing::info!(
-            "started Kernel Run {} for session {} with trace {}",
-            run_id,
+            "started Kernel Run for session {} {}",
             request.session_id,
-            trace_id
+            invocation.origin_phrase()
         );
         let _active_run = session.execution.install_run(ActiveRunContext {
             run_id: run_id.clone(),
@@ -236,6 +250,21 @@ impl Kernel {
 }
 
 impl Kernel {
+    /// Allocates and validates a fresh Run identifier.
+    pub(super) fn new_run_id(&self) -> Result<RunId, KernelError> {
+        RunId::try_from(self.id_generator.next(IdKind::Run))
+            .map_err(|error| KernelError::Protocol(error.to_string()))
+    }
+
+    /// Opens the span of a top-level Run that starts a trace of its own.
+    pub(super) fn new_trace_span(
+        &self,
+        run_id: &RunId,
+    ) -> Result<RunSpan, KernelError> {
+        let trace_id = TraceOrigin::New.trace_id(&*self.id_generator)?;
+        Ok(RunSpan::top_level(&trace_id, run_id))
+    }
+
     /// Allocates and validates a fresh Turn identifier.
     pub(super) fn new_turn_id(&self) -> Result<TurnId, KernelError> {
         TurnId::try_from(self.id_generator.next(IdKind::Turn))
@@ -266,8 +295,9 @@ impl Kernel {
 pub(in crate::runtime) struct RunInvocation {
     /// Origin reported to input hooks.
     input_source: protocol::InputSource,
-    /// Ingress trace that stays stable through Tool calls.
-    trace_id: TraceId,
+    /// Where this Run's trace comes from; a new trace unless a caller supplies one.
+    #[builder(default)]
+    trace: TraceOrigin,
     /// Caller-owned cancellation that also stops this Run while it waits.
     #[builder(default)]
     cancellation_parent: Option<CancellationToken>,
@@ -281,6 +311,17 @@ pub(in crate::runtime) struct RunInvocation {
 }
 
 impl RunInvocation {
+    /// Describes where the Run came from for its start line.
+    fn origin_phrase(&self) -> String {
+        match &self.trace {
+            TraceOrigin::New => format!("from {:?}", self.input_source),
+            TraceOrigin::Inherit(_) => "as foreground subagent".to_string(),
+            TraceOrigin::LinkFrom(parent) => {
+                format!("as background subagent linked to trace {parent}")
+            }
+        }
+    }
+
     /// Retains the ingress cancellation generation through every fallback gate wait.
     fn waiters(&self) -> WaiterCancellation {
         self.admission.as_ref().map_or_else(
@@ -343,10 +384,8 @@ impl RetainedInput<'_> {
             .settle()
             .await?;
         tracing::info!(
-            "persisted {:?} input for Kernel Run {} in session {} after cancellation before insertion",
-            self.input_source,
-            self.run_id,
-            self.session_id
+            "persisted {:?} input after cancellation before insertion",
+            self.input_source
         );
         Ok((
             RunResult {

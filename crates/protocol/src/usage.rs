@@ -24,6 +24,31 @@ impl AsRef<Usage> for ModelUsage {
     }
 }
 
+impl std::fmt::Display for ModelUsage {
+    /// Writes the reported counters for logs, omitting unreported ones and keeping zeros.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let counters = [
+            ("input", self.0.input_tokens),
+            ("output", self.0.output_tokens),
+            ("cache read", self.0.cached_input_tokens),
+            ("cache write", self.0.cache_creation_input_tokens),
+            ("reasoning", self.0.reasoning_tokens),
+        ];
+        let mut reported = counters
+            .into_iter()
+            .filter_map(|(name, count)| count.map(|count| (name, count)))
+            .peekable();
+        if reported.peek().is_none() {
+            return formatter.write_str("no usage reported");
+        }
+        for (index, (name, count)) in reported.enumerate() {
+            let separator = if index == 0 { "" } else { ", " };
+            write!(formatter, "{separator}{name} {count}")?;
+        }
+        Ok(())
+    }
+}
+
 impl std::ops::AddAssign<&Self> for ModelUsage {
     /// Delegates partial-counter and cost accumulation to the upstream owner.
     fn add_assign(&mut self, other: &Self) {

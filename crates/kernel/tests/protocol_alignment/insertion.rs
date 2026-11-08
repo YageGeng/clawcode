@@ -18,7 +18,7 @@ use protocol::{
     InputEvent, InputResult, MessageContent, MessageEndEvent, MessageId,
     MessageStartEvent, ModelRequest, RunRequest, RunResult, SessionId,
     SlashCommandMessage, SlashCommandStatus, StaticExtensionRegistration,
-    StopReason, TraceId,
+    StopReason,
 };
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
@@ -30,11 +30,6 @@ type Insertion = oneshot::Receiver<Result<MessageId, KernelError>>;
 
 /// Gives a spawned Run time to reach the Session gate before the test acts.
 const SETTLE: Duration = Duration::from_millis(100);
-
-/// Builds the trace id shared by direct Kernel Runs in these tests.
-fn trace() -> TraceId {
-    TraceId::try_from("trace-alignment").expect("trace")
-}
 
 /// Starts one notice-carrying Run on a detached task, as the ACP prompt handler does.
 fn start(
@@ -51,7 +46,7 @@ fn start(
     };
     let run = tokio::spawn(async move {
         kernel
-            .run_traced(run_request, sink, trace(), Some(notice))
+            .run_with_insertion(run_request, sink, Some(notice))
             .await
     });
     (run, receiver)
@@ -624,7 +619,6 @@ fn admit(
             input: input.into(),
         })
         .sink(test.sinks.sink(session))
-        .trace_id(trace())
         .ticket(ticket)
         .insertion(notice)
         .build();

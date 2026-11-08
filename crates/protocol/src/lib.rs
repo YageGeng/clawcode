@@ -18,6 +18,7 @@ mod session;
 mod skill;
 mod slash_command;
 mod tool;
+mod trace;
 mod turn;
 
 pub use acp::{
@@ -141,6 +142,7 @@ pub use turn::{
 };
 
 pub use login::{DeviceCode, DeviceCodeSink, LoginMethod};
+pub use trace::{RUN_ID_FIELD, TRACE_ID_FIELD};
 
 pub mod llm;
 pub mod usage;

@@ -292,11 +292,7 @@ impl RunScope<'_> {
             .or_else(|| turn_loop.next_turn_id.take())
             .map_or_else(|| kernel.new_turn_id(), Ok)?;
         let started_at = kernel.clock.now();
-        tracing::info!(
-            "started Turn {} for Kernel Run {}",
-            turn_id,
-            self.run_id
-        );
+        tracing::info!("started Turn {}", turn_id);
         // Model selection is snapshotted once so host changes made during
         // this Turn apply only to the next Turn.
         let (model, thinking_level) = self.session.model.snapshot()?;
@@ -415,9 +411,7 @@ impl RunScope<'_> {
                 if self.insertion.is_some() && self.cancellation.is_cancelled()
                 {
                     tracing::info!(
-                        "cancelled prompt after message hooks before insertion for session {}, Run {}",
-                        self.session_id,
-                        self.run_id
+                        "cancelled prompt after message hooks before insertion"
                     );
                     return Err(KernelError::PromptCancelled);
                 }
@@ -762,9 +756,8 @@ impl RunScope<'_> {
             // ExtensionRuntime keeps the role, but that guarantee lives in another
             // crate, so a broken one must fail this Run instead of panicking.
             tracing::error!(
-                "Assistant message {} lost its role before settlement in Kernel Run {}",
-                assistant_id,
-                self.run_id
+                "Assistant message {} lost its role before settlement",
+                assistant_id
             );
             return Err(KernelError::Protocol(
                 "settled Assistant message lost its role".to_string(),
@@ -1028,9 +1021,8 @@ impl RunScope<'_> {
         // again after TurnEnd hooks in case they persisted extension state.
         self.session.sync_store()?;
         tracing::info!(
-            "settled Turn {} for Kernel Run {} in {} ms with outcome {:?}",
+            "settled Turn {} in {} ms with outcome {:?}",
             turn_id,
-            self.run_id,
             turn_ended_at.get().saturating_sub(turn.started_at.get()),
             record.outcome
         );
@@ -1058,12 +1050,14 @@ impl RunScope<'_> {
             )));
         }
 
-        // Overflow recovery compacts and retries at most once per Run.
+        // Overflow recovery compacts and retries at most once per Run. With
+        // nothing to compact, a retry would overflow again, so the failure
+        // settles below instead.
         if settled.overflow_recovery == Some(OverflowRecovery::CompactAndRetry)
             && !turn_loop.overflow_recovery_attempted
         {
             turn_loop.overflow_recovery_attempted = true;
-            kernel
+            if kernel
                 .perform_compaction(
                     CompactionExecution::builder()
                         .session_id(self.session_id)
@@ -1074,9 +1068,12 @@ impl RunScope<'_> {
                         .excluded_message_id(Some(&settled.assistant_id))
                         .build(),
                 )
-                .await?;
-            turn_loop.next_turn_id = Some(kernel.new_turn_id()?);
-            return Ok(None);
+                .await?
+                .is_some()
+            {
+                turn_loop.next_turn_id = Some(kernel.new_turn_id()?);
+                return Ok(None);
+            }
         }
 
         // Retryable provider failures use cancellable backoff before a
@@ -1275,10 +1272,7 @@ impl RunScope<'_> {
                     self.session.sync_store()?;
                 }
                 tracing::info!(
-                    "completed Kernel Run {} for session {} with trace {} because an extension handled the input",
-                    self.run_id,
-                    self.session_id,
-                    self.trace_id
+                    "completed Kernel Run because an extension handled the input"
                 );
                 return Ok(None);
             }
@@ -1323,10 +1317,7 @@ impl RunScope<'_> {
                     .settle()
                     .await?;
                 tracing::info!(
-                    "settled Kernel Run {} for session {} with trace {} and outcome {:?} after {} Turns",
-                    self.run_id,
-                    self.session_id,
-                    self.trace_id,
+                    "settled Kernel Run with outcome {:?} after {} Turns",
                     completion.outcome,
                     completion.result.turns.len()
                 );
@@ -1357,10 +1348,7 @@ impl RunScope<'_> {
                     .settle()
                     .await?;
                 tracing::info!(
-                    "cancelled Kernel Run {} for session {} with trace {} before insertion: {}",
-                    self.run_id,
-                    self.session_id,
-                    self.trace_id,
+                    "cancelled Kernel Run before insertion: {}",
                     error
                 );
                 Err(KernelError::PromptCancelled)
@@ -1375,13 +1363,7 @@ impl RunScope<'_> {
                     .build()
                     .settle()
                     .await?;
-                tracing::error!(
-                    "failed Kernel Run {} for session {} with trace {}: {}",
-                    self.run_id,
-                    self.session_id,
-                    self.trace_id,
-                    error
-                );
+                tracing::error!("failed Kernel Run: {}", error);
                 Err(error)
             }
         }

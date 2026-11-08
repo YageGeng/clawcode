@@ -252,16 +252,6 @@ impl ExtensionHost for SessionExtensionHost {
                     Arc::new(DiscardEventSink),
                     RunInvocation::builder()
                         .input_source(protocol::InputSource::Extension)
-                        .trace_id(
-                            protocol::TraceId::try_from(
-                                self.kernel
-                                    .id_generator
-                                    .next(protocol::IdKind::Trace),
-                            )
-                            .map_err(|error| {
-                                ExtensionHostError::Operation(error.to_string())
-                            })?,
-                        )
                         .build(),
                 )
                 .await
@@ -324,12 +314,6 @@ impl ExtensionHost for SessionExtensionHost {
             Err(crate::KernelError::SessionNotRunning(_)) => {
                 let kernel = self.kernel.clone();
                 let session_id = invocation.session_id.clone();
-                let trace_id = protocol::TraceId::try_from(
-                    kernel.id_generator.next(protocol::IdKind::Trace),
-                )
-                .map_err(|error| {
-                    ExtensionHostError::Operation(error.to_string())
-                })?;
                 // A non-agent hook owns the gate: wait on another task so the hook can return.
                 tokio::spawn(async move {
                     let sink = kernel.session_sink(&session_id);
@@ -342,7 +326,6 @@ impl ExtensionHost for SessionExtensionHost {
                             sink,
                             RunInvocation::builder()
                                 .input_source(protocol::InputSource::Extension)
-                                .trace_id(trace_id)
                                 .input_processed(true)
                                 .build(),
                         )

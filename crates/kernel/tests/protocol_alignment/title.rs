@@ -1,5 +1,5 @@
 use kernel::SessionEventSinks;
-use protocol::{AgentEventPayload, RunRequest, SessionTitle, TraceId};
+use protocol::{AgentEventPayload, RunRequest, SessionTitle};
 
 use super::fixture::{Route, TestKernel};
 
@@ -47,13 +47,12 @@ async fn set_session_title_uses_active_turn_while_running() {
     let running = session.clone();
     let run = tokio::spawn(async move {
         kernel
-            .run_traced(
+            .run_with_insertion(
                 RunRequest {
                     session_id: running,
                     input: "hold".into(),
                 },
                 sink,
-                TraceId::try_from("trace-title").unwrap(),
                 None,
             )
             .await

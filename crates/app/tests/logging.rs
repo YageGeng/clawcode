@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use app::LoggingFactory;
-use protocol::ProductIdentity;
+use protocol::{ProductIdentity, RUN_ID_FIELD};
 
 /// Shared in-memory writer used to inspect formatted production tracing output.
 #[derive(Clone, Default)]
@@ -63,7 +63,7 @@ fn logging_factory_filters_debug_and_writes_info_messages() {
     assert!(!output.contains("\u{1b}["));
 }
 
-/// Explicit color configuration emits ANSI escape sequences.
+/// Allowed color uses tracing's ANSI styling, which a non-empty `NO_COLOR` turns off.
 #[test]
 fn logging_factory_emits_ansi_when_color_is_enabled() {
     let logs = CapturedLogs::default();
@@ -75,111 +75,26 @@ fn logging_factory_emits_ansi_when_color_is_enabled() {
         tracing::info!("colored diagnostic");
     });
 
-    assert!(logs.content().contains("\u{1b}["));
+    // Same reading as tracing: a non-Unicode value counts as unset.
+    let no_color =
+        std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty());
+    assert_eq!(logs.content().contains("\u{1b}["), !no_color);
 }
 
-/// Compact logs expose local millisecond time and the exact event source line.
-#[test]
-fn logging_factory_writes_compact_timestamp_and_source_location() {
-    let logs = CapturedLogs::default();
-    let subscriber = LoggingFactory::new("info", false)
-        .expect("valid filter")
-        .build(logs.clone());
-
-    let expected_line = line!() + 2;
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::info!("source location diagnostic");
-    });
-
-    let output = logs.content();
-    let (timestamp, remainder) = output
-        .split_once(" INFO  [-] ")
-        .expect("compact level and empty trace marker");
-    assert_eq!(timestamp.len(), 23);
-    assert_eq!(timestamp.as_bytes().get(4), Some(&b'-'));
-    assert_eq!(timestamp.as_bytes().get(7), Some(&b'-'));
-    assert_eq!(timestamp.as_bytes().get(10), Some(&b' '));
-    assert_eq!(timestamp.as_bytes().get(13), Some(&b':'));
-    assert_eq!(timestamp.as_bytes().get(16), Some(&b':'));
-    assert_eq!(timestamp.as_bytes().get(19), Some(&b'.'));
-    assert!(remainder.contains(&format!(
-        "crates/app/tests/logging.rs:{expected_line} | source location diagnostic"
-    )));
-}
-
-/// Nested tracing spans contribute one Trace ID without exposing their names.
-#[test]
-fn logging_factory_flattens_span_context_to_one_trace_id() {
-    let logs = CapturedLogs::default();
-    let subscriber = LoggingFactory::new("info", false)
-        .expect("valid filter")
-        .build(logs.clone());
-
-    tracing::subscriber::with_default(subscriber, || {
-        let trace = tracing::info_span!(
-            "acp_operation",
-            trace_id = "trace-format-test"
-        );
-        trace.in_scope(|| {
-            let provider = tracing::info_span!("provider_request");
-            provider.in_scope(|| tracing::info!("provider completed"));
-        });
-    });
-
-    let output = logs.content();
-    assert_eq!(output.matches("trace-format-test").count(), 1);
-    assert!(output.contains(" INFO  [trace-format-test] "));
-    assert!(!output.contains("acp_operation"));
-    assert!(!output.contains("provider_request"));
-}
-
-/// ACP handler diagnostics omit the recursively escaped handler chain.
-#[test]
-fn logging_factory_compacts_acp_handler_chain_diagnostics() {
-    let logs = CapturedLogs::default();
-    let subscriber = LoggingFactory::new("warn", false)
-        .expect("valid filter")
-        .build(logs.clone());
-    let escaped_handler = format!(
-        "NamedHandler({:?}, {:?})",
-        "agent_client_protocol_schema::v2::agent::InitializeRequest",
-        "\\\"\\\\\\\"\\\\\\\\\\\\\\\"(null)"
-    );
-
-    tracing::subscriber::with_default(subscriber, || {
-        // This reproduces the structured event emitted by the external ACP SDK.
-        tracing::warn!(
-            target: "agent_client_protocol::jsonrpc::incoming_actor",
-            method = ?"_clawcode/mcp/status",
-            id = ?Some(10_u64),
-            err = ?"session not found: session-test",
-            handler = ?escaped_handler,
-            "Handler errored"
-        );
-    });
-
-    let output = logs.content();
-    assert!(output.contains("Handler errored"));
-    assert!(output.contains("method=\"_clawcode/mcp/status\""));
-    assert!(output.contains("id=Some(10)"));
-    assert!(output.contains("session not found: session-test"));
-    assert!(output.contains("handler=<omitted>"));
-    assert!(!output.contains("NamedHandler"));
-    assert!(output.len() < 512, "unexpectedly large log: {output}");
-}
-
-/// Process startup uses the TOML filter unless `RUST_LOG` explicitly overrides it.
-#[test]
-fn process_logging_prefers_environment_over_toml_filter() {
-    let directory = tempfile::tempdir().expect("logging config directory");
-    let config_path = directory.path().join("claw.toml");
+/// Writes a config for the production binary with the given `[logging]` table.
+fn logging_config(
+    directory: &std::path::Path,
+    logging: &str,
+) -> std::path::PathBuf {
+    let config_path = directory.join("claw.toml");
     std::fs::write(
         &config_path,
-        r#"
+        format!(
+            r#"
 active_model = "fixture/model"
 
 [logging]
-filter = "off"
+{logging}
 
 [[providers]]
 id = "fixture"
@@ -192,9 +107,41 @@ id = "model"
 display_name = "Fixture Model"
 context_tokens = 32768
 max_output_tokens = 1024
-"#,
+"#
+        ),
     )
     .expect("write logging config");
+    config_path
+}
+
+/// Allowed color is still off when stderr is redirected away from a terminal.
+#[test]
+fn redirected_process_logs_have_no_ansi_even_with_color() {
+    let directory = tempfile::tempdir().expect("logging config directory");
+    let config_path =
+        logging_config(directory.path(), "filter = \"info\"\ncolor = true");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_clawcode"))
+        .arg("stdio")
+        .env(ProductIdentity::CONFIG_PATH_ENV, &config_path)
+        .env_remove("RUST_LOG")
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run colored logging process");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 process logs");
+    assert!(
+        stderr.contains("starting Clawcode stdio transport"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("\u{1b}["), "{stderr}");
+}
+
+/// Process startup uses the TOML filter unless `RUST_LOG` explicitly overrides it.
+#[test]
+fn process_logging_prefers_environment_over_toml_filter() {
+    let directory = tempfile::tempdir().expect("logging config directory");
+    let config_path = logging_config(directory.path(), "filter = \"off\"");
 
     let configured = Command::new(env!("CARGO_BIN_EXE_clawcode"))
         .arg("stdio")
@@ -229,160 +176,48 @@ max_output_tokens = 1024
     assert!(stderr.contains("starting Clawcode stdio transport"));
 }
 
-/// Real upstream calls record final identity/usage once without logging sensitive opted-in content.
-#[tokio::test]
-async fn rig_telemetry_logs_final_metadata_without_content() {
-    use tracing::{Instrument, instrument::WithSubscriber};
-    let logs = CapturedLogs::default();
-    let subscriber = LoggingFactory::new("info", false)
-        .expect("filter")
-        .build(logs.clone());
-    async {
-        for adopted in [false,true] {
-            let trace=tracing::info_span!("acp_operation",trace_id=if adopted {"trace-adopted"} else {"trace-native"});
-            async {
-                let http=rig_core::test_utils::RecordingHttpClient::new(serde_json::json!({
-                    "id":"reply-audit","object":"chat.completion","created":0,"model":"response-model",
-                    "choices":[{"index":0,"message":{"role":"assistant","content":"RESPONSE_SECRET_SENTINEL"},"finish_reason":"stop"}],
-                    "usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":1}}
-                }).to_string());
-                let model=rig_core::providers::openai::OpenAIConfig::new("API_SECRET_SENTINEL")
-                    .with_route(rig_core::providers::openai::wire::Route::Chat).connect(http).completion("request-model");
-                // These SDK fields exercise adoption and an explicitly enabled content recorder.
-                let parent=adopted.then(|| rig_core::telemetry::completion_parent_span!(
-                    target:"host::telemetry",name:"provider_call",operation:"chat",system_instructions:Some("SYSTEM_SECRET_SENTINEL"),authorization="AUTH_SECRET_SENTINEL"
-                ));
-                let request=rig_core::completion::CompletionRequest::new("PROMPT_SECRET_SENTINEL").record_content_telemetry(true);
-                match parent {
-                    Some(parent)=> {model.call(request).instrument(parent).await.expect("completion");}
-                    None=> {model.call(request).await.expect("completion");}
-                }
-            }.instrument(trace).await;
-        }
-    }.with_subscriber(subscriber).await;
-    let output = logs.content();
-    let summaries = output
+/// Returns the first captured line that contains `needle`, or the output as the error.
+fn line<'a>(output: &'a str, needle: &str) -> Result<&'a str, String> {
+    output
         .lines()
-        .filter(|line| line.contains("model request "))
-        .collect::<Vec<_>>();
-    assert_eq!(summaries.len(), 4, "{output}");
-    let starts = summaries
-        .iter()
-        .filter(|summary| summary.contains("model request start"))
-        .collect::<Vec<_>>();
-    let dones = summaries
-        .iter()
-        .filter(|summary| summary.contains("model request done"))
-        .collect::<Vec<_>>();
-    assert_eq!(starts.len(), 2, "{output}");
-    assert_eq!(dones.len(), 2, "{output}");
-    for summary in starts {
-        assert!(
-            summary.contains("gen_ai.operation.name=\"chat\""),
-            "{summary}"
-        );
-        assert!(!summary.contains("elapsed_ms="), "{summary}");
-    }
-    for summary in dones {
-        assert!(
-            summary.contains("gen_ai.operation.name=\"chat\"")
-                && summary.contains("gen_ai.provider.name=\"openai\"")
-                && summary.contains("gen_ai.request.model=\"request-model\"")
-                && summary.contains("gen_ai.response.model=\"response-model\""),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("gen_ai.usage.input_tokens=12")
-                && summary.contains("gen_ai.usage.output_tokens=3")
-                && summary.contains("gen_ai.usage.cache_read.input_tokens=0")
-                && summary.contains("gen_ai.usage.reasoning_tokens=1"),
-            "{summary}"
-        );
-        assert!(
-            summary.contains("gen_ai.response.id=\"reply-audit\"")
-                && summary.contains("elapsed_ms="),
-            "{summary}"
-        );
-        assert!(!summary.contains("gen_ai.usage.cache_creation.input_tokens="));
-    }
-    assert!(
-        output.contains("[trace-native]") && output.contains("[trace-adopted]"),
-        "{output}"
-    );
-    for secret in [
-        "PROMPT_SECRET_SENTINEL",
-        "RESPONSE_SECRET_SENTINEL",
-        "SYSTEM_SECRET_SENTINEL",
-        "API_SECRET_SENTINEL",
-        "AUTH_SECRET_SENTINEL",
-    ] {
-        assert!(!output.contains(secret), "content leaked: {secret}");
-    }
+        .find(|line| line.contains(needle))
+        .ok_or_else(|| format!("missing {needle} in {output}"))
 }
 
-/// Empty or interrupted spans emit start immediately and final usage after their last handle closes.
+/// Opening and closing spans, including Rig's, writes nothing on its own.
 #[test]
-fn rig_telemetry_waits_for_close_and_preserves_unknown_usage() {
+fn logging_factory_writes_no_span_lifecycle_lines() {
     let logs = CapturedLogs::default();
-    let subscriber = LoggingFactory::new("info", false)
-        .expect("filter")
+    let subscriber = LoggingFactory::new("trace", false)
+        .expect("valid filter")
         .build(logs.clone());
+
     tracing::subscriber::with_default(subscriber, || {
-        let span = rig_core::telemetry::SpanBuilder::new(
-            "provider",
-            "unreported",
-            rig_core::telemetry::GenAiOperation::Chat,
-        )
-        .build();
-        let other = span.clone();
-        for _ in 0..3 {
-            span.in_scope(|| {});
-        }
-        drop(span);
-        assert!(
-            logs.content().contains("model request start"),
-            "start must be logged immediately"
-        );
-        assert!(!logs.content().contains("model request done"));
-        drop(other);
-        tracing::info_span!("ordinary_operation").in_scope(|| {});
+        tracing::info_span!(target: "rig::completions", "chat").in_scope(|| {});
+        tracing::error_span!("run", { RUN_ID_FIELD } = "run-x").in_scope(|| {});
     });
-    let output = logs.content();
-    assert_eq!(output.lines().count(), 2, "{output}");
-    assert!(output.contains("model request start"), "{output}");
-    assert!(output.contains("model request done"), "{output}");
-    assert!(
-        !output.contains("input_tokens=") && !output.contains("output_tokens=")
-    );
-    assert!(
-        !output.contains("succeeded") && !output.contains("ordinary_operation")
-    );
+
+    assert_eq!(logs.content(), "");
 }
 
-/// Existing filters can disable Rig summaries without suppressing ordinary application logs.
-#[test]
-fn rig_telemetry_respects_existing_log_filters() {
-    for (filter, expected) in [
-        ("info,rig::completions=off", false),
-        ("warn,rig::completions=info", true),
-    ] {
-        let logs = CapturedLogs::default();
-        let subscriber = LoggingFactory::new(filter, false)
-            .expect("filter")
-            .build(logs.clone());
-        tracing::subscriber::with_default(subscriber, || {
-            drop(
-                rig_core::telemetry::SpanBuilder::new(
-                    "provider",
-                    "model",
-                    rig_core::telemetry::GenAiOperation::Chat,
-                )
-                .build(),
-            );
-            tracing::warn!("ordinary warning");
-        });
-        let output = logs.content();
-        assert_eq!(output.contains("model request done"), expected, "{output}");
-        assert!(output.contains("ordinary warning"), "{output}");
-    }
+/// Warnings inside a Run keep its span fields even when the filter hides INFO.
+#[tokio::test]
+async fn run_span_prefix_survives_a_warn_filter() {
+    let logs = CapturedLogs::default();
+    let subscriber = LoggingFactory::new("warn", false)
+        .expect("valid filter")
+        .build(logs.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let trace = protocol::TraceId::try_from("trace-w").expect("trace");
+    let run = protocol::RunId::try_from("run-w").expect("run");
+
+    kernel::RunSpan::top_level(&trace, &run)
+        .instrument(async { tracing::warn!("slow tool") })
+        .await;
+
+    assert!(
+        line(&logs.content(), "slow tool")
+            .expect("log line")
+            .contains("run{trace_id=trace-w run_id=run-w}: ")
+    );
 }

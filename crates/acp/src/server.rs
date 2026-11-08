@@ -11,9 +11,9 @@ use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use kernel::{InsertionNotice, Kernel, KernelError, ModelError};
 use protocol::{
     AcpExtensionMethod, AcpWorkingDirectory, AgentEvent, AgentEventPayload,
-    EventMetadata, IdGenerator, McpSessionChange,
-    McpSessionRevisionNotification, ProductIdentity, RunRequest, Sequence,
-    SessionId, SessionTitle, TimestampMs,
+    EventMetadata, McpSessionChange, McpSessionRevisionNotification,
+    ProductIdentity, RunRequest, Sequence, SessionId, SessionTitle,
+    TimestampMs,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -39,7 +39,6 @@ use crate::recovery::{
     AcpReplayRequest, CursorErrorData, RECOVERY_VERSION, RecoveryMode,
     RecoveryRequest, RecoveryResponse, ResumeMeta,
 };
-use crate::trace::AcpTraceFactory;
 
 /// Cohesive ACP notification operations backed by one shared Kernel.
 pub(crate) struct AcpServer {
@@ -716,7 +715,6 @@ impl AcpServer {
 /// Factory that creates an isolated ACP v2 connection over a shared kernel.
 pub struct AcpServerFactory {
     kernel: Arc<Kernel>,
-    id_generator: Arc<dyn IdGenerator>,
     runtime: AcpServerRuntime,
 }
 
@@ -731,7 +729,7 @@ struct AcpServerRuntime {
 struct ComponentContext {
     kernel: Arc<Kernel>,
     projections: Arc<ProjectionRegistry>,
-    traces: AcpTraceFactory,
+    transport: crate::AcpTransportKind,
     watchers: ConnectionWatchers,
 }
 
@@ -745,11 +743,7 @@ struct ConnectionWatchers {
 impl AcpServerFactory {
     /// Creates an ACP server factory without client filesystem or terminal callbacks.
     #[must_use]
-    pub fn new(
-        kernel: Arc<Kernel>,
-        id_generator: Arc<dyn IdGenerator>,
-        max_batch_size: NonZeroUsize,
-    ) -> Self {
+    pub fn new(kernel: Arc<Kernel>, max_batch_size: NonZeroUsize) -> Self {
         let projections =
             Arc::new(ProjectionRegistry::new(Arc::clone(&kernel)));
         if let Err(error) = kernel.install_event_sinks(Arc::new(
@@ -762,7 +756,6 @@ impl AcpServerFactory {
         }
         Self {
             kernel,
-            id_generator,
             runtime: AcpServerRuntime {
                 projections,
                 max_batch_size,
@@ -781,10 +774,7 @@ impl AcpServerFactory {
             ComponentContext::builder()
                 .kernel(Arc::clone(&self.kernel))
                 .projections(Arc::clone(&self.runtime.projections))
-                .traces(AcpTraceFactory::new(
-                    Arc::clone(&self.id_generator),
-                    transport,
-                ))
+                .transport(transport)
                 .watchers(ConnectionWatchers {
                     mcp: Arc::new(Mutex::new(BTreeSet::new())),
                     sessions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -816,7 +806,7 @@ impl AcpServerFactory {
                     context.watchers.elicitations.negotiated(ElicitationModes::from(
                         request.capabilities.elicitation.as_ref(),
                     ));
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         // The SDK has already negotiated and rewritten the version.
                         tracing::info!(
@@ -954,7 +944,7 @@ impl AcpServerFactory {
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
                     let elicitations = Arc::clone(&context.watchers.elicitations);
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         let cwd = AcpWorkingDirectory::try_from(
                             request.cwd.into_inner(),
@@ -1005,7 +995,7 @@ impl AcpServerFactory {
                                 responder: Responder<wire::ListSessionsResponse>,
                                 _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         if request.cursor.is_some() {
                             return Err(agent_client_protocol::Error::invalid_params()
@@ -1054,7 +1044,7 @@ impl AcpServerFactory {
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
                     let elicitations = Arc::clone(&context.watchers.elicitations);
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         let session_id = SessionId::try_from(request.session_id.to_string())
                             .map_err(|error| {
@@ -1322,7 +1312,7 @@ impl AcpServerFactory {
                     async move |request: wire::CloseSessionRequest,
                                 responder: Responder<wire::CloseSessionResponse>,
                                 connection: V2ConnectionTo<Client>| {
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.start();
                     let accepted = SessionId::try_from(request.session_id.to_string())
                         .map_err(|error| {
@@ -1363,7 +1353,7 @@ impl AcpServerFactory {
                     async move |request: wire::SetSessionConfigOptionRequest,
                                 responder: Responder<wire::SetSessionConfigOptionResponse>,
                                 connection: V2ConnectionTo<Client>| {
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.start();
                     let accepted = SessionId::try_from(request.session_id.to_string())
                         .map_err(|error| {
@@ -1404,7 +1394,7 @@ impl AcpServerFactory {
                     async move |request: wire::LoginAuthRequest,
                                 responder: Responder<wire::LoginAuthResponse>,
                                 connection: V2ConnectionTo<Client>| {
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.start();
                     let requested = request.method_id.to_string();
                     let Some(method) = context
@@ -1447,7 +1437,7 @@ impl AcpServerFactory {
                                 _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         let session_id =
                             SessionId::try_from(request.session_id.to_string())
@@ -1479,7 +1469,7 @@ impl AcpServerFactory {
                                 responder: Responder<wire::SetSessionTitleResponse>,
                                 _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
-                    let operation = context.traces.request(&responder, &request)?;
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.run(async move {
                         let session_id =
                             SessionId::try_from(request.session_id.to_string())
@@ -1525,11 +1515,10 @@ impl AcpServerFactory {
                     let kernel = Arc::clone(&context.kernel);
                     let projections = Arc::clone(&context.projections);
                     let watchers = Arc::clone(&context.watchers.sessions);
-                    let operation = context.traces.request(&responder, &request)?;
-                    let trace_id = operation.trace_id().clone();
+                    let operation = context.transport.request_log(&responder, &request);
                     operation.start();
                     let task_operation = operation.clone();
-                    let result = operation.instrument(async move {
+                    let result = async move {
                         let session_id = SessionId::try_from(request.session_id.to_string())
                             .map_err(|error| {
                                 agent_client_protocol::Error::invalid_params()
@@ -1550,88 +1539,91 @@ impl AcpServerFactory {
                         // A Prompt Run belongs to the Kernel Session rather than
                         // the requesting socket. Detaching it lets reconnecting
                         // clients recover through runtime polling and replay.
-                        tokio::spawn(async move {
-                            let detached_session_id = task_session_id.clone();
-                            let result: Result<
-                                (),
-                                agent_client_protocol::Error,
-                            > = task_operation
-                                .settle(Box::pin(async move {
-                                    let sink = projections
-                                        .sink(task_session_id.clone());
-                                    match kernel
-                                        .prompt(kernel::PromptRequest::builder()
-                                            .run(RunRequest { session_id: task_session_id.clone(), input })
-                                            .sink(sink).trace_id(trace_id).insertion(notice).ticket(ticket)
-                                            .when_busy(options.when_busy).submission_id(options.submission_id).build())
-                                        .await
+                        // The Run logs its own lifecycle inside its span; the ACP
+                        // request is already complete once its response is sent.
+                        tokio::spawn(Box::pin(async move {
+                            let sink = projections
+                                .sink(task_session_id.clone());
+                            let prompt = kernel::PromptRequest::builder()
+                                .run(RunRequest {
+                                    session_id: task_session_id.clone(),
+                                    input,
+                                })
+                                .sink(sink)
+                                .insertion(notice)
+                                .ticket(ticket)
+                                .when_busy(options.when_busy)
+                                .submission_id(options.submission_id)
+                                .build();
+                            match kernel.prompt(prompt).await {
+                                Ok(_result) => {}
+                                // A prompt rejected before insertion either
+                                // settled its own Run or never started one;
+                                // another Run may still own the live state.
+                                Err(KernelError::PromptCancelled) => {
+                                    tracing::info!(
+                                        "prompt for session {} was cancelled before insertion",
+                                        task_session_id
+                                    );
+                                }
+                                // Refused before insertion, so no Run exists to
+                                // settle; the Kernel already logged the refusal.
+                                Err(KernelError::Model(
+                                    ModelError::AuthRequired { .. },
+                                )) => {}
+                                Err(error) => {
+                                    tracing::error!(
+                                        "Kernel Run for session {} failed: {}",
+                                        task_session_id,
+                                        error
+                                    );
+                                    // An enqueue can fail while another Run
+                                    // still owns the Session.
+                                    let idle = kernel
+                                        .session_runtime(&task_session_id)
+                                        .is_ok_and(|runtime| !runtime.running);
+                                    if idle
+                                        && let Err(fallback_error) = projections
+                                            .publish_terminal_fallback(
+                                                &task_session_id,
+                                            )
                                     {
-                                        Ok(_result) => {}
-                                        // A prompt rejected before insertion either
-                                        // settled its own Run or never started one;
-                                        // another Run may still own the live state.
-                                        Err(KernelError::PromptCancelled) => {
-                                            tracing::info!(
-                                                "prompt for session {} was cancelled before insertion",
-                                                task_session_id
-                                            );
-                                        }
-                                        // Refused before insertion, so no Run exists to settle; the
-                                        // Kernel already logged the refusal.
-                                        Err(KernelError::Model(ModelError::AuthRequired { .. })) => {}
-                                        Err(error) => {
-                                            tracing::error!(
-                                                "Kernel Run for session {} failed: {}",
-                                                task_session_id,
-                                                error
-                                            );
-                                            // An enqueue can fail while another Run still owns the Session.
-                                            if kernel.session_runtime(&task_session_id).is_ok_and(|runtime| !runtime.running)
-                                                && let Err(fallback_error) = projections
-                                                .publish_terminal_fallback(
-                                                    &task_session_id,
-                                                )
-                                            {
-                                                tracing::error!(
-                                                    "failed to publish terminal ACP fallback for Session {}: {}",
-                                                    task_session_id,
-                                                    fallback_error
-                                                );
-                                            }
-                                        }
+                                        tracing::error!(
+                                            "failed to publish terminal ACP fallback for Session {}: {}",
+                                            task_session_id,
+                                            fallback_error
+                                        );
                                     }
-                                    Ok(())
-                                }))
-                                .await;
-                            if let Err(error) = result {
-                                tracing::warn!(
-                                    "detached ACP projection for session {} ended with error: {}",
-                                    detached_session_id,
-                                    error
-                                );
+                                }
                             }
-                        });
+                        }));
 
                         // The callback returns at once so this connection keeps
                         // dispatching session/cancel and elicitation replies while
                         // the prompt waits for the gate or pre-insertion hooks.
                         connection.spawn(async move {
-                            let response = match insertion.await {
-                                Ok(Ok(message_id)) => Ok(wire::PromptResponse::new(
-                                    message_id.to_string(),
-                                )),
-                                Ok(Err(error)) => {
-                                    Err(KernelFailure(error).into())
-                                }
-                                Err(_closed) => {
-                                    tracing::error!(
-                                        "prompt for session {} ended without reporting insertion",
-                                        session_id
-                                    );
-                                    Err(agent_client_protocol::Error::internal_error()
-                                        .data("prompt ended before insertion"))
-                                }
-                            };
+                            // The request completes when its response is sent: at
+                            // insertion, not when the Run it started or joined settles.
+                            let response = task_operation
+                                .settle(async {
+                                    match insertion.await {
+                                        Ok(Ok(message_id)) => Ok(wire::PromptResponse::new(
+                                            message_id.to_string(),
+                                        )),
+                                        Ok(Err(error)) => {
+                                            Err(KernelFailure(error).into())
+                                        }
+                                        Err(_closed) => {
+                                            tracing::error!(
+                                                "prompt for session {} ended without reporting insertion",
+                                                session_id
+                                            );
+                                            Err(agent_client_protocol::Error::internal_error()
+                                                .data("prompt ended before insertion"))
+                                        }
+                                    }
+                                })
+                                .await;
                             if let Err(error) = responder.respond_with_result(response) {
                                 tracing::warn!(
                                     "failed to answer prompt for session {}: {}",
@@ -1642,7 +1634,7 @@ impl AcpServerFactory {
                             Ok(())
                         })?;
                         Ok(())
-                    }).await;
+                    }.await;
                     if let Err(error) = &result {
                         operation.fail(error);
                     }
@@ -1657,10 +1649,10 @@ impl AcpServerFactory {
                     async move |notification: wire::CancelSessionNotification,
                                 _connection: V2ConnectionTo<Client>| {
                     let kernel = Arc::clone(&context.kernel);
-                    let operation = context.traces.notification(
+                    let operation = context.transport.notification_log(
                         notification.method(),
                         &notification,
-                    )?;
+                    );
                     operation.run(async move {
                         let session_id = SessionId::try_from(
                             notification.session_id.to_string(),
@@ -1688,10 +1680,10 @@ impl AcpServerFactory {
                     let mcp_watchers = Arc::clone(&context.watchers.mcp);
                     let session_watchers = Arc::clone(&context.watchers.sessions);
                     let elicitations = Arc::clone(&context.watchers.elicitations);
-                    let operation = context.traces.request(
+                    let operation = context.transport.request_log(
                         &responder,
                         request.parameters(),
-                    )?;
+                    );
                     // The extension dispatcher covers every product method;
                     // boxing keeps that large state machine out of the ACP handler future.
                     operation.run(Box::pin(async move {

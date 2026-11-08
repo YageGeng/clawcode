@@ -1,11 +1,10 @@
 use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use acp::{AcpServerFactory, AcpTransportKind};
-use agent_client_protocol::Client;
+use agent_client_protocol::{Client, UntypedMessage};
 use agent_client_protocol::{schema::ProtocolVersion, v2::schema as wire};
 use extension::StaticExtensionFactory;
 use futures::stream;
@@ -14,10 +13,7 @@ use kernel::{
     NanoidIdGenerator,
 };
 use prompt::FilesystemPromptFactory;
-use protocol::{
-    IdGenerator, IdKind, ModelFinal, ModelProfile, ModelRequest,
-    ModelStreamEvent, StopReason,
-};
+use protocol::{AcpExtensionMethod, ModelProfile, ModelRequest};
 use store::{JsonlStoreFactory, SystemClock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -62,18 +58,6 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
     }
 }
 
-/// Produces deterministic operation identifiers independently from Kernel IDs.
-#[derive(Default)]
-struct TraceIds(AtomicUsize);
-
-impl IdGenerator for TraceIds {
-    /// Generates an incrementing identifier with the requested domain prefix.
-    fn next(&self, kind: IdKind) -> String {
-        let sequence = self.0.fetch_add(1, Ordering::SeqCst) + 1;
-        format!("{}-{}", kind.prefix(), sequence)
-    }
-}
-
 /// Model that reports when the Provider boundary is reached by a Prompt task.
 struct TracedModel {
     reached: Arc<Notify>,
@@ -92,7 +76,8 @@ impl Model for TracedModel {
         Ok(())
     }
 
-    /// Emits a diagnostic event under the inherited Prompt Trace.
+    /// Logs under the inherited Run span, then never answers, so the Run
+    /// cannot settle before the test cancels it.
     async fn stream(
         &self,
         _request: ModelRequest,
@@ -100,20 +85,7 @@ impl Model for TracedModel {
     ) -> Result<ModelStream, ModelError> {
         tracing::info!("fixture provider received request");
         self.reached.notify_one();
-        Ok(Box::pin(stream::iter([Ok(ModelStreamEvent::Finished(
-            ModelFinal::builder()
-                .stop_reason(StopReason::EndTurn)
-                .raw_stop_reason(Some("stop".to_string()))
-                .usage(protocol::ModelUsage::from(
-                    protocol::Usage::new()
-                        .input_tokens(0)
-                        .output_tokens(0)
-                        .cached_input_tokens(0)
-                        .cache_creation_input_tokens(0)
-                        .total_tokens(0),
-                ))
-                .build(),
-        ))])))
+        Ok(Box::pin(stream::pending()))
     }
 }
 
@@ -162,9 +134,24 @@ fn traced_kernel(root: &Path, reached: Arc<Notify>) -> Arc<Kernel> {
     )
 }
 
-/// Prompt background work keeps the ACP operation Trace through the Provider boundary.
+/// Returns the value of the nearest `trace_id=` span field on one line.
+fn trace_field(line: &str) -> Option<&str> {
+    let key = "trace_id=";
+    let rest = line.get(line.rfind(key)? + key.len()..)?;
+    rest.get(..rest.find([' ', '}']).unwrap_or(rest.len()))
+}
+
+/// Returns the index of the first captured line containing `needle`.
+fn line_index(output: &str, needle: &str) -> Result<usize, String> {
+    output
+        .lines()
+        .position(|line| line.contains(needle))
+        .ok_or_else(|| format!("missing {needle} in {output}"))
+}
+
+/// The prompt's Run, not its ACP request, owns the trace the provider sees.
 #[tokio::test]
-async fn prompt_trace_reaches_the_provider_background_task() {
+async fn prompt_run_trace_reaches_the_provider() {
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
@@ -181,7 +168,6 @@ async fn prompt_trace_reaches_the_provider_background_task() {
     let kernel = traced_kernel(state.path(), Arc::clone(&reached));
     let server = AcpServerFactory::new(
         kernel,
-        Arc::new(TraceIds::default()),
         NonZeroUsize::new(128).expect("positive batch size"),
     )
     .component(AcpTransportKind::Stdio);
@@ -260,24 +246,36 @@ async fn prompt_trace_reaches_the_provider_background_task() {
         .find(|line| line.contains("fixture provider received request"))
         .expect("provider log line")
         .to_string();
-    assert!(provider_line.contains("trace_id=trace-3"));
+    assert!(
+        provider_line.contains("run{trace_id=trace-"),
+        "{provider_line}"
+    );
+    let trace = trace_field(&provider_line).expect("trace field");
     for lifecycle in ["started Kernel Run", "started Turn"] {
         let line = output
             .lines()
             .find(|line| line.contains(lifecycle))
             .unwrap_or_else(|| panic!("missing {lifecycle} log line"));
-        assert!(line.contains("trace_id=trace-3"));
+        assert_eq!(trace_field(line).expect("trace field"), trace, "{line}");
     }
-    for lifecycle in [
-        "started ACP request session/prompt:",
-        "completed ACP request session/prompt:",
-    ] {
-        let line = output
+    let completed =
+        line_index(&output, "completed ACP request session/prompt:")
+            .expect("log line");
+    let completed_line =
+        output.lines().nth(completed).expect("completion line");
+    assert!(!completed_line.contains("trace_id="), "{completed_line}");
+    // The request completes when its response is sent, after insertion and
+    // before the Run (held open by the fixture model) settles.
+    assert!(
+        line_index(&output, "reported prompt insertion").expect("log line")
+            < completed
+    );
+    assert!(
+        output
             .lines()
-            .find(|line| line.contains(lifecycle))
-            .unwrap_or_else(|| panic!("missing {lifecycle} log line"));
-        assert_eq!(line.matches("trace-3").count(), 1);
-    }
+            .take(completed)
+            .all(|line| !line.contains("settled Kernel Run"))
+    );
     for operation in [
         "parameters for ACP request initialize:",
         "parameters for ACP request session/new:",
@@ -289,7 +287,7 @@ async fn prompt_trace_reaches_the_provider_background_task() {
             .lines()
             .find(|line| line.contains(operation))
             .unwrap_or_else(|| panic!("missing {operation} log line"));
-        assert!(line.contains("trace_id=trace-"));
+        assert!(!line.contains("trace_id="), "{line}");
     }
     assert!(output.contains("sensitive prompt body"));
     assert!(output.contains("image data omitted: 18 bytes"));
@@ -307,4 +305,77 @@ async fn prompt_trace_reaches_the_provider_background_task() {
     ] {
         assert!(!output.contains(secret), "secret leaked: {secret}");
     }
+}
+
+/// At INFO, read-only queries write nothing and a change writes one completion line.
+#[tokio::test]
+async fn read_only_requests_are_silent_at_info() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .with_writer(logs.clone())
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let state = tempfile::tempdir().expect("store directory");
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let kernel = traced_kernel(state.path(), Arc::new(Notify::new()));
+    let server = AcpServerFactory::new(
+        kernel,
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
+
+    Client
+        .v2()
+        .connect_with(server, async move |connection| {
+            connection
+                .send_request(wire::InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    wire::Implementation::new("trace-test", "0.1.0"),
+                ))
+                .block_task()
+                .await?;
+            let session = connection
+                .send_request(wire::NewSessionRequest::new(
+                    workspace.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            connection
+                .send_request(wire::ListSessionsRequest::new())
+                .block_task()
+                .await?;
+            // An extension query is classified by its parsed method name.
+            connection
+                .send_request(UntypedMessage::new(
+                    AcpExtensionMethod::SessionRuntime.as_str(),
+                    serde_json::json!({"sessionId": session.session_id}),
+                )?)
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
+        .expect("ACP connection");
+
+    let output = logs.content();
+    assert!(!output.contains("ACP request session/list"), "{output}");
+    assert!(
+        !output.contains(&format!(
+            "ACP request {}",
+            AcpExtensionMethod::SessionRuntime.as_str()
+        )),
+        "{output}"
+    );
+    assert_eq!(
+        output.matches("completed ACP request session/new:").count(),
+        1,
+        "{output}"
+    );
+    assert!(
+        !output.contains("started ACP request session/new:"),
+        "{output}"
+    );
 }

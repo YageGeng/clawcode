@@ -23,7 +23,6 @@ thiserror = { workspace = true }
 
 # tracing & log
 tracing = { workspace = true }
-tracing-futures = { workspace = true, features = ["futures-03"] }
 
 # async
 async-stream = { workspace = true }
@@ -54,6 +53,7 @@ rig-core = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["sync", "time", "test-util"] }
 
 # tracing & log
+tracing-futures = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # http

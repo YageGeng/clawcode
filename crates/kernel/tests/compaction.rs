@@ -29,6 +29,8 @@ use store::{
 use tokio_util::sync::CancellationToken;
 use tools::BuiltinToolFactory;
 
+#[path = "support/spans.rs"]
+mod spans;
 mod support;
 
 use support::CapturedLogs;
@@ -223,6 +225,18 @@ impl Model for ScriptedModel {
                         .build(),
                 )
             })??;
+        // A probe reply logs one line inside the caller's span, named by its
+        // text; other replies stay unlogged because summaries must not be logged.
+        if let Some(probe) = events.iter().find_map(|event| match event {
+            ModelStreamEvent::TextDelta(text)
+                if text.starts_with("span-probe-") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        }) {
+            tracing::info!("scripted model streaming {}", probe);
+        }
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
 }
@@ -880,8 +894,8 @@ async fn compaction_lifecycle_is_logged_without_summary_content() {
 
     let output = logs.content();
     for lifecycle in [
-        "started Compaction Run",
-        "completed Compaction Run",
+        "started Compaction Turn",
+        "completed Compaction Turn",
         "session session-compact",
         "reason Manual",
     ] {
@@ -890,6 +904,12 @@ async fn compaction_lifecycle_is_logged_without_summary_content() {
             "missing {lifecycle} in captured logs: {output:?}"
         );
     }
+    // Only the start line names the Session; the Run span carries it onward.
+    let completed = output
+        .lines()
+        .find(|line| line.contains("completed Compaction Turn"))
+        .expect("completion line");
+    assert!(!completed.contains("session-compact"), "{completed}");
     assert!(!output.contains("sensitive-compaction-summary"));
 }
 
@@ -1586,50 +1606,50 @@ async fn retained_tail_excludes_model_invisible_command_messages() {
     );
 }
 
-/// Threshold usage compacts after a successful response without repeating that response.
-#[tokio::test]
-async fn threshold_usage_compacts_without_repeating_assistant_call() {
-    let root = tempfile::tempdir().expect("store root");
-    let cwd = root.path().join("workspace/threshold");
+/// One answer whose reported usage, 84,000 tokens, crosses the 83,616-token
+/// threshold of `threshold_kernel`.
+fn large_usage_answer() -> Vec<ModelStreamEvent> {
+    vec![
+        ModelStreamEvent::TextDelta("large answer".to_string()),
+        ModelStreamEvent::Finished(
+            ModelFinal::builder()
+                .stop_reason(StopReason::EndTurn)
+                .raw_stop_reason(None)
+                .usage(protocol::ModelUsage::from(
+                    protocol::Usage::new()
+                        .input_tokens(83_000)
+                        .output_tokens(1_000)
+                        .cached_input_tokens(0)
+                        .cache_creation_input_tokens(0)
+                        .total_tokens(84_000),
+                ))
+                .build(),
+        ),
+    ]
+}
+
+/// Builds a Kernel over `model` whose 100k window and 16,384-token reserve
+/// compact automatically above 83,616 tokens, with one Session at `session_id`.
+async fn threshold_kernel(
+    root: &Path,
+    model: &Arc<ScriptedModel>,
+    keep_recent_tokens: u64,
+    session_id: &SessionId,
+) -> Kernel {
+    let cwd = root.join("workspace").join(session_id.as_str());
     std::fs::create_dir_all(&cwd).expect("create project cwd");
     let clock: Arc<dyn Clock> = Arc::new(StepClock(AtomicU64::new(60_000)));
-    let model = Arc::new(ScriptedModel {
-        responses: Mutex::new(VecDeque::from([
-            Ok(vec![
-                ModelStreamEvent::TextDelta("large answer".to_string()),
-                ModelStreamEvent::Finished(
-                    ModelFinal::builder()
-                        .stop_reason(StopReason::EndTurn)
-                        .raw_stop_reason(None)
-                        .usage(protocol::ModelUsage::from(
-                            protocol::Usage::new()
-                                .input_tokens(83_000)
-                                .output_tokens(1_000)
-                                .cached_input_tokens(0)
-                                .cache_creation_input_tokens(0)
-                                .total_tokens(84_000),
-                        ))
-                        .build(),
-                ),
-            ]),
-            Ok(vec![
-                ModelStreamEvent::TextDelta("threshold summary".to_string()),
-                ScriptedModel::finished(StopReason::EndTurn),
-            ]),
-        ])),
-        requests: Mutex::new(Vec::new()),
-    });
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(StaticModelFactory(
-            Arc::clone(&model) as Arc<dyn Model>
+            Arc::clone(model) as Arc<dyn Model>
         )))
         .tool_factory(Arc::new(BuiltinToolFactory::new()))
         .store_factory(Arc::new(JsonlStoreFactory::new(
-            root.path(),
+            root,
             Arc::clone(&clock),
         )))
         .prompt_factory(Arc::new(FilesystemPromptFactory::new(
-            root.path().join("config"),
+            root.join("config"),
             protocol::PromptPolicy::default(),
         )))
         .extension_factory(Arc::new(StaticExtensionFactory::default()))
@@ -1639,14 +1659,12 @@ async fn threshold_usage_compacts_without_repeating_assistant_call() {
             CompactionPolicy::builder()
                 .enabled(true)
                 .reserve_tokens(16_384)
-                .keep_recent_tokens(0)
+                .keep_recent_tokens(keep_recent_tokens)
                 .build(),
         )
         .build()
         .build()
         .expect("build kernel");
-    let session_id =
-        SessionId::try_from("session-threshold").expect("session id");
     kernel
         .create_session(SessionCreateOptions {
             session_id: session_id.clone(),
@@ -1655,6 +1673,131 @@ async fn threshold_usage_compacts_without_repeating_assistant_call() {
         })
         .await
         .expect("create session");
+    kernel
+}
+
+/// Threshold usage with nothing compactable skips compaction instead of
+/// failing the Run and rejecting every later prompt.
+#[tokio::test]
+async fn threshold_without_compactable_context_skips_compaction() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(large_usage_answer()),
+            Ok(vec![
+                ModelStreamEvent::TextDelta("second answer".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-threshold-skip").expect("session id");
+    // A recent window larger than the whole history leaves nothing to summarize.
+    let kernel =
+        threshold_kernel(root.path(), &model, 1_000_000, &session_id).await;
+
+    // The first Run ends over the threshold; the second starts over it.
+    for input in ["large context", "next prompt"] {
+        let result = kernel
+            .run(
+                RunRequest {
+                    session_id: session_id.clone(),
+                    input: input.into(),
+                },
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+            .expect(input);
+        assert!(
+            matches!(
+                result.turns.last().map(|turn| &turn.outcome),
+                Some(TurnOutcome::Completed { .. })
+            ),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        model.requests.lock().expect("request lock").len(),
+        2,
+        "two answers and no summary request"
+    );
+    assert!(
+        !kernel
+            .session_tree(&session_id)
+            .expect("tree")
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "compaction")
+    );
+}
+
+/// A post-Run compaction that fails still lets the answered Run settle, so
+/// clients see the Run end instead of an open Operation.
+#[tokio::test]
+async fn failed_post_run_compaction_still_settles_the_run() {
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(large_usage_answer()),
+            Err(ModelError::Request(
+                ModelFailure::builder()
+                    .summary("summary failed".to_string())
+                    .status(None)
+                    .retry_disposition(ModelRetryDisposition::NonRetryable)
+                    .build(),
+            )),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-threshold-failure").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
+    let sink = Arc::new(RecordingSink::default());
+
+    let result = kernel
+        .run(
+            RunRequest {
+                session_id: session_id.clone(),
+                input: "large context".into(),
+            },
+            sink.clone(),
+        )
+        .await
+        .expect("the answered Run succeeds");
+    assert_eq!(result.turns.len(), 1);
+    assert_eq!(
+        model.requests.lock().expect("request lock").len(),
+        2,
+        "one answer and one failed summary request"
+    );
+    assert!(sink.events().iter().any(|event| matches!(
+        event.payload,
+        AgentEventPayload::AgentSettled {
+            outcome: protocol::AgentOutcome::Succeeded,
+            ..
+        }
+    )));
+}
+
+/// Threshold usage compacts after a successful response without repeating that response.
+#[tokio::test]
+async fn threshold_usage_compacts_without_repeating_assistant_call() {
+    let logs = CapturedLogs::default();
+    let root = tempfile::tempdir().expect("store root");
+    let model = Arc::new(ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            Ok(large_usage_answer()),
+            Ok(vec![
+                ModelStreamEvent::TextDelta("threshold summary".to_string()),
+                ScriptedModel::finished(StopReason::EndTurn),
+            ]),
+        ])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let session_id =
+        SessionId::try_from("session-threshold").expect("session id");
+    let kernel = threshold_kernel(root.path(), &model, 0, &session_id).await;
     let sink = Arc::new(RecordingSink::default());
 
     let result = kernel
@@ -1688,6 +1831,22 @@ async fn threshold_usage_compacts_without_repeating_assistant_call() {
             .iter()
             .any(|entry| entry.kind == "compaction")
     );
+    // In-loop compaction nests under the loop's trace with a Run id of its own.
+    let start = spans::line_with(
+        &logs.content(),
+        "started Kernel Run for session session-threshold",
+    )
+    .expect("log line");
+    let (loop_trace, loop_run) = spans::run_fields(&start);
+    let summary = spans::line_with(
+        &logs.content(),
+        "for session session-threshold with reason",
+    )
+    .expect("log line");
+    assert_eq!(summary.matches("run{").count(), 2, "{summary}");
+    let (trace, run) = spans::run_fields(&summary);
+    assert_eq!(trace, loop_trace, "{summary}");
+    assert_ne!(run, loop_run, "{summary}");
 }
 
 /// Owns one deterministic overflow run and exposes provider requests for context assertions.
@@ -1706,6 +1865,16 @@ impl OverflowFixture {
         responses: impl IntoIterator<
             Item = Result<Vec<ModelStreamEvent>, ModelError>,
         >,
+    ) -> Self {
+        Self::with_keep_recent(responses, 0).await
+    }
+
+    /// Creates the fixture like `new`, keeping `keep_recent_tokens` out of compaction.
+    async fn with_keep_recent(
+        responses: impl IntoIterator<
+            Item = Result<Vec<ModelStreamEvent>, ModelError>,
+        >,
+        keep_recent_tokens: u64,
     ) -> Self {
         let root = tempfile::tempdir().expect("store root");
         let cwd = root.path().join("workspace/overflow");
@@ -1743,7 +1912,7 @@ impl OverflowFixture {
                 CompactionPolicy::builder()
                     .enabled(true)
                     .reserve_tokens(16_384)
-                    .keep_recent_tokens(0)
+                    .keep_recent_tokens(keep_recent_tokens)
                     .build(),
             )
             .build()
@@ -1828,6 +1997,30 @@ async fn explicit_overflow_compacts_once_and_recovers_without_failed_context() {
         MessageContent::Assistant { metadata, .. }
             if metadata.error.is_some()
     )));
+}
+
+/// An overflow with nothing to compact ends the Run with the provider's failure
+/// instead of retrying the same oversized request.
+#[tokio::test]
+async fn overflow_without_compactable_context_fails_without_retrying() {
+    // A recent window larger than the whole history leaves nothing to summarize.
+    let fixture = OverflowFixture::with_keep_recent(
+        [Err(ScriptedModel::context_overflow())],
+        1_000_000,
+    )
+    .await;
+
+    let result = fixture.run().await;
+    assert_eq!(result.turns.len(), 1);
+    assert!(matches!(
+        result.turns[0].outcome,
+        TurnOutcome::Failed { .. }
+    ));
+    assert_eq!(
+        fixture.model.requests.lock().expect("request lock").len(),
+        1,
+        "no retry and no summary request"
+    );
 }
 
 /// A second overflow in the resumed Turn settles as failure without another summary call.
@@ -2146,4 +2339,107 @@ async fn compaction_without_plan_mode_adds_no_note() {
         .expect("compact");
     let live = plan_prompt(&fixture, "after compaction").await;
     assert!(!live.messages.iter().any(is_plan_note));
+}
+
+/// Standalone compaction is a top-level Run with a trace of its own.
+#[tokio::test]
+async fn standalone_compaction_opens_a_top_level_run_span() {
+    let logs = CapturedLogs::default();
+    let fixture =
+        CompactionFixture::with_history_and_summary("span-probe-standalone")
+            .await;
+    fixture
+        .kernel
+        .compact_session(
+            &fixture.session_id,
+            Arc::new(RecordingSink::default()),
+        )
+        .await
+        .expect("compact");
+
+    let line = spans::line_with(
+        &logs.content(),
+        "scripted model streaming span-probe-standalone",
+    )
+    .expect("log line");
+    assert_eq!(line.matches("run{").count(), 1, "{line}");
+    let trace = spans::run_fields(&line)
+        .0
+        .expect("trace on the summary call");
+    assert!(trace.starts_with("trace-"), "{line}");
+}
+
+/// `/compact` reuses its slash command's Run instead of opening another span.
+#[tokio::test]
+async fn manual_compact_command_opens_no_extra_span() {
+    let logs = CapturedLogs::default();
+    let fixture =
+        CompactionFixture::with_history_and_summary("span-probe-manual").await;
+    fixture
+        .kernel
+        .run_with_insertion(
+            RunRequest {
+                session_id: fixture.session_id.clone(),
+                input: "/compact".into(),
+            },
+            Arc::new(RecordingSink::default()),
+            None,
+        )
+        .await
+        .expect("compact command");
+
+    let line = spans::line_with(
+        &logs.content(),
+        "scripted model streaming span-probe-manual",
+    )
+    .expect("log line");
+    assert_eq!(line.matches("run{").count(), 1, "{line}");
+    assert!(spans::run_fields(&line).0.is_some(), "{line}");
+}
+
+/// A Tree navigation summary is a top-level Run with a trace of its own.
+#[tokio::test]
+async fn branch_summary_opens_a_top_level_run_span() {
+    let logs = CapturedLogs::default();
+    let fixture =
+        CompactionFixture::with_history_and_summary("span-probe-branch").await;
+    let target = fixture
+        .kernel
+        .session_tree(&fixture.session_id)
+        .expect("tree before navigation")
+        .entries
+        .into_iter()
+        .find(|entry| {
+            entry.kind == "message"
+                && entry.payload["content"]["type"] == "user"
+        })
+        .expect("first user entry")
+        .entry_id;
+    fixture
+        .kernel
+        .navigate_session_with_summary(&fixture.session_id, target, true)
+        .await
+        .expect("navigate with summary");
+
+    let line = spans::line_with(
+        &logs.content(),
+        "scripted model streaming span-probe-branch",
+    )
+    .expect("log line");
+    assert_eq!(line.matches("run{").count(), 1, "{line}");
+    let trace = spans::run_fields(&line)
+        .0
+        .expect("trace on the summary call");
+    assert!(trace.starts_with("trace-"), "{line}");
+    // The Run's start line ties its new trace to the Session.
+    let start = spans::line_with(
+        &logs.content(),
+        &format!("started branch summary for session {}", fixture.session_id),
+    )
+    .expect("start line");
+    assert_eq!(
+        spans::run_fields(&start),
+        spans::run_fields(&line),
+        "{start}"
+    );
 }

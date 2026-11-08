@@ -10,7 +10,8 @@ pub struct LoggingConfig {
     /// Complete `EnvFilter` directive used when `RUST_LOG` is absent.
     #[serde(default = "default_log_filter")]
     pub filter: String,
-    /// Whether formatted log events include ANSI color escape sequences.
+    /// Whether log events may use tracing's ANSI color; color is used only
+    /// when stderr is a terminal, and a non-empty `NO_COLOR` still turns it off.
     #[serde(default)]
     pub color: bool,
 }

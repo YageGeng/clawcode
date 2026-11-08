@@ -5,7 +5,7 @@ use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_http::{AcpHttpServer, CorsOptions, ServerOptions};
 use axum::Router;
 use kernel::Kernel;
-use protocol::{IdGenerator, ProductIdentity};
+use protocol::ProductIdentity;
 
 use crate::{AcpServerFactory, AcpTransportKind};
 
@@ -54,7 +54,6 @@ impl AcpServerFactory {
     /// Builds the official HTTP/SSE router with WebSocket upgrade on the same path.
     pub fn http_router(
         kernel: Arc<Kernel>,
-        id_generator: Arc<dyn IdGenerator>,
         max_batch_size: NonZeroUsize,
         options: HttpTransportOptions,
     ) -> Result<Router, AcpTransportError> {
@@ -72,11 +71,7 @@ impl AcpServerFactory {
 
         // Every HTTP/SSE or WebSocket connection inherits the immutable
         // application batch limit captured at router construction time.
-        let factory = Arc::new(AcpServerFactory::new(
-            kernel,
-            id_generator,
-            max_batch_size,
-        ));
+        let factory = Arc::new(AcpServerFactory::new(kernel, max_batch_size));
 
         Ok(AcpHttpServer::new(move || {
             factory.component(AcpTransportKind::Http)

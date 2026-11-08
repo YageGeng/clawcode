@@ -122,7 +122,6 @@ async fn prompt_run_survives_client_disconnect() {
     let kernel = disconnect_kernel(state.path(), Arc::clone(&model));
     let factory = Arc::new(AcpServerFactory::new(
         Arc::clone(&kernel),
-        Arc::new(NanoidIdGenerator),
         NonZeroUsize::new(128).expect("positive batch size"),
     ));
     let server = factory.component(AcpTransportKind::Stdio);
