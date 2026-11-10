@@ -1,7 +1,9 @@
 use agent_client_protocol::v2::schema as wire;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use protocol::{ContentBlock, UserBashDisposition, UserBashResult};
+use protocol::{
+    ContentBlock, EXEC_OUTPUT_HEADER, UserBashDisposition, UserBashResult,
+};
 
 /// One terminal's whole visible output, sent as an authoritative replacement.
 ///
@@ -37,19 +39,27 @@ impl From<TerminalExit<'_>> for wire::TerminalExitStatus {
     }
 }
 
-/// Borrows tool result blocks for the text a terminal displays.
-pub(crate) struct TerminalText<'a>(pub(crate) &'a [ContentBlock]);
+/// Borrows an exec result's blocks for the command output a terminal displays.
+pub(crate) struct ExecResultBody<'a>(pub(crate) &'a [ContentBlock]);
 
-impl From<TerminalText<'_>> for String {
-    /// Joins the text blocks; a bash result carries no other kind.
-    fn from(text: TerminalText<'_>) -> Self {
-        text.0
+impl From<ExecResultBody<'_>> for String {
+    /// Keeps what follows the `Output:` header line of the exec result text.
+    fn from(body: ExecResultBody<'_>) -> Self {
+        let text: String = body
+            .0
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
                 _ => None,
             })
-            .collect()
+            .collect();
+        match text.split_once(&format!("\n{EXEC_OUTPUT_HEADER}\n")) {
+            Some((_header, output)) => output.to_string(),
+            None if text.ends_with(&format!("\n{EXEC_OUTPUT_HEADER}")) => {
+                String::new()
+            }
+            None => text,
+        }
     }
 }
 

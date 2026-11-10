@@ -29,8 +29,10 @@ fn long_tool(request: &ModelRequest) -> Route {
                     .tool_call_id(
                         ToolCallId::try_from("bash-call").expect("id"),
                     )
-                    .name("bash".to_string())
-                    .arguments(serde_json::json!({ "command": "sleep 5" }))
+                    .name("exec_command".to_string())
+                    .arguments(
+                        serde_json::json!({ "cmd": "sleep 5", "login": false }),
+                    )
                     .build(),
             ),
             finished(StopReason::ToolUse),

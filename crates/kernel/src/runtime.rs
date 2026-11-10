@@ -8,6 +8,7 @@
 
 mod command;
 mod compaction;
+mod exec;
 mod extension;
 mod mcp;
 mod plan;
@@ -236,6 +237,9 @@ pub struct KernelFactory {
     /// A provider cannot force an unbounded server-requested retry wait.
     #[builder(default = config::ProviderRetryConfig::default().max_retry_delay_ms)]
     provider_retry_delay_limit_ms: u64,
+    /// Shell tool settings; `None` registers no `exec_command`/`write_stdin`.
+    #[builder(default)]
+    exec: Option<Arc<::tools::exec::ExecSettings>>,
 }
 
 impl KernelFactory {
@@ -332,6 +336,7 @@ impl KernelFactory {
             .branch_summary(self.branch_summary)
             .retry_policy(self.retry_policy)
             .provider_retry_delay_limit_ms(self.provider_retry_delay_limit_ms)
+            .exec(self.exec)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
             .pending_sessions(Arc::new(Mutex::new(HashMap::new())))
             .shutdown(CancellationToken::new())
@@ -369,6 +374,9 @@ pub struct Kernel {
     branch_summary: config::BranchSummaryConfig,
     retry_policy: RetryPolicy,
     provider_retry_delay_limit_ms: u64,
+    /// Shell tool settings shared by every Session's process manager.
+    #[builder(default)]
+    exec: Option<Arc<::tools::exec::ExecSettings>>,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
     pending_sessions:
         Arc<Mutex<HashMap<SessionId, tokio::sync::watch::Sender<()>>>>,
@@ -640,6 +648,9 @@ struct Session {
     model: SessionModelState,
     /// Plan-mode state that settings changes and tool batches consult.
     plan: plan::SessionPlanState,
+    /// Background command sessions; `None` when shell tools are disabled.
+    #[builder(default)]
+    exec: Option<Arc<::tools::exec::ExecProcessManager>>,
     /// Serializes settings changes so reported snapshots follow change order.
     #[builder(default)]
     settings_changes: tokio::sync::Mutex<()>,

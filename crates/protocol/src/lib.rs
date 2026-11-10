@@ -3,6 +3,7 @@
 mod acp;
 mod capability;
 mod event;
+mod exec;
 mod extension;
 mod id;
 mod identity;
@@ -22,10 +23,11 @@ mod trace;
 mod turn;
 
 pub use acp::{
-    AcpCommandParameters, AcpCompactParameters, AcpForkParameters,
-    AcpNavigateParameters, AcpPendingMessageRemoveParameters,
-    AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
-    AcpWorkingDirectory, AcpWorkingDirectoryError,
+    AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
+    AcpForkParameters, AcpNavigateParameters,
+    AcpPendingMessageRemoveParameters, AcpSessionParameters,
+    AcpSkillParameters, AcpUserBashParameters, AcpWorkingDirectory,
+    AcpWorkingDirectoryError,
 };
 pub use capability::{
     CompactionData, CompactionDetails, CompactionOperationError,
@@ -38,6 +40,10 @@ pub use capability::{
     SessionSettings, SessionTitle,
 };
 pub use event::{AgentEvent, AgentEventPayload, AgentOutcome, EventMetadata};
+pub use exec::{
+    EXEC_COMMAND_TOOL, EXEC_FULL_OUTPUT_LABEL, EXEC_OUTPUT_HEADER, ExecExit,
+    ExecProcessInfo, WRITE_STDIN_TOOL,
+};
 pub use extension::{
     AgentEndEvent, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
     BeforeAgentStartResult, CompactionPreparation, ContextEvent, ContextResult,

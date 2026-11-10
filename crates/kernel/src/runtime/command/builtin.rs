@@ -21,11 +21,15 @@ pub(in crate::runtime) enum BuiltinSlashCommand {
     Name,
     /// Reports persisted Session information and usage.
     Session,
+    /// Lists the Session's running background terminals.
+    Ps,
+    /// Stops every background terminal of the Session (alias `/clean`).
+    Stop,
 }
 
 impl BuiltinSlashCommand {
     /// Returns definitions for every server-owned command in lexical order.
-    pub(super) fn definitions() -> [SlashCommandDefinition; 3] {
+    pub(super) fn definitions() -> [SlashCommandDefinition; 5] {
         [
             Self::Compact.definition(
                 "Manually compact the session context",
@@ -35,8 +39,10 @@ impl BuiltinSlashCommand {
                 "Set or show the session display name",
                 Some("[name]"),
             ),
+            Self::Ps.definition("list background terminals", None),
             Self::Session
                 .definition("Show session information and statistics", None),
+            Self::Stop.definition("stop all background terminals", None),
         ]
     }
 
@@ -46,6 +52,9 @@ impl BuiltinSlashCommand {
             "compact" => Some(Self::Compact),
             "name" => Some(Self::Name),
             "session" => Some(Self::Session),
+            "ps" => Some(Self::Ps),
+            // codex's `/clean` stays accepted without a second listing.
+            "stop" | "clean" => Some(Self::Stop),
             _ => None,
         }
     }
@@ -72,6 +81,8 @@ impl BuiltinSlashCommand {
             Self::Compact => "compact",
             Self::Name => "name",
             Self::Session => "session",
+            Self::Ps => "ps",
+            Self::Stop => "stop",
         }
     }
 
@@ -201,6 +212,46 @@ impl Kernel {
                         &transcript,
                     )
                     .to_string(),
+                ))
+            }
+            BuiltinSlashCommand::Ps => {
+                let processes = match &execution.session.exec {
+                    Some(exec) => exec.list().await,
+                    None => Vec::new(),
+                };
+                let text = if processes.is_empty() {
+                    "No background terminals.".to_string()
+                } else {
+                    let rows = processes.iter().map(|process| {
+                        let command: String =
+                            process.command.chars().take(80).collect();
+                        format!(
+                            "  {}  {}  ({})",
+                            process.process_id,
+                            command,
+                            process.cwd.display()
+                        )
+                    });
+                    std::iter::once("Background terminals:".to_string())
+                        .chain(rows)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                Ok(command.output(SlashCommandStatus::Succeeded, text))
+            }
+            BuiltinSlashCommand::Stop => {
+                let stopped = match &execution.session.exec {
+                    Some(exec) => exec.terminate_all().await,
+                    None => 0,
+                };
+                tracing::info!(
+                    "stopped {} background terminals of session {}",
+                    stopped,
+                    execution.session_id
+                );
+                Ok(command.output(
+                    SlashCommandStatus::Succeeded,
+                    format!("Stopped {stopped} background terminals"),
                 ))
             }
         }

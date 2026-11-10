@@ -72,7 +72,7 @@ fn builtins_validate_arguments_during_preflight() {
 
     assert!(
         registry
-            .validate(&tool_call("bash", serde_json::json!({})))
+            .validate(&tool_call("read", serde_json::json!({})))
             .is_err()
     );
     assert!(
@@ -253,13 +253,4 @@ async fn file_tools_report_paths_resolved_like_execution() {
             call.name
         );
     }
-    assert!(
-        registry
-            .locations(
-                &tool_call("bash", serde_json::json!({ "command": "ls" })),
-                root.path(),
-            )
-            .await
-            .is_empty()
-    );
 }

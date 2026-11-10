@@ -26,28 +26,41 @@ impl PlanModeGate {
 
     /// Lets a call run, or returns the reason plan mode refuses it.
     ///
-    /// Kernel tools run because their own behavior respects plan mode; `bash`
-    /// runs only read-only commands; anything else needs a read-only hint.
+    /// `exec_command` runs only read-only commands and `write_stdin` may only
+    /// poll or interrupt, although both are the kernel's; other kernel tools
+    /// run because their own behavior respects plan mode; anything else needs
+    /// a read-only hint.
     pub(in crate::runtime) fn check(
         &self,
         call: &ToolCall,
         metadata: Option<&ToolMetadata>,
     ) -> Result<(), String> {
-        if self.mode == SessionMode::Default
-            || self.kernel_owned.contains(&call.name)
-        {
+        if self.mode == SessionMode::Default {
             return Ok(());
         }
-        if call.name == "bash" {
-            return match call
-                .arguments
-                .get("command")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some(command) => ShellCommandLine::read_only(command)
-                    .map_err(|violation| violation.to_string()),
-                None => Err("plan mode needs a bash command to check".into()),
-            };
+        // Shell tools are checked by name first: being the kernel's says
+        // nothing about what the command does.
+        let argument = |name: &str| {
+            call.arguments.get(name).and_then(serde_json::Value::as_str)
+        };
+        match call.name.as_str() {
+            protocol::EXEC_COMMAND_TOOL => {
+                return match argument("cmd") {
+                    Some(command) => ShellCommandLine::read_only(command)
+                        .map_err(|violation| violation.to_string()),
+                    None => Err("plan mode needs a command to check".into()),
+                };
+            }
+            protocol::WRITE_STDIN_TOOL => {
+                return match argument("chars").unwrap_or_default() {
+                    "" | "\u{3}" => Ok(()),
+                    _ => Err("Plan mode is active: write_stdin may only poll or interrupt.".into()),
+                };
+            }
+            _ => {}
+        }
+        if self.kernel_owned.contains(&call.name) {
+            return Ok(());
         }
         if metadata.and_then(|metadata| metadata.annotations.read_only_hint)
             == Some(true)

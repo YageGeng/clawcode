@@ -2,6 +2,7 @@
 
 mod assembly;
 mod close;
+mod custom;
 mod fork;
 pub(super) mod model_state;
 mod open;
@@ -14,6 +15,7 @@ pub(super) mod settings;
 pub(super) mod transcript;
 mod tree;
 
+pub(in crate::runtime) use custom::ClawcodeEntry;
 pub use tree::TreeNavigationRequest;
 
 use std::collections::HashMap;

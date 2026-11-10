@@ -257,6 +257,22 @@ pub enum AgentEventPayload {
         result_emitted: bool,
     },
 
+    /// A command session's visible output changed; replaces earlier snapshots.
+    ExecOutput {
+        /// `exec_command` call that started the process; its terminal id.
+        tool_call_id: crate::ToolCallId,
+        /// Session ID the model uses for `write_stdin`.
+        process_id: i32,
+        /// Whole current visible transcript tail.
+        output: String,
+    },
+
+    /// A command session that outlived its starting call ended.
+    ExecExited {
+        /// How and when the process ended.
+        exit: crate::ExecExit,
+    },
+
     /// The persisted display title for this session changed.
     SessionTitleChanged {
         /// New normalized session title; `None` when the name was cleared.

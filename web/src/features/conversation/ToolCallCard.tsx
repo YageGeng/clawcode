@@ -100,7 +100,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
   const [manual, setManual] = useState<Readonly<{ phase: string; open: boolean }>>();
   // Terminal output and subagents are what a running tool is worth watching.
   // A plan awaiting approval stays collapsed: its dialog already renders it.
-  const open = manual?.phase === phase ? manual.open : (childId !== undefined || terminal !== undefined || tool.title === "bash") && tool.status === "in_progress";
+  const open = manual?.phase === phase ? manual.open : (childId !== undefined || terminal !== undefined || tool.title === "exec_command") && tool.status === "in_progress";
   useEffect(() => {
     if (childId === undefined || controller === undefined) return;
     void controller.ensureSessionListed(childId).catch(() => {});

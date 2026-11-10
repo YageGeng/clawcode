@@ -851,3 +851,40 @@ fn provider_id_rejects_slash_blank_or_padded_names() {
         );
     }
 }
+
+/// Exec tool defaults follow codex unified exec, including not stripping secrets.
+#[test]
+fn tools_exec_defaults_match_codex() {
+    let value = serde_json::to_value(AppConfig::default())
+        .expect("serialize default application config");
+    let exec = &value["tools"]["exec"];
+
+    assert_eq!(exec["background_terminal_max_timeout_ms"], 300_000);
+    assert_eq!(exec["shell_snapshot"], true);
+    assert_eq!(exec["command_sessions"], true);
+    assert_eq!(exec["env"]["inherit"], "all");
+    assert_eq!(exec["env"]["ignore_default_excludes"], true);
+}
+
+/// The exec environment policy loads every documented key from TOML.
+#[test]
+fn tools_exec_loads_env_policy() {
+    let config: AppConfig = toml::from_str(
+        r#"
+[tools.exec.env]
+inherit = "core"
+ignore_default_excludes = false
+exclude = ["*PROXY*"]
+set = { FOO = "1" }
+"#,
+    )
+    .expect("parse exec environment policy");
+
+    assert_eq!(config.tools.exec.env.inherit, config::EnvInherit::Core);
+    assert!(!config.tools.exec.env.ignore_default_excludes);
+    assert_eq!(config.tools.exec.env.exclude, vec!["*PROXY*".to_string()]);
+    assert_eq!(
+        config.tools.exec.env.set.get("FOO").map(String::as_str),
+        Some("1")
+    );
+}

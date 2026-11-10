@@ -72,8 +72,8 @@ fn bash_call(call_id: &str) -> Vec<ModelStreamEvent> {
         ModelStreamEvent::ToolCall(
             ToolCall::builder()
                 .tool_call_id(ToolCallId::try_from(call_id).expect("call id"))
-                .name("bash".to_string())
-                .arguments(serde_json::json!({"command": "true"}))
+                .name("exec_command".to_string())
+                .arguments(serde_json::json!({ "cmd": "true", "login": false }))
                 .build(),
         ),
         finished(StopReason::ToolUse),

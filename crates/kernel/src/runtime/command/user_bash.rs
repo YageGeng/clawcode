@@ -280,11 +280,11 @@ impl UserBashOperation<'_> {
                         .turn_id(self.turn_id.clone())
                         .cancellation(self.cancellation)
                         .build(),
-                    move |snapshot| {
-                        if output_at.is_none() && !snapshot.output.is_empty() {
+                    move |output: String| {
+                        if output_at.is_none() && !output.is_empty() {
                             *output_at = Some(kernel.clock.now());
                         }
-                        snapshots.send_replace(Some(snapshot.output));
+                        snapshots.send_replace(Some(output));
                     },
                 );
                 // Ends when the executor drops its sender, after the final snapshot.
@@ -314,7 +314,7 @@ impl UserBashOperation<'_> {
                     }
                 };
                 let (executed, ()) = tokio::join!(executed, forward);
-                executed?.result
+                executed?
             }
         };
         let ended_at_ms = kernel.clock.now();

@@ -7,8 +7,8 @@ use agent_client_protocol::{
 };
 use kernel::Kernel;
 use protocol::{
-    AcpCommandParameters, AcpCompactParameters, AcpExtensionMethod,
-    AcpForkParameters, AcpNavigateParameters,
+    AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
+    AcpExtensionMethod, AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpSessionParameters,
     AcpSkillParameters, AcpUserBashParameters, McpSessionRevisionNotification,
     ProductIdentity,
@@ -479,6 +479,39 @@ impl AcpExtensionDispatcher {
                         )?,
                 )
                 .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::ExecList => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let processes = self
+                    .kernel
+                    .exec_processes(&input.session_id)
+                    .await
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({ "processes": processes })
+            }
+            AcpExtensionMethod::ExecTerminate => {
+                let input: AcpExecTerminateParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let terminated = self
+                    .kernel
+                    .terminate_exec_process(&input.session_id, input.process_id)
+                    .await
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({ "terminated": terminated })
+            }
+            AcpExtensionMethod::ExecClean => {
+                let input: AcpSessionParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let terminated = self
+                    .kernel
+                    .clean_exec_processes(&input.session_id)
+                    .await
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({ "terminated": terminated })
             }
         };
         Ok(AcpExtensionResponse(result))

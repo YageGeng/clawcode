@@ -7,6 +7,7 @@ use protocol::{
 };
 use store::{EntryKind, RecordKind, SessionEntry, SessionStore};
 
+use super::ClawcodeEntry as _;
 use crate::runtime::plan::{ModeChange, ModeNote, ModeNotes};
 use crate::runtime::{Kernel, KernelError};
 
@@ -277,10 +278,23 @@ impl Kernel {
                         },
                     ));
                 }
+                // A stored background exit closes its terminal card on replay.
+                EntryKind::Custom => {
+                    if let Some(crate::runtime::exec::ExecExitEntry(exit)) =
+                        crate::runtime::exec::ExecExitEntry::from_entry(&entry)
+                    {
+                        replay.push((
+                            sequence,
+                            protocol::SessionReplayItem::ExecExited {
+                                exit,
+                                timestamp_ms: entry.timestamp_ms,
+                            },
+                        ));
+                    }
+                }
                 EntryKind::ModelChange
                 | EntryKind::ThinkingLevelChange
-                | EntryKind::ActiveToolsChange
-                | EntryKind::Custom => {}
+                | EntryKind::ActiveToolsChange => {}
             }
         }
         let records = session.transcript.records()?;
@@ -423,6 +437,16 @@ impl Kernel {
                     )?;
                 }
                 EntryKind::Custom => {
+                    if let Some(note) =
+                        crate::runtime::exec::CommandSessionsNote::from_entry(
+                            &entry,
+                        )
+                    {
+                        notes.place(
+                            &mut history,
+                            note.message(&entry.id, entry.timestamp_ms)?,
+                        );
+                    }
                     if let Some(change) = ModeChange::from_entry(&entry) {
                         mode = change.mode;
                         let note = ModeNote::new(change.mode, delegated)

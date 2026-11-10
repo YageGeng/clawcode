@@ -354,8 +354,8 @@ async fn note_waits_for_the_tool_results() {
                             protocol::ToolCallId::try_from("call-sleep")
                                 .expect("id"),
                         )
-                        .name("bash".into())
-                        .arguments(serde_json::json!({ "command": "sleep 1" }))
+                        .name("exec_command".into())
+                        .arguments(serde_json::json!({ "cmd": "sleep 1", "login": false }))
                         .build(),
                 ),
                 super::fixture::finished(protocol::StopReason::ToolUse),
@@ -475,8 +475,10 @@ async fn dangling_tool_calls_do_not_swallow_the_note() {
                             protocol::ToolCallId::try_from("call-dangling")
                                 .expect("id"),
                         )
-                        .name("bash".into())
-                        .arguments(serde_json::json!({ "command": "pwd" }))
+                        .name("exec_command".into())
+                        .arguments(
+                            serde_json::json!({ "cmd": "pwd", "login": false }),
+                        )
                         .build(),
                 ),
                 super::fixture::finished(protocol::StopReason::ToolUse),
@@ -773,18 +775,22 @@ async fn plan_mode_blocks_edits_but_allows_reading() {
     assert!(!seen_result(&test, "call-grep").is_error);
 }
 
-/// Plan mode runs read-only bash and refuses writes without echoing the command.
+/// Plan mode runs read-only commands and refuses writes without echoing the command.
 #[tokio::test]
-async fn plan_mode_runs_read_only_bash_only() {
+async fn plan_mode_runs_read_only_exec_only() {
     let logs = super::support::CapturedLogs::default();
     let test = TestKernel::new(calls_on(
         "go",
         vec![
-            ("call-ls", "bash", serde_json::json!({ "command": "ls" })),
+            (
+                "call-ls",
+                "exec_command",
+                serde_json::json!({ "cmd": "ls" }),
+            ),
             (
                 "call-echo",
-                "bash",
-                serde_json::json!({ "command": "echo hi > redirected.txt" }),
+                "exec_command",
+                serde_json::json!({ "cmd": "echo hi > redirected.txt" }),
             ),
         ],
     ));
@@ -805,6 +811,51 @@ async fn plan_mode_runs_read_only_bash_only() {
     assert!(!refused.text.contains("echo hi"), "{}", refused.text);
     assert!(!test.root.path().join("redirected.txt").exists());
     assert!(!logs.content().contains("echo hi"));
+}
+
+/// Plan mode lets `write_stdin` poll or interrupt but never type input.
+#[tokio::test]
+async fn plan_mode_limits_write_stdin_to_poll_and_interrupt() {
+    let test = TestKernel::new(calls_on(
+        "go",
+        vec![
+            (
+                "call-poll",
+                "write_stdin",
+                serde_json::json!({ "session_id": 1000, "yield_time_ms": 5000 }),
+            ),
+            (
+                "call-type",
+                "write_stdin",
+                serde_json::json!({ "session_id": 1000, "chars": "y\n" }),
+            ),
+        ],
+    ));
+    let session = test.create("plan-gate-stdin").await;
+    test.kernel
+        .set_session_mode(&session, SessionMode::Plan)
+        .await
+        .expect("set mode");
+    test.kernel
+        .submit(request(&session, "go", WhenBusy::FollowUp))
+        .await
+        .expect("prompt");
+
+    let typed = seen_result(&test, "call-type");
+    assert!(typed.is_error);
+    assert!(
+        typed.text.contains(
+            "Plan mode is active: write_stdin may only poll or interrupt."
+        ),
+        "{}",
+        typed.text
+    );
+    let polled = seen_result(&test, "call-poll");
+    assert!(
+        polled.text.contains("Unknown process id 1000"),
+        "{}",
+        polled.text
+    );
 }
 
 /// A tool an extension supplies, with or without a read-only hint.

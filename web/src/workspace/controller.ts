@@ -15,6 +15,9 @@ import type { WorkspaceAction } from "./state";
 import { SessionUpdateRouter } from "./updateRouter";
 import type { WorkspaceStoreAccess } from "./updateRouter";
 
+/** One running background terminal as the backend lists it. */
+export type ExecProcessInfo = Readonly<{ processId: number; command: string; cwd: string; toolCallId: string }>;
+
 const RECONNECT_DELAYS = [250, 500, 1_000, 2_000, 5_000] as const;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_IDLE_MS = 20_000;
@@ -336,6 +339,24 @@ export class WorkspaceController {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
     await this.requireConnection().request(this.methods.clearQueue, { sessionId });
+  }
+
+  /** Lists a Session's running background terminals. */
+  async listExecProcesses(sessionId: SessionId): Promise<readonly ExecProcessInfo[]> {
+    const result = await this.requireConnection().request<{ processes: ExecProcessInfo[] }>(this.methods.execList, { sessionId });
+    return result.processes;
+  }
+
+  /** Stops one background terminal; false when it was already gone. */
+  async terminateExecProcess(sessionId: SessionId, processId: number): Promise<boolean> {
+    const result = await this.requireConnection().request<{ terminated: boolean }>(this.methods.execTerminate, { sessionId, processId });
+    return result.terminated;
+  }
+
+  /** Stops every background terminal of a Session and returns how many ran. */
+  async cleanExecProcesses(sessionId: SessionId): Promise<number> {
+    const result = await this.requireConnection().request<{ terminated: number }>(this.methods.execClean, { sessionId });
+    return result.terminated;
   }
 
   /** Moves the lane, optionally asking the backend to summarize the abandoned branch. */

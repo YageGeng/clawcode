@@ -37,4 +37,4 @@ pub use protocol::PromptCacheRetention;
 pub use retry::{ProviderRetryConfig, RetryConfig};
 pub use skills::{SkillSelectionRule, SkillsConfig};
 pub use subagent::SubagentConfig;
-pub use tools::ToolsConfig;
+pub use tools::{EnvInherit, ExecConfig, ExecEnvPolicy, ToolsConfig};

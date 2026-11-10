@@ -959,13 +959,8 @@ impl EventSink for ProjectionSink {
             AgentEventPayload::UserBashOutput { message_id, .. } => {
                 Some(format!("terminal:{message_id}"))
             }
-            AgentEventPayload::ToolExecutionUpdate { result, .. }
-                if matches!(
-                    result.details,
-                    Some(protocol::ToolResultDetails::Bash { .. })
-                ) =>
-            {
-                Some(format!("terminal:{}", result.tool_call_id))
+            AgentEventPayload::ExecOutput { tool_call_id, .. } => {
+                Some(format!("terminal:{tool_call_id}"))
             }
             _ => None,
         };

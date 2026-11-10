@@ -133,6 +133,7 @@ clap = { version = "4", features = ["derive"] }
 
 # pty
 nix = { version = "0.31", features = ["signal", "process"] }
+portable-pty = "0.9"
 
 # misc
 arc-swap = "1.9"

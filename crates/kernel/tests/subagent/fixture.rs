@@ -290,6 +290,8 @@ pub struct KernelPolicy {
     pub max_turns: config::TurnLimit,
     pub when_busy: WhenBusy,
     pub subagent_reply_as: WhenBusy,
+    /// Turns off `<command_sessions>` notes for tests of that switch.
+    pub disable_command_sessions: bool,
 }
 
 #[derive(typed_builder::TypedBuilder)]
@@ -420,6 +422,13 @@ impl TestKernel {
             .extension_factory(extensions)
             .clock(clock)
             .id_generator(Arc::new(SequenceClock::default()))
+            .exec(Some(Arc::new(tools::exec::ExecSettings {
+                config: config::ExecConfig::builder()
+                    .shell_snapshot(false)
+                    .command_sessions(!policy.disable_command_sessions)
+                    .build(),
+                snapshot_dir: root.path().join("shell_snapshots"),
+            })))
             .build()
             .build()
             .expect("kernel");

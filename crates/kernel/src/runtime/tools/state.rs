@@ -7,8 +7,12 @@ use protocol::{ToolExposure, ToolSelection};
 use crate::KernelError;
 
 /// Tool names only the kernel may register; plan mode depends on their behavior.
-pub(in crate::runtime) const RESERVED_TOOL_NAMES: [&str; 2] =
-    [protocol::EXIT_PLAN_MODE_TOOL, protocol::TODO_WRITE_TOOL];
+pub(in crate::runtime) const RESERVED_TOOL_NAMES: [&str; 4] = [
+    protocol::EXIT_PLAN_MODE_TOOL,
+    protocol::TODO_WRITE_TOOL,
+    protocol::EXEC_COMMAND_TOOL,
+    protocol::WRITE_STDIN_TOOL,
+];
 
 /// Immutable catalog partitions and explicit preferences captured for one model request.
 #[derive(Clone, typed_builder::TypedBuilder)]

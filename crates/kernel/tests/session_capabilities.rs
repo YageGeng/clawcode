@@ -1623,7 +1623,9 @@ async fn available_commands_merge_session_sources_deterministically() {
         vec![
             "compact",
             "name",
+            "ps",
             "session",
+            "stop",
             "first:inspect",
             "first:shared",
             "inspect",

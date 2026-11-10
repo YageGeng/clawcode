@@ -349,6 +349,17 @@ impl AcpServer {
                         },
                     },
                 )],
+                // A persisted background exit replays through the live event mapping.
+                protocol::SessionReplayItem::ExecExited {
+                    exit,
+                    timestamp_ms,
+                } => {
+                    vec![(
+                        exit.turn_id.clone(),
+                        timestamp_ms,
+                        AgentEventPayload::ExecExited { exit },
+                    )]
+                }
             };
             for (turn_id, timestamp_ms, payload) in events {
                 event_index = event_index.saturating_add(1);
@@ -876,6 +887,9 @@ impl AcpServerFactory {
                         AcpExtensionMethod::McpOAuthContinue,
                         AcpExtensionMethod::ExtensionCommand,
                         AcpExtensionMethod::UserBash,
+                        AcpExtensionMethod::ExecList,
+                        AcpExtensionMethod::ExecTerminate,
+                        AcpExtensionMethod::ExecClean,
                     ]
                     .into_iter()
                     .map(|method| serde_json::Value::String(method.to_string()))

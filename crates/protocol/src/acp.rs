@@ -104,6 +104,16 @@ pub struct AcpPendingMessageRemoveParameters {
     pub queue_id: QueueId,
 }
 
+/// Parameters for terminating one background terminal.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcpExecTerminateParameters {
+    /// Session that owns the process.
+    pub session_id: SessionId,
+    /// Session ID of the process, as `exec_command` returned it.
+    pub process_id: i32,
+}
+
 /// Parameters for explicitly loading one discovered skill.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -9,9 +9,11 @@ import { ModelUsages } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { CommandPalette } from "./CommandPalette";
 import { CommandPaletteModel } from "./commandPaletteModel";
+import { BackgroundTerminals } from "./BackgroundTerminals";
 import { PendingQueue } from "./PendingQueue";
 import { PlanPanel } from "./PlanPanel";
 import { sessionWorkspace } from "../../workspace/state";
+import { backgroundTerminalCount } from "../../workspace/selectors";
 import { useWorkspaceStore } from "../../workspace/store";
 
 export type ComposerProps = Readonly<{
@@ -117,6 +119,7 @@ const DraftCodec = {
 export function Composer({ productSlug, sessionId, running, contextUsage, outcomeUnknown, pending, availableCommands, initialDraft, controller }: ComposerProps) {
   const storageKey = `${productSlug}:agent-draft:${sessionId}`;
   const planMode = useWorkspaceStore((state) => sessionWorkspace(state, sessionId).configOptions.some((option) => option.configId === "mode" && option.currentValue === "plan"));
+  const backgroundTerminals = useWorkspaceStore((state) => backgroundTerminalCount(sessionWorkspace(state, sessionId)));
   const stored = DraftCodec.parse(sessionStorage.getItem(storageKey));
   const initial = initialDraft ?? { ...stored, images: [] };
   const [text, setText] = useState(initial.text);
@@ -243,6 +246,7 @@ export function Composer({ productSlug, sessionId, running, contextUsage, outcom
     <div className="composer-area">
       <PlanPanel sessionId={sessionId} />
       {pending.steering.length + pending.followUp.length === 0 ? null : <PendingQueue pending={pending} controller={controller} onError={queueError} onHint={setHint} />}
+      {backgroundTerminals === 0 ? null : <BackgroundTerminals sessionId={sessionId} count={backgroundTerminals} controller={controller} onError={queueError} />}
       <div className="composer-card">
         {running ? <div className="composer-delivery">
           <div className="composer-delivery__options" role="group" aria-label="运行时发送方式">

@@ -3,13 +3,14 @@
 use std::sync::{Mutex, RwLock};
 
 use protocol::{
-    PlanApprovalDecision, PlanApprovalRequest, ProductIdentity, SessionMode,
-    TurnId,
+    PlanApprovalDecision, PlanApprovalRequest, SessionMode, TurnId,
 };
-use store::{EntryKind, SessionEntry};
+use serde::{Deserialize, Serialize};
+use store::SessionEntry;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::KernelError;
+use crate::runtime::session::ClawcodeEntry;
 
 mod approval;
 mod gate;
@@ -24,63 +25,16 @@ pub(in crate::runtime) use todo::register as register_todo_write;
 const MODE_CUSTOM_TYPE: &str = "session_mode";
 
 /// One persisted mode switch, stored as a clawcode custom entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(in crate::runtime) struct ModeChange {
     pub(in crate::runtime) mode: SessionMode,
     /// Turn the switch belongs to, so rebuilt notes keep the identity they had live.
     pub(in crate::runtime) turn_id: TurnId,
 }
 
-impl ModeChange {
-    /// Encodes the switch in the extension-entry shape clawcode already writes.
-    pub(in crate::runtime) fn payload(&self) -> serde_json::Value {
-        serde_json::json!({
-            "extensionId": ProductIdentity::SLUG,
-            "customType": MODE_CUSTOM_TYPE,
-            "data": { "mode": self.mode, "turnId": self.turn_id },
-        })
-    }
-
-    /// Reads the switch an entry records.
-    ///
-    /// Other custom entries are not switches. A clawcode switch this version cannot
-    /// read, such as a mode added later, is skipped with a warning instead of making
-    /// the Session unopenable.
-    pub(in crate::runtime) fn from_entry(entry: &SessionEntry) -> Option<Self> {
-        if entry.kind != EntryKind::Custom
-            || entry
-                .payload
-                .get("extensionId")
-                .and_then(serde_json::Value::as_str)
-                != Some(ProductIdentity::SLUG)
-            || entry
-                .payload
-                .get("customType")
-                .and_then(serde_json::Value::as_str)
-                != Some(MODE_CUSTOM_TYPE)
-        {
-            return None;
-        }
-        let data = entry.payload.get("data");
-        let mode = data
-            .and_then(|data| data.get("mode"))
-            .cloned()
-            .and_then(|mode| serde_json::from_value(mode).ok());
-        let turn_id = data
-            .and_then(|data| data.get("turnId"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|turn_id| TurnId::try_from(turn_id).ok());
-        match (mode, turn_id) {
-            (Some(mode), Some(turn_id)) => Some(Self { mode, turn_id }),
-            _ => {
-                tracing::warn!(
-                    "skipped unreadable session mode entry {}",
-                    entry.id
-                );
-                None
-            }
-        }
-    }
+impl ClawcodeEntry for ModeChange {
+    const CUSTOM_TYPE: &'static str = MODE_CUSTOM_TYPE;
 }
 
 /// A plan waiting for the user, with the route its answer takes.

@@ -1,8 +1,6 @@
-mod bash;
 mod edit;
 mod grep;
 mod mutation;
-pub(crate) mod output;
 mod path;
 mod read;
 mod write;
@@ -11,19 +9,17 @@ use std::sync::Arc;
 
 use crate::{AgentTool, ToolError, ToolFactory, ToolRegistry};
 
-/// Factory for local pi-compatible coding tools.
+/// Factory for local pi-compatible coding tools; shell tools are the Kernel's.
 pub struct BuiltinToolFactory {
     filesystem_enabled: bool,
-    shell_enabled: bool,
 }
 
 impl BuiltinToolFactory {
-    /// Creates a factory with pi's filesystem and shell tool groups enabled.
+    /// Creates a factory with pi's filesystem tool group enabled.
     #[must_use]
     pub fn new() -> Self {
         Self {
             filesystem_enabled: true,
-            shell_enabled: true,
         }
     }
 
@@ -31,13 +27,6 @@ impl BuiltinToolFactory {
     #[must_use]
     pub fn filesystem_enabled(mut self, enabled: bool) -> Self {
         self.filesystem_enabled = enabled;
-        self
-    }
-
-    /// Enables or disables bash registration.
-    #[must_use]
-    pub fn shell_enabled(mut self, enabled: bool) -> Self {
-        self.shell_enabled = enabled;
         self
     }
 }
@@ -59,9 +48,6 @@ impl ToolFactory for BuiltinToolFactory {
                 .register(Arc::new(write::WriteTool) as Arc<dyn AgentTool>)?;
             registry.register(Arc::new(edit::EditTool) as Arc<dyn AgentTool>)?;
             registry.register(Arc::new(grep::GrepTool) as Arc<dyn AgentTool>)?;
-        }
-        if self.shell_enabled {
-            registry.register(Arc::new(bash::BashTool) as Arc<dyn AgentTool>)?;
         }
         Ok(registry)
     }

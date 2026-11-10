@@ -1,367 +1,155 @@
+//! `BashExecutor`, which runs user `!` commands: output, exits, limits, and streaming.
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use protocol::{
-    ContentBlock, SessionId, ToolCall, ToolCallId, ToolResult,
-    ToolResultDetails, TurnId,
-};
+use protocol::{SessionId, TurnId, UserBashResult};
 use tokio_util::sync::CancellationToken;
-use tools::{
-    BuiltinToolFactory, ToolExecutionContext, ToolFactory, ToolUpdateSink,
-};
+use tools::{BashExecutionRequest, BashExecutor};
 
-/// Records replaceable streaming snapshots in publication order.
-#[derive(Default)]
-struct RecordingUpdates(Mutex<Vec<ToolResult>>);
-
-impl ToolUpdateSink for RecordingUpdates {
-    /// Stores one partial bash snapshot.
-    fn publish(&self, update: ToolResult) {
-        self.0.lock().expect("updates lock").push(update);
-    }
-}
-
-/// Builds a direct bash context with caller-owned cancellation and updates.
-fn execution_context(
+/// Runs one command and records every published output tail.
+async fn run(
     cwd: &Path,
+    command: &str,
     cancellation: CancellationToken,
-    updates: Arc<dyn ToolUpdateSink>,
-) -> ToolExecutionContext {
-    ToolExecutionContext::builder()
+    published: Arc<Mutex<Vec<String>>>,
+) -> UserBashResult {
+    let request = BashExecutionRequest::builder()
+        .command(command.to_string())
+        .cwd(cwd.to_path_buf())
         .session_id(SessionId::try_from("session-bash").expect("session id"))
         .turn_id(TurnId::try_from("turn-bash").expect("turn id"))
-        .trace_id(protocol::TraceId::try_from("trace-bash").expect("trace id"))
-        .cwd(cwd.to_path_buf())
         .cancellation(cancellation)
-        .updates(updates)
-        .build()
+        .build();
+    BashExecutor::execute(request, move |output| {
+        published.lock().expect("published").push(output);
+    })
+    .await
+    .expect("execute")
 }
 
-/// Builds one bash call with an optional timeout in seconds.
-fn bash_call(id: &str, command: &str, timeout: Option<f64>) -> ToolCall {
-    let mut arguments = serde_json::Map::from_iter([(
-        "command".to_string(),
-        serde_json::json!(command),
-    )]);
-    if let Some(timeout) = timeout {
-        arguments.insert("timeout".to_string(), serde_json::json!(timeout));
-    }
-    ToolCall::builder()
-        .tool_call_id(ToolCallId::try_from(id).expect("tool call id"))
-        .name("bash".to_string())
-        .arguments(serde_json::Value::Object(arguments))
-        .build()
+/// Runs one command without cancellation or recording.
+async fn run_plain(cwd: &Path, command: &str) -> UserBashResult {
+    run(cwd, command, CancellationToken::new(), Arc::default()).await
 }
 
-/// Returns the default pi-compatible built-in registry.
-fn registry() -> tools::ToolRegistry {
-    BuiltinToolFactory::new()
-        .create()
-        .expect("built-in registry")
-}
-
-/// Bash returns combined output and uses pi's no-output placeholder.
+/// Stdout and stderr are combined in arrival order.
 #[tokio::test]
-async fn bash_executes_commands_and_formats_empty_output() {
+async fn executor_combines_output() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let updates: Arc<dyn ToolUpdateSink> =
-        Arc::new(RecordingUpdates::default());
-    let context =
-        execution_context(root.path(), CancellationToken::new(), updates);
 
-    let output = registry()
-        .execute(
-            bash_call(
-                "bash-output",
-                "printf 'stdout'; printf 'stderr' >&2",
-                None,
-            ),
-            &context,
-        )
-        .await
-        .expect("execute output command");
-    let empty = registry()
-        .execute(bash_call("bash-empty", ":", None), &context)
-        .await
-        .expect("execute empty command");
+    let result =
+        run_plain(root.path(), "printf 'stdout'; printf 'stderr' >&2").await;
 
-    assert_eq!(output.blocks[0].text(), Some("stdoutstderr"));
-    assert_eq!(empty.blocks[0].text(), Some("(no output)"));
+    assert_eq!(result.output, "stdoutstderr");
+    assert_eq!(result.exit_code, Some(0));
+    assert!(!result.cancelled);
 }
 
-/// Non-zero exit errors retain emitted output and the exact status footer.
+/// A non-zero exit keeps the output and its code.
 #[tokio::test]
-async fn bash_reports_nonzero_exit_after_output() {
+async fn executor_reports_nonzero_exit_after_output() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let result = registry()
-        .execute(
-            bash_call("bash-fail", "printf 'before'; exit 7", None),
-            &execution_context(
-                root.path(),
-                CancellationToken::new(),
-                Arc::new(RecordingUpdates::default()),
-            ),
-        )
-        .await
-        .expect("nonzero command still yields a result");
 
-    // The failure keeps its output, text, and exit metadata.
-    assert!(result.is_error);
-    assert!(
-        result.blocks[0]
-            .text()
-            .expect("bash output")
-            .contains("before\n\nCommand exited with code 7")
-    );
-    assert_eq!(BashExit::of(&result), Some(BashExit(Some(7), None)));
+    let result = run_plain(root.path(), "printf 'before'; exit 7").await;
+
+    assert_eq!(result.output, "before");
+    assert_eq!(result.exit_code, Some(7));
 }
 
-/// Exit details of one bash result: exit code and signal name.
-#[derive(Debug, PartialEq, Eq)]
-struct BashExit(Option<i32>, Option<String>);
-
-impl BashExit {
-    /// Reads the exit details a bash result carries, if it has bash details.
-    fn of(result: &ToolResult) -> Option<Self> {
-        match &result.details {
-            Some(ToolResultDetails::Bash {
-                exit_code, signal, ..
-            }) => Some(Self(*exit_code, signal.clone())),
-            _ => None,
-        }
-    }
-}
-
-/// A successful command reports exit code 0 in its details.
-#[tokio::test]
-async fn bash_details_carry_exit_code() {
-    let root = tempfile::tempdir().expect("temporary directory");
-    let result = registry()
-        .execute(
-            bash_call("bash-ok", "printf 'fine'", None),
-            &execution_context(
-                root.path(),
-                CancellationToken::new(),
-                Arc::new(RecordingUpdates::default()),
-            ),
-        )
-        .await
-        .expect("successful command");
-    assert!(!result.is_error);
-    assert_eq!(BashExit::of(&result), Some(BashExit(Some(0), None)));
-}
-
-/// A shell ended by a signal is a failure that names the signal.
+/// A shell ended by a signal names it.
 #[cfg(unix)]
 #[tokio::test]
-async fn bash_signal_exit_is_an_error_with_its_signal() {
+async fn executor_names_the_signal_that_ended_the_shell() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let result = registry()
-        .execute(
-            bash_call("bash-term", "printf 'going'; kill -TERM $$", None),
-            &execution_context(
-                root.path(),
-                CancellationToken::new(),
-                Arc::new(RecordingUpdates::default()),
-            ),
-        )
-        .await
-        .expect("signal exit still yields a result");
-    assert!(result.is_error);
-    assert!(
-        result.blocks[0]
-            .text()
-            .expect("bash output")
-            .contains("going\n\nCommand terminated by SIGTERM")
-    );
-    assert_eq!(
-        BashExit::of(&result),
-        Some(BashExit(None, Some("SIGTERM".to_string())))
-    );
+
+    let result = run_plain(root.path(), "printf 'going'; kill -TERM $$").await;
+
+    assert_eq!(result.exit_code, None);
+    assert_eq!(result.signal.as_deref(), Some("SIGTERM"));
 }
 
-/// Timeout rejects non-positive values and terminates long-running process groups.
+/// Cancellation kills the process group and keeps what it printed.
 #[tokio::test]
-async fn bash_validates_and_enforces_timeout_seconds() {
+async fn executor_observes_cancellation() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let context = execution_context(
-        root.path(),
-        CancellationToken::new(),
-        Arc::new(RecordingUpdates::default()),
-    );
-    let invalid = registry()
-        .execute(bash_call("bash-invalid-timeout", ":", Some(0.0)), &context)
-        .await
-        .expect_err("zero timeout should fail");
-    assert!(
-        invalid
-            .to_string()
-            .contains("Invalid timeout: must be a finite number of seconds")
-    );
+    let cancellation = CancellationToken::new();
+    let cancel = cancellation.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+    });
 
-    let timed_out = tokio::time::timeout(
+    let result = tokio::time::timeout(
         Duration::from_secs(2),
-        registry().execute(
-            bash_call("bash-timeout", "printf 'started'; sleep 5", Some(0.1)),
-            &context,
+        run(
+            root.path(),
+            "printf 'running'; sleep 5",
+            cancellation,
+            Arc::default(),
         ),
     )
     .await
-    .expect("tool timeout should settle")
-    .expect("timed-out command still yields a result");
-    assert!(timed_out.is_error);
-    assert!(
-        timed_out.blocks[0]
-            .text()
-            .expect("bash output")
-            .contains("started\n\nCommand timed out after 0.1 seconds")
-    );
-    // We kill the process group, so the signal is known.
-    #[cfg(unix)]
-    assert_eq!(
-        BashExit::of(&timed_out),
-        Some(BashExit(None, Some("SIGKILL".to_string())))
-    );
-}
+    .expect("cancellation settles");
 
-/// Turn cancellation terminates bash and reports output captured before cancellation.
-#[tokio::test]
-async fn bash_observes_turn_cancellation() {
-    let root = tempfile::tempdir().expect("temporary directory");
-    let cancellation = CancellationToken::new();
-    let context = execution_context(
-        root.path(),
-        cancellation.clone(),
-        Arc::new(RecordingUpdates::default()),
-    );
-    let registry = registry();
-    let task = tokio::spawn(async move {
-        registry
-            .execute(
-                bash_call("bash-cancel", "printf 'running'; sleep 5", None),
-                &context,
-            )
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    cancellation.cancel();
-
-    let result = tokio::time::timeout(Duration::from_secs(2), task)
-        .await
-        .expect("cancelled tool should settle")
-        .expect("bash task")
-        .expect("aborted command still yields a result");
-    assert!(result.is_error);
-    assert!(
-        result.blocks[0]
-            .text()
-            .expect("bash output")
-            .contains("running\n\nCommand aborted")
-    );
+    assert!(result.cancelled);
+    assert_eq!(result.output, "running");
     #[cfg(unix)]
-    assert_eq!(
-        BashExit::of(&result),
-        Some(BashExit(None, Some("SIGKILL".to_string())))
-    );
+    assert_eq!(result.signal.as_deref(), Some("SIGKILL"));
 }
 
 /// Large output keeps the last 2000 lines and persists the complete stream.
 #[tokio::test]
-async fn bash_truncates_tail_and_persists_full_output() {
+async fn executor_truncates_tail_and_persists_full_output() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let result = registry()
-        .execute(
-            bash_call(
-                "bash-large",
-                "for i in $(seq 1 3000); do echo $i; done",
-                None,
-            ),
-            &execution_context(
-                root.path(),
-                CancellationToken::new(),
-                Arc::new(RecordingUpdates::default()),
-            ),
-        )
-        .await
-        .expect("large command");
-    let text = result.blocks[0].text().expect("bash output");
-    let Some(ToolResultDetails::Bash {
-        truncation: Some(truncation),
-        full_output_path: Some(full_output_path),
-        ..
-    }) = result.details
-    else {
-        panic!("bash truncation details");
-    };
-    let full_output =
-        std::fs::read_to_string(&full_output_path).expect("full output file");
 
-    assert!(!text.lines().any(|line| line == "1"));
-    assert!(text.lines().any(|line| line == "3000"));
-    assert!(text.contains("[Showing lines 1001-3000 of 3000. Full output:"));
-    assert_eq!(truncation.output_lines, 2_000);
-    assert!(full_output.starts_with("1\n2\n3\n"));
-    assert!(full_output.ends_with("2999\n3000\n"));
+    let result =
+        run_plain(root.path(), "for i in $(seq 1 3000); do echo $i; done")
+            .await;
+
+    let path = result
+        .full_output_path
+        .as_deref()
+        .expect("full output path");
+    let full = std::fs::read_to_string(path).expect("full output file");
+    assert!(result.truncated);
+    assert_eq!(result.output.lines().count(), 2_000);
+    assert!(!result.output.lines().any(|line| line == "1"));
+    assert!(result.output.lines().any(|line| line == "3000"));
+    assert!(full.starts_with("1\n2\n3\n"));
+    assert!(full.ends_with("2999\n3000\n"));
 }
 
-/// Streaming commands publish an initial snapshot and throttled visible output.
+/// Streaming commands publish partial output before the final tail.
 #[tokio::test]
-async fn bash_publishes_partial_output_updates() {
+async fn executor_publishes_partial_output() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let updates = Arc::new(RecordingUpdates::default());
-    let result = registry()
-        .execute(
-            bash_call(
-                "bash-updates",
-                "printf 'first'; sleep 0.15; printf 'second'",
-                None,
-            ),
-            &execution_context(
-                root.path(),
-                CancellationToken::new(),
-                Arc::clone(&updates) as Arc<dyn ToolUpdateSink>,
-            ),
-        )
-        .await
-        .expect("streaming command");
-    let snapshots = updates.0.lock().expect("updates lock");
+    let published = Arc::new(Mutex::new(Vec::new()));
 
-    assert_eq!(result.blocks[0].text(), Some("firstsecond"));
-    assert!(snapshots.len() >= 2);
-    assert!(
-        snapshots
-            .first()
-            .is_some_and(|snapshot| snapshot.blocks.is_empty())
-    );
-    assert!(snapshots.iter().any(|snapshot| {
-        snapshot
-            .blocks
-            .iter()
-            .filter_map(ContentBlock::text)
-            .any(|text| text.contains("first"))
-    }));
+    let result = run(
+        root.path(),
+        "printf 'first'; sleep 0.15; printf 'second'",
+        CancellationToken::new(),
+        Arc::clone(&published),
+    )
+    .await;
+
+    assert_eq!(result.output, "firstsecond");
+    let published = published.lock().expect("published");
+    assert!(published.len() >= 2);
+    assert!(published.iter().any(|output| output == "first"));
+    assert_eq!(published.last().map(String::as_str), Some("firstsecond"));
 }
 
-/// Bash drains output from short-lived inherited pipes after the shell exits.
+/// Output from short-lived inherited pipes is drained after the shell exits.
 #[tokio::test]
-async fn bash_drains_inherited_stdio_within_exit_grace() {
+async fn executor_drains_inherited_stdio_within_exit_grace() {
     let root = tempfile::tempdir().expect("temporary directory");
-    let result = registry()
-        .execute(
-            bash_call(
-                "bash-inherited-stdio",
-                "(sleep 0.2; printf 'late') & printf 'early'",
-                None,
-            ),
-            &execution_context(
-                root.path(),
-                CancellationToken::new(),
-                Arc::new(RecordingUpdates::default()),
-            ),
-        )
-        .await
-        .expect("command with inherited stdout");
 
-    assert_eq!(result.blocks[0].text(), Some("earlylate"));
+    let result =
+        run_plain(root.path(), "(sleep 0.2; printf 'late') & printf 'early'")
+            .await;
+
+    assert_eq!(result.output, "earlylate");
 }

@@ -204,20 +204,28 @@ pub enum ToolResultDetails {
         /// Applied truncation and continuation measurements.
         truncation: TruncationDetails,
     },
-    /// Diagnostics produced by bash output accumulation.
-    Bash {
-        /// Applied truncation when the visible tail was bounded.
+    /// Outcome of one `exec_command` or `write_stdin` call.
+    Exec {
+        /// Session ID when the process is still running after the call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        truncation: Option<TruncationDetails>,
-        /// Temporary file containing complete output when truncation occurred.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        full_output_path: Option<String>,
-        /// Process exit code; absent when a signal ended the shell or for older results.
+        process_id: Option<i32>,
+        /// Exit code when the process ended during the call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
-        /// Name of the signal that ended the shell, such as `SIGTERM`.
+        /// Signal name when a signal ended the process during the call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signal: Option<String>,
+        /// Identifier repeated in the model-facing header.
+        chunk_id: String,
+        /// Time this call spent waiting for output.
+        wall_time_ms: u64,
+        /// Estimated tokens of the collected output before truncation.
+        original_token_count: usize,
+        /// Retained file holding the complete collected output after truncation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_output_path: Option<String>,
+        /// `exec_command` call that started the process; its terminal id.
+        terminal_call_id: ToolCallId,
     },
     /// Policy disposition produced before a tool implementation is invoked.
     Blocked {

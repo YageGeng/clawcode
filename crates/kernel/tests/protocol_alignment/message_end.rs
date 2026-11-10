@@ -163,12 +163,10 @@ impl RewriteKinds {
                                     ToolCallId::try_from("bash-call")
                                         .expect("id"),
                                 )
-                                .name("bash".to_string())
+                                .name("exec_command".to_string())
                                 // Only the output spells the secret, so finding
                                 // it in a request means the output leaked.
-                                .arguments(serde_json::json!({
-                                    "command": "printf 'raw-%s' secret"
-                                }))
+                                .arguments(serde_json::json!({ "cmd": "printf 'raw-%s' secret", "login": false }))
                                 .build(),
                         ),
                         finished(StopReason::ToolUse),

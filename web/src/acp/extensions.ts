@@ -18,6 +18,9 @@ export type AcpExtensionMethods = Readonly<{
   mcpComplete: string;
   mcpOAuthContinue: string;
   extensionCommand: string;
+  execList: string;
+  execTerminate: string;
+  execClean: string;
 }>;
 
 export const AcpMethods = {
@@ -42,7 +45,10 @@ export const AcpMethods = {
       mcpResourceRead: `${prefix}/mcp/resource/read`,
       mcpComplete: `${prefix}/mcp/complete`,
       mcpOAuthContinue: `${prefix}/mcp/oauth/continue`,
-      extensionCommand: `${prefix}/extension/command`
+      extensionCommand: `${prefix}/extension/command`,
+      execList: `${prefix}/session/exec/list`,
+      execTerminate: `${prefix}/session/exec/terminate`,
+      execClean: `${prefix}/session/exec/clean`
     };
   },
   required(methods: AcpExtensionMethods): readonly string[] {

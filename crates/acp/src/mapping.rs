@@ -3,15 +3,15 @@ use std::collections::BTreeMap;
 use agent_client_protocol::v2::schema as wire;
 use protocol::{
     AgentEvent, AgentEventPayload, AgentOutcome, CompactionOutcome,
-    ContentBlock, MessageContent, ModelUsage, ProductIdentity, RunId,
-    ToolResultDetails,
+    ContentBlock, EXEC_FULL_OUTPUT_LABEL, ExecExit, MessageContent, ModelUsage,
+    ProductIdentity, RunId, ToolResultDetails,
 };
 
 use crate::config::ConfigOptionsOf;
 use crate::content::AcpContentMapper;
 use crate::plan::PlanUpdateOf;
 use crate::terminal::{
-    ShellStatusOf, TerminalExit, TerminalSnapshot, TerminalText,
+    ExecResultBody, ShellStatusOf, TerminalExit, TerminalSnapshot,
 };
 use crate::tool_call::{ToolKindOf, ToolLocationsOf, ToolStatusOf};
 
@@ -47,6 +47,20 @@ impl<'a> AcpEventMapper<'a> {
         let updates = match &event.payload {
             AgentEventPayload::QueueChanged { .. } => {
                 vec![self.extension_update()?]
+            }
+            AgentEventPayload::ExecOutput {
+                tool_call_id,
+                output,
+                ..
+            } => vec![wire::SessionUpdate::TerminalUpdate(
+                wire::TerminalUpdate::from(TerminalSnapshot {
+                    terminal_id: tool_call_id.as_str(),
+                    output,
+                })
+                .meta(metadata),
+            )],
+            AgentEventPayload::ExecExited { exit } => {
+                Self::exec_exited(exit, &metadata)
             }
             AgentEventPayload::MessageTextDelta { message_id, delta } => {
                 vec![wire::SessionUpdate::AgentMessageChunk(
@@ -175,38 +189,37 @@ impl<'a> AcpEventMapper<'a> {
                             cancelled: *cancelled,
                             is_error: *is_error,
                         });
-                        if let Some(bash @ ToolResultDetails::Bash { .. }) =
+                        if let Some(exec @ ToolResultDetails::Exec { .. }) =
                             details
                         {
-                            // Replay closes the terminal with its saved output.
-                            Self::bash_tool_end(
+                            // Replay closes a finished command's terminal from its result.
+                            return Ok(Self::exec_tool_end(
                                 tool_call_id.as_str(),
                                 blocks,
-                                bash,
+                                exec,
                                 status,
                                 serde_json::to_value(message)?,
                                 metadata,
-                            )
-                        } else {
-                            let content = Self::tool_result_content(
-                                blocks,
-                                details.as_ref(),
-                                &metadata,
-                            )?;
-                            let mut updates =
-                                vec![wire::SessionUpdate::ToolCallUpdate(
-                                    wire::ToolCallUpdate::new(
-                                        tool_call_id.to_string(),
-                                    )
-                                    .status(status)
-                                    .content(content)
-                                    .raw_output(serde_json::to_value(message)?)
-                                    .meta(metadata.clone()),
-                                )];
-                            // An approved plan follows the result that approved it.
-                            updates.extend(plan.update(&metadata));
-                            updates
+                            ));
                         }
+                        let content = Self::tool_result_content(
+                            blocks,
+                            details.as_ref(),
+                            &metadata,
+                        )?;
+                        let mut updates =
+                            vec![wire::SessionUpdate::ToolCallUpdate(
+                                wire::ToolCallUpdate::new(
+                                    tool_call_id.to_string(),
+                                )
+                                .status(status)
+                                .content(content)
+                                .raw_output(serde_json::to_value(message)?)
+                                .meta(metadata.clone()),
+                            )];
+                        // An approved plan follows the result that approved it.
+                        updates.extend(plan.update(&metadata));
+                        updates
                     }
                     MessageContent::BashExecution { bash } => {
                         let message_id = &message.identity.message_id;
@@ -326,8 +339,8 @@ impl<'a> AcpEventMapper<'a> {
                 } else {
                     update.locations(locations)
                 };
-                if call.name == "bash" {
-                    // The terminal id is the tool call id; no size, it is not a PTY.
+                if call.name == protocol::EXEC_COMMAND_TOOL {
+                    // The terminal id is the tool call id; no size is reported.
                     let terminal = wire::TerminalUpdate::new(
                         call.tool_call_id.to_string(),
                     )
@@ -335,7 +348,7 @@ impl<'a> AcpEventMapper<'a> {
                     .meta(metadata);
                     let terminal = match call
                         .arguments
-                        .get("command")
+                        .get("cmd")
                         .and_then(serde_json::Value::as_str)
                     {
                         Some(command) => terminal.command(command.to_string()),
@@ -349,24 +362,34 @@ impl<'a> AcpEventMapper<'a> {
                         )),
                         wire::SessionUpdate::TerminalUpdate(terminal),
                     ]
+                } else if call.name == protocol::WRITE_STDIN_TOOL {
+                    // Output already streams into the starting call's terminal,
+                    // so this card shows only what it sends.
+                    let session = call
+                        .arguments
+                        .get("session_id")
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    let chars = call
+                        .arguments
+                        .get("chars")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let text = if chars.is_empty() {
+                        format!("等待 session {session} 输出")
+                    } else {
+                        format!(
+                            "向 session {session} 发送：{}",
+                            chars.escape_debug()
+                        )
+                    };
+                    vec![wire::SessionUpdate::ToolCallUpdate(
+                        update
+                            .content(vec![Self::text_content(text, &metadata)]),
+                    )]
                 } else {
                     vec![wire::SessionUpdate::ToolCallUpdate(update)]
                 }
-            }
-            AgentEventPayload::ToolExecutionUpdate { result, .. }
-                if matches!(
-                    result.details,
-                    Some(ToolResultDetails::Bash { .. })
-                ) =>
-            {
-                let output = String::from(TerminalText(&result.blocks));
-                vec![wire::SessionUpdate::TerminalUpdate(
-                    wire::TerminalUpdate::from(TerminalSnapshot {
-                        terminal_id: result.tool_call_id.as_str(),
-                        output: &output,
-                    })
-                    .meta(metadata),
-                )]
             }
             AgentEventPayload::ToolExecutionUpdate { result, .. } => {
                 vec![wire::SessionUpdate::ToolCallUpdate(
@@ -384,7 +407,7 @@ impl<'a> AcpEventMapper<'a> {
             AgentEventPayload::ToolExecutionEnd { result, .. }
                 if matches!(
                     result.details,
-                    Some(ToolResultDetails::Bash { .. })
+                    Some(ToolResultDetails::Exec { .. })
                 ) =>
             {
                 let status = wire::ToolCallStatus::from(ToolStatusOf {
@@ -392,10 +415,10 @@ impl<'a> AcpEventMapper<'a> {
                     is_error: result.is_error,
                 });
                 match &result.details {
-                    Some(bash) => Self::bash_tool_end(
+                    Some(exec) => Self::exec_tool_end(
                         result.tool_call_id.as_str(),
                         &result.blocks,
-                        bash,
+                        exec,
                         status,
                         serde_json::to_value(result)?,
                         metadata,
@@ -870,6 +893,8 @@ impl<'a> AcpEventMapper<'a> {
             | AgentEventPayload::PlanApprovalResolved { .. }
             | AgentEventPayload::UserBashFinished { .. }
             | AgentEventPayload::UserBashOutput { .. }
+            | AgentEventPayload::ExecOutput { .. }
+            | AgentEventPayload::ExecExited { .. }
             | AgentEventPayload::ActionRequired { .. }
             | AgentEventPayload::ActionResolved { .. } => {}
             AgentEventPayload::CompactionStart { reason, .. } => {
@@ -971,6 +996,130 @@ impl<'a> AcpEventMapper<'a> {
         ))
     }
 
+    /// Wraps plain text as tool call content.
+    fn text_content(
+        text: String,
+        metadata: &wire::Meta,
+    ) -> wire::ToolCallContent {
+        wire::ToolCallContent::Content(Box::new(
+            wire::Content::new(wire::ContentBlock::Text(
+                wire::TextContent::new(text),
+            ))
+            .meta(metadata.clone()),
+        ))
+    }
+
+    /// Ends an exec card. A finished `exec_command` closes its terminal from
+    /// the result body; one still running sets no status, so a background
+    /// exit that arrives first is never overwritten; `write_stdin` only
+    /// settles its own card because its output streams into the starting
+    /// call's terminal.
+    fn exec_tool_end(
+        tool_call_id: &str,
+        blocks: &[ContentBlock],
+        details: &ToolResultDetails,
+        status: wire::ToolCallStatus,
+        raw_output: serde_json::Value,
+        metadata: wire::Meta,
+    ) -> Vec<wire::SessionUpdate> {
+        let ToolResultDetails::Exec {
+            process_id,
+            exit_code,
+            signal,
+            full_output_path,
+            terminal_call_id,
+            ..
+        } = details
+        else {
+            return Vec::new();
+        };
+        let update = wire::ToolCallUpdate::new(tool_call_id.to_string())
+            .raw_output(raw_output)
+            .meta(metadata.clone());
+        if terminal_call_id.as_str() != tool_call_id {
+            return vec![wire::SessionUpdate::ToolCallUpdate(
+                update.status(status),
+            )];
+        }
+        let terminal = Self::terminal_content(tool_call_id);
+        if process_id.is_some() {
+            return vec![wire::SessionUpdate::ToolCallUpdate(
+                update.content(vec![terminal]),
+            )];
+        }
+        let mut body = String::from(ExecResultBody(blocks));
+        let mut content = vec![terminal];
+        if let Some(path) = full_output_path {
+            let footer = format!("{EXEC_FULL_OUTPUT_LABEL}{path}");
+            if let Some(stripped) = body.strip_suffix(&format!("\n\n{footer}"))
+            {
+                body = stripped.to_string();
+            }
+            content.push(Self::text_content(footer, &metadata));
+        }
+        vec![
+            wire::SessionUpdate::TerminalUpdate(
+                wire::TerminalUpdate::from(TerminalSnapshot {
+                    terminal_id: tool_call_id,
+                    output: &body,
+                })
+                .exit_status(wire::TerminalExitStatus::from(TerminalExit {
+                    exit_code: *exit_code,
+                    signal: signal.as_deref(),
+                }))
+                .meta(metadata),
+            ),
+            wire::SessionUpdate::ToolCallUpdate(
+                update.status(status).content(content),
+            ),
+        ]
+    }
+
+    /// Closes a background command's terminal and settles its starting card.
+    fn exec_exited(
+        exit: &ExecExit,
+        metadata: &wire::Meta,
+    ) -> Vec<wire::SessionUpdate> {
+        let tool_call_id = exit.tool_call_id.as_str();
+        let status = if exit.exit_code == Some(0) && !exit.lost {
+            wire::ToolCallStatus::Completed
+        } else {
+            wire::ToolCallStatus::Failed
+        };
+        let mut content = vec![Self::terminal_content(tool_call_id)];
+        if exit.lost {
+            content.push(Self::text_content(
+                "进程已不在本会话中运行（服务重启或会话分叉）".to_string(),
+                metadata,
+            ));
+        }
+        if let Some(path) = &exit.full_output_path {
+            content.push(Self::text_content(
+                format!("{EXEC_FULL_OUTPUT_LABEL}{path}"),
+                metadata,
+            ));
+        }
+        vec![
+            wire::SessionUpdate::TerminalUpdate(
+                wire::TerminalUpdate::from(TerminalSnapshot {
+                    terminal_id: tool_call_id,
+                    output: &exit.output,
+                })
+                .exit_status(wire::TerminalExitStatus::from(TerminalExit {
+                    exit_code: exit.exit_code,
+                    signal: exit.signal.as_deref(),
+                }))
+                .meta(metadata.clone()),
+            ),
+            wire::SessionUpdate::ToolCallUpdate(
+                wire::ToolCallUpdate::new(tool_call_id.to_string())
+                    .status(status)
+                    .content(content)
+                    .meta(metadata.clone()),
+            ),
+        ]
+    }
+
     /// Builds the user-tagged execute tool a `!bash` shell renders as.
     fn user_bash_tool(
         message_id: &protocol::MessageId,
@@ -995,56 +1144,6 @@ impl<'a> AcpEventMapper<'a> {
             .name("bash".to_string())
             .content(vec![Self::terminal_content(message_id.as_str())])
             .meta(metadata)
-    }
-
-    /// Closes a bash tool's terminal with its final output and exit, then ends the tool.
-    fn bash_tool_end(
-        tool_call_id: &str,
-        blocks: &[ContentBlock],
-        details: &ToolResultDetails,
-        status: wire::ToolCallStatus,
-        raw_output: serde_json::Value,
-        metadata: wire::Meta,
-    ) -> Vec<wire::SessionUpdate> {
-        let ToolResultDetails::Bash {
-            full_output_path,
-            exit_code,
-            signal,
-            ..
-        } = details
-        else {
-            return Vec::new();
-        };
-        let output = String::from(TerminalText(blocks));
-        let mut content = vec![Self::terminal_content(tool_call_id)];
-        if let Some(path) = full_output_path {
-            content.push(wire::ToolCallContent::Content(Box::new(
-                wire::Content::new(wire::ContentBlock::Text(
-                    wire::TextContent::new(format!("Full output: {path}")),
-                ))
-                .meta(metadata.clone()),
-            )));
-        }
-        vec![
-            wire::SessionUpdate::TerminalUpdate(
-                wire::TerminalUpdate::from(TerminalSnapshot {
-                    terminal_id: tool_call_id,
-                    output: &output,
-                })
-                .exit_status(wire::TerminalExitStatus::from(TerminalExit {
-                    exit_code: *exit_code,
-                    signal: signal.as_deref(),
-                }))
-                .meta(metadata.clone()),
-            ),
-            wire::SessionUpdate::ToolCallUpdate(
-                wire::ToolCallUpdate::new(tool_call_id.to_string())
-                    .status(status)
-                    .content(content)
-                    .raw_output(raw_output)
-                    .meta(metadata),
-            ),
-        ]
     }
 
     /// Preserves pi-only lifecycle data through ACP v2's custom update variant.

@@ -31,10 +31,7 @@ fn builtin_factory_registers_only_pi_coding_tools() {
         .create()
         .expect("built-ins should register");
 
-    assert_eq!(
-        registry.names(),
-        vec!["bash", "edit", "grep", "read", "write"]
-    );
+    assert_eq!(registry.names(), vec!["edit", "grep", "read", "write"]);
 }
 
 /// Built-in tools expose pi's exact System Prompt contributions.
@@ -81,15 +78,6 @@ fn builtin_tools_expose_pi_prompt_contributions() {
         })
     );
     assert_eq!(
-        contributions.get("bash"),
-        Some(&ToolPromptContribution {
-            snippet: Some(
-                "Execute bash commands (ls, grep, find, etc.)".to_string()
-            ),
-            guidelines: Vec::new(),
-        })
-    );
-    assert_eq!(
         contributions.get("grep"),
         Some(&ToolPromptContribution {
             snippet: Some(
@@ -101,12 +89,11 @@ fn builtin_tools_expose_pi_prompt_contributions() {
     );
 }
 
-/// Factory switches can disable filesystem and shell groups independently.
+/// The filesystem switch disables every built-in; shell tools are the Kernel's.
 #[test]
 fn builtin_factory_respects_group_switches() {
     let registry = BuiltinToolFactory::new()
         .filesystem_enabled(false)
-        .shell_enabled(false)
         .create()
         .expect("built-ins should register");
 

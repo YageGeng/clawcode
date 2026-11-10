@@ -19,6 +19,12 @@ impl Kernel {
             session.background.shutdown.cancel();
             tracing::info!("abandoned subagent reports for closing session {}", session_id);
             let _run_guard = session.execution.acquire_close().await?;
+            // No Run can start a process any more, so the table empties for good.
+            if let Some(exec) = &session.exec {
+                let terminated = exec.terminate_all().await;
+                tracing::info!("terminated {} exec processes while closing session {}", terminated, session_id);
+                exec.remove_snapshot().await;
+            }
             if let Err(error) = self.withdraw_pending(session_id) {
                 tracing::warn!("failed queue withdrawal while closing session {}: {}", session_id, error);
             }

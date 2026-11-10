@@ -165,6 +165,12 @@ pub enum AcpExtensionMethod {
     ExtensionCommand,
     /// Executes a user-authored shell command entirely on the server.
     UserBash,
+    /// Lists a Session's running background terminals.
+    ExecList,
+    /// Terminates one background terminal.
+    ExecTerminate,
+    /// Terminates every background terminal of a Session.
+    ExecClean,
 }
 
 impl fmt::Display for AcpExtensionMethod {
@@ -203,6 +209,9 @@ impl AcpExtensionMethod {
             Self::McpOAuthContinue => "_clawcode/mcp/oauth/continue",
             Self::ExtensionCommand => "_clawcode/extension/command",
             Self::UserBash => "_clawcode/session/bash",
+            Self::ExecList => "_clawcode/session/exec/list",
+            Self::ExecTerminate => "_clawcode/session/exec/terminate",
+            Self::ExecClean => "_clawcode/session/exec/clean",
         }
     }
 
@@ -219,7 +228,8 @@ impl AcpExtensionMethod {
             | Self::McpStatus
             | Self::McpPromptGet
             | Self::McpResourceRead
-            | Self::McpComplete => true,
+            | Self::McpComplete
+            | Self::ExecList => true,
             Self::Navigate
             | Self::Branch
             | Self::Fork
@@ -231,7 +241,9 @@ impl AcpExtensionMethod {
             | Self::McpReconnect
             | Self::McpOAuthContinue
             | Self::ExtensionCommand
-            | Self::UserBash => false,
+            | Self::UserBash
+            | Self::ExecTerminate
+            | Self::ExecClean => false,
         }
     }
 
@@ -258,6 +270,9 @@ impl AcpExtensionMethod {
             Self::McpOAuthContinue,
             Self::ExtensionCommand,
             Self::UserBash,
+            Self::ExecList,
+            Self::ExecTerminate,
+            Self::ExecClean,
         ]
         .into_iter()
         .find(|candidate| candidate.as_str() == method)

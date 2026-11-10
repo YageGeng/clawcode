@@ -10,7 +10,9 @@ impl From<ToolKindOf<'_>> for wire::ToolKind {
         match call.0.name.as_str() {
             "read" => Self::Read,
             "write" | "edit" => Self::Edit,
-            "bash" => Self::Execute,
+            protocol::EXEC_COMMAND_TOOL | protocol::WRITE_STDIN_TOOL => {
+                Self::Execute
+            }
             "grep" | "tool_search" => Self::Search,
             // The approval card is a mode switch, so clients can render it as one.
             protocol::EXIT_PLAN_MODE_TOOL => Self::SwitchMode,

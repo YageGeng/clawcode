@@ -158,8 +158,7 @@ impl ApplicationFactory {
             .map(RuntimeMcpServer::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         let builtin_tools = BuiltinToolFactory::new()
-            .filesystem_enabled(snapshot.tools.enable_fs)
-            .shell_enabled(snapshot.tools.enable_shell);
+            .filesystem_enabled(snapshot.tools.enable_fs);
         // Home discovery is a Skill dependency and must not block deployments
         // that explicitly disable the Skill subsystem.
         let skill_factory = if snapshot.tools.enable_skill {
@@ -206,6 +205,12 @@ impl ApplicationFactory {
             .provider_retry_delay_limit_ms(
                 snapshot.retry.provider.max_retry_delay_ms,
             )
+            .exec(snapshot.tools.enable_shell.then(|| {
+                Arc::new(tools::exec::ExecSettings {
+                    config: snapshot.tools.exec.clone(),
+                    snapshot_dir: data_root.join("shell_snapshots"),
+                })
+            }))
             .build()
             .build()?;
         Ok(Application {

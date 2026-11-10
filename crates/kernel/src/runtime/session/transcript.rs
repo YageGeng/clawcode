@@ -9,6 +9,7 @@ use store::{
     EntryKind, NewEntry, NewRecord, SessionEntry, SessionRecord, SessionStore,
 };
 
+use super::ClawcodeEntry as _;
 use super::replay::RebuiltHistory;
 use crate::runtime::KernelError;
 use crate::runtime::plan::{ModeChange, ModeNote, ModeNotes, SessionPlanState};
@@ -384,7 +385,7 @@ impl SessionTranscript {
             NewEntry {
                 id: entry_id,
                 kind: EntryKind::Custom,
-                payload: change.payload(),
+                payload: change.payload()?,
             },
         )?;
         let note = ModeNote::new(change.mode, self.delegated).message(
@@ -397,8 +398,31 @@ impl SessionTranscript {
         Ok(())
     }
 
+    /// Records a command sessions snapshot and places its note in context
+    /// under one lock; the note's identity and time come from the stored entry,
+    /// which is what a rebuild from the Store reads.
+    pub(in crate::runtime) fn append_command_sessions(
+        &self,
+        entry_id: EntryId,
+        note: &crate::runtime::exec::CommandSessionsNote,
+    ) -> Result<(), KernelError> {
+        let mut state = self.writable()?;
+        let entry = state.store.append_entry(
+            &self.lane,
+            NewEntry {
+                id: entry_id,
+                kind: EntryKind::Custom,
+                payload: note.payload()?,
+            },
+        )?;
+        let message = note.message(&entry.id, entry.timestamp_ms)?;
+        let state = &mut *state;
+        state.notes.place(&mut state.history, message);
+        Ok(())
+    }
+
     /// Appends a Store-only entry without changing model-visible history.
-    pub(super) fn append_store_only_entry(
+    pub(in crate::runtime) fn append_store_only_entry(
         &self,
         entry: NewEntry,
     ) -> Result<SessionEntry, KernelError> {

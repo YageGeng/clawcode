@@ -455,6 +455,10 @@ impl RunScope<'_> {
     {
         let kernel = self.kernel;
         let turn_id = &turn.turn_id;
+        // A changed command-session table is stated before the context is read.
+        self.session
+            .refresh_command_sessions(kernel, turn_id)
+            .await?;
         let mut history = self.session.transcript.history()?;
         // Failed Assistant attempts remain replayable in Store but are
         // excluded from the next active provider context, matching pi.

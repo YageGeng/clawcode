@@ -103,5 +103,7 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
             tracing::info!("stopped {} HTTP transport", ProductIdentity::NAME);
         }
     }
+    // Background commands must not outlive the server that started them.
+    application.kernel.terminate_exec_processes().await;
     Ok(())
 }

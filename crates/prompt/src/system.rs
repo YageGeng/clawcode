@@ -139,13 +139,14 @@ impl PromptSession {
 
         let mut guidelines = Vec::new();
         let mut seen = BTreeSet::new();
-        let has_bash = tools.iter().any(|tool| tool.name == "bash");
+        let has_shell = tools.iter().any(|tool| tool.name == "exec_command");
         let has_specialized_file_tool = tools
             .iter()
             .any(|tool| matches!(tool.name.as_str(), "grep" | "find" | "ls"));
-        if has_bash && !has_specialized_file_tool {
+        if has_shell && !has_specialized_file_tool {
             let fallback =
-                "Use bash for file operations like ls, rg, find".to_string();
+                "Use exec_command for file operations like ls, rg, find"
+                    .to_string();
             seen.insert(fallback.clone());
             guidelines.push(fallback);
         }

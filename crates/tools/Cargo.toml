@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 # workspace crates
+config = { workspace = true }
 protocol = { workspace = true }
 
 # error
@@ -37,9 +38,11 @@ tempfile = { workspace = true }
 
 # pty
 nix = { workspace = true }
+portable-pty = { workspace = true }
 
 # misc
 base64 = { workspace = true }
+fastrand = { workspace = true }
 image = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }

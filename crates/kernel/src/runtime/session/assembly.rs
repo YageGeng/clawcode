@@ -187,6 +187,11 @@ impl SessionAssembly<'_> {
                     settings.thinking_level,
                 ))
                 .plan(SessionPlanState::new(settings.mode))
+                .exec(kernel.exec.as_ref().map(|settings| {
+                    Arc::new(::tools::exec::ExecProcessManager::new(
+                        Arc::clone(settings),
+                    ))
+                }))
                 .execution(execution)
                 .build(),
         );
@@ -199,6 +204,10 @@ impl SessionAssembly<'_> {
         crate::runtime::subagent::register(&runtime, kernel)?;
         crate::runtime::plan::register_exit_plan_mode(&runtime, kernel)?;
         crate::runtime::plan::register_todo_write(&runtime)?;
+        crate::runtime::exec::register(&runtime, kernel)?;
+        if runtime.exec.is_some() {
+            kernel.reconcile_lost_exec(&runtime)?;
+        }
         if let Some(host) = mcp_host
             && let Err(error) = host.attach(&runtime)
         {

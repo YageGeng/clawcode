@@ -87,18 +87,29 @@ impl CommandPolicy {
 
 #[async_trait]
 impl ExtensionHandler<ToolCallPoint> for CommandPolicy {
-    /// Blocks destructive built-in bash calls before validation and execution.
+    /// Blocks destructive shell commands before validation and execution,
+    /// including ones typed line by line into a running command session.
     async fn handle(
         &self,
         event: &ToolCallEvent,
         _context: &ExtensionContext,
     ) -> Result<ToolCallResult, ExtensionError> {
-        let command = event
-            .call
-            .arguments
-            .get("command")
-            .and_then(serde_json::Value::as_str);
-        if event.call.name == "bash" && command.is_some_and(Self::rejects) {
+        let argument = |name: &str| {
+            event
+                .call
+                .arguments
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+        };
+        let rejected = match event.call.name.as_str() {
+            protocol::EXEC_COMMAND_TOOL => {
+                argument("cmd").is_some_and(Self::rejects)
+            }
+            protocol::WRITE_STDIN_TOOL => argument("chars")
+                .is_some_and(|chars| chars.lines().any(Self::rejects)),
+            _ => false,
+        };
+        if rejected {
             return Ok(ToolCallResult::Block(
                 ToolBlock::builder()
                     .reason(REJECTED_MESSAGE.to_string())

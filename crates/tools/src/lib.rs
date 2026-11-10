@@ -4,13 +4,11 @@ mod bash;
 mod builtin;
 mod command_line;
 mod contract;
+pub mod exec;
 mod output;
 mod truncation;
 
-pub use bash::{
-    BashExecutionOutput, BashExecutionRequest, BashExecutor,
-    BashOutputSnapshot, BashTermination,
-};
+pub use bash::{BashExecutionRequest, BashExecutor};
 pub use builtin::BuiltinToolFactory;
 pub use command_line::{
     CommandInvocation, ReadOnlyViolation, ShellCommandLine,

@@ -1,23 +1,27 @@
+//! The user's own shell commands (`!cmd`), run to completion with pi's
+//! output limits; the model's shell tools live in `exec`.
+
+mod output;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    ProductIdentity, SessionId, TruncationDetails, TurnId, UserBashDisposition,
-    UserBashResult,
+    ProductIdentity, SessionId, TurnId, UserBashDisposition, UserBashResult,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use self::output::OutputAccumulator;
 use crate::ToolError;
-use crate::builtin::output::OutputAccumulator;
 
 const UPDATE_THROTTLE: Duration = Duration::from_millis(100);
 const EXIT_STDIO_GRACE: Duration = Duration::from_millis(500);
 const OUTPUT_CHANNEL_CAPACITY: usize = 32;
 
-/// Complete parameters for one local shell process shared by tool and user-bash paths.
+/// One user shell command and the Session it runs for.
 #[derive(Clone, typed_builder::TypedBuilder)]
 pub struct BashExecutionRequest {
     /// Shell source passed to the selected local shell.
@@ -30,57 +34,19 @@ pub struct BashExecutionRequest {
     pub turn_id: TurnId,
     /// Cancellation shared with the owning session operation.
     pub cancellation: CancellationToken,
-    /// Optional command timeout already validated by the caller.
-    #[builder(default, setter(strip_option))]
-    pub timeout: Option<Duration>,
 }
 
-/// Replaceable visible output emitted while a shared bash execution is running.
-#[derive(Debug, Clone, typed_builder::TypedBuilder)]
-pub struct BashOutputSnapshot {
-    /// Current visible bounded tail.
-    pub output: String,
-    /// Current truncation accounting.
-    pub truncation: TruncationDetails,
-    /// Complete-output path once spooling has started.
-    #[builder(default)]
-    pub full_output_path: Option<PathBuf>,
-    /// Bytes in the final source line for partial-line diagnostics.
-    pub last_line_bytes: usize,
-}
-
-/// Terminal process state retained separately from the serializable user-bash result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BashTermination {
-    /// The shell exited normally or by a signal.
-    Exited,
-    /// Session cancellation terminated the process group.
-    Aborted,
-    /// The caller's validated timeout terminated the process group.
-    TimedOut,
-}
-
-/// Final shared bash execution value consumed by tool and user-bash adapters.
-#[derive(Debug, Clone)]
-pub struct BashExecutionOutput {
-    /// Pi-compatible command outcome.
-    pub result: UserBashResult,
-    /// Final bounded output metadata used by tool rendering.
-    pub snapshot: BashOutputSnapshot,
-    /// Terminal condition used by callers to choose their public error semantics.
-    pub termination: BashTermination,
-}
-
-/// Executes local shell commands with process-group cancellation and Pi output limits.
+/// Executes user shell commands with process-group cancellation and pi's output limits.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BashExecutor;
 
 impl BashExecutor {
-    /// Runs one command and publishes throttled replaceable output snapshots.
+    /// Runs one command until it exits or is cancelled, publishing its visible
+    /// output tail at most every 100 ms and once more at the end.
     pub async fn execute(
         request: BashExecutionRequest,
-        mut publish: impl FnMut(BashOutputSnapshot) + Send,
-    ) -> Result<BashExecutionOutput, ToolError> {
+        mut publish: impl FnMut(String) + Send,
+    ) -> Result<UserBashResult, ToolError> {
         if request.cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
@@ -141,21 +107,11 @@ impl BashExecutor {
             .checked_sub(UPDATE_THROTTLE)
             .unwrap_or_else(Instant::now);
         let mut wait = Box::pin(child.wait());
-        let mut timeout_wait = Box::pin(async move {
-            match request.timeout {
-                Some(timeout) => tokio::time::sleep(timeout).await,
-                None => std::future::pending::<()>().await,
-            }
-        });
-        let (termination, exit_code, signal) = loop {
+        let (cancelled, exit_code, signal) = loop {
             tokio::select! {
                 () = request.cancellation.cancelled() => {
                     Self::kill_process_tree(child_pid).await;
-                    break (BashTermination::Aborted, None, Self::killed());
-                }
-                () = &mut timeout_wait => {
-                    Self::kill_process_tree(child_pid).await;
-                    break (BashTermination::TimedOut, None, Self::killed());
+                    break (true, None, Self::killed());
                 }
                 status = &mut wait => {
                     let status = status.map_err(|error| ToolError::Execution {
@@ -163,7 +119,7 @@ impl BashExecutor {
                         message: error.to_string(),
                     })?;
                     // Read the signal before the status is dropped; it cannot be recovered later.
-                    break (BashTermination::Exited, status.code(), Self::signal_name(status));
+                    break (false, status.code(), Self::signal_name(status));
                 }
                 chunk = receiver.recv() => {
                     let Some(chunk) = chunk else {
@@ -174,13 +130,13 @@ impl BashExecutor {
                         message: error.to_string(),
                     })?;
                     if last_update.elapsed() >= UPDATE_THROTTLE {
-                        publish(Self::snapshot(&output));
+                        publish(output.snapshot().content);
                         last_update = Instant::now();
                     }
                 }
             }
         };
-        if termination != BashTermination::Exited {
+        if cancelled {
             let _status = wait.await;
         }
         let reader_result = tokio::time::timeout(EXIT_STDIO_GRACE, async {
@@ -207,30 +163,19 @@ impl BashExecutor {
                     tool: "bash".to_string(),
                     message: error.to_string(),
                 })?;
-        let snapshot = BashOutputSnapshot::builder()
-            .output(finished.content)
-            .truncation(finished.truncation)
-            .full_output_path(finished.full_output_path)
-            .last_line_bytes(output.last_line_bytes())
-            .build();
-        publish(snapshot.clone());
-        let result_builder = UserBashResult::builder()
+        publish(finished.content.clone());
+        let result = UserBashResult::builder()
             .disposition(UserBashDisposition::Completed)
-            .output(snapshot.output.clone())
+            .output(finished.content)
             .exit_code(exit_code)
             .signal(signal)
-            .cancelled(termination == BashTermination::Aborted)
-            .truncated(snapshot.truncation.truncated);
-        let result = match &snapshot.full_output_path {
-            Some(path) => result_builder
+            .cancelled(cancelled)
+            .truncated(finished.truncation.truncated);
+        Ok(match finished.full_output_path {
+            Some(path) => result
                 .full_output_path(path.to_string_lossy().into_owned())
                 .build(),
-            None => result_builder.build(),
-        };
-        Ok(BashExecutionOutput {
-            result,
-            snapshot,
-            termination,
+            None => result.build(),
         })
     }
 
@@ -310,17 +255,6 @@ impl BashExecutor {
                 .status()
                 .await;
         }
-    }
-
-    /// Converts the mutable accumulator into one public replaceable snapshot.
-    fn snapshot(output: &OutputAccumulator) -> BashOutputSnapshot {
-        let snapshot = output.snapshot();
-        BashOutputSnapshot::builder()
-            .output(snapshot.content)
-            .truncation(snapshot.truncation)
-            .full_output_path(snapshot.full_output_path)
-            .last_line_bytes(output.last_line_bytes())
-            .build()
     }
 }
 

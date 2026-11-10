@@ -146,7 +146,7 @@ fn default_prompt_uses_identity_and_visible_tool_contributions() {
 
 /// Guidelines are trimmed, stably deduplicated, and adapt to bash-only file access.
 #[test]
-fn default_prompt_normalizes_guidelines_and_bash_fallback() {
+fn default_prompt_normalizes_guidelines_and_shell_fallback() {
     let workspace = tempfile::tempdir().expect("workspace");
     let session = prompt_session(
         &workspace.path().join("global"),
@@ -157,7 +157,7 @@ fn default_prompt_normalizes_guidelines_and_bash_fallback() {
     let bash_only = session.build_system_prompt(SystemPromptTurnInput {
         tools: vec![
             prompt_tool(
-                "bash",
+                "exec_command",
                 Some("Execute commands"),
                 &["  Keep output focused  ", "Keep output focused", "   "],
             ),
@@ -168,9 +168,9 @@ fn default_prompt_normalizes_guidelines_and_bash_fallback() {
     });
 
     assert!(
-        bash_only
-            .text
-            .contains("- Use bash for file operations like ls, rg, find")
+        bash_only.text.contains(
+            "- Use exec_command for file operations like ls, rg, find"
+        )
     );
     assert_eq!(bash_only.text.matches("- Keep output focused").count(), 1);
     assert_eq!(
@@ -183,7 +183,7 @@ fn default_prompt_normalizes_guidelines_and_bash_fallback() {
 
     let with_grep = session.build_system_prompt(SystemPromptTurnInput {
         tools: vec![
-            prompt_tool("bash", Some("Execute commands"), &[]),
+            prompt_tool("exec_command", Some("Execute commands"), &[]),
             prompt_tool("grep", Some("Search text"), &[]),
         ],
         skills: Vec::new(),
@@ -192,7 +192,7 @@ fn default_prompt_normalizes_guidelines_and_bash_fallback() {
     assert!(
         !with_grep
             .text
-            .contains("Use bash for file operations like ls, rg, find")
+            .contains("Use exec_command for file operations like ls, rg, find")
     );
 }
 
@@ -264,7 +264,7 @@ fn skill_catalog_requires_read_and_enabled_policy() {
         PathBuf::from("/skills/review/SKILL.md"),
     );
     let without_read = session.build_system_prompt(SystemPromptTurnInput {
-        tools: vec![prompt_tool("bash", Some("Execute commands"), &[])],
+        tools: vec![prompt_tool("exec_command", Some("Execute commands"), &[])],
         skills: vec![skill.clone()],
         include_skill_instructions: true,
     });

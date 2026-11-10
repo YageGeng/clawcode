@@ -43,8 +43,8 @@ fn tool_then_answer(command: &'static str) -> impl Fn(&ModelRequest) -> Route {
                         .tool_call_id(
                             ToolCallId::try_from("bash-call").expect("id"),
                         )
-                        .name("bash".to_string())
-                        .arguments(serde_json::json!({ "command": command }))
+                        .name("exec_command".to_string())
+                        .arguments(serde_json::json!({ "cmd": command, "login": false }))
                         .build(),
                 ),
                 finished_with(StopReason::ToolUse, 15),

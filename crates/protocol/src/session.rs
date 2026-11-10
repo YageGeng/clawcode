@@ -134,6 +134,13 @@ pub enum SessionReplayItem {
         /// Durable settlement timestamp assigned by the Store.
         ended_at_ms: TimestampMs,
     },
+    /// A persisted background command exit that closes its terminal card.
+    ExecExited {
+        /// How and when the process ended.
+        exit: crate::ExecExit,
+        /// Durable entry timestamp assigned by the Store.
+        timestamp_ms: TimestampMs,
+    },
     /// A persisted compaction boundary rendered as a replayable card.
     Compaction {
         /// Run-shaped identifier originally emitted by the compaction.

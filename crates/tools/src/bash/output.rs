@@ -136,11 +136,6 @@ impl OutputAccumulator {
         Ok(self.snapshot())
     }
 
-    /// Returns the exact byte length of the current final source line.
-    pub(crate) const fn last_line_bytes(&self) -> usize {
-        self.current_line_bytes
-    }
-
     /// Counts complete lines plus one currently open line using pi's rule.
     fn total_lines(&self) -> usize {
         self.completed_lines + usize::from(self.has_open_line)

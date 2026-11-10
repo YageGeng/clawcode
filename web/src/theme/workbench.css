@@ -3840,3 +3840,75 @@
 .message--subagent-report { border-left: 3px solid var(--accent); padding-left: 12px; }
 .session-children { padding-left: 14px; border-left: 1px solid var(--border-subtle); margin-left: 10px; }
 .session-children > summary { cursor: pointer; padding: 6px; font-size: 12px; color: var(--text-secondary); }
+
+/* Background terminals: commands that outlived their turn, shown above the composer. */
+.background-terminals {
+  margin-bottom: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.background-terminals__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--surface-muted);
+}
+
+.background-terminals button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.background-terminals button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.background-terminals__toggle {
+  flex: 1;
+  min-width: 0;
+}
+
+.background-terminals__toggle[aria-expanded="true"] .background-terminals__chevron {
+  transform: rotate(180deg);
+}
+
+.background-terminals__list {
+  max-height: min(220px, 25vh);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.background-terminals__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.background-terminals__command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-terminals__spinner {
+  animation: spin 1s linear infinite;
+}

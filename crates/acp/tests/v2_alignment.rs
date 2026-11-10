@@ -148,8 +148,78 @@ impl Model for ScriptedModel {
                             protocol::ToolCallId::try_from("bash-call")
                                 .expect("tool call id"),
                         )
-                        .name("bash".to_string())
-                        .arguments(serde_json::json!({ "command": "sleep 5" }))
+                        .name("exec_command".to_string())
+                        .arguments(serde_json::json!({ "cmd": "sleep 5", "login": false }))
+                        .build(),
+                )),
+                Ok(ModelStreamEvent::Finished(
+                    ModelFinal::builder()
+                        .stop_reason(StopReason::ToolUse)
+                        .raw_stop_reason(None)
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
+                                .input_tokens(1)
+                                .output_tokens(1)
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(2),
+                        ))
+                        .build(),
+                )),
+            ]))),
+            "two" => Ok(Box::pin(stream::iter([
+                Ok(ModelStreamEvent::ToolCall(
+                    protocol::ToolCall::builder()
+                        .tool_call_id(
+                            protocol::ToolCallId::try_from("long-a")
+                                .expect("tool call id"),
+                        )
+                        .name("exec_command".to_string())
+                        .arguments(serde_json::json!({
+                            "cmd": "sleep 30", "yield_time_ms": 250, "login": false
+                        }))
+                        .build(),
+                )),
+                Ok(ModelStreamEvent::ToolCall(
+                    protocol::ToolCall::builder()
+                        .tool_call_id(
+                            protocol::ToolCallId::try_from("long-b")
+                                .expect("tool call id"),
+                        )
+                        .name("exec_command".to_string())
+                        .arguments(serde_json::json!({
+                            "cmd": "sleep 30", "yield_time_ms": 250, "login": false
+                        }))
+                        .build(),
+                )),
+                Ok(ModelStreamEvent::Finished(
+                    ModelFinal::builder()
+                        .stop_reason(StopReason::ToolUse)
+                        .raw_stop_reason(None)
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
+                                .input_tokens(1)
+                                .output_tokens(1)
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(2),
+                        ))
+                        .build(),
+                )),
+            ]))),
+            "background" => Ok(Box::pin(stream::iter([
+                Ok(ModelStreamEvent::ToolCall(
+                    protocol::ToolCall::builder()
+                        .tool_call_id(
+                            protocol::ToolCallId::try_from("bg-call")
+                                .expect("tool call id"),
+                        )
+                        .name("exec_command".to_string())
+                        .arguments(serde_json::json!({
+                            "cmd": "sleep 0.3; echo bg-done",
+                            "yield_time_ms": 250,
+                            "login": false
+                        }))
                         .build(),
                 )),
                 Ok(ModelStreamEvent::Finished(
@@ -274,6 +344,12 @@ fn alignment_kernel(
             .extension_factory(extensions)
             .clock(clock)
             .id_generator(Arc::new(NanoidIdGenerator))
+            .exec(Some(Arc::new(tools::exec::ExecSettings {
+                config: config::ExecConfig::builder()
+                    .shell_snapshot(false)
+                    .build(),
+                snapshot_dir: root.join("shell_snapshots"),
+            })))
             .build()
             .build()
             .expect("alignment kernel"),
@@ -1812,12 +1888,150 @@ async fn cancelled_tool_remains_cancelled_after_durable_resume() {
         resume_from_start(&session_id, workspace.path()),
     )
     .await;
-    let tool = replayed
+    // The cancelled result replays as cancelled; the process it left running
+    // was killed at close, and its later exit settles the card afterwards.
+    assert!(
+        replayed.iter().any(|value| {
+            value["sessionUpdate"] == "tool_call_update"
+                && value["toolCallId"] == "bash-call"
+                && value["status"] == "cancelled"
+        }),
+        "{replayed:?}"
+    );
+}
+
+/// A background exit closes the terminal live and again when the Session is replayed.
+#[tokio::test]
+async fn replayed_exec_exit_maps_like_live() {
+    let state = tempfile::tempdir().expect("state");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let kernel = alignment_kernel(
+        state.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    let factory = acp(&kernel);
+    let session_id = prepared_session(
+        &factory,
+        workspace.path(),
+        async |connection, session_id, updates| {
+            connection
+                .send_request(prompt(session_id, "background"))
+                .block_task()
+                .await?;
+            next_matching(updates, |value| {
+                value["sessionUpdate"] == "terminal_update"
+                    && value["terminalId"] == "bg-call"
+                    && value.get("exitStatus").is_some()
+            })
+            .await;
+            Ok(())
+        },
+    )
+    .await;
+    kernel
+        .close_session(
+            &protocol::SessionId::try_from(session_id.to_string()).expect("id"),
+        )
+        .await
+        .expect("close");
+
+    let replayed = resume_notifications(
+        &factory,
+        resume_from_start(&session_id, workspace.path()),
+    )
+    .await;
+
+    let terminal = replayed
         .iter()
         .rev()
-        .find(|value| value["sessionUpdate"] == "tool_call_update")
-        .expect("replayed tool");
-    assert_eq!(tool["status"], "cancelled");
+        .find(|value| {
+            value["sessionUpdate"] == "terminal_update"
+                && value["terminalId"] == "bg-call"
+        })
+        .expect("replayed terminal");
+    assert_eq!(terminal["exitStatus"]["exitCode"], 0);
+    let status = replayed
+        .iter()
+        .filter(|value| {
+            value["sessionUpdate"] == "tool_call_update"
+                && value["toolCallId"] == "bg-call"
+        })
+        .filter_map(|value| value["status"].as_str())
+        .next_back();
+    assert_eq!(status, Some("completed"));
+}
+
+/// Sends one exec extension request over the ACP connection.
+async fn exec_request(
+    connection: &V2ConnectionTo<Agent>,
+    method: protocol::AcpExtensionMethod,
+    parameters: serde_json::Value,
+) -> Result<serde_json::Value, agent_client_protocol::Error> {
+    connection
+        .send_request(
+            agent_client_protocol::UntypedMessage::new(
+                method.as_str(),
+                &parameters,
+            )
+            .expect("request"),
+        )
+        .block_task()
+        .await
+}
+
+/// Lists two background processes, stops one, then cleans the rest.
+#[tokio::test]
+async fn exec_extension_methods_list_terminate_and_clean() {
+    let state = tempfile::tempdir().expect("state");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let kernel = alignment_kernel(
+        state.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    let factory = acp(&kernel);
+    prepared_session(
+        &factory,
+        workspace.path(),
+        async |connection, session_id, updates| {
+            connection
+                .send_request(prompt(session_id, "two"))
+                .block_task()
+                .await?;
+            next_matching(updates, |value| is_idle(value, "end_turn")).await;
+            let session = serde_json::json!({ "sessionId": session_id });
+
+            let listed = exec_request(connection, protocol::AcpExtensionMethod::ExecList, session.clone()).await?;
+            let processes = listed["processes"].as_array().expect("processes").clone();
+            assert_eq!(processes.len(), 2, "{listed}");
+            assert_eq!(processes[0]["command"], "sleep 30");
+            let first = processes[0]["processId"].clone();
+            let stopped = exec_request(
+                connection,
+                protocol::AcpExtensionMethod::ExecTerminate,
+                serde_json::json!({ "sessionId": session_id, "processId": first }),
+            )
+            .await?;
+            let again = exec_request(
+                connection,
+                protocol::AcpExtensionMethod::ExecTerminate,
+                serde_json::json!({ "sessionId": session_id, "processId": first }),
+            )
+            .await?;
+            let remaining = exec_request(connection, protocol::AcpExtensionMethod::ExecList, session.clone()).await?;
+            let cleaned = exec_request(connection, protocol::AcpExtensionMethod::ExecClean, session.clone()).await?;
+            let empty = exec_request(connection, protocol::AcpExtensionMethod::ExecList, session).await?;
+
+            assert_eq!(stopped, serde_json::json!({ "terminated": true }));
+            assert_eq!(again, serde_json::json!({ "terminated": false }));
+            assert_eq!(remaining["processes"].as_array().map(Vec::len), Some(1));
+            assert_eq!(cleaned, serde_json::json!({ "terminated": 1 }));
+            assert_eq!(empty, serde_json::json!({ "processes": [] }));
+            Ok(())
+        },
+    )
+    .await;
 }
 
 /// A live notice is shown once and never returns through replay.
