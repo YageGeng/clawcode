@@ -1,4 +1,4 @@
-active_model = "chatgpt/gpt-6-astra"
+active_model = "deepseek/deepseek-flash"
 
 [app.recovery]
 # Caps source Session updates consumed into one outbound ACP frame.
