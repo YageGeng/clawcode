@@ -113,11 +113,18 @@ impl ExecError {
 /// Shortest wait before an `exec_command` or a write yields.
 pub const MIN_YIELD_TIME_MS: u64 = 250;
 /// Longest wait before an `exec_command` or a non-empty write yields.
-pub const MAX_YIELD_TIME_MS: u64 = 30_000;
+///
+/// This doubles as the ceiling of the default wait below, so a model that asks
+/// for a longer wait than one minute still yields at the background threshold.
+pub const MAX_YIELD_TIME_MS: u64 = 60_000;
 /// Shortest wait for an empty `write_stdin` poll.
 pub const MIN_EMPTY_YIELD_TIME_MS: u64 = 5_000;
 /// Default wait for `exec_command`.
-pub const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
+///
+/// A command that outlives this wait is promoted to a background terminal and
+/// surfaces above the WebUI composer, so the default is one minute: anything
+/// shorter keeps everyday commands inline instead of claiming a background slot.
+pub const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 60_000;
 /// Default wait after a non-empty write.
 pub const DEFAULT_WRITE_YIELD_TIME_MS: u64 = 250;
 /// Windows shells start slowly, so the first wait is never shorter than this.

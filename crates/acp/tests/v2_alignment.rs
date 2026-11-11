@@ -207,7 +207,7 @@ impl Model for ScriptedModel {
                         .build(),
                 )),
             ]))),
-            "background" => Ok(Box::pin(stream::iter([
+            scenario @ ("background" | "background-after-idle") => Ok(Box::pin(stream::iter([
                 Ok(ModelStreamEvent::ToolCall(
                     protocol::ToolCall::builder()
                         .tool_call_id(
@@ -216,7 +216,13 @@ impl Model for ScriptedModel {
                         )
                         .name("exec_command".to_string())
                         .arguments(serde_json::json!({
-                            "cmd": "sleep 0.3; echo bg-done",
+                            // The gated scenario exits only after the test observes idle.
+                            // Existing background scenarios keep their original timing.
+                            "cmd": if scenario == "background-after-idle" {
+                                "while [ ! -f release-background ]; do sleep 0.01; done; echo bg-done"
+                            } else {
+                                "sleep 0.3; echo bg-done"
+                            },
                             "yield_time_ms": 250,
                             "login": false
                         }))
@@ -1898,6 +1904,74 @@ async fn cancelled_tool_remains_cancelled_after_durable_resume() {
         }),
         "{replayed:?}"
     );
+}
+
+/// A resume that keeps the retained Operation journal replays the background exit.
+///
+/// The process exits after its Run ended, so the exit arrives as an ungrouped
+/// event. The test releases the process only after observing idle, rather than
+/// relying on a delay to order the exit after the Run. A journal that only
+/// retained running Operation groups would leave a phantom open terminal.
+#[tokio::test]
+async fn retained_journal_replays_exec_exit_without_closing() {
+    let state = tempfile::tempdir().expect("state");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let release = workspace.path().join("release-background");
+    let kernel = alignment_kernel(
+        state.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    let factory = acp(&kernel);
+    let session_id = prepared_session(
+        &factory,
+        workspace.path(),
+        async |connection, session_id, updates| {
+            connection
+                .send_request(prompt(session_id, "background-after-idle"))
+                .block_task()
+                .await?;
+            next_matching(updates, |value| is_idle(value, "end_turn")).await;
+            // Idle is published after the journal closes, so the released
+            // process must report its exit outside the running Operation.
+            tokio::fs::write(&release, b"release")
+                .await
+                .expect("release background process after idle");
+            next_matching(updates, |value| {
+                value["sessionUpdate"] == "terminal_update"
+                    && value["terminalId"] == "bg-call"
+                    && value.get("exitStatus").is_some()
+            })
+            .await;
+            Ok(())
+        },
+    )
+    .await;
+    // The Session stays open, so the resume prefers the retained journal.
+    let replayed = resume_notifications(
+        &factory,
+        resume_from_start(&session_id, workspace.path()),
+    )
+    .await;
+
+    let terminal = replayed
+        .iter()
+        .rev()
+        .find(|value| {
+            value["sessionUpdate"] == "terminal_update"
+                && value["terminalId"] == "bg-call"
+        })
+        .expect("replayed terminal");
+    assert_eq!(terminal["exitStatus"]["exitCode"], 0);
+    let status = replayed
+        .iter()
+        .filter(|value| {
+            value["sessionUpdate"] == "tool_call_update"
+                && value["toolCallId"] == "bg-call"
+        })
+        .filter_map(|value| value["status"].as_str())
+        .next_back();
+    assert_eq!(status, Some("completed"));
 }
 
 /// A background exit closes the terminal live and again when the Session is replayed.

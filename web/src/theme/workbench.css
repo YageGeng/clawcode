@@ -3847,11 +3847,35 @@
     animation: none !important;
   }
 }
-/* Inter-agent mail: sender, recipient, and kind above the payload. */
-.agent-mail-card { border-left: 3px solid var(--accent); }
+/* Inter-agent mail is folded by default: the summary carries the routing header
+   (sender → recipient plus kind) and the payload only mounts once expanded. */
+.agent-mail-card {
+  border-left: 3px solid var(--accent);
+  padding: 0;
+}
 .agent-mail-card[data-kind="result"] { border-left-color: var(--success, var(--accent)); }
-.agent-mail-card header span { display: inline-flex; align-items: center; gap: 6px; }
-.agent-mail-card__body { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-mail-card summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+.agent-mail-card summary::-webkit-details-marker { display: none; }
+.agent-mail-card__route { color: var(--text-primary); font-weight: 650; }
+.agent-mail-card__kind { margin-left: auto; color: var(--text-secondary); }
+.agent-mail-card__chevron { transition: transform 160ms ease; }
+.agent-mail-card[open] .agent-mail-card__chevron { transform: rotate(180deg); }
+.agent-mail-card__body {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
 .agent-mail-card__body > :first-child { margin-top: 0; }
 .agent-mail-card__body > :last-child { margin-bottom: 0; }
 /* A forked child's compact view collapses the history it inherited. */

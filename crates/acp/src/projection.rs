@@ -312,8 +312,15 @@ impl SessionProjection {
                         .build(),
                 );
             } else if let Some(journal) = state.journal.as_mut()
-                && journal.running
-                && group.run_id.as_ref() == Some(&journal.run_id)
+                // A finished Operation still owns the events it caused: a
+                // background process exits after its Run ended, so an ungrouped
+                // or same-Run group must stay in the journal. Dropping it would
+                // hide the exit from a resume, which prefers this journal over
+                // the Store snapshot, and leave a phantom open terminal.
+                && group
+                    .run_id
+                    .as_ref()
+                    .is_none_or(|run_id| *run_id == journal.run_id)
             {
                 // Complete queue and terminal snapshots supersede earlier views;
                 // discarded sequence positions remain valid inclusive resume cursors.

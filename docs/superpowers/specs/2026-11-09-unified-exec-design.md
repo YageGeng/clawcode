@@ -87,7 +87,7 @@ web       卡片在 turn 结束后继续接收更新；后台终端计数与列�
 | `cmd`（必填） | — | shell 命令 |
 | `workdir` | 本轮 cwd | 目录不存在时返回错误 |
 | `tty` | `false` | `true` 时分配 24×80 的 PTY |
-| `yield_time_ms` | 10000 | 限制在 250–30000；Windows 下限 10000 |
+| `yield_time_ms` | 60000 | 限制在 250–60000；Windows 下限 10000。超过该等待的命令转为后台终端，因此默认取 1 分钟 |
 | `max_output_tokens` | 10000 | 上限 262144（1 MiB ÷ 4） |
 | `shell` | 用户默认 shell | `$SHELL`，否则依次 `/bin/bash`、`/bin/sh` |
 | `login` | `true` | `true` 用 `-lc`，`false` 用 `-c` |
@@ -102,7 +102,7 @@ web       卡片在 turn 结束后继续接收更新；后台终端计数与列�
 |---|---|---|
 | `session_id`（必填） | — | `exec_command` 返回的编号 |
 | `chars` | `""` | 为空表示只轮询 |
-| `yield_time_ms` | 写入 250；轮询 5000 | 写入上限 30000；轮询限制在 5000 到 `background_terminal_max_timeout_ms` |
+| `yield_time_ms` | 写入 250；轮询 5000 | 写入上限 60000；轮询限制在 5000 到 `background_terminal_max_timeout_ms` |
 | `max_output_tokens` | 10000 | 同 4.1 |
 
 ### 4.3 执行流程

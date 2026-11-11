@@ -85,9 +85,9 @@ impl ExecCommandArgs {
     #[must_use]
     pub fn definition() -> ToolDefinition {
         let yield_description = if cfg!(windows) {
-            "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
+            "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 60000 ms default. Effective range on Windows is 10000-60000 ms."
         } else {
-            "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+            "Wait before yielding output. Defaults to 60000 ms; effective range is 250-60000 ms. A command that outlives this wait keeps running as a background terminal."
         };
         ToolDefinition {
             name: EXEC_COMMAND_TOOL.to_string(),
@@ -179,7 +179,7 @@ impl WriteStdinArgs {
                 "properties": {
                     "session_id": { "type": "number", "description": "Identifier of the running unified exec session." },
                     "chars": { "type": "string", "description": "Bytes to write to stdin. Defaults to empty, which polls without writing." },
-                    "yield_time_ms": { "type": "number", "description": "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default." },
+                    "yield_time_ms": { "type": "number", "description": "Wait before yielding output. Non-empty writes default to 250 ms and cap at 60000 ms; empty polls wait 5000-300000 ms by default." },
                     "max_output_tokens": { "type": "number", "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy." }
                 },
                 "required": ["session_id"],

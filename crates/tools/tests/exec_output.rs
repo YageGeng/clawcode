@@ -129,7 +129,7 @@ fn response_truncates_middle_by_token_budget() {
     assert!(body.trim_end().ends_with('b'), "{body}");
 }
 
-/// Exec yield times are clamped to codex's 250-30000 ms window.
+/// Exec yield times are clamped to codex's 250-60000 ms window.
 #[cfg(not(windows))]
 #[test]
 fn exec_args_clamp_yield_time() {
@@ -144,9 +144,9 @@ fn exec_args_clamp_yield_time() {
     assert_eq!(args(Some(1)).yield_time(), Duration::from_millis(250));
     assert_eq!(
         args(Some(99_999)).yield_time(),
-        Duration::from_millis(30_000)
+        Duration::from_millis(60_000)
     );
-    assert_eq!(args(None).yield_time(), Duration::from_millis(10_000));
+    assert_eq!(args(None).yield_time(), Duration::from_millis(60_000));
     assert!(args(None).login, "login defaults to true");
     assert!(!args(None).tty, "tty defaults to false");
 }
@@ -178,7 +178,7 @@ fn write_args_clamp_yield_time() {
     );
     assert_eq!(
         args("y\n", Some(99_999)).yield_time(max_background),
-        Duration::from_millis(30_000)
+        Duration::from_millis(60_000)
     );
 }
 

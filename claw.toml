@@ -10,7 +10,7 @@ max_turns = { type = "unlimited" }
 
 [subagent]
 # Children of one main agent allowed to run at the same time.
-max_agents = 3
+max_agents = 100
 
 [logging]
 filter = "info"
