@@ -787,6 +787,16 @@
   align-items: flex-end;
 }
 
+/* Keep actions and diagnostics clear of the card's clipped rounded corners. */
+.command-message > .message__action-area,
+.command-message > .message__diagnostics {
+  margin-inline: 12px;
+}
+
+.command-message > .message__diagnostics {
+  margin-bottom: 10px;
+}
+
 .message__actions {
   display: flex;
   gap: 2px;

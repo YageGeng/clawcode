@@ -26,6 +26,9 @@ const STATUS_LABELS: Readonly<Record<NonNullable<SlashCommandMessageMeta["status
 export function CommandMessageCard({ message, actions }: CommandMessageCardProps) {
   const command = message.slashCommand;
   if (command === undefined) return null;
+  // The header already names the command, so invocation bodies show only the
+  // arguments that follow the typed `/name` token (or its alias).
+  const body = command.messageKind === "output" ? message.text : message.text.trim().replace(/^\S+\s*/, "");
   return (
     <article className="command-message" data-kind={command.messageKind} data-status={command.status} data-transcript-key={TranscriptRowKeys.message(message.messageId)}>
       <header className="command-message__header">
@@ -34,7 +37,7 @@ export function CommandMessageCard({ message, actions }: CommandMessageCardProps
         <span className="command-message__kind">{command.messageKind === "output" ? "结果" : command.messageKind === "expansion" ? "展开调用" : "调用"}</span>
         {command.status === undefined ? null : <span className="command-message__status">{STATUS_LABELS[command.status]}</span>}
       </header>
-      {message.text.length === 0 ? null : <div className="command-message__body"><MarkdownContent text={message.text} /></div>}
+      {body.length === 0 ? null : <div className="command-message__body"><MarkdownContent text={body} /></div>}
       {actions}
       <details className="message__diagnostics">
         <summary>消息详情</summary>

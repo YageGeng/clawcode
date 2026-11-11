@@ -65,7 +65,8 @@ export function MessageActions({ message, entry, cwd, running, inspecting, onIns
             }}
           ><Pencil size={15} /></button>
         )}
-        {message.role !== "assistant" || entry === undefined || cwd === undefined ? null : (
+        {/* Slash Command records never reach the model context, so forking from one is meaningless. */}
+        {message.role !== "assistant" || message.slashCommand !== undefined || entry === undefined || cwd === undefined ? null : (
           <button
             className="message-action"
             type="button"
