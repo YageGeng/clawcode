@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentMessage, AgentOutcome, CompactionReason, CompactionResult,
-    ContentBlock, EntryId, LaneId, RunId, SessionId, TimestampMs, ToolCallId,
-    TurnId, TurnRecord,
+    ContentBlock, EntryId, LaneId, RunId, SessionId, TimestampMs, TurnId,
+    TurnRecord,
 };
 
 /// Ordered prompt input plus whether text-only command dispatch is safe.
@@ -15,6 +15,8 @@ pub enum RunInput {
     Text(String),
     /// Ordered content blocks that bypass text-only command dispatch.
     Blocks(Vec<ContentBlock>),
+    /// Inter-agent mail that wakes its recipient; never queued, never dispatched.
+    Mail(crate::AgentMail),
 }
 
 impl RunInput {
@@ -23,7 +25,7 @@ impl RunInput {
     pub fn slash_command_text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(text),
-            Self::Blocks(_) => None,
+            Self::Blocks(_) | Self::Mail(_) => None,
         }
     }
 }
@@ -152,39 +154,16 @@ pub enum SessionReplayItem {
     },
 }
 
-/// Owner edge of a delegated Session, independent of its fork history.
+/// Owner edge of a named child Session, independent of its fork history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum SessionOwnership {
-    /// Foreground child whose work is held by one parent tool invocation.
-    Tool {
-        /// Session that owns the child.
-        session_id: SessionId,
-        /// Invocation that created the child.
-        tool_call_id: ToolCallId,
-    },
-    /// Persistent named child with an independent cancellation boundary.
-    Background {
-        /// Session that owns the child.
-        session_id: SessionId,
-        /// Name unique among this owner's background children.
-        name: String,
-    },
-}
-
-impl SessionOwnership {
-    /// Returns the owning Session for either ownership edge.
-    #[must_use]
-    pub const fn owner(&self) -> &SessionId {
-        match self {
-            Self::Tool { session_id, .. }
-            | Self::Background { session_id, .. } => session_id,
-        }
-    }
+#[serde(rename_all = "camelCase")]
+pub struct SessionOwnership {
+    /// Owner Session (`/root`).
+    pub session_id: SessionId,
+    /// The child's `agent_name`; its path is `/root/{name}`.
+    pub name: crate::AgentName,
+    /// User-facing nickname allocated at spawn.
+    pub nickname: String,
 }
 
 /// Persisted session metadata exposed without leaking a storage implementation.

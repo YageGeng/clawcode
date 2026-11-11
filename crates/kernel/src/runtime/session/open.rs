@@ -188,7 +188,7 @@ impl Kernel {
         let store = self.store_factory.open(&metadata.path)?;
         let path = store.path().to_path_buf();
         let owner = match &metadata.ownership {
-            Some(edge) => self.resume_owner(&session_id, edge.owner(), &cwd).await?,
+            Some(edge) => self.resume_owner(&session_id, &edge.session_id, &cwd).await?,
             None => None,
         };
         let _owner_creation = match &owner {

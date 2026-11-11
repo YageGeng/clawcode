@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use protocol::{AgentMessage, AgentOutcome, MessageContent, MessageId};
+use protocol::MessageId;
 use tokio::sync::oneshot;
 
 use crate::runtime::KernelError;
@@ -94,105 +94,6 @@ impl From<Option<&InsertionNotice>> for WaiterCancellation {
         match notice {
             Some(_) => Self::Reject,
             None => Self::Ignore,
-        }
-    }
-}
-
-/// Terminal state of the run that answered delegated input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AnswerOutcome {
-    Completed,
-    Cancelled,
-    Failed(String),
-}
-
-/// Last assistant answer, without duplicating the child Session's usage.
-#[derive(Debug, Clone)]
-pub struct SubmissionAnswer {
-    /// Stable assistant identity used to deduplicate background reports.
-    pub message_id: Option<MessageId>,
-    /// Concatenated text blocks from the last assistant message.
-    pub text: String,
-    /// Outcome of the answering run.
-    pub outcome: AnswerOutcome,
-}
-
-type ReceiptResult = Result<Arc<SubmissionAnswer>, KernelError>;
-
-/// One in-memory submission receipt, settled exactly once by consumption or withdrawal.
-#[derive(Debug)]
-pub(in crate::runtime) struct SubmissionReceipt {
-    sender: Mutex<Option<oneshot::Sender<ReceiptResult>>>,
-}
-
-impl SubmissionReceipt {
-    /// Creates a receipt before enqueueing so even immediate consumption cannot lose its answer.
-    pub(super) fn new() -> (Arc<Self>, oneshot::Receiver<ReceiptResult>) {
-        let (sender, receiver) = oneshot::channel();
-        (
-            Arc::new(Self {
-                sender: Mutex::new(Some(sender)),
-            }),
-            receiver,
-        )
-    }
-
-    /// Completes a receipt once; a dropped caller does not invalidate the persisted run.
-    pub(super) fn resolve(&self, answer: Arc<SubmissionAnswer>) {
-        let mut sender = self.sender.lock().unwrap_or_else(|error| {
-            tracing::error!(
-                "submission receipt lock was poisoned; releasing its waiter"
-            );
-            error.into_inner()
-        });
-        if let Some(sender) = sender.take() {
-            let _ = sender.send(Ok(answer));
-        }
-    }
-    /// Reports uncertainty without disguising an unknown outcome as cancelled input.
-    pub(super) fn reject(&self, error: &KernelError) {
-        if let Some(sender) = self
-            .sender
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            let _ = sender.send(Err(error.for_insertion()));
-        }
-    }
-}
-
-impl SubmissionAnswer {
-    /// Represents input withdrawn before an answering run can complete.
-    pub(super) fn cancelled() -> Self {
-        Self {
-            message_id: None,
-            text: String::new(),
-            outcome: AnswerOutcome::Cancelled,
-        }
-    }
-}
-
-impl From<(&AgentOutcome, &[AgentMessage])> for SubmissionAnswer {
-    /// Uses the final Run outcome and its own messages, never the Session's newest history.
-    fn from((outcome, messages): (&AgentOutcome, &[AgentMessage])) -> Self {
-        // Native provenance does not change the assistant role or its lifecycle.
-        let message = messages.iter().rev().find(|message| {
-            matches!(message.content, MessageContent::Assistant { .. })
-        });
-        Self {
-            message_id: message
-                .map(|message| message.identity.message_id.clone()),
-            text: message
-                .and_then(|message| message.content.text_content())
-                .unwrap_or_default(),
-            outcome: match outcome {
-                AgentOutcome::Succeeded => AnswerOutcome::Completed,
-                AgentOutcome::Cancelled => AnswerOutcome::Cancelled,
-                AgentOutcome::Failed { message } => {
-                    AnswerOutcome::Failed(message.clone())
-                }
-            },
         }
     }
 }

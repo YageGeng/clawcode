@@ -1,6 +1,7 @@
 //! Shared domain protocol for the agent runtime.
 
 mod acp;
+mod agent;
 mod capability;
 mod event;
 mod exec;
@@ -28,6 +29,12 @@ pub use acp::{
     AcpPendingMessageRemoveParameters, AcpSessionParameters,
     AcpSkillParameters, AcpUserBashParameters, AcpWorkingDirectory,
     AcpWorkingDirectoryError,
+};
+pub use agent::{
+    AGENT_MESSAGE_TYPE, AgentMail, AgentName, AgentNickname, AgentPath,
+    FOLLOWUP_TASK_TOOL, INTERRUPT_AGENT_TOOL, LIST_AGENTS_TOOL, MailKind,
+    SEND_MESSAGE_TOOL, SPAWN_AGENT_TOOL, SUBAGENT_ROLE_TYPE,
+    SUBAGENT_ROSTER_TYPE, WAIT_AGENT_TOOL,
 };
 pub use capability::{
     CompactionData, CompactionDetails, CompactionOperationError,

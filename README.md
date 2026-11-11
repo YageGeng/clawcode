@@ -72,8 +72,8 @@ max_turns = { type = "unlimited" }
 # max_turns = { type = "limited", turns = 64 }
 
 [subagent]
-# How a background subagent's reply joins a busy main agent: "follow_up" or "steer".
-reply_as = "follow_up"
+# Children of one main agent allowed to run at the same time.
+max_agents = 3
 
 [logging]
 filter = "info,acp::trace=debug"
@@ -254,18 +254,32 @@ example, an `extra_param` `thinking` object replaces the generated one. A
 reasoning for every Session thinking level; remove those keys to let the
 Session level choose.
 
-The built-in `subagent` tool and the `background_subagent` `spawn` action take an
-optional `model` argument naming a configured model as `provider/model`. The
-reference splits at the first `/`, so `openrouter/aion-labs/aion-2.0` works. When
-omitted, the child uses the parent's current model; it always inherits the
-thinking level and tools. An unconfigured model is rejected with the list of
-configured models.
+## Subagents
 
-A `background_subagent` reply reaches the main agent as a follow-up by default:
-when the main agent is busy, the reply waits until its current Run would
-otherwise finish. Set `[subagent] reply_as = "steer"` to insert the reply after
-the main agent's current Turn instead. A foreground `subagent` answer is the
-tool result itself and is not affected.
+The main agent (`/root`) works with named child agents through the Codex
+multi-agent v2 tools:
+
+- `spawn_agent { task_name, message, fork_turns?, model?, reasoning_effort? }`
+  starts `/root/<task_name>` and returns at once. `task_name` uses lowercase
+  letters, digits, and underscores. `fork_turns` is `all` (the default: the child
+  starts from the parent's conversation, without tool traffic) or `none`.
+  `model` names a configured model as `provider/model` (split at the first `/`,
+  so `openrouter/aion-labs/aion-2.0` works); `reasoning_effort` is one of `none`,
+  `minimal`, `low`, `medium`, `high`, `xhigh`. Omitted values inherit the parent.
+- `send_message { target, message }` queues a message without waking the target.
+- `followup_task { target, message }` gives a child a new task, waking it when idle.
+- `wait_agent { timeout_ms? }` waits for mail, new user input, or the timeout
+  (30 s by default, 10 s to 1 h).
+- `list_agents { path_prefix? }` and `interrupt_agent { target }`.
+
+Children have only `send_message`, `list_agents`, and `wait_agent`, so they can
+reach `/root` and their siblings but never spawn or wake other agents. Every
+message between agents goes through the recipient's mailbox: it enters the
+context before the recipient's next model request, or is written into an idle
+recipient without starting a Run. Each answer a child gives is mailed to `/root`
+as a `result` without waking it; the main agent calls `wait_agent` to wait for
+it. The main agent's context states its children in a hidden `<subagents>` note.
+At most `[subagent] max_agents` children run at once.
 
 ## MCP discovery and output
 
@@ -416,7 +430,7 @@ restored when the Session reopens.
 
 In plan mode the agent researches and plans but changes nothing:
 
-- `read`, `grep`, `tool_search`, subagents (which start in plan mode too),
+- `read`, `grep`, `tool_search`, the agent tools (children start in plan mode too),
   `todo_write`, and any tool whose metadata sets `readOnlyHint: true` run.
   `edit`, `write`, and other tools are refused with a message telling the
   model to finish the plan.
@@ -451,12 +465,11 @@ Logs go to stderr in tracing's default format, one line per event:
 
 The `run{…}` span is the line's Run correlation, and the innermost one is the
 Run the line belongs to: in-loop compaction adds `:run{run_id=…}` under the same
-trace, and a foreground subagent adds a `run{trace_id=… run_id=…}` of its own. A trace is one top-level Kernel Run:
+trace. A trace is one top-level Kernel Run:
 one complete agent loop, including the queued messages it processes, its Turns,
 model calls, Tool calls, and in-loop compaction. Filter by a trace id to read the
-whole loop. Foreground subagent Runs keep their parent's trace under their own run
-id; a background subagent starts a new trace whose start line names the parent's
-(`as background subagent linked to trace …`). Standalone compaction, user `!`
+whole loop. A subagent Run starts a new trace whose start line names the parent's
+(`as subagent linked to trace …`). Standalone compaction, user `!`
 commands, direct slash commands, and Tree branch summaries are Runs of their own.
 Lines outside any Run have no `run{…}` span: ACP requests, prompt admission, Session watchers,
 and replies to permission and elicitation requests. A Run's Session id appears on

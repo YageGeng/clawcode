@@ -398,13 +398,13 @@ impl SessionTranscript {
         Ok(())
     }
 
-    /// Records a command sessions snapshot and places its note in context
-    /// under one lock; the note's identity and time come from the stored entry,
-    /// which is what a rebuild from the Store reads.
-    pub(in crate::runtime) fn append_command_sessions(
+    /// Records a stated note and places it in context under one lock; the
+    /// note's identity and time come from the stored entry, which is what a
+    /// rebuild from the Store reads.
+    pub(in crate::runtime) fn append_note<N: super::StatedNote>(
         &self,
         entry_id: EntryId,
-        note: &crate::runtime::exec::CommandSessionsNote,
+        note: &N,
     ) -> Result<(), KernelError> {
         let mut state = self.writable()?;
         let entry = state.store.append_entry(

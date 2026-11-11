@@ -18,9 +18,10 @@ fn header_queries_ignore_bodies_and_respect_cwd() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let cwd = root.path().join("project");
     let child = SessionId::try_from("child").expect("id");
-    let ownership = protocol::SessionOwnership::Background {
+    let ownership = protocol::SessionOwnership {
         session_id: SessionId::try_from("owner").expect("owner"),
-        name: "reader".into(),
+        name: protocol::AgentName::try_from("reader").expect("name"),
+        nickname: "Euclid".into(),
     };
     let store = factory
         .create_owned(store::OwnedSessionCreateOptions {
@@ -200,13 +201,13 @@ impl Clock for FixedClock {
 
 /// Owned headers preserve their edge through listing and remain readable after reopening.
 #[test]
-fn owned_header_round_trips_through_list() {
+fn owned_header_round_trips_struct_ownership() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
-    let ownership = protocol::SessionOwnership::Tool {
+    let ownership = protocol::SessionOwnership {
         session_id: SessionId::try_from("owner").expect("owner id"),
-        tool_call_id: protocol::ToolCallId::try_from("call-1")
-            .expect("call id"),
+        name: protocol::AgentName::try_from("x").expect("name"),
+        nickname: "Euclid".into(),
     };
     let store = factory
         .create_owned(store::OwnedSessionCreateOptions {
@@ -223,7 +224,7 @@ fn owned_header_round_trips_through_list() {
         serde_json::from_str(content.trim()).expect("header JSON");
     assert_eq!(
         header["ownership"],
-        serde_json::json!({"kind":"tool", "sessionId":"owner", "toolCallId":"call-1"})
+        serde_json::json!({"sessionId":"owner", "name":"x", "nickname":"Euclid"})
     );
     assert_eq!(
         factory

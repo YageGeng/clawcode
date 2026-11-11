@@ -7,7 +7,7 @@ use protocol::{
 };
 use store::{EntryKind, RecordKind, SessionEntry, SessionStore};
 
-use super::ClawcodeEntry as _;
+use super::{ClawcodeEntry as _, StatedNote as _};
 use crate::runtime::plan::{ModeChange, ModeNote, ModeNotes};
 use crate::runtime::{Kernel, KernelError};
 
@@ -437,15 +437,18 @@ impl Kernel {
                     )?;
                 }
                 EntryKind::Custom => {
-                    if let Some(note) =
-                        crate::runtime::exec::CommandSessionsNote::from_entry(
+                    for note in [
+                        crate::runtime::exec::CommandSessionsNote::rebuild(
                             &entry,
-                        )
+                        )?,
+                        crate::runtime::subagent::SubagentRosterNote::rebuild(
+                            &entry,
+                        )?,
+                    ]
+                    .into_iter()
+                    .flatten()
                     {
-                        notes.place(
-                            &mut history,
-                            note.message(&entry.id, entry.timestamp_ms)?,
-                        );
+                        notes.place(&mut history, note);
                     }
                     if let Some(change) = ModeChange::from_entry(&entry) {
                         mode = change.mode;

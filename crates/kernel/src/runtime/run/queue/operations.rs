@@ -11,7 +11,7 @@ use store::{NewRecord, RecordKind};
 use super::super::input::PromptInputExpansion;
 use super::{
     ClaimedItem, PendingQueueItem, QueueCancellationReason, QueueRequest,
-    QueueWaiter, cancelled_payload,
+    cancelled_payload,
 };
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session};
 
@@ -72,6 +72,12 @@ impl Kernel {
                     }
                     protocol::RunInput::Blocks(blocks) => {
                         PromptInputExpansion::from_blocks(blocks)
+                    }
+                    // Agent mail travels only through the mailbox lane.
+                    protocol::RunInput::Mail(_) => {
+                        return Err(KernelError::Protocol(
+                            "agent mail never joins a user queue".into(),
+                        ));
                     }
                 };
                 if let Some(diagnostic) = expanded.diagnostic().cloned() {
@@ -385,10 +391,10 @@ impl Kernel {
             .steering
             .iter()
             .chain(&queue.follow_up)
-            .filter(|item| match &item.waiter {
-                Some(QueueWaiter::Insertion(notice)) => notice.is_listening(),
-                Some(QueueWaiter::Receipt(_)) => true,
-                None => false,
+            .filter(|item| {
+                item.waiter
+                    .as_ref()
+                    .is_some_and(|notice| notice.is_listening())
             })
             .map(|item| item.queued.queue_id.clone())
             .collect::<Vec<_>>();
@@ -476,6 +482,11 @@ impl Session {
         }
         self.transcript.commit_records(vec![record])?;
         queue.push(item);
+        drop(queue);
+        // New user input ends a `wait_agent` early.
+        self.execution.mailbox.send_modify(|activity| {
+            activity.input = activity.input.wrapping_add(1);
+        });
         Ok(())
     }
 
@@ -517,14 +528,8 @@ impl Session {
             claimed.item.reject(&error);
             return Err(error);
         }
-        match &claimed.item.waiter {
-            Some(QueueWaiter::Insertion(notice)) => {
-                notice.inserted(&message.identity.message_id)
-            }
-            Some(QueueWaiter::Receipt(receipt)) => {
-                self.execution.accept_receipt(Arc::clone(receipt))?
-            }
-            None => {}
+        if let Some(notice) = &claimed.item.waiter {
+            notice.inserted(&message.identity.message_id);
         }
         Ok(())
     }

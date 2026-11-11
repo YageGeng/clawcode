@@ -3847,7 +3847,15 @@
     animation: none !important;
   }
 }
-.message--subagent-report { border-left: 3px solid var(--accent); padding-left: 12px; }
+/* Inter-agent mail: sender, recipient, and kind above the payload. */
+.agent-mail-card { border-left: 3px solid var(--accent); }
+.agent-mail-card[data-kind="result"] { border-left-color: var(--success, var(--accent)); }
+.agent-mail-card header span { display: inline-flex; align-items: center; gap: 6px; }
+.agent-mail-card__body { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-mail-card__body > :first-child { margin-top: 0; }
+.agent-mail-card__body > :last-child { margin-bottom: 0; }
+/* A forked child's compact view collapses the history it inherited. */
+.inherited-history { margin: 0 0 12px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
 .session-children { padding-left: 14px; border-left: 1px solid var(--border-subtle); margin-left: 10px; }
 .session-children > summary { cursor: pointer; padding: 6px; font-size: 12px; color: var(--text-secondary); }
 

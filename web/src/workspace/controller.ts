@@ -866,11 +866,9 @@ export class WorkspaceController {
     const meta = session._meta?.[this.bootstrap.product.slug];
     const details = typeof meta === "object" && meta !== null && !Array.isArray(meta) ? meta as Record<string, unknown> : {};
     const edge = typeof details.ownership === "object" && details.ownership !== null ? details.ownership as Record<string, unknown> : {};
-    const ownership = typeof edge.sessionId !== "string" ? undefined
-      : edge.kind === "tool" && typeof edge.toolCallId === "string"
-        ? { kind: "tool" as const, sessionId: edge.sessionId as SessionId, toolCallId: edge.toolCallId }
-        : edge.kind === "background" && typeof edge.name === "string"
-          ? { kind: "background" as const, sessionId: edge.sessionId as SessionId, name: edge.name } : undefined;
+    const ownership = typeof edge.sessionId === "string" && typeof edge.name === "string" && typeof edge.nickname === "string"
+      ? { sessionId: edge.sessionId as SessionId, name: edge.name, nickname: edge.nickname }
+      : undefined;
     return {
       sessionId: session.sessionId,
       cwd: session.cwd,

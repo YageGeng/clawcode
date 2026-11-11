@@ -38,8 +38,6 @@ export const MessageView = memo(function MessageView({ message, cacheMiss, entry
     && assistant?.error === undefined
   ) return null;
 
-  const report = message.role === "user" ? /^\[subagent (\S+) ([^\]]*)\] ?([\s\S]*)$/.exec(message.text) : null;
-  const body = report === null ? message.text : report[3] || report[2] || "";
   const actions = readOnly ? null : (
     <MessageActions
       message={message}
@@ -55,13 +53,13 @@ export const MessageView = memo(function MessageView({ message, cacheMiss, entry
     return <CommandMessageCard message={message} actions={actions} />;
   }
   return (
-    <article className={`message${report === null ? "" : " message--subagent-report"}`} data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming} data-transcript-key={TranscriptRowKeys.message(message.messageId)}>
-      <div className="message__label">{report === null ? message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System" : `Subagent · ${report[1]}`}</div>
+    <article className="message" data-role={message.role} data-error={assistant?.error === undefined ? undefined : "true"} data-streaming={message.streaming} data-transcript-key={TranscriptRowKeys.message(message.messageId)}>
+      <div className="message__label">{message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : "System"}</div>
       <ReasoningBlock message={message} />
       {assistant?.error === undefined ? null : <div className="message-error" role="alert"><strong>模型调用失败</strong><span>{assistant.error}</span></div>}
       {message.text.length === 0 ? null : (
         <div className="message__body">
-          <MarkdownContent text={body} highlight={!message.streaming} />
+          <MarkdownContent text={message.text} highlight={!message.streaming} />
           {message.streaming ? <span className="streaming-cursor" aria-label="正在生成" /> : null}
         </div>
       )}

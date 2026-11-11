@@ -2,8 +2,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use protocol::{
-    EntryId, IdGenerator, IdKind, SessionId, SessionMode, SessionOwnership,
-    SessionTitle, ThinkingLevel, ToolSelection, TurnId,
+    AgentMessage, EntryId, IdGenerator, IdKind, MessageIdentity, SessionId,
+    SessionMode, SessionOwnership, SessionTitle, ThinkingLevel, ToolSelection,
+    TurnId,
 };
 use store::{NewEntry, OwnedSessionCreateOptions, SessionCreateOptions};
 
@@ -12,8 +13,12 @@ use crate::Model;
 use crate::runtime::plan::ModeChange;
 use crate::runtime::{Kernel, KernelError, Session, mcp, tools};
 
-pub(in crate::runtime) const SUBAGENT_TOOL_NAMES: [&str; 2] =
-    ["subagent", "background_subagent"];
+/// Agent tools only `/root` may call; children keep the mailbox tools.
+pub(in crate::runtime) const ROOT_ONLY_AGENT_TOOLS: [&str; 3] = [
+    protocol::SPAWN_AGENT_TOOL,
+    protocol::FOLLOWUP_TASK_TOOL,
+    protocol::INTERRUPT_AGENT_TOOL,
+];
 
 /// Agent choices copied before a child's startup extensions observe it.
 struct AgentSnapshot {
@@ -99,9 +104,49 @@ struct OwnedSessionSpawn<'a> {
     /// A configured model replacing the inherited one, resolved by the caller.
     #[builder(default)]
     model: Option<Arc<dyn Model>>,
+    /// A thinking level replacing the inherited one.
+    #[builder(default)]
+    thinking_level: Option<ThinkingLevel>,
+    /// Owner history the child inherits before its first task, already filtered.
+    #[builder(default)]
+    history: Vec<AgentMessage>,
+}
+
+/// Everything one owned child is created from (pi `createConversation({ ownership })`).
+#[derive(typed_builder::TypedBuilder)]
+pub struct OwnedSessionRequest {
+    /// Owner edge written into the child's header.
+    pub ownership: SessionOwnership,
+    /// Child display title.
+    pub title: SessionTitle,
+    /// Model replacing the inherited one.
+    #[builder(default)]
+    pub model: Option<Arc<dyn Model>>,
+    /// Thinking level replacing the inherited one.
+    #[builder(default)]
+    pub thinking_level: Option<ThinkingLevel>,
+    /// Filtered owner history copied in order before the child starts.
+    #[builder(default)]
+    pub history: Vec<AgentMessage>,
 }
 
 impl OwnedSessionSpawn<'_> {
+    /// Copies inherited messages under fresh identities so the child's store
+    /// never shares message ids with its owner.
+    fn write_history(&self, child: &Session) -> Result<(), KernelError> {
+        for message in &self.history {
+            let copy = AgentMessage {
+                identity: MessageIdentity {
+                    message_id: self.kernel.message_id()?,
+                    turn_id: message.identity.turn_id.clone(),
+                },
+                ..message.clone()
+            };
+            self.kernel.persist_message(child, &copy)?;
+        }
+        Ok(())
+    }
+
     /// Creates isolated history, adopts agent choices, and rolls back any failed startup.
     async fn create(self) -> Result<SessionId, KernelError> {
         // Close takes the write side after draining its Run, so externally started
@@ -109,9 +154,12 @@ impl OwnedSessionSpawn<'_> {
         let _creation_guard = self.owner.owned_creation.read().await;
         self.owner.ensure_active()?;
         let mut snapshot = AgentSnapshot::try_from(self.owner.as_ref())?
-            .without_tools(&SUBAGENT_TOOL_NAMES);
+            .without_tools(&ROOT_ONLY_AGENT_TOOLS);
         if let Some(model) = &self.model {
             snapshot.model = Arc::clone(model);
+        }
+        if let Some(level) = self.thinking_level {
+            snapshot.thinking_level = level;
         }
         let child =
             SessionId::try_from(self.kernel.id_generator.next(IdKind::Session))
@@ -120,7 +168,7 @@ impl OwnedSessionSpawn<'_> {
         tracing::info!(
             "started owned Session creation {} for owner {}",
             child,
-            self.ownership.owner()
+            self.ownership.session_id
         );
         let result: Result<(), KernelError> = async {
             let store = self.kernel.store_factory.create_owned(
@@ -146,6 +194,7 @@ impl OwnedSessionSpawn<'_> {
             // because registration rollback only cleans Sessions already in the map.
             let prepared = snapshot
                 .apply(&runtime, self.kernel.id_generator.as_ref())
+                .and_then(|()| self.write_history(&runtime))
                 .and_then(|()| self.owner.ensure_active());
             if let Err(error) = prepared {
                 if let Err(cleanup_error) =
@@ -154,7 +203,7 @@ impl OwnedSessionSpawn<'_> {
                     tracing::warn!(
                         "failed to release owned Session {} for owner {} before registration: {}",
                         child,
-                        self.ownership.owner(),
+                        self.ownership.session_id,
                         cleanup_error
                     );
                 }
@@ -169,7 +218,9 @@ impl OwnedSessionSpawn<'_> {
             self.kernel
                 .checkpoint_started_session(&child, &runtime, true)
                 .await?;
-            self.kernel.rename_session(&child, self.title).await?;
+            self.kernel
+                .rename_session(&child, self.title.clone())
+                .await?;
             Ok(())
         }
         .await;
@@ -177,7 +228,7 @@ impl OwnedSessionSpawn<'_> {
             tracing::error!(
                 "failed owned Session creation {} for owner {}: {}",
                 child,
-                self.ownership.owner(),
+                self.ownership.session_id,
                 error
             );
             if let Err(cleanup) = self
@@ -196,7 +247,7 @@ impl OwnedSessionSpawn<'_> {
         tracing::info!(
             "completed owned Session creation {} for owner {}",
             child,
-            self.ownership.owner()
+            self.ownership.session_id
         );
         Ok(child)
     }
@@ -232,7 +283,7 @@ impl Kernel {
                 .iter()
                 .find(|session| &session.id == id)
                 .and_then(|session| session.ownership.as_ref())
-                .map(SessionOwnership::owner);
+                .map(|edge| &edge.session_id);
         }
         loop {
             match self.session(owner) {
@@ -304,38 +355,45 @@ impl Kernel {
                 child
                     .ownership
                     .as_ref()
-                    .is_some_and(|edge| edge.owner() == owner)
+                    .is_some_and(|edge| &edge.session_id == owner)
             })
             .map(|(id, _)| id.clone())
             .collect())
     }
 
     /// Creates an isolated child with copied agent settings and a persistent owner edge.
-    /// `model` replaces the inherited model; thinking level and tools stay inherited.
+    /// Model and thinking overrides replace inherited choices; tools stay inherited.
     pub async fn create_owned_session(
         &self,
-        ownership: SessionOwnership,
-        title: SessionTitle,
-        model: Option<Arc<dyn Model>>,
+        request: OwnedSessionRequest,
     ) -> Result<SessionId, KernelError> {
-        let owner = self.session(ownership.owner()).map_err(
-            |error| match error {
+        let OwnedSessionRequest {
+            ownership,
+            title,
+            model,
+            thinking_level,
+            history,
+        } = request;
+        let owner = self.session(&ownership.session_id).map_err(|error| {
+            match error {
                 KernelError::SessionNotFound(_) => {
                     tracing::warn!(
                         "cannot create owned Session for unavailable owner {}",
-                        ownership.owner()
+                        ownership.session_id
                     );
-                    KernelError::OwnerUnavailable(ownership.owner().clone())
+                    KernelError::OwnerUnavailable(ownership.session_id.clone())
                 }
                 error => error,
-            },
-        )?;
+            }
+        })?;
         OwnedSessionSpawn::builder()
             .kernel(self)
             .owner(&owner)
             .ownership(ownership)
             .title(title)
             .model(model)
+            .thinking_level(thinking_level)
+            .history(history)
             .build()
             .create()
             .await

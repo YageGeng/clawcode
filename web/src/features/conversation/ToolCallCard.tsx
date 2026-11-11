@@ -7,6 +7,7 @@ import { CodeBlock, JsonBlock, MarkdownContent } from "./MarkdownContent";
 import { TerminalView } from "./TerminalView";
 import type { TerminalEntity } from "../../workspace/terminals";
 import type { WorkspaceController } from "../../workspace/controller";
+import { useWorkspaceStore } from "../../workspace/store";
 import { SubagentPanel } from "./SubagentPanel";
 
 /** Parses one JSON object or array string once while tolerating arbitrary text. */
@@ -96,11 +97,15 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
   // Bash cards first mount from the in-progress ACP update, so reveal streamed
   // output immediately while preserving the user's later expand/collapse choice.
   const childId = tool.subagentSessionId;
-  const phase = childId === undefined ? "ordinary" : `${childId}:${tool.status}`;
+  // A spawned child is worth watching while it runs, not while its spawn call does.
+  const childRunning = useWorkspaceStore((state) => childId !== undefined && state.runningSessionIds.has(childId));
+  const phase = childId === undefined ? "ordinary" : `${childId}:${childRunning}`;
   const [manual, setManual] = useState<Readonly<{ phase: string; open: boolean }>>();
   // Terminal output and subagents are what a running tool is worth watching.
   // A plan awaiting approval stays collapsed: its dialog already renders it.
-  const open = manual?.phase === phase ? manual.open : (childId !== undefined || terminal !== undefined || tool.title === "exec_command") && tool.status === "in_progress";
+  const open = manual?.phase === phase ? manual.open
+    : childId !== undefined ? childRunning
+      : (terminal !== undefined || tool.title === "exec_command") && tool.status === "in_progress";
   useEffect(() => {
     if (childId === undefined || controller === undefined) return;
     void controller.ensureSessionListed(childId).catch(() => {});

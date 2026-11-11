@@ -6,14 +6,10 @@
 //! stable and live and rebuilt contexts match.
 
 use ::tools::exec::CommandSessions;
-use protocol::{
-    AgentMessage, ContentBlock, EntryId, ExtensionId, ExtensionMessage, IdKind,
-    MessageContent, MessageId, MessageIdentity, MessageTiming, ProductIdentity,
-    TimestampMs, TurnId,
-};
+use protocol::TurnId;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::session::ClawcodeEntry;
+use crate::runtime::session::{ClawcodeEntry, StatedNote};
 use crate::runtime::{Kernel, KernelError, Session};
 
 /// One stated command-sessions snapshot.
@@ -30,61 +26,28 @@ impl ClawcodeEntry for CommandSessionsNote {
     const CUSTOM_TYPE: &'static str = "command_sessions";
 }
 
-impl CommandSessionsNote {
-    /// Builds the hidden context message; its identity comes from the stored entry.
-    pub(in crate::runtime) fn message(
-        &self,
-        entry_id: &EntryId,
-        at: TimestampMs,
-    ) -> Result<AgentMessage, KernelError> {
-        let protocol_error = |error: protocol::ScalarError| {
-            KernelError::Protocol(error.to_string())
-        };
-        Ok(AgentMessage {
-            identity: MessageIdentity {
-                message_id: MessageId::try_from(
-                    format!("command-sessions-{entry_id}").as_str(),
-                )
-                .map_err(protocol_error)?,
-                turn_id: self.turn_id.clone(),
-            },
-            timing: MessageTiming::try_from((at, at, at))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?,
-            content: MessageContent::Extension {
-                extension: ExtensionMessage::builder()
-                    .extension_id(
-                        ExtensionId::try_from(ProductIdentity::SLUG)
-                            .map_err(protocol_error)?,
-                    )
-                    .custom_type(Self::CUSTOM_TYPE.to_string())
-                    .blocks(vec![ContentBlock::Text {
-                        text: self.sessions.render(),
-                    }])
-                    .display(false)
-                    .include_in_context(true)
-                    .details(serde_json::to_value(&self.sessions)?)
-                    .build(),
-            },
-        })
+impl StatedNote for CommandSessionsNote {
+    type State = CommandSessions;
+    const ID_PREFIX: &'static str = "command-sessions";
+
+    /// Wraps the session table stated before `turn_id`.
+    fn new(sessions: CommandSessions, turn_id: TurnId) -> Self {
+        Self { sessions, turn_id }
     }
 
-    /// Returns the snapshot a context message states, if it is one of these notes.
-    pub(in crate::runtime) fn stated(
-        message: &AgentMessage,
-    ) -> Option<CommandSessions> {
-        match &message.content {
-            MessageContent::Extension { extension }
-                if extension.custom_type == Self::CUSTOM_TYPE
-                    && extension.extension_id.as_str()
-                        == ProductIdentity::SLUG =>
-            {
-                extension
-                    .details
-                    .clone()
-                    .and_then(|details| serde_json::from_value(details).ok())
-            }
-            _ => None,
-        }
+    /// Returns the stated session table.
+    fn state(&self) -> &CommandSessions {
+        &self.sessions
+    }
+
+    /// Returns the Turn the note belongs to.
+    fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
+    /// Renders the `<command_sessions>` table.
+    fn render(&self) -> String {
+        self.sessions.render()
     }
 }
 
@@ -103,32 +66,6 @@ impl Session {
             return Ok(());
         }
         let current = exec.sessions().await;
-        let stated = self.transcript.inspect_history(|history| {
-            history
-                .iter()
-                .rev()
-                .find_map(CommandSessionsNote::stated)
-                .unwrap_or_default()
-        })?;
-        if stated == current {
-            return Ok(());
-        }
-        let entry_id =
-            EntryId::try_from(kernel.id_generator.next(IdKind::Entry))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        tracing::info!(
-            "stated {} command sessions ({} omitted) before turn {}",
-            current.sessions.len(),
-            current.omitted,
-            turn_id
-        );
-        self.transcript.append_command_sessions(
-            entry_id,
-            &CommandSessionsNote {
-                sessions: current,
-                turn_id: turn_id.clone(),
-            },
-        )?;
-        self.sync_store()
+        self.refresh_note::<CommandSessionsNote>(kernel, turn_id, current)
     }
 }

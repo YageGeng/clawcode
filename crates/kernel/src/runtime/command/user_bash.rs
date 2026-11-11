@@ -122,17 +122,12 @@ impl Kernel {
         // A cancel or close while this shell waits for the gate must reject it
         // before any process is spawned.
         let (_run_guard, cancellation) = session
-            .acquire_operation_for_prompt(
-                None,
-                admission.map_or_else(
-                    || WaiterCancellation::from(insertion),
-                    |ticket| {
-                        WaiterCancellation::Captured(
-                            ticket.cancellation.clone(),
-                        )
-                    },
-                ),
-            )
+            .acquire_operation_for_prompt(admission.map_or_else(
+                || WaiterCancellation::from(insertion),
+                |ticket| {
+                    WaiterCancellation::Captured(ticket.cancellation.clone())
+                },
+            ))
             .await?;
         if let Some(ticket) = admission {
             ticket.release();

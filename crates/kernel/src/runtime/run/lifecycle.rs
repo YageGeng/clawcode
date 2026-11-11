@@ -37,8 +37,6 @@ pub(in crate::runtime) struct ActiveRunContext {
 #[derive(typed_builder::TypedBuilder)]
 pub(in crate::runtime) struct SessionExecution {
     #[builder(default)]
-    submissions: Mutex<Vec<Arc<super::insertion::SubmissionReceipt>>>,
-    #[builder(default)]
     pub(super) admission: Mutex<super::admission::AdmissionState>,
     lifecycle: RwLock<SessionLifecycle>,
     /// True while a shutdown is in progress, so waiters learn when it ends.
@@ -58,10 +56,34 @@ pub(in crate::runtime) struct SessionExecution {
     idle_notify: Notify,
     pub(super) cancellation: Mutex<CancellationToken>,
     pub(super) queue: Mutex<PendingQueue>,
+    /// Counts mailbox and user-input arrivals that wake `wait_agent`.
+    #[builder(default = tokio::sync::watch::channel(MailboxActivity::default()).0)]
+    pub(super) mailbox: tokio::sync::watch::Sender<MailboxActivity>,
     sequence: AtomicU64,
 }
 
+/// Monotonic arrival counters observed by `wait_agent`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::runtime) struct MailboxActivity {
+    /// Mail queued for the running recipient.
+    pub(in crate::runtime) mail: u64,
+    /// User steer or follow-up input queued for the running Session.
+    pub(in crate::runtime) input: u64,
+}
+
 impl SessionExecution {
+    /// Reports whether a Run is active; an unreadable state reads as idle.
+    pub(in crate::runtime) fn is_running(&self) -> bool {
+        self.active_run().is_ok_and(|active| active.is_some())
+    }
+
+    /// Subscribes to mailbox and user-input arrivals.
+    pub(in crate::runtime) fn mailbox(
+        &self,
+    ) -> tokio::sync::watch::Receiver<MailboxActivity> {
+        self.mailbox.subscribe()
+    }
+
     /// Acquires the operation gate only while this execution remains active.
     pub(super) async fn acquire_operation(
         &self,
@@ -82,7 +104,6 @@ impl SessionExecution {
     /// Acquires the prompt gate and installs cancellation without an admission gap.
     pub(super) async fn acquire_operation_for_prompt(
         &self,
-        cancellation_parent: Option<&CancellationToken>,
         waiters: WaiterCancellation,
     ) -> Result<(MutexGuard<'_, ()>, CancellationToken), KernelError> {
         self.ensure_active()?;
@@ -93,7 +114,6 @@ impl SessionExecution {
             WaiterCancellation::Ignore => None,
             WaiterCancellation::Captured(token) => Some(token.clone()),
         };
-        let parent = cancellation_parent.cloned().unwrap_or_default();
         let rejected = async {
             match &waiting {
                 Some(token) => token.cancelled().await,
@@ -105,10 +125,6 @@ impl SessionExecution {
             () = closing.cancelled() => {
                 tracing::info!("rejected waiting prompt because its session is closing");
                 return Err(waiters.closing());
-            }
-            () = parent.cancelled() => {
-                tracing::info!("rejected waiting prompt because its parent was cancelled");
-                return Err(KernelError::PromptCancelled);
             }
             () = rejected => {
                 tracing::info!("rejected waiting prompt because its session was cancelled");
@@ -127,15 +143,11 @@ impl SessionExecution {
         if waiting
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
-            || parent.is_cancelled()
         {
             tracing::info!("rejected prompt cancelled during admission");
             return Err(KernelError::PromptCancelled);
         }
-        let cancellation = cancellation_parent.map_or_else(
-            CancellationToken::new,
-            CancellationToken::child_token,
-        );
+        let cancellation = CancellationToken::new();
         if closing.is_cancelled() {
             match waiters {
                 WaiterCancellation::Reject
@@ -231,27 +243,6 @@ impl SessionExecution {
             .lock()
             .map(|queue| !queue.is_empty())
             .map_err(KernelError::from)
-    }
-
-    /// Transfers a consumed receipt to the Run holding the execution gate.
-    pub(super) fn accept_receipt(
-        &self,
-        receipt: Arc<super::insertion::SubmissionReceipt>,
-    ) -> Result<(), KernelError> {
-        self.submissions.lock()?.push(receipt);
-        Ok(())
-    }
-
-    /// Publishes one authoritative answer to every input consumed by the current Run.
-    pub(super) fn settle_submissions(
-        &self,
-        answer: Arc<crate::runtime::SubmissionAnswer>,
-    ) -> Result<(), KernelError> {
-        let submissions = std::mem::take(&mut *self.submissions.lock()?);
-        for receipt in submissions {
-            receipt.resolve(Arc::clone(&answer));
-        }
-        Ok(())
     }
 
     /// Captures the stop generation when a protocol prompt arrives.
@@ -508,18 +499,6 @@ impl Drop for ActiveRunLease {
     /// Clears only the active Run identity installed by this lease.
     fn drop(&mut self) {
         let _ = self.execution.close_queue();
-        // Fail only receipts left unresolved by an operational error or a dropped Run future.
-        if let Err(error) = self.execution.settle_submissions(Arc::new(
-            crate::runtime::SubmissionAnswer {
-                message_id: None,
-                text: String::new(),
-                outcome: crate::runtime::AnswerOutcome::Failed(
-                    "run ended before settlement".into(),
-                ),
-            },
-        )) {
-            tracing::warn!("failed to release submission waiters: {}", error);
-        }
         if let Ok(mut active_run) = self.execution.active_run.lock()
             && active_run
                 .as_ref()
@@ -554,12 +533,9 @@ impl Session {
     /// Acquires the run gate for prompt input and installs its cancellation atomically.
     pub(in crate::runtime) async fn acquire_operation_for_prompt(
         &self,
-        cancellation_parent: Option<&CancellationToken>,
         waiters: WaiterCancellation,
     ) -> Result<(MutexGuard<'_, ()>, CancellationToken), KernelError> {
-        self.execution
-            .acquire_operation_for_prompt(cancellation_parent, waiters)
-            .await
+        self.execution.acquire_operation_for_prompt(waiters).await
     }
 
     /// Transitions an active runtime into closing while holding its run gate.
@@ -759,7 +735,7 @@ mod tests {
         let queued = Arc::clone(&execution);
         let waiter = tokio::spawn(async move {
             queued
-                .acquire_operation_for_prompt(None, WaiterCancellation::Reject)
+                .acquire_operation_for_prompt(WaiterCancellation::Reject)
                 .await
                 .map(|(_guard, token)| token)
         });
@@ -779,7 +755,7 @@ mod tests {
     async fn cancel_after_admission_cancels_installed_token() {
         let execution = execution();
         let (_guard, token) = execution
-            .acquire_operation_for_prompt(None, WaiterCancellation::Reject)
+            .acquire_operation_for_prompt(WaiterCancellation::Reject)
             .await
             .expect("admitted");
         execution.cancel().expect("cancel");
@@ -794,7 +770,7 @@ mod tests {
         let queued = Arc::clone(&execution);
         let waiter = tokio::spawn(async move {
             queued
-                .acquire_operation_for_prompt(None, WaiterCancellation::Ignore)
+                .acquire_operation_for_prompt(WaiterCancellation::Ignore)
                 .await
                 .map(|(_guard, token)| token)
         });
@@ -804,31 +780,6 @@ mod tests {
 
         let token = waiter.await.expect("join").expect("admitted");
         assert!(!token.is_cancelled());
-    }
-
-    /// A parent cancellation rejects a waiting internal submission.
-    #[tokio::test]
-    async fn parent_cancellation_rejects_ignored_waiter() {
-        let execution = execution();
-        let guard = execution.acquire_operation().await.expect("gate");
-        let parent = CancellationToken::new();
-        let queued = Arc::clone(&execution);
-        let waiting_parent = parent.clone();
-        let waiter = tokio::spawn(async move {
-            queued
-                .acquire_operation_for_prompt(
-                    Some(&waiting_parent),
-                    WaiterCancellation::Ignore,
-                )
-                .await
-                .map(|_admission| ())
-        });
-        tokio::task::yield_now().await;
-        parent.cancel();
-
-        let result = waiter.await.expect("join");
-        assert!(matches!(result, Err(KernelError::PromptCancelled)));
-        drop(guard);
     }
 
     /// Restores an active lifecycle when shutdown fails before resource teardown.

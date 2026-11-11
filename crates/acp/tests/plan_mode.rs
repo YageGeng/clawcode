@@ -93,6 +93,21 @@ impl PlanModel {
 /// Reads the newest user text of a provider request.
 fn last_user_text(request: &ModelRequest) -> String {
     match request.messages.last().map(|message| &message.content) {
+        // A spawned child starts from its `new_task` mail; route on the payload.
+        Some(MessageContent::Extension { extension })
+            if extension.custom_type == protocol::AGENT_MESSAGE_TYPE =>
+        {
+            extension
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => {
+                        text.split("\nPayload:\n").nth(1)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
         Some(MessageContent::User { blocks }) => blocks
             .iter()
             .filter_map(|block| match block {
@@ -154,8 +169,12 @@ impl Model for PlanModel {
             )]),
             "delegate" => Self::calls(vec![(
                 "call-child",
-                "subagent",
-                serde_json::json!({ "task": "Track it." }),
+                "spawn_agent",
+                serde_json::json!({
+                    "task_name": "tracker",
+                    "message": "Track it.",
+                    "fork_turns": "none"
+                }),
             )]),
             "Track it." => Self::calls(vec![(
                 "call-child-todo",
@@ -818,8 +837,9 @@ async fn blocked_todo_write_is_not_published() {
 #[tokio::test]
 async fn subagent_todos_stay_in_the_child() {
     let root = tempfile::tempdir().expect("root");
-    let (_kernel, acp) = server(root.path(), no_policy());
+    let (kernel, acp) = server(root.path(), no_policy());
     let workspace = root.path().to_path_buf();
+    let listing = workspace.clone();
     with_client(&acp, async move |connection, side| {
         let created = connection
             .send_request(wire::NewSessionRequest::new(workspace))
@@ -844,6 +864,37 @@ async fn subagent_todos_stay_in_the_child() {
                 break;
             }
         }
+        // The child really ran and wrote its own todo list.
+        let child = tokio::time::timeout(WAIT, async {
+            loop {
+                let child = kernel
+                    .list_sessions(Some(&listing))
+                    .expect("list")
+                    .into_iter()
+                    .find(|summary| summary.ownership.is_some())
+                    .map(|summary| summary.session_id);
+                if let Some(child) = child
+                    && kernel
+                        .session_transcript(&child)
+                        .expect("child transcript")
+                        .iter()
+                        .any(|message| matches!(&message.content,
+                            MessageContent::ToolResult { tool_call_id, is_error: false, .. }
+                                if tool_call_id.as_str() == "call-child-todo"))
+                {
+                    break child;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("child wrote its todos");
+        while let Ok(Some(update)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), side.updates.recv()).await
+        {
+            values.push((update.session_id.clone(), json(&update)));
+        }
+        assert_ne!(child.to_string(), created.session_id.to_string());
         assert!(
             !values
                 .iter()

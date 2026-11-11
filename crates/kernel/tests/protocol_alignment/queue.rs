@@ -304,48 +304,6 @@ async fn unconsumed_claim_returns_after_turn_limit_or_preflight_failure() {
     }
 }
 
-/// A claimed submission is answered, not stranded, when the turn limit ends the Run.
-#[tokio::test]
-async fn claimed_submission_is_answered_when_turn_limit_ends_run() {
-    let release = Arc::new(Notify::new());
-    let wait = Arc::clone(&release);
-    let test = TestKernel::with_policy(
-        move |request| hold_route(&wait, request),
-        KernelPolicy {
-            max_turns: config::TurnLimit::Limited {
-                turns: std::num::NonZeroUsize::new(1).unwrap(),
-            },
-            when_busy: WhenBusy::FollowUp,
-            ..KernelPolicy::default()
-        },
-    );
-    let session = test.create("queue-claim-answer").await;
-    let run = test.start_run(&session, "hold");
-    test.wait_until(|| !test.model.last_texts().is_empty())
-        .await;
-    let kernel = test.kernel.clone();
-    let follow = super::fixture::request(&session, "q", WhenBusy::FollowUp);
-    let submit = tokio::spawn(async move { kernel.submit(follow).await });
-    test.wait_until(|| {
-        !test
-            .kernel
-            .pending_messages(&session)
-            .unwrap()
-            .follow_up
-            .is_empty()
-    })
-    .await;
-    release.notify_one();
-    run.await.expect("join").expect_err("Run must fail");
-    // The claim returns before withdrawal, so its waiter learns the outcome
-    // instead of waiting for some later Run.
-    let _answered =
-        tokio::time::timeout(std::time::Duration::from_secs(5), submit)
-            .await
-            .expect("submission must not hang")
-            .expect("join");
-}
-
 /// A live claim is invisible to mutation APIs until it is inserted or returned.
 #[derive(Clone)]
 struct HoldClaim {

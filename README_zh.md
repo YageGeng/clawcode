@@ -71,8 +71,8 @@ max_turns = { type = "unlimited" }
 # max_turns = { type = "limited", turns = 64 }
 
 [subagent]
-# 后台子代理的回复如何进入忙碌中的主代理："follow_up" 或 "steer"。
-reply_as = "follow_up"
+# 同一个主代理同时运行的子代理上限。
+max_agents = 3
 
 [logging]
 filter = "info,acp::trace=debug"
@@ -233,14 +233,27 @@ Session 的 thinking 级别会作为可移植的推理强度发送，由 rig 翻
 `extra_param` 里的 `thinking` 或 `reasoning_effort` 会为所有 Session thinking
 级别钉住推理；删除这些键才能让 Session 级别生效。
 
-内置 `subagent` 工具与 `background_subagent` 的 `spawn` 动作支持可选的 `model`
-参数，用 `provider/model` 指定一个已配置模型。引用按第一个 `/` 切分，因此
-`openrouter/aion-labs/aion-2.0` 可用。省略时子代理使用父会话当前模型；它始终继承
-父会话的 thinking 级别与工具。未配置的模型会被拒绝，并返回已配置模型列表。
+## 子代理
 
-`background_subagent` 的回复默认以 follow-up 送达主代理：主代理忙碌时，回复会等到
-其当前 Run 即将结束时再插入。设置 `[subagent] reply_as = "steer"` 则改为在主代理
-当前 Turn 结束后插入。前台 `subagent` 的回答就是工具结果本身，不受此设置影响。
+主代理（`/root`）通过 Codex multi-agent v2 的工具与具名子代理协作：
+
+- `spawn_agent { task_name, message, fork_turns?, model?, reasoning_effort? }`
+  启动 `/root/<task_name>` 并立即返回。`task_name` 只能用小写字母、数字和下划线。
+  `fork_turns` 为 `all`（默认：子代理从父会话的对话开始，不含工具调用）或 `none`。
+  `model` 用 `provider/model` 指定已配置模型（按第一个 `/` 切分，因此
+  `openrouter/aion-labs/aion-2.0` 可用）；`reasoning_effort` 取 `none`、`minimal`、
+  `low`、`medium`、`high`、`xhigh` 之一。省略时继承父会话。
+- `send_message { target, message }`：只排队，不唤醒对方。
+- `followup_task { target, message }`：给子代理新任务，对方空闲时唤醒它。
+- `wait_agent { timeout_ms? }`：等待邮件、用户新输入或超时（默认 30 秒，范围 10 秒到 1 小时）。
+- `list_agents { path_prefix? }` 与 `interrupt_agent { target }`。
+
+子代理只有 `send_message`、`list_agents`、`wait_agent`，可以联系 `/root` 和兄弟代理，
+但不能派生或唤醒其他代理。代理之间的所有消息都进入接收方的 mailbox：在接收方下一次
+请求模型前进入上下文；接收方空闲时直接写入记录，不启动 Run。子代理的每次回答都以
+`result` 邮件投给 `/root`，不唤醒它；主代理调用 `wait_agent` 等待。主代理的上下文用
+一条隐藏的 `<subagents>` note 声明当前子代理。同时运行的子代理不超过
+`[subagent] max_agents`。
 
 ## MCP 发现与输出
 
@@ -365,7 +378,7 @@ provider，因此必须提供有效模型配置和凭据。
 
 plan 模式下 Agent 只调研、写计划，不做修改：
 
-- 可以运行 `read`、`grep`、`tool_search`、子代理（子代理同样以 plan 模式启动）、
+- 可以运行 `read`、`grep`、`tool_search`、代理工具（子代理同样以 plan 模式启动）、
   `todo_write`，以及元数据标注了 `readOnlyHint: true` 的工具；`edit`、`write`
   等其他工具会被拒绝，并提示模型先完成计划。
 - `bash` 只允许只读命令：`ls`、`cat`、`grep`、`rg`、`find`、`git` 的只读子命令
@@ -394,11 +407,10 @@ WebUI 在输入框上方的面板中显示这两者；发布它们的那次运�
 ```
 
 `run{…}` span 标明这一行所属的 Run，以最内层的 `run{…}` 为准：循环内压缩在同一个
-trace 下追加 `:run{run_id=…}`，前台子代理追加自己的 `run{trace_id=… run_id=…}`。一个 trace 就是一个顶层 Kernel Run，即一次完整的
+trace 下追加 `:run{run_id=…}`。一个 trace 就是一个顶层 Kernel Run，即一次完整的
 agent loop：包括它处理的排队消息、它的每个 Turn、模型调用、工具调用和循环内的
-压缩。按一个 trace id 过滤，就能看到整个循环。前台子代理的 Run 沿用父 trace，
-使用自己的 run id；后台子代理使用新 trace，其起始行写明父 trace
-（`as background subagent linked to trace …`）。独立压缩、用户 `!` 命令、直接
+压缩。按一个 trace id 过滤，就能看到整个循环。子代理的 Run 使用新 trace，其起始行
+写明父 trace（`as subagent linked to trace …`）。独立压缩、用户 `!` 命令、直接
 斜杠命令和 Tree 分支摘要各自是独立的 Run。不在任何 Run 内的行没有 `run{…}` span：ACP
 请求、prompt 准入、会话 watcher，以及权限请求与 elicitation 的回复。Run 的会话
 id 只写在它的起始行，不在每一行重复。

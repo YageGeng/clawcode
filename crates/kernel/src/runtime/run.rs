@@ -8,7 +8,7 @@ pub(super) mod lifecycle;
 pub(super) mod queue;
 pub(super) mod retry;
 mod settlement;
-pub(super) mod submit;
+pub(super) mod sinks;
 pub(super) mod trace;
 mod turn;
 
@@ -27,11 +27,11 @@ use crate::EventSink;
 use crate::runtime::{EventEmitter, Kernel, KernelError, Session, command};
 use admission::AdmissionTicket;
 use input::PromptInputExpansion;
-use insertion::{InsertionNotice, SubmissionAnswer, WaiterCancellation};
+use insertion::{InsertionNotice, WaiterCancellation};
 use lifecycle::ActiveRunContext;
 use retry::RetryState;
 use settlement::RunSettlement;
-use trace::{RunSpan, TraceOrigin};
+use trace::RunSpan;
 
 impl Kernel {
     /// Executes one run with an explicit input source for trusted host callers.
@@ -40,12 +40,12 @@ impl Kernel {
         request: RunRequest,
         sink: Arc<dyn EventSink>,
         invocation: RunInvocation,
-    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+    ) -> Result<RunResult, KernelError> {
         // Every path below is one Run: mint its identity and open its span
         // before any of them can log, so the whole operation shares one trace.
         // A minting failure is a pre-insertion error like any other.
         let result = async {
-            let trace_id = invocation.trace.trace_id(&*self.id_generator)?;
+            let trace_id = self.new_trace_id()?;
             let run_id = self.new_run_id()?;
             // Keep the full generation state off every caller's async stack frame.
             RunSpan::top_level(&trace_id, &run_id)
@@ -77,7 +77,7 @@ impl Kernel {
         invocation: &RunInvocation,
         run_id: RunId,
         trace_id: &TraceId,
-    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+    ) -> Result<RunResult, KernelError> {
         let input_source = invocation.input_source;
         let insertion = invocation.insertion.as_deref();
         // Pi handles `!` and `!!` before ordinary input hooks and agent Turns.
@@ -92,7 +92,7 @@ impl Kernel {
                 )
                 .await?
         {
-            return Ok((result, None));
+            return Ok(result);
         }
 
         // Resolve the Session before any command path can emit lifecycle events.
@@ -123,16 +123,13 @@ impl Kernel {
                 )
                 .await?
         {
-            return Ok((result, None));
+            return Ok(result);
         }
 
         // Install serialized Run state only after every immediate command path
         // has declined the request.
         let (_run_guard, cancellation) = session
-            .acquire_operation_for_prompt(
-                invocation.cancellation_parent.as_ref(),
-                invocation.waiters(),
-            )
+            .acquire_operation_for_prompt(invocation.waiters())
             .await?;
         if let Some(ticket) = &invocation.admission {
             ticket.release();
@@ -178,14 +175,11 @@ impl Kernel {
             )
             .await?
         else {
-            return Ok((
-                RunResult {
-                    run_id,
-                    messages: Vec::new(),
-                    turns: Vec::new(),
-                },
-                None,
-            ));
+            return Ok(RunResult {
+                run_id,
+                messages: Vec::new(),
+                turns: Vec::new(),
+            });
         };
 
         // RunStart marks the first externally visible Agent lifecycle event.
@@ -207,6 +201,9 @@ impl Kernel {
             }
             protocol::RunInput::Blocks(blocks) => {
                 PromptInputExpansion::from_blocks(blocks)
+            }
+            protocol::RunInput::Mail(mail) => {
+                PromptInputExpansion::from_mail(mail)?
             }
         };
         if let Some(diagnostic) = expanded_input.diagnostic().cloned() {
@@ -256,13 +253,18 @@ impl Kernel {
             .map_err(|error| KernelError::Protocol(error.to_string()))
     }
 
+    /// Allocates and validates a fresh trace identifier; every Run starts its own trace.
+    pub(super) fn new_trace_id(&self) -> Result<TraceId, KernelError> {
+        TraceId::try_from(self.id_generator.next(IdKind::Trace))
+            .map_err(|error| KernelError::Protocol(error.to_string()))
+    }
+
     /// Opens the span of a top-level Run that starts a trace of its own.
     pub(super) fn new_trace_span(
         &self,
         run_id: &RunId,
     ) -> Result<RunSpan, KernelError> {
-        let trace_id = TraceOrigin::New.trace_id(&*self.id_generator)?;
-        Ok(RunSpan::top_level(&trace_id, run_id))
+        Ok(RunSpan::top_level(&self.new_trace_id()?, run_id))
     }
 
     /// Allocates and validates a fresh Turn identifier.
@@ -295,12 +297,9 @@ impl Kernel {
 pub(in crate::runtime) struct RunInvocation {
     /// Origin reported to input hooks.
     input_source: protocol::InputSource,
-    /// Where this Run's trace comes from; a new trace unless a caller supplies one.
+    /// Trace of the Run that caused this one; the new trace's start line names it.
     #[builder(default)]
-    trace: TraceOrigin,
-    /// Caller-owned cancellation that also stops this Run while it waits.
-    #[builder(default)]
-    cancellation_parent: Option<CancellationToken>,
+    link_trace: Option<TraceId>,
     /// Client acceptance report; absent for internal input.
     #[builder(default)]
     insertion: Option<Arc<InsertionNotice>>,
@@ -313,12 +312,9 @@ pub(in crate::runtime) struct RunInvocation {
 impl RunInvocation {
     /// Describes where the Run came from for its start line.
     fn origin_phrase(&self) -> String {
-        match &self.trace {
-            TraceOrigin::New => format!("from {:?}", self.input_source),
-            TraceOrigin::Inherit(_) => "as foreground subagent".to_string(),
-            TraceOrigin::LinkFrom(parent) => {
-                format!("as background subagent linked to trace {parent}")
-            }
+        match &self.link_trace {
+            None => format!("from {:?}", self.input_source),
+            Some(parent) => format!("as subagent linked to trace {parent}"),
         }
     }
 
@@ -346,10 +342,7 @@ struct RetainedInput<'a> {
 
 impl RetainedInput<'_> {
     /// Persists the retained input, then settles its Run as cancelled.
-    async fn settle(
-        self,
-        kernel: &Kernel,
-    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+    async fn settle(self, kernel: &Kernel) -> Result<RunResult, KernelError> {
         let message = kernel.message_now(self.turn_id, self.content)?;
         self.emitter
             .emit(
@@ -368,7 +361,7 @@ impl RetainedInput<'_> {
                 },
             )
             .await?;
-        let answer = RunSettlement::builder()
+        RunSettlement::builder()
             .kernel(kernel)
             .session_id(self.session_id)
             .session(self.session)
@@ -387,13 +380,10 @@ impl RetainedInput<'_> {
             "persisted {:?} input after cancellation before insertion",
             self.input_source
         );
-        Ok((
-            RunResult {
-                run_id: self.run_id.clone(),
-                messages: vec![message],
-                turns: Vec::new(),
-            },
-            Some(answer),
-        ))
+        Ok(RunResult {
+            run_id: self.run_id.clone(),
+            messages: vec![message],
+            turns: Vec::new(),
+        })
     }
 }

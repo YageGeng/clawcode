@@ -9,9 +9,9 @@ export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessio
   const sessions = useWorkspaceStore((state) => state.sessions);
   const running = useWorkspaceStore((state) => state.runningSessionIds);
   const connection = useWorkspaceStore((state) => state.connection.type);
-  // The ownership name is persisted in the header, so it is available even before the title fact is listed.
-  const children = useMemo(() => sessions.flatMap((session) => session.ownership?.kind === "background" && session.ownership.sessionId === sessionId
-    ? [{ sessionId: session.sessionId, name: session.ownership.name }]
+  // The ownership edge is persisted in the header, so nicknames are known before the title fact is listed.
+  const children = useMemo(() => sessions.flatMap((session) => session.ownership?.sessionId === sessionId
+    ? [{ sessionId: session.sessionId, name: session.ownership.name, nickname: session.ownership.nickname }]
     : []), [sessions, sessionId]);
   const ids = useMemo(() => children.map((child) => child.sessionId), [children]);
   const [error, setError] = useState<string>();
@@ -33,21 +33,21 @@ export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessio
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [connection, controller, ids]);
   if (children.length === 0) return null;
-  return <section className="background-subagents" aria-label="后台子会话">
-    <span className="background-subagents__label"><Bot size={13} aria-hidden="true" />后台<b>{children.length}</b></span>
+  return <section className="background-subagents" aria-label="子 agent">
+    <span className="background-subagents__label"><Bot size={13} aria-hidden="true" />子 agent<b>{children.length}</b></span>
     <ul className="background-subagents__list">
       {children.map((child) => {
         const active = running.has(child.sessionId);
         return <li key={child.sessionId} className="subagent-pill" data-running={active}>
-          <button className="subagent-pill__open" type="button" title={`打开 ${child.name}`} onClick={() => {
+          <button className="subagent-pill__open" type="button" title={`/root/${child.name}`} onClick={() => {
             void controller.openSession(child.sessionId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
           }}>
             <span className="subagent-pill__dot" aria-hidden="true" />
-            <span className="subagent-pill__name">{child.name}</span>
+            <span className="subagent-pill__name">{child.nickname}</span>
             {/* Idle pills stay quiet visually; the state remains announced to assistive technology. */}
             <span className={active ? "subagent-pill__state" : "visually-hidden"}>{active ? "运行中" : "空闲"}</span>
           </button>
-          {active ? <button className="subagent-pill__stop" type="button" aria-label={`停止 ${child.name}`} title="停止" onClick={() => controller.cancel(child.sessionId)}>
+          {active ? <button className="subagent-pill__stop" type="button" aria-label={`停止 ${child.nickname}`} title="停止" onClick={() => controller.cancel(child.sessionId)}>
             <Square size={9} fill="currentColor" aria-hidden="true" />
           </button> : null}
         </li>;

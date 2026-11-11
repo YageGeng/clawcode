@@ -8,7 +8,7 @@ use protocol::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::queue::{QueueRequest, QueueWaiter};
+use super::queue::QueueRequest;
 use crate::runtime::{
     EventEmitter, EventSink, InsertionNotice, Kernel, KernelError,
     RunInvocation, SessionExecution, WhenBusy,
@@ -238,9 +238,7 @@ impl Kernel {
                     QueueRequest::builder()
                         .kind(placement.into())
                         .input(request.run.input.clone())
-                        .waiter(Some(QueueWaiter::Insertion(Arc::clone(
-                            &request.insertion,
-                        ))))
+                        .waiter(Some(Arc::clone(&request.insertion)))
                         .submission_id(request.submission_id)
                         .input_processed(true)
                         .cancellation(Some(request.ticket.cancellation.clone()))
@@ -278,7 +276,7 @@ impl Kernel {
                     .build(),
             )
             .await?;
-        Ok(PromptOutcome::Ran(result.0))
+        Ok(PromptOutcome::Ran(result))
     }
 
     /// Accepts handled input as a live-only message without starting a Run or writing history.

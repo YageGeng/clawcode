@@ -4,7 +4,7 @@ import type { UiBootstrap } from "../../bootstrap/model";
 import { MessageActionModel } from "../../domain/messageActions";
 import type { EntryId, MessageId, RunId, SessionId } from "../../acp/protocol";
 import type { MessageEntity, SessionTreeEntry, ToolCallEntity } from "../../domain/model";
-import { TranscriptRowKeys } from "../../domain/model";
+import { AgentMails, TranscriptRowKeys } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { initialSessionWorkspaceState } from "../../workspace/sessionState";
 import { sessionWorkspaceOf } from "../../workspace/selectors";
@@ -12,6 +12,7 @@ import { useWorkspaceStore } from "../../workspace/store";
 import type { ContextSelection } from "../inspector/ContextLens";
 import { Composer } from "../composer/Composer";
 import { MessageView } from "./MessageView";
+import { AgentMailCard } from "./AgentMailCard";
 import { ExtensionCard } from "./ExtensionCard";
 import { ToolCallCard } from "./ToolCallCard";
 import { BranchSummaryCard } from "./BranchSummaryCard";
@@ -77,7 +78,8 @@ const ToolRow = memo(function ToolRow({ sessionId, controller, compact, toolCall
 
 const ExtensionRow = memo(function ExtensionRow({ sessionId, id }: Readonly<{ sessionId: SessionId; id: string }>) {
   const extension = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.extensions.get(id));
-  return extension === undefined ? null : <ExtensionCard extension={extension} />;
+  if (extension === undefined) return null;
+  return extension.customType === AgentMails.TYPE ? <AgentMailCard extension={extension} /> : <ExtensionCard extension={extension} />;
 });
 
 const CompactionRow = memo(function CompactionRow({ sessionId, entryId }: Readonly<{ sessionId: SessionId; entryId: EntryId }>) {
@@ -114,6 +116,18 @@ export function Conversation({ bootstrap, controller, contextSelection, revealRo
   const cwd = useWorkspaceStore((state) => state.sessions
     .find((session) => session.sessionId === sessionId)?.cwd);
   const messageTreeIndex = useMemo(() => MessageActionModel.index(tree), [tree]);
+  // A forked child's compact view starts at its first task; the inherited
+  // owner history before it collapses into one line.
+  const firstTaskIndex = useWorkspaceStore((state) => {
+    if (!compact) return -1;
+    const workspace = sessionWorkspaceOf(state, sessionId);
+    return workspace?.transcript.findIndex((entry) => entry.type === "extension"
+      && AgentMails.isNewTask(workspace.extensions.get(entry.extensionEventId))) ?? -1;
+  });
+  const inheritedCount = firstTaskIndex > 0
+    ? transcript.slice(0, firstTaskIndex).filter((entry) => entry.type === "message").length
+    : 0;
+  const visibleTranscript = firstTaskIndex > 0 ? transcript.slice(firstTaskIndex) : transcript;
 
   /** Resolves a Tool's nearest same-Turn assistant message from the live Tree. */
   const resolveToolOwner = useCallback((tool: ToolCallEntity): SessionTreeEntry | undefined => {
@@ -185,7 +199,8 @@ export function Conversation({ bootstrap, controller, contextSelection, revealRo
         onScroll={onScroll}
       >
         {transcript.length === 0 ? <div className="empty-state transcript__empty"><h2>准备好了</h2><p>发送文本、图片、Markdown 或资源链接开始这一会话。</p></div> : null}
-        {transcript.map((entry) => {
+        {inheritedCount === 0 ? null : <div className="inherited-history" role="note">继承了 {inheritedCount} 条父会话历史</div>}
+        {visibleTranscript.map((entry) => {
           if (entry.type === "recovery") {
             return <div className="recovery-divider" key={`recovery:${entry.notice.recoveryId}`} role="status">
               <span>已恢复 {entry.notice.eventCount} 条事件 · seq {entry.notice.sequenceRange.start}–{entry.notice.sequenceRange.end}</span>

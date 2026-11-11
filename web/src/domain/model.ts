@@ -11,10 +11,8 @@ import type {
 } from "../acp/protocol";
 import type { ImageContentBlock, ImageMimeType } from "../acp/protocol";
 
-export type SessionOwnership = Readonly<
-  { kind: "tool"; sessionId: SessionId; toolCallId: string }
-  | { kind: "background"; sessionId: SessionId; name: string }
->;
+/** Owner edge of a named child agent (`/root/<name>`). */
+export type SessionOwnership = Readonly<{ sessionId: SessionId; name: string; nickname: string }>;
 
 export type SessionSummary = Readonly<{
   sessionId: SessionId;
@@ -377,6 +375,23 @@ export type ExtensionEntity = Readonly<{
   timestampMs: TimestampMs;
   kind: "message" | "error";
 }>;
+
+/** Inter-agent mail persisted as `agent_message` extension messages. */
+export const AgentMails = {
+  /** Extension custom type of one mail. */
+  TYPE: "agent_message",
+  /** Reads one string field of a mail's structured details. */
+  detail(extension: ExtensionEntity, field: "kind" | "author" | "recipient"): string | undefined {
+    const details = extension.details;
+    if (typeof details !== "object" || details === null || Array.isArray(details)) return undefined;
+    const value = (details as Record<string, unknown>)[field];
+    return typeof value === "string" ? value : undefined;
+  },
+  /** Reports whether an extension message is the `new_task` mail that starts a child's work. */
+  isNewTask(extension: ExtensionEntity | undefined): boolean {
+    return extension?.customType === AgentMails.TYPE && AgentMails.detail(extension, "kind") === "new_task";
+  }
+} as const;
 
 export type PromptResourceLink = Readonly<{
   name: string;

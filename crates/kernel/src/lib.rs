@@ -11,9 +11,9 @@ pub use model::{Model, ModelCatalog, ModelError, ModelFactory, ModelStream};
 pub use protocol::{PendingMessages, QueueKind, QueuedMessage};
 pub use provider::{ProviderModel, ProviderModelFactory};
 pub use runtime::{
-    AdmissionTicket, AnswerOutcome, ContextUsageEstimate, InsertionNotice,
-    InsertionReceiver, Kernel, KernelError, KernelFactory, PromptOutcome,
-    PromptRequest, RunSpan, SubmissionAnswer, SubmitRequest, TraceOrigin,
+    AdmissionTicket, ContextUsageEstimate, InsertionNotice, InsertionReceiver,
+    Kernel, KernelError, KernelFactory, MailDelivery, MailPlacement,
+    OwnedSessionRequest, PromptOutcome, PromptRequest, RunSpan,
     TreeNavigationRequest, WhenBusy,
 };
 pub use sink::{ChannelEventSink, EventSink, SessionEventSinks, SinkError};

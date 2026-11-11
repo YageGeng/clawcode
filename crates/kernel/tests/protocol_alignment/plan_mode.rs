@@ -2,10 +2,9 @@
 
 use std::path::PathBuf;
 
-use kernel::WhenBusy;
 use protocol::{AgentEventPayload, SessionId, SessionMode};
 
-use super::fixture::{Route, TestKernel, request};
+use super::fixture::{Route, TestKernel};
 
 /// Finds the JSONL file that backs one Session under the fixture's store root.
 fn session_file(test: &TestKernel, session: &SessionId) -> PathBuf {
@@ -112,8 +111,7 @@ fn append_custom_entry(
         "type": "custom",
         "extensionId": extension_id,
         "customType": "session_mode",
-        "data": data,
-    });
+        "data": data});
     let mut content =
         std::fs::read_to_string(&path).expect("read session file");
     content.push_str(&entry.to_string());
@@ -167,8 +165,7 @@ async fn mode_change_is_persisted_and_restored() {
 async fn mode_follows_the_branch() {
     let test = TestKernel::new(|_| Route::answer("ok"));
     let session = test.create("plan-mode-branch").await;
-    test.kernel
-        .submit(request(&session, "first", WhenBusy::FollowUp))
+    test.run_text(&session, "first")
         .await
         .expect("first prompt");
     let before = test
@@ -303,16 +300,14 @@ fn assert_history_prefix(
 async fn entering_plan_appends_a_note_without_touching_the_prefix() {
     let test = TestKernel::new(|_| Route::answer("ok"));
     let session = test.create("plan-note-prefix").await;
-    test.kernel
-        .submit(request(&session, "first", WhenBusy::FollowUp))
+    test.run_text(&session, "first")
         .await
         .expect("first prompt");
     test.kernel
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "second", WhenBusy::FollowUp))
+    test.run_text(&session, "second")
         .await
         .expect("second prompt");
 
@@ -360,17 +355,10 @@ async fn note_waits_for_the_tool_results() {
                 ),
                 super::fixture::finished(protocol::StopReason::ToolUse),
             ]),
-            _ => Route::answer("done"),
-        }
+            _ => Route::answer("done")}
     });
     let session = test.create("plan-note-tools").await;
-    let kernel = test.kernel.clone();
-    let prompt_session = session.clone();
-    let prompt = tokio::spawn(async move {
-        kernel
-            .submit(request(&prompt_session, "run", WhenBusy::FollowUp))
-            .await
-    });
+    let prompt = test.start(&session, "run");
     test.wait_until(|| {
         test.sinks.payloads(&session).iter().any(|payload| {
             matches!(payload, AgentEventPayload::ToolExecutionStart { .. })
@@ -392,8 +380,7 @@ async fn note_waits_for_the_tool_results() {
     )));
 
     reopen(&test, &session).await;
-    test.kernel
-        .submit(request(&session, "again", WhenBusy::FollowUp))
+    test.run_text(&session, "again")
         .await
         .expect("reopened prompt");
     let rebuilt = requests(&test).last().expect("request").clone();
@@ -423,13 +410,7 @@ async fn note_precedes_a_streaming_reply() {
         }
     });
     let session = test.create("plan-note-streaming").await;
-    let kernel = test.kernel.clone();
-    let prompt_session = session.clone();
-    let prompt = tokio::spawn(async move {
-        kernel
-            .submit(request(&prompt_session, "first", WhenBusy::FollowUp))
-            .await
-    });
+    let prompt = test.start(&session, "first");
     test.wait_until(|| !requests(&test).is_empty()).await;
     test.kernel
         .set_session_mode(&session, SessionMode::Plan)
@@ -437,8 +418,7 @@ async fn note_precedes_a_streaming_reply() {
         .expect("set mode");
     gate.notify_one();
     prompt.await.expect("join").expect("first prompt");
-    test.kernel
-        .submit(request(&session, "second", WhenBusy::FollowUp))
+    test.run_text(&session, "second")
         .await
         .expect("second prompt");
 
@@ -450,8 +430,7 @@ async fn note_precedes_a_streaming_reply() {
     )));
 
     reopen(&test, &session).await;
-    test.kernel
-        .submit(request(&session, "third", WhenBusy::FollowUp))
+    test.run_text(&session, "third")
         .await
         .expect("third prompt");
     let rebuilt = requests(&test).last().expect("request").clone();
@@ -487,10 +466,7 @@ async fn dangling_tool_calls_do_not_swallow_the_note() {
         }
     });
     let session = test.create("plan-note-dangling").await;
-    test.kernel
-        .submit(request(&session, "tool", WhenBusy::FollowUp))
-        .await
-        .expect("tool prompt");
+    test.run_text(&session, "tool").await.expect("tool prompt");
     test.kernel
         .close_session(&session)
         .await
@@ -515,10 +491,7 @@ async fn dangling_tool_calls_do_not_swallow_the_note() {
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "next", WhenBusy::FollowUp))
-        .await
-        .expect("next prompt");
+    test.run_text(&session, "next").await.expect("next prompt");
     let live = requests(&test).last().expect("request").clone();
     let note = live
         .messages
@@ -533,8 +506,7 @@ async fn dangling_tool_calls_do_not_swallow_the_note() {
     assert!(note < next, "the note precedes the new user message");
 
     reopen(&test, &session).await;
-    test.kernel
-        .submit(request(&session, "again", WhenBusy::FollowUp))
+    test.run_text(&session, "again")
         .await
         .expect("reopened prompt");
     let rebuilt = requests(&test).last().expect("request").clone();
@@ -551,40 +523,18 @@ async fn subagent_inherits_plan_with_its_own_note() {
             .map(|message| super::fixture::text(&message.content))
             .as_deref()
         {
-            Some("delegate") => Route::Events(vec![
-                protocol::ModelStreamEvent::ToolCall(
-                    protocol::ToolCall::builder()
-                        .tool_call_id(
-                            protocol::ToolCallId::try_from("call-child")
-                                .expect("id"),
-                        )
-                        .name("subagent".into())
-                        .arguments(
-                            serde_json::json!({ "task": "Survey the code." }),
-                        )
-                        .build(),
-                ),
-                super::fixture::finished(protocol::StopReason::ToolUse),
-            ]),
             Some("Survey the code.") => Route::answer("findings"),
             _ => Route::answer("done"),
         }
     });
     let owner = test.create("plan-note-owner").await;
-    test.kernel
-        .set_session_mode(&owner, SessionMode::Plan)
+    let child = plan_child(&test, &owner).await;
+    test.run_text(&child, "Survey the code.")
         .await
-        .expect("set mode");
-    test.kernel
-        .submit(request(&owner, "delegate", WhenBusy::FollowUp))
-        .await
-        .expect("delegate");
-
-    let child = test.owned_children(&owner);
-    let child = child.first().expect("child");
+        .expect("child task");
     assert_eq!(
         test.kernel
-            .session_settings(&child.session_id)
+            .session_settings(&child)
             .expect("child settings")
             .mode,
         SessionMode::Plan
@@ -608,6 +558,30 @@ async fn subagent_inherits_plan_with_its_own_note() {
     let text = note_text(note);
     assert!(!text.contains("exit_plan_mode"), "{text}");
     assert!(text.contains("parent"), "{text}");
+}
+
+/// Puts the owner in plan mode, then creates its child through the ownership primitive.
+async fn plan_child(test: &TestKernel, owner: &SessionId) -> SessionId {
+    test.kernel
+        .set_session_mode(owner, SessionMode::Plan)
+        .await
+        .expect("set mode");
+    test.kernel
+        .create_owned_session(
+            kernel::OwnedSessionRequest::builder()
+                .ownership(protocol::SessionOwnership {
+                    session_id: owner.clone(),
+                    name: protocol::AgentName::try_from("child").expect("name"),
+                    nickname: "Euclid".into(),
+                })
+                .title(
+                    protocol::SessionTitle::try_from("Euclid").expect("title"),
+                )
+                .model(None)
+                .build(),
+        )
+        .await
+        .expect("child")
 }
 
 /// Scripts one model response that calls the given tools.
@@ -743,10 +717,7 @@ async fn plan_mode_blocks_edits_but_allows_reading() {
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "go", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "go").await.expect("prompt");
 
     for (call, tool) in [("call-write", "write"), ("call-edit", "edit")] {
         let result = seen_result(&test, call);
@@ -799,10 +770,7 @@ async fn plan_mode_runs_read_only_exec_only() {
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "go", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "go").await.expect("prompt");
 
     assert!(!seen_result(&test, "call-ls").is_error);
     let refused = seen_result(&test, "call-echo");
@@ -836,10 +804,7 @@ async fn plan_mode_limits_write_stdin_to_poll_and_interrupt() {
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "go", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "go").await.expect("prompt");
 
     let typed = seen_result(&test, "call-type");
     assert!(typed.is_error);
@@ -927,7 +892,7 @@ impl extension::ExtensionModule for ProbeModule {
         }
     }
 
-    /// Registers read-only and unmarked tools, a subagent override, and reserved names.
+    /// Registers read-only and unmarked tools, a `spawn_agent` override, and reserved names.
     fn register(
         &self,
         registrar: &mut extension::ExtensionRegistrar,
@@ -935,7 +900,7 @@ impl extension::ExtensionModule for ProbeModule {
         for tool in [
             ProbeTool::new("probe_ro", Some(true)),
             ProbeTool::new("probe_rw", None),
-            ProbeTool::new("subagent", None),
+            ProbeTool::new(protocol::SPAWN_AGENT_TOOL, None),
             ProbeTool::new("todo_write", Some(true)),
             ProbeTool::new("exit_plan_mode", Some(true)),
         ] {
@@ -1002,7 +967,11 @@ async fn read_only_hints_decide_other_tools() {
         vec![
             ("call-ro", "probe_ro", serde_json::json!({})),
             ("call-rw", "probe_rw", serde_json::json!({})),
-            ("call-sub", "subagent", serde_json::json!({})),
+            (
+                "call-sub",
+                protocol::SPAWN_AGENT_TOOL,
+                serde_json::json!({}),
+            ),
         ],
     ));
     let session = test.create("plan-gate-hints").await;
@@ -1010,14 +979,11 @@ async fn read_only_hints_decide_other_tools() {
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "go", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "go").await.expect("prompt");
 
     assert_eq!(seen_result(&test, "call-ro").text, "ran probe_ro");
     assert!(seen_result(&test, "call-rw").is_error);
-    // An extension's `subagent` is not the kernel's, so its name earns no exemption.
+    // An extension's `spawn_agent` replaces the kernel's, so its name earns no exemption.
     assert!(seen_result(&test, "call-sub").is_error);
 }
 
@@ -1027,10 +993,7 @@ async fn reserved_tool_names_are_rejected() {
     let logs = super::support::CapturedLogs::default();
     let (test, registration) = probe_kernel(|_| Route::answer("ok"));
     let session = test.create("plan-gate-reserved").await;
-    test.kernel
-        .submit(request(&session, "hello", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "hello").await.expect("prompt");
 
     let descriptions = requests(&test)
         .first()
@@ -1066,10 +1029,7 @@ async fn default_mode_does_not_gate() {
         )],
     ));
     let session = test.create("plan-gate-default").await;
-    test.kernel
-        .submit(request(&session, "go", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "go").await.expect("prompt");
     assert!(!seen_result(&test, "call-write").is_error);
     assert!(test.root.path().join("created.txt").exists());
 }
@@ -1084,11 +1044,6 @@ async fn subagent_in_plan_mode_cannot_edit() {
             .map(|message| super::fixture::text(&message.content))
             .as_deref()
         {
-            Some("delegate") => tool_calls(&[(
-                "call-child",
-                "subagent",
-                serde_json::json!({ "task": "Write the file." }),
-            )]),
             Some("Write the file.") => tool_calls(&[(
                 "call-child-write",
                 "write",
@@ -1098,14 +1053,10 @@ async fn subagent_in_plan_mode_cannot_edit() {
         }
     });
     let owner = test.create("plan-gate-owner").await;
-    test.kernel
-        .set_session_mode(&owner, SessionMode::Plan)
+    let child = plan_child(&test, &owner).await;
+    test.run_text(&child, "Write the file.")
         .await
-        .expect("set mode");
-    test.kernel
-        .submit(request(&owner, "delegate", WhenBusy::FollowUp))
-        .await
-        .expect("delegate");
+        .expect("child task");
     assert!(seen_result(&test, "call-child-write").is_error);
     assert!(!test.root.path().join("child.txt").exists());
 }
@@ -1115,16 +1066,14 @@ async fn subagent_in_plan_mode_cannot_edit() {
 async fn tool_definitions_do_not_change_with_mode() {
     let test = TestKernel::new(|_| Route::answer("ok"));
     let session = test.create("plan-gate-definitions").await;
-    test.kernel
-        .submit(request(&session, "first", WhenBusy::FollowUp))
+    test.run_text(&session, "first")
         .await
         .expect("first prompt");
     test.kernel
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "second", WhenBusy::FollowUp))
+    test.run_text(&session, "second")
         .await
         .expect("second prompt");
     let requests = requests(&test);
@@ -1216,22 +1165,14 @@ async fn submit_plan(
     test: &TestKernel,
     session: &SessionId,
 ) -> (
-    tokio::task::JoinHandle<
-        Result<kernel::SubmissionAnswer, kernel::KernelError>,
-    >,
+    tokio::task::JoinHandle<Result<protocol::RunResult, kernel::KernelError>>,
     protocol::PlanApprovalRequest,
 ) {
     test.kernel
         .set_session_mode(session, SessionMode::Plan)
         .await
         .expect("set mode");
-    let kernel = test.kernel.clone();
-    let prompt_session = session.clone();
-    let prompt = tokio::spawn(async move {
-        kernel
-            .submit(request(&prompt_session, "plan it", WhenBusy::FollowUp))
-            .await
-    });
+    let prompt = test.start(session, "plan it");
     test.wait_until(|| !approval_requests(test, session).is_empty())
         .await;
     let request = approval_requests(test, session)
@@ -1262,10 +1203,7 @@ async fn answer(
 async fn exit_plan_mode_requires_plan_mode() {
     let test = TestKernel::new(plan_route("1. Write the file."));
     let session = test.create("plan-exit-default").await;
-    test.kernel
-        .submit(request(&session, "plan it", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "plan it").await.expect("prompt");
     let result = seen_result(&test, "call-exit");
     assert!(result.is_error);
     assert_eq!(result.text, "Plan mode is not active.");
@@ -1281,11 +1219,6 @@ async fn subagent_cannot_exit_plan_mode() {
             .map(|message| super::fixture::text(&message.content))
             .as_deref()
         {
-            Some("delegate") => tool_calls(&[(
-                "call-child",
-                "subagent",
-                serde_json::json!({ "task": "Plan the child." }),
-            )]),
             Some("Plan the child.") => tool_calls(&[(
                 "call-child-exit",
                 "exit_plan_mode",
@@ -1295,14 +1228,10 @@ async fn subagent_cannot_exit_plan_mode() {
         }
     });
     let owner = test.create("plan-exit-owner").await;
-    test.kernel
-        .set_session_mode(&owner, SessionMode::Plan)
+    let child = plan_child(&test, &owner).await;
+    test.run_text(&child, "Plan the child.")
         .await
-        .expect("set mode");
-    test.kernel
-        .submit(request(&owner, "delegate", WhenBusy::FollowUp))
-        .await
-        .expect("delegate");
+        .expect("child task");
     let result = seen_result(&test, "call-child-exit");
     assert!(result.is_error);
     assert!(result.text.contains("parent"), "{}", result.text);
@@ -1405,7 +1334,7 @@ async fn approval_switches_mode_and_continues() {
         result.details,
         Some(protocol::ToolResultDetails::PlanApproval {
             approved: true,
-            plan: Some("1. Write the file.".into()),
+            plan: Some("1. Write the file.".into())
         })
     );
     assert!(!result_in(&test, &session, "call-write").is_error);
@@ -1440,7 +1369,7 @@ async fn keep_planning_ends_the_run() {
             result.details,
             Some(protocol::ToolResultDetails::PlanApproval {
                 approved: false,
-                plan: None,
+                plan: None
             })
         );
         assert_eq!(requests(&test).len(), 1, "the Run ends after the batch");
@@ -1487,8 +1416,7 @@ async fn cancel_withdraws_the_approval() {
         payload,
         AgentEventPayload::PlanApprovalResolved {
             request_id,
-            decision: protocol::PlanApprovalDecision::Cancelled,
-        } if request_id == &pending.request_id
+            decision: protocol::PlanApprovalDecision::Cancelled} if request_id == &pending.request_id
     )));
     assert_eq!(
         test.kernel
@@ -1580,19 +1508,11 @@ async fn submit_plan_again(
     test: &TestKernel,
     session: &SessionId,
 ) -> (
-    tokio::task::JoinHandle<
-        Result<kernel::SubmissionAnswer, kernel::KernelError>,
-    >,
+    tokio::task::JoinHandle<Result<protocol::RunResult, kernel::KernelError>>,
     protocol::PlanApprovalRequest,
 ) {
     let before = approval_requests(test, session).len();
-    let kernel = test.kernel.clone();
-    let prompt_session = session.clone();
-    let prompt = tokio::spawn(async move {
-        kernel
-            .submit(request(&prompt_session, "plan it", WhenBusy::FollowUp))
-            .await
-    });
+    let prompt = test.start(session, "plan it");
     test.wait_until(|| approval_requests(test, session).len() > before)
         .await;
     let request = approval_requests(test, session)
@@ -1659,10 +1579,7 @@ async fn todo_write_returns_the_validated_list() {
         ("call-empty", serde_json::json!({ "todos": [] })),
     ]));
     let session = test.create("todo-valid").await;
-    test.kernel
-        .submit(request(&session, "todo", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "todo").await.expect("prompt");
 
     let result = seen_result(&test, "call-todo");
     assert!(!result.is_error);
@@ -1673,14 +1590,14 @@ async fn todo_write_returns_the_validated_list() {
                 protocol::TodoItem {
                     content: "Read the code".into(),
                     status: protocol::TodoStatus::Completed,
-                    active_form: "Reading the code".into(),
+                    active_form: "Reading the code".into()
                 },
                 protocol::TodoItem {
                     content: "Write the plan".into(),
                     status: protocol::TodoStatus::InProgress,
-                    active_form: "Writing the plan".into(),
+                    active_form: "Writing the plan".into()
                 },
-            ],
+            ]
         })
     );
     assert_eq!(
@@ -1707,10 +1624,7 @@ async fn todo_write_rejects_invalid_items() {
         ),
     ]));
     let session = test.create("todo-invalid").await;
-    test.kernel
-        .submit(request(&session, "todo", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "todo").await.expect("prompt");
     for call in ["call-status", "call-content", "call-active"] {
         let result = seen_result(&test, call);
         assert!(result.is_error, "{call}");
@@ -1736,10 +1650,7 @@ async fn todo_write_works_in_plan_mode() {
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "todo", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "todo").await.expect("prompt");
     assert!(!seen_result(&test, "call-todo").is_error);
 }
 
@@ -1751,10 +1662,7 @@ async fn reserved_names_resolve_to_kernel_tools() {
         serde_json::json!({ "todos": [] }),
     )]));
     let session = test.create("todo-reserved").await;
-    test.kernel
-        .submit(request(&session, "todo", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "todo").await.expect("prompt");
     assert!(matches!(
         seen_result(&test, "call-todo").details,
         Some(protocol::ToolResultDetails::TodoList { .. })
@@ -1778,16 +1686,14 @@ async fn reserved_names_resolve_to_kernel_tools() {
 async fn plan_tools_are_declared_in_every_mode() {
     let test = TestKernel::new(|_| Route::answer("ok"));
     let session = test.create("todo-declared").await;
-    test.kernel
-        .submit(request(&session, "first", WhenBusy::FollowUp))
+    test.run_text(&session, "first")
         .await
         .expect("first prompt");
     test.kernel
         .set_session_mode(&session, SessionMode::Plan)
         .await
         .expect("set mode");
-    test.kernel
-        .submit(request(&session, "second", WhenBusy::FollowUp))
+    test.run_text(&session, "second")
         .await
         .expect("second prompt");
     for request in requests(&test) {
@@ -1810,10 +1716,7 @@ async fn todo_logs_omit_items() {
         serde_json::json!({ "todos": [{ "content": "SECRET-TODO", "status": "pending", "activeForm": "SECRET-ACTIVE" }] }),
     )]));
     let session = test.create("todo-logs").await;
-    test.kernel
-        .submit(request(&session, "todo", WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(&session, "todo").await.expect("prompt");
     let content = logs.content();
     assert!(!content.contains("SECRET-TODO"));
     assert!(!content.contains("SECRET-ACTIVE"));

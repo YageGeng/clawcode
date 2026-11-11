@@ -10,9 +10,11 @@ async fn deleting_owner_only_reads_headers_for_ownership() {
     let child = test
         .kernel
         .create_owned_session(
-            ownership(&owner),
-            SessionTitle::try_from("child").expect("title"),
-            None,
+            kernel::OwnedSessionRequest::builder()
+                .ownership(ownership(&owner))
+                .title(SessionTitle::try_from("child").expect("title"))
+                .model(None)
+                .build(),
         )
         .await
         .expect("child");
@@ -117,9 +119,11 @@ async fn close_waits_for_inflight_owned_creation() {
     let creating = tokio::spawn(async move {
         kernel
             .create_owned_session(
-                edge,
-                SessionTitle::try_from("child").expect("title"),
-                None,
+                kernel::OwnedSessionRequest::builder()
+                    .ownership(edge)
+                    .title(SessionTitle::try_from("child").expect("title"))
+                    .model(None)
+                    .build(),
             )
             .await
     });
@@ -137,13 +141,14 @@ async fn close_waits_for_inflight_owned_creation() {
     ));
 }
 use kernel::KernelError;
-use protocol::{SessionId, SessionOwnership, SessionTitle, ToolCallId};
+use protocol::{SessionId, SessionOwnership, SessionTitle};
 
-/// Builds a foreground ownership edge using validated protocol identifiers.
+/// Builds a named child ownership edge for the owner.
 pub fn ownership(owner: &SessionId) -> SessionOwnership {
-    SessionOwnership::Tool {
+    SessionOwnership {
         session_id: owner.clone(),
-        tool_call_id: ToolCallId::try_from("call-1").expect("call"),
+        name: protocol::AgentName::try_from("child").expect("name"),
+        nickname: "Euclid".into(),
     }
 }
 
@@ -163,9 +168,11 @@ async fn owned_session_copies_owner_agent() {
     let child = test
         .kernel
         .create_owned_session(
-            ownership(&owner),
-            SessionTitle::try_from("subagent: x").expect("title"),
-            None,
+            kernel::OwnedSessionRequest::builder()
+                .ownership(ownership(&owner))
+                .title(SessionTitle::try_from("subagent: x").expect("title"))
+                .model(None)
+                .build(),
         )
         .await
         .expect("child");
@@ -201,7 +208,7 @@ async fn owned_session_copies_owner_agent() {
         .find(|e| e.kind == "active_tools_change")
         .expect("tools")
         .payload["selection"];
-    for name in ["subagent", "background_subagent"] {
+    for name in ["spawn_agent", "followup_task", "interrupt_agent"] {
         assert!(
             policy["disabled"]
                 .as_array()
@@ -219,9 +226,11 @@ async fn creating_owned_session_requires_live_owner() {
     assert!(matches!(
         test.kernel
             .create_owned_session(
-                ownership(&missing),
-                SessionTitle::try_from("x").expect("title"),
-                None
+                kernel::OwnedSessionRequest::builder()
+                    .ownership(ownership(&missing))
+                    .title(SessionTitle::try_from("x").expect("title"))
+                    .model(None)
+                    .build(),
             )
             .await,
         Err(KernelError::OwnerUnavailable(_))

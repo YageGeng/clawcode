@@ -300,12 +300,19 @@ impl OwnedMcpFixture {
     async fn child(&self) -> SessionId {
         self.kernel
             .create_owned_session(
-                protocol::SessionOwnership::Tool {
-                    session_id: self.owner.clone(),
-                    tool_call_id: ToolCallId::try_from("call-1").expect("call"),
-                },
-                protocol::SessionTitle::try_from("child").expect("title"),
-                None,
+                kernel::OwnedSessionRequest::builder()
+                    .ownership(protocol::SessionOwnership {
+                        session_id: self.owner.clone(),
+                        name: protocol::AgentName::try_from("child")
+                            .expect("name"),
+                        nickname: "Euclid".into(),
+                    })
+                    .title(
+                        protocol::SessionTitle::try_from("child")
+                            .expect("title"),
+                    )
+                    .model(None)
+                    .build(),
             )
             .await
             .expect("child")

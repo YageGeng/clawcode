@@ -45,7 +45,7 @@ impl SessionMcpHost {
             runtime
                 .ownership
                 .as_ref()
-                .map_or(&id, protocol::SessionOwnership::owner)
+                .map_or(&id, |edge| &edge.session_id)
         );
         Ok(())
     }

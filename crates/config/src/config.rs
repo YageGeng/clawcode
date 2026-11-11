@@ -499,23 +499,22 @@ mod tests {
         assert!(cfg.providers.is_empty());
     }
 
-    /// Background subagent replies queue as follow-ups unless configured to steer.
+    /// Three children may run at once by default; zero is rejected at load.
     #[test]
-    fn subagent_reply_as_defaults_to_follow_up_and_reads_steer() {
-        assert_eq!(
-            AppConfig::default().subagent.reply_as,
-            crate::QueuePlacement::FollowUp
-        );
+    fn subagent_max_agents_defaults_to_three_and_rejects_zero() {
+        assert_eq!(AppConfig::default().subagent.max_agents.get(), 3);
 
         let cfg: AppConfig = toml::from_str(
             r#"
 [subagent]
-reply_as = "steer"
+max_agents = 5
 "#,
         )
         .expect("parse subagent config");
+        assert_eq!(cfg.subagent.max_agents.get(), 5);
 
-        assert_eq!(cfg.subagent.reply_as, crate::QueuePlacement::Steer);
+        toml::from_str::<AppConfig>("[subagent]\nmax_agents = 0\n")
+            .expect_err("zero max_agents is rejected");
     }
 
     /// Providers send no prompt-cache option unless one names a retention.

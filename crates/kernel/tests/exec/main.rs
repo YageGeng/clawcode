@@ -7,8 +7,7 @@ mod fixture;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fixture::{Route, TestKernel, finished, request, text};
-use kernel::WhenBusy;
+use fixture::{Route, TestKernel, finished, text};
 use protocol::{
     AgentEventPayload, MessageContent, ModelStreamEvent, SessionId, StopReason,
     ToolCall, ToolCallId,
@@ -91,10 +90,7 @@ async fn exec_command_runs_and_reports_exit() {
     ));
     let session = test.create("exec-run").await;
 
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
 
     let results = tool_results(&test, &session);
     assert_eq!(results.len(), 1, "{results:?}");
@@ -144,14 +140,8 @@ async fn background_process_survives_turn_and_is_pollable() {
     });
     let session = test.create("exec-background").await;
 
-    test.kernel
-        .submit(request(&session, "start", WhenBusy::FollowUp))
-        .await
-        .expect("start");
-    test.kernel
-        .submit(request(&session, "poll", WhenBusy::FollowUp))
-        .await
-        .expect("poll");
+    test.run_text(&session, "start").await.expect("start");
+    test.run_text(&session, "poll").await.expect("poll");
 
     let results = tool_results(&test, &session);
     assert!(session_id_in(&results[0]).is_some(), "{}", results[0]);
@@ -175,13 +165,7 @@ async fn interrupt_keeps_background_process() {
         )],
     ));
     let session = test.create("exec-interrupt").await;
-    let kernel = test.kernel.clone();
-    let prompt_session = session.clone();
-    let prompt = tokio::spawn(async move {
-        kernel
-            .submit(request(&prompt_session, "run", WhenBusy::FollowUp))
-            .await
-    });
+    let prompt = test.start(&session, "run");
     test.wait_until(|| {
         test.sinks.payloads(&session).iter().any(|payload| {
             matches!(payload, AgentEventPayload::ToolExecutionStart { .. })
@@ -223,10 +207,7 @@ async fn close_session_terminates_processes() {
         )],
     ));
     let session = test.create("exec-close").await;
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
     let pid: i32 = std::fs::read_to_string(&pid_path)
         .expect("pid")
         .trim()
@@ -259,10 +240,7 @@ async fn background_exit_emits_exec_exited_event() {
     ));
     let session = test.create("exec-events").await;
 
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
     test.wait_until(|| {
         test.sinks.payloads(&session).iter().any(|payload| {
             matches!(payload, AgentEventPayload::ExecExited { exit } if exit.tool_call_id.as_str() == "call-bg")
@@ -295,10 +273,7 @@ async fn sessions_have_separate_process_tables() {
     let first = test.create("exec-first").await;
     let second = test.create("exec-second").await;
 
-    test.kernel
-        .submit(request(&first, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&first, "run").await.expect("run");
 
     assert_eq!(
         test.kernel
@@ -338,10 +313,7 @@ async fn extension_cannot_register_exec_command() {
     );
     let session = test.create("exec-reserved").await;
 
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
 
     let results = tool_results(&test, &session);
     assert!(results[0].contains("kernel"), "{}", results[0]);
@@ -454,10 +426,7 @@ async fn ps_lists_running_background_terminals() {
         )],
     ));
     let session = test.create("exec-ps").await;
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
     let id =
         session_id_in(&tool_results(&test, &session)[0]).expect("session id");
 
@@ -480,10 +449,7 @@ async fn stop_terminates_all_and_clean_is_an_alias() {
         )],
     ));
     let session = test.create("exec-stop").await;
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
 
     let stopped = slash(&test, &session, "/clean").await;
     let listed = slash(&test, &session, "/ps").await;
@@ -562,10 +528,7 @@ async fn exec_exit_is_persisted_and_replayed() {
         )],
     ));
     let session = test.create("exec-persist").await;
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
     test.wait_until(|| !replayed_exits(&test, &session).is_empty())
         .await;
 
@@ -603,11 +566,7 @@ async fn reopened_session_marks_unfinished_processes_lost() {
         store(sessions.clone()),
     );
     let session = first.create("exec-lost").await;
-    first
-        .kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    first.run_text(&session, "run").await.expect("run");
     // A second Kernel on the same store stands in for the restarted server.
     let second = TestKernel::with_store(
         |_request| Route::answer("done"),
@@ -646,17 +605,11 @@ async fn exec_exit_entries_stay_out_of_model_context() {
         )],
     ));
     let session = test.create("exec-context").await;
-    test.kernel
-        .submit(request(&session, "run", WhenBusy::FollowUp))
-        .await
-        .expect("run");
+    test.run_text(&session, "run").await.expect("run");
     test.wait_until(|| !replayed_exits(&test, &session).is_empty())
         .await;
 
-    test.kernel
-        .submit(request(&session, "again", WhenBusy::FollowUp))
-        .await
-        .expect("again");
+    test.run_text(&session, "again").await.expect("again");
 
     let last = test
         .model
@@ -738,10 +691,7 @@ fn sleeper(
 
 /// Sends one prompt and waits for the Run.
 async fn prompt(test: &TestKernel, session: &SessionId, text: &str) {
-    test.kernel
-        .submit(request(session, text, WhenBusy::FollowUp))
-        .await
-        .expect("prompt");
+    test.run_text(session, text).await.expect("prompt");
 }
 
 /// A Session that never backgrounded a command gets no note.

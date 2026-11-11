@@ -1583,19 +1583,46 @@ mod tests {
             )))
             .expect("install");
         let mut receiver = registry.subscribe_live(&session).expect("live");
-        kernel
-            .submit(
-                kernel::SubmitRequest::builder()
-                    .session_id(session.clone())
-                    .content(vec![protocol::ContentBlock::Text {
-                        text: "internal input".into(),
-                    }])
-                    .when_busy(kernel::WhenBusy::FollowUp)
+        let placement = kernel
+            .deliver_mail(
+                kernel::MailDelivery::builder()
+                    .recipient(session.clone())
+                    .mail(
+                        protocol::AgentMail::builder()
+                            .author(
+                                protocol::AgentPath::try_from("/root/peer")
+                                    .expect("author"),
+                            )
+                            .recipient(protocol::AgentPath::root())
+                            .kind(protocol::MailKind::NewTask)
+                            .payload("internal input".into())
+                            .build(),
+                    )
                     .build(),
             )
             .await
-            .expect("submit");
-        let group = receiver.receiver.try_recv().expect("RunStart");
+            .expect("deliver");
+        assert_eq!(placement, kernel::MailPlacement::Woken);
+        // The woken Run starts and settles in the background.
+        let group =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Ok(group) = receiver.receiver.try_recv() {
+                        break group;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10))
+                        .await;
+                }
+            })
+            .await
+            .expect("RunStart");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while kernel.session_runtime(&session).expect("runtime").running {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("woken Run settled");
         assert_eq!(group.operation_phase, Some(OperationPhase::Start));
         assert!(
             registry

@@ -560,16 +560,19 @@ async fn submit_cancellation_during_backoff() {
         .expect("install");
     let kernel = Arc::clone(&fixture.kernel);
     let id = fixture.session_id.clone();
+    let sink = Arc::clone(&fixture.sink);
     let run = tokio::spawn(async move {
         kernel
-            .submit(
-                kernel::SubmitRequest::builder()
-                    .session_id(id)
-                    .content(vec![protocol::ContentBlock::Text {
-                        text: "work".into(),
-                    }])
-                    .when_busy(kernel::WhenBusy::FollowUp)
-                    .build(),
+            .run(
+                protocol::RunRequest {
+                    session_id: id,
+                    input: protocol::RunInput::Blocks(vec![
+                        protocol::ContentBlock::Text {
+                            text: "work".into(),
+                        },
+                    ]),
+                },
+                sink,
             )
             .await
     });
@@ -578,7 +581,7 @@ async fn submit_cancellation_during_backoff() {
         .kernel
         .cancel_session(&fixture.session_id)
         .expect("cancel");
-    let answer = run.await.expect("join").expect("answer");
+    let _cancelled = run.await.expect("join");
     assert!(fixture.sink.snapshot().iter().any(|e| matches!(
         e.payload,
         AgentEventPayload::RunEnd {
@@ -586,7 +589,6 @@ async fn submit_cancellation_during_backoff() {
             ..
         }
     )));
-    assert_eq!(answer.outcome, kernel::AnswerOutcome::Cancelled);
 }
 
 /// Retries contribute each settled attempt once; a failed request has no usage to add.

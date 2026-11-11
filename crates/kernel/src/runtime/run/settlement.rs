@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use protocol::{AgentEventPayload, AgentOutcome, RunId, SessionId, TurnId};
+use protocol::{
+    AgentEventPayload, AgentOutcome, MessageContent, RunId, SessionId, TurnId,
+};
 
 use crate::runtime::{
     CompactionExecution, CompactionReason, EventEmitter, Kernel, KernelError,
@@ -60,13 +62,9 @@ pub(super) struct RunSettlement<'a> {
 
 impl RunSettlement<'_> {
     /// Persists and publishes the complete terminal lifecycle in protocol order.
-    pub(super) async fn settle(
-        self,
-    ) -> Result<Arc<crate::runtime::SubmissionAnswer>, KernelError> {
-        let answer = Arc::new(crate::runtime::SubmissionAnswer::from((
-            self.outcome,
-            self.messages.as_slice(),
-        )));
+    pub(super) async fn settle(self) -> Result<(), KernelError> {
+        // AgentEnd takes the messages; a child's owner still reads the answer.
+        let answer = self.final_answer();
         self.kernel.record_operation(
             self.session,
             self.run_id,
@@ -147,9 +145,21 @@ impl RunSettlement<'_> {
         // Close the run with a final durability checkpoint so the terminal
         // hook's own writes survive a crash before the next operation.
         self.session.sync_store()?;
-        self.session
-            .execution
-            .settle_submissions(Arc::clone(&answer))?;
-        Ok(answer)
+        // A child's settled answer becomes a queue-only result for its owner.
+        self.kernel
+            .notify_owner(self.session, self.outcome, &answer);
+        Ok(())
+    }
+
+    /// Text of this Run's last assistant message, never the Session's newest history.
+    fn final_answer(&self) -> String {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| {
+                matches!(message.content, MessageContent::Assistant { .. })
+            })
+            .and_then(|message| message.content.text_content())
+            .unwrap_or_default()
     }
 }

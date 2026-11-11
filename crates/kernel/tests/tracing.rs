@@ -14,15 +14,14 @@ use futures::stream;
 use kernel::{
     EventSink, InsertionNotice, Kernel, KernelError, KernelFactory, Model,
     ModelError, ModelFactory, ModelStream, NanoidIdGenerator, SinkError,
-    SubmitRequest, WhenBusy,
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
-    AgentEvent, ContentBlock, ExtensionCommandDefinition, ExtensionDescriptor,
-    ExtensionId, ExtensionUserMessage, IdGenerator, IdKind, ModelFinal,
-    ModelProfile, ModelRequest, ModelStreamEvent, ModelUsage, QueueKind,
-    RunRequest, SessionId, StaticExtensionRegistration, StopReason, ToolCall,
-    ToolCallId, UserBashRequest,
+    AgentEvent, ExtensionCommandDefinition, ExtensionDescriptor, ExtensionId,
+    ExtensionUserMessage, IdGenerator, IdKind, ModelFinal, ModelProfile,
+    ModelRequest, ModelStreamEvent, ModelUsage, QueueKind, RunRequest,
+    SessionId, StaticExtensionRegistration, StopReason, ToolCall, ToolCallId,
+    UserBashRequest,
 };
 use store::{JsonlStoreFactory, SessionCreateOptions, SystemClock};
 use tokio::sync::Notify;
@@ -460,17 +459,13 @@ async fn queued_follow_up_runs_under_the_running_trace() {
         fixture.model.reached.notified().await;
         fixture
             .kernel
-            .submit(
-                SubmitRequest::builder()
-                    .session_id(session.clone())
-                    .content(vec![ContentBlock::Text {
-                        text: "queued input".to_string(),
-                    }])
-                    .when_busy(WhenBusy::FollowUp)
-                    .build(),
+            .queue_message(
+                &session,
+                protocol::QueueKind::FollowUp,
+                "queued input",
             )
             .await
-            .expect("submit follow-up");
+            .expect("queue follow-up");
     };
     let release = async {
         wait_for_line(&logs, &enqueued).await.expect("log line");
@@ -595,4 +590,63 @@ async fn server_side_user_bash_runs_in_a_run_span() {
     .expect("log line");
     let trace = run_fields(&line).0.expect("trace on the user bash line");
     assert!(trace.starts_with("trace-"), "{line}");
+}
+
+/// A spawned child's Run starts a new trace whose start line names the owner's.
+#[tokio::test]
+async fn spawned_child_links_the_owner_trace() {
+    let logs = CapturedLogs::default();
+    let spawn = vec![
+        ModelStreamEvent::ToolCall(
+            ToolCall::builder()
+                .tool_call_id(
+                    ToolCallId::try_from("call-spawn").expect("call id"),
+                )
+                .name(protocol::SPAWN_AGENT_TOOL.to_string())
+                .arguments(serde_json::json!({
+                    "task_name": "tracer",
+                    "message": "Trace me."
+                }))
+                .build(),
+        ),
+        finished(StopReason::ToolUse),
+    ];
+    let fixture = Fixture::new(
+        vec![Reply {
+            hold: None,
+            events: spawn,
+        }],
+        Vec::new(),
+    );
+    let owner = fixture.session("tracing-spawn-owner").await;
+    fixture.run(&owner, "spawn").await;
+    let child = fixture
+        .kernel
+        .list_sessions(Some(&fixture.root.path().join("tracing-spawn-owner")))
+        .expect("list")
+        .into_iter()
+        .find(|summary| summary.ownership.is_some())
+        .expect("child")
+        .session_id;
+
+    let owner_start = wait_for_line(
+        &logs,
+        &format!("started Kernel Run for session {owner} "),
+    )
+    .await
+    .expect("owner start");
+    let parent_trace = run_fields(&owner_start).0.expect("owner trace");
+    let child_start = wait_for_line(
+        &logs,
+        &format!("started Kernel Run for session {child} "),
+    )
+    .await
+    .expect("child start");
+    assert!(
+        child_start
+            .contains(&format!("as subagent linked to trace {parent_trace}")),
+        "{child_start}"
+    );
+    assert_ne!(run_fields(&child_start).0, Some(parent_trace));
+    fixture.kernel.close_session(&owner).await.expect("close");
 }

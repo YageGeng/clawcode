@@ -1,6 +1,14 @@
 mod background;
-mod foreground;
+mod fork;
+mod mail;
+mod path;
+mod roster;
+mod tools;
+
 pub(super) use background::SessionBackgroundWork;
+pub use mail::{MailDelivery, MailPlacement};
+pub(super) use roster::AgentRoster;
+pub(in crate::runtime) use roster::SubagentRosterNote;
 
 use super::{Kernel, KernelError, Session};
 use ::tools::ToolError;
@@ -34,38 +42,49 @@ impl From<SubagentError> for ToolError {
     }
 }
 
-/// Registers built-in delegation unless an extension already supplies the same name.
+/// Registers the built-in agent tools unless an extension supplies the same name.
 pub(in crate::runtime) fn register(
     runtime: &Arc<Session>,
     kernel: &Kernel,
 ) -> Result<(), KernelError> {
-    if runtime.tools.snapshot()?.has_extension("subagent") {
-        tracing::info!(
-            "skipped built-in subagent because an extension provides it"
-        );
-    } else {
-        runtime
-            .tools
-            .register_kernel(Arc::new(foreground::SubagentTool {
-                session: Arc::downgrade(runtime),
-                kernel: kernel.clone(),
-            }))?;
-    }
-    if runtime
-        .tools
-        .snapshot()?
-        .has_extension("background_subagent")
-    {
-        tracing::info!(
-            "skipped built-in background_subagent because an extension provides it"
-        );
-    } else {
-        runtime.tools.register_kernel(Arc::new(
-            background::BackgroundSubagentTool {
-                session: Arc::downgrade(runtime),
-                kernel: kernel.clone(),
-            },
-        ))?;
+    let session = Arc::downgrade(runtime);
+    let tools: [Arc<dyn ::tools::AgentTool>; 6] = [
+        Arc::new(tools::SpawnAgentTool {
+            session: std::sync::Weak::clone(&session),
+            kernel: kernel.clone(),
+        }),
+        Arc::new(tools::MailTool {
+            session: std::sync::Weak::clone(&session),
+            kernel: kernel.clone(),
+            kind: protocol::MailKind::Message,
+        }),
+        Arc::new(tools::MailTool {
+            session: std::sync::Weak::clone(&session),
+            kernel: kernel.clone(),
+            kind: protocol::MailKind::NewTask,
+        }),
+        Arc::new(tools::WaitAgentTool {
+            session: std::sync::Weak::clone(&session),
+        }),
+        Arc::new(tools::ListAgentsTool {
+            session: std::sync::Weak::clone(&session),
+            kernel: kernel.clone(),
+        }),
+        Arc::new(tools::InterruptAgentTool {
+            session,
+            kernel: kernel.clone(),
+        }),
+    ];
+    for tool in tools {
+        let name = tool.definition().name;
+        if runtime.tools.snapshot()?.has_extension(&name) {
+            tracing::info!(
+                "skipped built-in {} because an extension provides it",
+                name
+            );
+        } else {
+            runtime.tools.register_kernel(tool)?;
+        }
     }
     Ok(())
 }

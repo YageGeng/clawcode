@@ -3,11 +3,12 @@ mod operations;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use protocol::{EntryId, PendingMessages, QueueId, QueueKind, QueuedMessage};
+use protocol::{
+    AgentMail, EntryId, PendingMessages, QueueId, QueueKind, QueuedMessage,
+};
 use serde::{Deserialize, Serialize};
 use store::{RecordKind, SessionRecord, SessionStore};
 
-use super::insertion::SubmissionReceipt;
 use crate::runtime::{InsertionNotice, KernelError, SessionExecution};
 
 /// Placement of delegated input that arrives during an active run.
@@ -43,21 +44,15 @@ impl From<WhenBusy> for QueueKind {
 pub(in crate::runtime) struct QueueRequest {
     pub(super) kind: QueueKind,
     pub(super) input: protocol::RunInput,
+    /// Client prompt that awaits this input's insertion.
     #[builder(default)]
-    pub(super) waiter: Option<QueueWaiter>,
+    pub(super) waiter: Option<Arc<InsertionNotice>>,
     #[builder(default)]
     pub(super) submission_id: Option<String>,
     #[builder(default)]
     pub(super) input_processed: bool,
     #[builder(default)]
     pub(super) cancellation: Option<tokio_util::sync::CancellationToken>,
-}
-
-/// Exactly one consumer owns the result of a queued input.
-#[derive(Debug, Clone)]
-pub(in crate::runtime) enum QueueWaiter {
-    Insertion(Arc<InsertionNotice>),
-    Receipt(Arc<SubmissionReceipt>),
 }
 
 /// Returns a claim to its original lane unless persistence has already started.
@@ -112,24 +107,83 @@ impl SessionExecution {
     }
 
     /// Atomically claims eligible input or closes acceptance when no continuation remains.
+    ///
+    /// A queued `new_task` mail keeps the queue open so the Run continues one
+    /// more Turn to read it; queue-only mail never extends a finishing Run.
     pub(super) fn claim_next_or_close(
         self: &Arc<Self>,
         allow_follow_up: bool,
-    ) -> Result<Option<ClaimedItem>, KernelError> {
+    ) -> Result<ClaimOutcome, KernelError> {
         let mut queue = self.queue.lock()?;
         let item = queue.steering.pop_front().or_else(|| {
             allow_follow_up
                 .then(|| queue.follow_up.pop_front())
                 .flatten()
         });
-        if item.is_none() && allow_follow_up {
-            queue.open = false;
+        if let Some(item) = item {
+            return Ok(ClaimOutcome::Item(Box::new(ClaimedItem {
+                item,
+                execution: Arc::clone(self),
+                committed: false,
+            })));
         }
-        Ok(item.map(|item| ClaimedItem {
-            item,
-            execution: Arc::clone(self),
-            committed: false,
-        }))
+        if !allow_follow_up {
+            return Ok(ClaimOutcome::Done);
+        }
+        if queue.mail.iter().any(|mail| mail.kind.triggers_turn()) {
+            return Ok(ClaimOutcome::Continue);
+        }
+        queue.open = false;
+        Ok(ClaimOutcome::Done)
+    }
+
+    /// Queues mail for the active Run, or hands it back when no Run accepts input.
+    pub(in crate::runtime) fn queue_mail(
+        &self,
+        mail: AgentMail,
+    ) -> Result<Option<AgentMail>, KernelError> {
+        let mut queue = self.queue.lock()?;
+        if !queue.open {
+            return Ok(Some(mail));
+        }
+        queue.mail.push_back(mail);
+        drop(queue);
+        self.mailbox.send_modify(|activity| {
+            activity.mail = activity.mail.wrapping_add(1);
+        });
+        Ok(None)
+    }
+
+    /// Removes every queued mail in arrival order.
+    pub(in crate::runtime) fn take_mail(
+        &self,
+    ) -> Result<Vec<AgentMail>, KernelError> {
+        Ok(self.queue.lock()?.mail.drain(..).collect())
+    }
+
+    /// Reports whether mail is waiting for the next model request.
+    pub(in crate::runtime) fn pending_mail(&self) -> Result<bool, KernelError> {
+        Ok(!self.queue.lock()?.mail.is_empty())
+    }
+}
+
+/// What a finishing Turn found to continue with.
+pub(in crate::runtime) enum ClaimOutcome {
+    /// A user queue item becomes the next Turn's input.
+    Item(Box<ClaimedItem>),
+    /// Queued `new_task` mail needs one more Turn without new user input.
+    Continue,
+    /// Nothing continues the Run from the queue.
+    Done,
+}
+
+impl ClaimOutcome {
+    /// Returns the claimed user item, if this outcome carries one.
+    pub(in crate::runtime) fn into_item(self) -> Option<ClaimedItem> {
+        match self {
+            Self::Item(item) => Some(*item),
+            Self::Continue | Self::Done => None,
+        }
     }
 }
 
@@ -138,7 +192,7 @@ impl SessionExecution {
 pub(super) struct PendingQueueItem {
     pub(super) queued: QueuedMessage,
     pub(super) entry_id: EntryId,
-    pub(super) waiter: Option<QueueWaiter>,
+    pub(super) waiter: Option<Arc<InsertionNotice>>,
 }
 
 impl PendingQueueItem {
@@ -153,18 +207,8 @@ impl PendingQueueItem {
 
     /// Delivers a definitive cancellation or an uncertainty error to the item's sole waiter.
     fn reject(&self, error: &KernelError) {
-        match &self.waiter {
-            Some(QueueWaiter::Insertion(notice)) => notice.rejected(error),
-            Some(QueueWaiter::Receipt(receipt)) => {
-                if matches!(error, KernelError::PromptCancelled) {
-                    receipt.resolve(Arc::new(
-                        crate::runtime::SubmissionAnswer::cancelled(),
-                    ));
-                } else {
-                    receipt.reject(error);
-                }
-            }
-            None => {}
+        if let Some(notice) = &self.waiter {
+            notice.rejected(error);
         }
     }
 
@@ -204,6 +248,10 @@ pub(in crate::runtime) struct PendingQueue {
     open: bool,
     steering: VecDeque<PendingQueueItem>,
     follow_up: VecDeque<PendingQueueItem>,
+    /// Inter-agent mail held in memory until the next model request or Run close.
+    // ponytail: mail of a busy recipient lives only in memory and is lost with
+    // a crashed Run; write lane records when crash recovery is required.
+    mail: VecDeque<AgentMail>,
 }
 
 impl PendingQueue {

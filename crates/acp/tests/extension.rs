@@ -44,12 +44,18 @@ async fn session_list_reports_ownership() {
         .expect("owner");
     let child = kernel
         .create_owned_session(
-            protocol::SessionOwnership::Tool {
-                session_id: owner.clone(),
-                tool_call_id: ToolCallId::try_from("call-1").expect("call"),
-            },
-            protocol::SessionTitle::try_from("child").expect("title"),
-            None,
+            kernel::OwnedSessionRequest::builder()
+                .ownership(protocol::SessionOwnership {
+                    session_id: owner.clone(),
+                    name: protocol::AgentName::try_from("reader")
+                        .expect("name"),
+                    nickname: "Euclid".into(),
+                })
+                .title(
+                    protocol::SessionTitle::try_from("child").expect("title"),
+                )
+                .model(None)
+                .build(),
         )
         .await
         .expect("child");
@@ -67,7 +73,7 @@ async fn session_list_reports_ownership() {
         .expect("child listed");
     assert_eq!(
         item["_meta"]["clawcode"]["ownership"],
-        serde_json::json!({"kind":"tool", "sessionId": owner.as_str(), "toolCallId":"call-1"})
+        serde_json::json!({"sessionId": owner.as_str(), "name": "reader", "nickname": "Euclid"})
     );
     kernel.close_session(&owner).await.expect("close");
 }

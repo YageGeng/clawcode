@@ -21,8 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::attempt::{
     AssistantAttempt, AssistantAttemptResult, AssistantAttemptSettlement,
 };
-use super::insertion::SubmissionAnswer;
-use super::queue::{ClaimedItem, QueueCancellationReason};
+use super::queue::{ClaimOutcome, ClaimedItem, QueueCancellationReason};
 use super::retry::RetryState;
 use super::settlement::{RunCompletion, RunSettlement};
 use crate::runtime::compaction::{
@@ -455,6 +454,18 @@ impl RunScope<'_> {
     {
         let kernel = self.kernel;
         let turn_id = &turn.turn_id;
+        // Mail queued since the previous request enters history before the
+        // context is read, so each request sees every delivered message.
+        let mail = self.session.execution.take_mail()?;
+        if !mail.is_empty() {
+            let written = self
+                .session
+                .write_mail(kernel, self.emitter, turn_id, mail)
+                .await?;
+            turn_loop.produced_messages.extend(written);
+        }
+        // A changed child roster is stated before the context is read.
+        self.session.refresh_subagent_roster(kernel, turn_id)?;
         // A changed command-session table is stated before the context is read.
         self.session
             .refresh_command_sessions(kernel, turn_id)
@@ -1209,14 +1220,20 @@ impl RunScope<'_> {
 
         // Tool use and queued follow-ups are the normal reasons to
         // continue after a successful Turn.
-        turn_loop.next_queued_item = self
+        let claim = self
             .session
             .execution
             .claim_next_or_close(!continue_for_tools)?;
+        let continue_for_mail = matches!(claim, ClaimOutcome::Continue);
+        turn_loop.next_queued_item = claim.into_item();
         if turn_loop.next_queued_item.is_some() {
             kernel.publish_queue_changed(self.session_id);
         }
-        if continue_for_tools || turn_loop.next_queued_item.is_some() {
+        // A queued `new_task` mail keeps a finishing Run for one more Turn.
+        if continue_for_tools
+            || continue_for_mail
+            || turn_loop.next_queued_item.is_some()
+        {
             return self
                 .compact_before_next_turn(turn, turn_loop, &settled)
                 .await;
@@ -1383,6 +1400,63 @@ impl RunScope<'_> {
         Ok(Some(protocol::RunInput::Text(text)))
     }
 
+    /// Writes mail that arrived after the last model request; a new task
+    /// still owed a Turn wakes one next Run unless this one was cancelled, so
+    /// a stopped agent never restarts by itself.
+    async fn write_back_mail(
+        &self,
+        execution: &Result<RunCompletion, KernelError>,
+        first_turn_id: &TurnId,
+    ) -> Result<(), KernelError> {
+        let mut write = self.session.execution.take_mail()?;
+        if write.is_empty() {
+            return Ok(());
+        }
+        let cancelled = self.session.background.shutdown.is_cancelled()
+            || match execution {
+                Ok(completion) => {
+                    matches!(completion.outcome, AgentOutcome::Cancelled)
+                }
+                Err(error) => error.is_cancellation(),
+            };
+        let close_turn = match execution {
+            Ok(completion) => completion.turn_id.clone(),
+            Err(_) => first_turn_id.clone(),
+        };
+        // The last new task wakes the next Run; every other mail is written
+        // first, so that Run's first request reads it too. Queue-only mail
+        // after that task is written ahead of it.
+        let wake = if cancelled {
+            None
+        } else {
+            write
+                .iter()
+                .rposition(|mail| mail.kind.triggers_turn())
+                .map(|index| write.remove(index))
+        };
+        tracing::info!(
+            "wrote back {} mail at Run close; woke the next Run: {}",
+            write.len(),
+            wake.is_some()
+        );
+        if !write.is_empty() {
+            self.session
+                .write_mail(self.kernel, self.emitter, &close_turn, write)
+                .await?;
+        }
+        if let Some(mail) = wake
+            && let Err(error) = self.kernel.wake_with_mail(
+                self.session_id,
+                self.session,
+                mail,
+                Some(self.trace_id.clone()),
+            )
+        {
+            tracing::warn!("failed to wake for leftover mail: {}", error);
+        }
+        Ok(())
+    }
+
     /// Closes the Run's queue, then settles the durable Run exactly once for
     /// either a terminal completion or an operational error.
     pub(in crate::runtime) async fn settle(
@@ -1390,13 +1464,14 @@ impl RunScope<'_> {
         execution: Result<RunCompletion, KernelError>,
         mut turn_loop: TurnLoop<'_>,
         first_turn_id: TurnId,
-    ) -> Result<(RunResult, Option<Arc<SubmissionAnswer>>), KernelError> {
+    ) -> Result<RunResult, KernelError> {
         let kernel = self.kernel;
         // An unconsumed claim returns to the queue before it closes, so the
         // withdrawal below answers its waiter.
         drop(turn_loop.next_queued_item.take());
         self.session.execution.close_queue()?;
         kernel.publish_queue_changed(self.session_id);
+        self.write_back_mail(&execution, &first_turn_id).await?;
         if !matches!(&execution, Ok(completion) if matches!(completion.outcome, AgentOutcome::Succeeded))
         {
             kernel.withdraw_pending(self.session_id)?;
@@ -1411,7 +1486,7 @@ impl RunScope<'_> {
             .usage(turn_loop.usage);
         match execution {
             Ok(completion) => {
-                let answer = settlement
+                settlement
                     .turn_id(completion.turn_id)
                     .outcome(&completion.outcome)
                     .messages(completion.result.messages.clone())
@@ -1424,7 +1499,7 @@ impl RunScope<'_> {
                     completion.outcome,
                     completion.result.turns.len()
                 );
-                Ok((completion.result, Some(answer)))
+                Ok(completion.result)
             }
             Err(error)
                 if !turn_loop.user_message_inserted

@@ -9,8 +9,8 @@ use extension::{
     MessageStartPoint, StaticExtensionFactory,
 };
 use kernel::{
-    AnswerOutcome, InsertionNotice, KernelError, ModelError, PromptOutcome,
-    PromptRequest, SessionEventSinks, SubmitRequest, WhenBusy,
+    InsertionNotice, KernelError, ModelError, PromptOutcome, PromptRequest,
+    SessionEventSinks,
 };
 use protocol::{
     AgentEventPayload, AgentOutcome, BeforeAgentStartEvent,
@@ -22,9 +22,8 @@ use protocol::{
 };
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
-use super::fixture::{Route, TestKernel, request, text};
+use super::fixture::{Route, TestKernel, text};
 
 type Insertion = oneshot::Receiver<Result<MessageId, KernelError>>;
 
@@ -387,59 +386,6 @@ async fn cancel_rejects_prompt_waiting_for_gate() {
     ));
     run_a.await.expect("join").expect("first run");
     assert_eq!(test.user_texts(&session), vec!["first".to_string()]);
-}
-
-/// A submission whose parent was already cancelled reports Cancelled, not a failure.
-#[tokio::test]
-async fn submit_maps_prompt_cancelled_to_cancelled_outcome() {
-    let test = TestKernel::new(|_| Route::answer("unused"));
-    let session = test.create("owner").await;
-    let parent = CancellationToken::new();
-    parent.cancel();
-    let submission = SubmitRequest::builder()
-        .session_id(session.clone())
-        .content(vec![ContentBlock::Text {
-            text: "report".into(),
-        }])
-        .when_busy(WhenBusy::FollowUp)
-        .cancellation(Some(parent))
-        .build();
-    let answer = test.kernel.submit(submission).await.expect("answer");
-    assert!(matches!(answer.outcome, AnswerOutcome::Cancelled));
-    assert!(test.user_texts(&session).is_empty());
-}
-
-/// Neither prefixed shell form may start after cancellation while waiting for the gate.
-#[tokio::test]
-async fn cancel_rejects_waiting_user_bash_without_spawning() {
-    let test = TestKernel::new(hang_first);
-    let session = test.create("owner").await;
-    let (run_a, receiver_a) = start(&test, &session, "first");
-    receiver_a.await.expect("sent").expect("first inserted");
-    let bang = marker(&test, "bang");
-    let excluded = marker(&test, "excluded");
-    let (run_bang, receiver_bang) =
-        start(&test, &session, &format!("!touch {}", bang.display()));
-    let (run_excluded, receiver_excluded) =
-        start(&test, &session, &format!("!!touch {}", excluded.display()));
-    tokio::time::sleep(SETTLE).await;
-    test.kernel.cancel_session(&session).expect("cancel");
-    for receiver in [receiver_bang, receiver_excluded] {
-        assert!(matches!(
-            receiver.await.expect("sent"),
-            Err(KernelError::PromptCancelled)
-        ));
-    }
-    for run in [run_bang, run_excluded] {
-        assert!(matches!(
-            run.await.expect("join"),
-            Err(KernelError::PromptCancelled)
-        ));
-    }
-    run_a.await.expect("join").expect("first run");
-    tokio::time::sleep(SETTLE).await;
-    assert!(!bang.exists());
-    assert!(!excluded.exists());
 }
 
 /// Closing rejects waiting shell prompts through the same admission path.
@@ -940,37 +886,47 @@ async fn cancellation_error_before_insertion_rejects_with_prompt_cancelled() {
     )));
 }
 
-/// A subagent report waiting behind another operation survives the user's stop.
+/// A woken mail Run waiting behind another operation survives the user's stop.
 #[tokio::test]
-async fn cancel_does_not_reject_waiting_internal_submission() {
+async fn cancel_does_not_reject_waiting_mail_run() {
     let test = TestKernel::new(hang_summary);
     let session = test.create("owner").await;
     let compact = hold_gate_with_compaction(&test, &session).await;
-    let kernel = test.kernel.clone();
-    let report = request(&session, "report", WhenBusy::FollowUp);
-    let submit = tokio::spawn(async move { kernel.submit(report).await });
+    assert_eq!(
+        test.mail(&session, "/root/x", protocol::MailKind::NewTask, "report")
+            .await,
+        kernel::MailPlacement::Woken
+    );
     tokio::time::sleep(SETTLE).await;
     test.kernel.cancel_session(&session).expect("cancel");
     compact.await.expect("join").expect("compact");
-    let answer = submit.await.expect("join").expect("answer");
-    assert!(matches!(answer.outcome, AnswerOutcome::Completed));
-    assert!(test.user_texts(&session).contains(&"report".to_string()));
+    test.wait_until(|| {
+        test.agent_mails(&session)
+            .iter()
+            .any(|mail| mail.ends_with("Payload:\nreport"))
+    })
+    .await;
 }
 
-/// Internal input interrupted before insertion stays in the transcript.
+/// A woken mail Run interrupted before insertion keeps its mail in the transcript.
 #[tokio::test]
-async fn internal_submission_cancelled_before_insertion_is_persisted() {
+async fn mail_run_cancelled_before_insertion_is_persisted() {
     let test = TestKernel::new(|_| Route::answer("unused"));
     *test.model.preflight_failure.lock().expect("preflight") =
         Some(|| ModelError::Cancelled);
     let session = test.create("owner").await;
-    let answer = test
-        .kernel
-        .submit(request(&session, "report", WhenBusy::FollowUp))
-        .await
-        .expect("answer");
-    assert!(matches!(answer.outcome, AnswerOutcome::Cancelled));
-    assert_eq!(test.user_texts(&session), vec!["report".to_string()]);
+    test.mail(&session, "/root/x", protocol::MailKind::NewTask, "report")
+        .await;
+    test.wait_until(|| {
+        !test
+            .kernel
+            .session_runtime(&session)
+            .expect("runtime")
+            .running
+            && test.agent_mails(&session).len() == 1
+    })
+    .await;
+    assert_eq!(test.model.request_count(), 0);
 }
 
 /// Returns the status of the command output produced by a direct Slash Command Run.

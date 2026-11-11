@@ -125,9 +125,12 @@ impl Kernel {
             // Reserve before closing so construction cannot claim the identifier
             // between runtime removal and persisted Store deletion.
             let _reservation = self.reserve_session_deletion(session_id)?;
-            let cwd = match self.session(session_id) {
-                Ok(session) => Some(session.cwd.clone()),
-                Err(KernelError::SessionNotFound(_)) => self.store_factory.header(session_id)?.map(|header| header.cwd),
+            let (cwd, ownership) = match self.session(session_id) {
+                Ok(session) => (Some(session.cwd.clone()), session.ownership.clone()),
+                Err(KernelError::SessionNotFound(_)) => self
+                    .store_factory
+                    .header(session_id)?
+                    .map_or((None, None), |header| (Some(header.cwd), header.ownership)),
                 Err(error) => return Err(error),
             };
             match self.close_session(session_id).await {
@@ -135,13 +138,19 @@ impl Kernel {
                 Err(error) => return Err(error),
             }
             if let Some(cwd) = cwd {
-                for child in self.store_factory.headers(Some(&cwd))?.into_iter().filter(|item| item.ownership.as_ref().is_some_and(|edge| edge.owner() == session_id)) {
+                for child in self.store_factory.headers(Some(&cwd))?.into_iter().filter(|item| item.ownership.as_ref().is_some_and(|edge| &edge.session_id == session_id)) {
                     tracing::info!("started cascading deletion of session {} owned by {}", child.id, session_id);
                     Box::pin(self.delete_session(&child.id)).await?;
                     tracing::info!("completed cascading deletion of session {} owned by {}", child.id, session_id);
                 }
             }
             self.store_factory.delete(session_id)?;
+            // A deleted child leaves its live owner's roster at once.
+            if let Some(edge) = ownership
+                && let Ok(owner) = self.session(&edge.session_id)
+            {
+                owner.roster.forget_child(&edge.name)?;
+            }
             Ok(())
         }
         .await;

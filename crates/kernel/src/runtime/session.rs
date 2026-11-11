@@ -15,7 +15,8 @@ pub(super) mod settings;
 pub(super) mod transcript;
 mod tree;
 
-pub(in crate::runtime) use custom::ClawcodeEntry;
+pub(in crate::runtime) use custom::{ClawcodeEntry, StatedNote};
+pub use ownership::OwnedSessionRequest;
 pub use tree::TreeNavigationRequest;
 
 use std::collections::HashMap;

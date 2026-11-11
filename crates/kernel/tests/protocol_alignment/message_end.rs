@@ -6,7 +6,7 @@ use extension::{
     ExtensionModule, ExtensionRegistrar, MessageEndPoint,
     StaticExtensionFactory,
 };
-use kernel::{AnswerOutcome, SessionEventSinks, WhenBusy};
+use kernel::SessionEventSinks;
 use protocol::{
     AgentEventPayload, AgentMessage, BeforeAgentStartEvent,
     BeforeAgentStartResult, ContentBlock, ExtensionDescriptor, ExtensionId,
@@ -16,7 +16,7 @@ use protocol::{
 };
 use tokio::sync::Notify;
 
-use super::fixture::{Route, TestKernel, finished, request, text};
+use super::fixture::{Route, TestKernel, finished, text};
 
 /// What the hook changes on the message it targets.
 #[derive(Clone, Copy, Debug)]
@@ -544,46 +544,6 @@ async fn message_end_rewrite_leaves_queue_usable() {
             "{rewrite:?}"
         );
     }
-}
-
-/// A queued submitter gets the real answer instead of a misleading cancellation.
-#[tokio::test]
-async fn message_end_rewrite_still_answers_queued_submitter() {
-    let release = Arc::new(Notify::new());
-    let test = RewriteMessage {
-        target: "queued",
-        rewrite: Rewrite::Identity,
-    }
-    .holding_kernel(Arc::clone(&release));
-    let session = test.create("message-end-submit").await;
-    let kernel = test.kernel.clone();
-    let hold = request(&session, "hold", WhenBusy::FollowUp);
-    let first = tokio::spawn(async move { kernel.submit(hold).await });
-    test.wait_until(|| !test.model.last_texts().is_empty())
-        .await;
-    let kernel = test.kernel.clone();
-    let queued = request(&session, "queued", WhenBusy::FollowUp);
-    let second = tokio::spawn(async move { kernel.submit(queued).await });
-    test.wait_until(|| {
-        !test
-            .kernel
-            .pending_messages(&session)
-            .expect("pending")
-            .follow_up
-            .is_empty()
-    })
-    .await;
-    release.notify_one();
-
-    let answer = second.await.expect("join").expect("answer");
-
-    assert!(
-        matches!(answer.outcome, AnswerOutcome::Completed),
-        "unexpected outcome: {:?}",
-        answer.outcome
-    );
-    assert_eq!(answer.text, "answer");
-    first.await.expect("join").expect("first answer");
 }
 
 /// Rewriting what a user message says stays allowed; the model sees the new text.

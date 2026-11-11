@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use extension::StaticExtensionFactory;
 use kernel::{
     EventSink, Kernel, KernelFactory, Model, ModelError, ModelFactory,
-    ModelStream, SessionEventSinks, SinkError, SubmitRequest, WhenBusy,
+    ModelStream, SessionEventSinks, SinkError, WhenBusy,
 };
 use prompt::FilesystemPromptFactory;
 use protocol::{
@@ -77,6 +77,14 @@ pub fn text(content: &MessageContent) -> String {
                 _ => None,
             })
             .collect(),
+        MessageContent::Extension { extension } => extension
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect(),
         _ => String::new(),
     }
 }
@@ -96,6 +104,11 @@ pub struct RoutedModel {
 }
 
 impl RoutedModel {
+    /// Counts the provider requests the Kernel actually sent.
+    pub fn request_count(&self) -> usize {
+        self.requests.lock().expect("requests").len()
+    }
+
     /// Returns the last message text from each actual Kernel provider request.
     pub fn last_texts(&self) -> Vec<String> {
         self.requests
@@ -230,6 +243,8 @@ impl RecordingSinks {
     }
 
     /// Checks events emitted by real Kernel runs for a particular Session.
+    // Only the protocol_alignment target, which shares this fixture, checks events.
+    #[allow(dead_code)]
     pub fn saw(
         &self,
         session: &SessionId,
@@ -289,7 +304,8 @@ impl IdGenerator for SequenceClock {
 pub struct KernelPolicy {
     pub max_turns: config::TurnLimit,
     pub when_busy: WhenBusy,
-    pub subagent_reply_as: WhenBusy,
+    /// Overrides `subagent.max_agents`; `None` keeps the default of three.
+    pub max_agents: Option<std::num::NonZeroUsize>,
     /// Turns off `<command_sessions>` notes for tests of that switch.
     pub disable_command_sessions: bool,
 }
@@ -354,6 +370,8 @@ impl TestKernel {
     }
 
     /// Substitutes only storage while retaining the production Kernel and tool pipeline.
+    // Only the protocol_alignment target, which shares this fixture, swaps storage.
+    #[allow(dead_code)]
     pub fn with_store(
         route: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
         store: impl FnOnce(
@@ -410,7 +428,11 @@ impl TestKernel {
         let kernel = KernelFactory::builder()
             .max_turns(policy.max_turns)
             .when_busy(policy.when_busy)
-            .subagent_reply_as(policy.subagent_reply_as)
+            .subagent_max_agents(
+                policy
+                    .max_agents
+                    .unwrap_or(config::SubagentConfig::default().max_agents),
+            )
             .compaction_policy(compaction)
             .model_factory(Arc::new(StaticModelFactory(Arc::clone(&model))))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
@@ -471,6 +493,89 @@ impl TestKernel {
         .expect("condition timed out");
     }
 
+    /// Starts one structured Run in the background so a test can act while it waits.
+    pub fn start(
+        &self,
+        session: &SessionId,
+        text: &str,
+    ) -> tokio::task::JoinHandle<Result<protocol::RunResult, kernel::KernelError>>
+    {
+        let kernel = self.kernel.clone();
+        let sink = self.sinks.sink(session);
+        let request = protocol::RunRequest {
+            session_id: session.clone(),
+            input: protocol::RunInput::Blocks(vec![ContentBlock::Text {
+                text: text.into(),
+            }]),
+        };
+        tokio::spawn(async move { kernel.run(request, sink).await })
+    }
+
+    /// Runs structured input to settlement; text never dispatches user bash
+    /// or Slash Commands, as for any internal caller.
+    // The exec and protocol_alignment targets, which share this fixture, use it.
+    #[allow(dead_code)]
+    pub async fn run_text(
+        &self,
+        session: &SessionId,
+        text: &str,
+    ) -> Result<protocol::RunResult, kernel::KernelError> {
+        self.kernel
+            .run(
+                protocol::RunRequest {
+                    session_id: session.clone(),
+                    input: protocol::RunInput::Blocks(vec![
+                        ContentBlock::Text { text: text.into() },
+                    ]),
+                },
+                self.sinks.sink(session),
+            )
+            .await
+    }
+
+    /// Delivers one mail from `author` to a Session through the public primitive.
+    pub async fn mail(
+        &self,
+        recipient: &SessionId,
+        author: &str,
+        kind: protocol::MailKind,
+        payload: &str,
+    ) -> kernel::MailPlacement {
+        self.kernel
+            .deliver_mail(
+                kernel::MailDelivery::builder()
+                    .recipient(recipient.clone())
+                    .mail(
+                        protocol::AgentMail::builder()
+                            .author(
+                                protocol::AgentPath::try_from(author)
+                                    .expect("author"),
+                            )
+                            .recipient(protocol::AgentPath::root())
+                            .kind(kind)
+                            .payload(payload.into())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("deliver")
+    }
+
+    /// Reads the model text of every persisted agent mail in one Session.
+    pub fn agent_mails(&self, session: &SessionId) -> Vec<String> {
+        self.kernel
+            .session_transcript(session)
+            .expect("transcript")
+            .iter()
+            .filter(|m| {
+                matches!(&m.content, MessageContent::Extension { extension }
+                    if extension.custom_type == protocol::AGENT_MESSAGE_TYPE)
+            })
+            .map(|m| text(&m.content))
+            .collect()
+    }
+
     /// Lists persisted ownership edges through the public metadata API.
     pub fn owned_children(&self, owner: &SessionId) -> Vec<SessionSummary> {
         self.kernel
@@ -478,12 +583,14 @@ impl TestKernel {
             .expect("list")
             .into_iter()
             .filter(|s| {
-                s.ownership.as_ref().is_some_and(|o| o.owner() == owner)
+                s.ownership.as_ref().is_some_and(|o| &o.session_id == owner)
             })
             .collect()
     }
 
-    /// Reads the real transcript used by reporter-delivery assertions.
+    /// Reads the user messages of a Session's real transcript.
+    // Only the protocol_alignment target, which shares this fixture, reads them.
+    #[allow(dead_code)]
     pub fn user_texts(&self, session: &SessionId) -> Vec<String> {
         self.kernel
             .session_transcript(session)
@@ -495,17 +602,79 @@ impl TestKernel {
     }
 }
 
-/// Builds structured input so model-generated tasks never execute user commands.
-pub fn request(
+/// Scripts one provider turn that calls the given tools.
+pub fn calls(calls: &[(&str, &str, serde_json::Value)]) -> Route {
+    let mut events = calls
+        .iter()
+        .map(|(id, name, arguments)| {
+            ModelStreamEvent::ToolCall(
+                protocol::ToolCall::builder()
+                    .tool_call_id(
+                        protocol::ToolCallId::try_from(*id).expect("id"),
+                    )
+                    .name((*name).into())
+                    .arguments(arguments.clone())
+                    .build(),
+            )
+        })
+        .collect::<Vec<_>>();
+    events.push(finished(StopReason::ToolUse));
+    Route::Events(events)
+}
+
+/// Whether the result of `call_id` in `session` is marked as an error.
+pub fn tool_failed(
+    test: &TestKernel,
     session: &SessionId,
-    text: &str,
-    busy: WhenBusy,
-) -> SubmitRequest {
-    SubmitRequest::builder()
-        .session_id(session.clone())
-        .content(vec![ContentBlock::Text { text: text.into() }])
-        .when_busy(busy)
-        .build()
+    call_id: &str,
+) -> bool {
+    test.kernel
+        .session_transcript(session)
+        .expect("transcript")
+        .iter()
+        .rev()
+        .find_map(|message| match &message.content {
+            MessageContent::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } if tool_call_id.as_str() == call_id => Some(*is_error),
+            _ => None,
+        })
+        .expect("tool result")
+}
+
+/// Reads the latest tool result with `call_id` from a Session's transcript,
+/// so scripted calls may reuse an id across prompts.
+pub fn tool_result(
+    test: &TestKernel,
+    session: &SessionId,
+    call_id: &str,
+) -> (String, Option<protocol::ToolResultDetails>) {
+    test.kernel
+        .session_transcript(session)
+        .expect("transcript")
+        .iter()
+        .rev()
+        .find_map(|message| match &message.content {
+            MessageContent::ToolResult {
+                tool_call_id,
+                blocks,
+                details,
+                ..
+            } if tool_call_id.as_str() == call_id => Some((
+                blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+                details.clone(),
+            )),
+            _ => None,
+        })
+        .expect("tool result")
 }
 
 /// Exposes configuration mutations through the same Extension Host used in production.

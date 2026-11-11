@@ -99,10 +99,9 @@ impl Kernel {
         let admitted = if let Some(ticket) = execution.admission {
             let operation = execution
                 .session
-                .acquire_operation_for_prompt(
-                    None,
-                    WaiterCancellation::Captured(ticket.cancellation.clone()),
-                )
+                .acquire_operation_for_prompt(WaiterCancellation::Captured(
+                    ticket.cancellation.clone(),
+                ))
                 .await?;
             ticket.release();
             Some(operation)

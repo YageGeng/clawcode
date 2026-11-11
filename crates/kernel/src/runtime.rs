@@ -46,15 +46,13 @@ use crate::{EventSink, ModelCatalog, ModelError, ModelFactory, SinkError};
 pub use compaction::ContextUsageEstimate;
 use compaction::{CompactionExecution, CompactionIdentity};
 pub use run::admission::{AdmissionTicket, PromptOutcome, PromptRequest};
-pub use run::insertion::{
-    AnswerOutcome, InsertionNotice, InsertionReceiver, SubmissionAnswer,
-};
+pub use run::insertion::{InsertionNotice, InsertionReceiver};
 use run::queue::PendingQueue;
 pub use run::queue::WhenBusy;
-pub use run::submit::SubmitRequest;
-pub use run::trace::{RunSpan, TraceOrigin};
-pub use session::TreeNavigationRequest;
+pub use run::trace::RunSpan;
 use session::transcript::SessionTranscript;
+pub use session::{OwnedSessionRequest, TreeNavigationRequest};
+pub use subagent::{MailDelivery, MailPlacement};
 use tools::SessionToolState;
 
 /// Errors surfaced by kernel construction, persistence, extensions, and Turns.
@@ -221,9 +219,9 @@ pub struct KernelFactory {
     max_turns: TurnLimit,
     #[builder(default)]
     when_busy: WhenBusy,
-    /// Lane a background subagent's reply joins while its owner is busy.
-    #[builder(default)]
-    subagent_reply_as: WhenBusy,
+    /// Children of one owner allowed to run at the same time.
+    #[builder(default = config::SubagentConfig::default().max_agents)]
+    subagent_max_agents: std::num::NonZeroUsize,
     /// Compaction budgets with pi-style per-model overrides. The field keeps
     /// its historical name so builders that pass one policy still compile.
     #[builder(default, setter(into))]
@@ -331,7 +329,7 @@ impl KernelFactory {
             .include_skill_instructions(self.include_skill_instructions)
             .max_turns(self.max_turns)
             .when_busy(self.when_busy)
-            .subagent_reply_as(self.subagent_reply_as)
+            .subagent_max_agents(self.subagent_max_agents)
             .compaction_policy(self.compaction_policy.clone())
             .branch_summary(self.branch_summary)
             .retry_policy(self.retry_policy)
@@ -368,8 +366,7 @@ pub struct Kernel {
     max_turns: TurnLimit,
     #[builder(default)]
     when_busy: WhenBusy,
-    #[builder(default)]
-    subagent_reply_as: WhenBusy,
+    subagent_max_agents: std::num::NonZeroUsize,
     compaction_policy: config::CompactionConfig,
     branch_summary: config::BranchSummaryConfig,
     retry_policy: RetryPolicy,
@@ -412,7 +409,6 @@ impl Kernel {
                 .build(),
         )
         .await
-        .map(|(result, _answer)| result)
     }
 
     /// Waits until an extension or the embedding application requests shutdown.
@@ -637,6 +633,9 @@ struct Session {
     owned_creation: tokio::sync::RwLock<()>,
     #[builder(default)]
     background: Arc<subagent::SessionBackgroundWork>,
+    /// Named children this Session owns as `/root`.
+    #[builder(default)]
+    roster: subagent::AgentRoster,
     #[builder(default)]
     ownership: Option<protocol::SessionOwnership>,
     cwd: PathBuf,

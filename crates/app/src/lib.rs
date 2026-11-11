@@ -198,7 +198,7 @@ impl ApplicationFactory {
             .include_skill_instructions(snapshot.skills.include_instructions)
             .max_turns(snapshot.kernel.max_turns)
             .when_busy(snapshot.kernel.when_busy.into())
-            .subagent_reply_as(snapshot.subagent.reply_as.into())
+            .subagent_max_agents(snapshot.subagent.max_agents)
             .compaction_policy(snapshot.compaction.clone())
             .branch_summary(snapshot.branch_summary)
             .retry_policy(snapshot.retry.model_policy())

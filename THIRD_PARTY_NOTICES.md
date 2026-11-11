@@ -28,6 +28,17 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
+## OpenAI Codex agent nickname list
+
+`crates/protocol/assets/agent_names.txt` is copied from `openai/codex`
+(`codex-rs/core/assets/agent/agent_names.txt`), and the multi-agent tool
+names, addressing rules, and inter-agent message text follow its
+`multi_agent_v2` design.
+
+- Source: https://github.com/openai/codex
+- License: Apache-2.0
+- Copyright: Copyright 2025 OpenAI
+
 ## Agent WebUI direct dependencies
 
 The browser application directly depends on the following packages. Versions
