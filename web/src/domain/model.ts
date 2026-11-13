@@ -390,6 +390,19 @@ export const AgentMails = {
   /** Reports whether an extension message is the `new_task` mail that starts a child's work. */
   isNewTask(extension: ExtensionEntity | undefined): boolean {
     return extension?.customType === AgentMails.TYPE && AgentMails.detail(extension, "kind") === "new_task";
+  },
+  /** Returns one child's canonical agent path, the only place the WebUI builds it. */
+  path(ownership: SessionOwnership): string {
+    return `/root/${ownership.name}`;
+  },
+  /**
+   * Resolves an agent path to that child's user-facing nickname within the tree
+   * the viewing Session belongs to: `/root` is its owner, or itself when it owns
+   * none. `/root` and unknown paths have no nickname.
+   */
+  nickname(sessions: readonly SessionSummary[], viewing: SessionId, path: string): string | undefined {
+    const root = sessions.find((session) => session.sessionId === viewing)?.ownership?.sessionId ?? viewing;
+    return sessions.find((session) => session.ownership?.sessionId === root && AgentMails.path(session.ownership) === path)?.ownership?.nickname;
   }
 } as const;
 

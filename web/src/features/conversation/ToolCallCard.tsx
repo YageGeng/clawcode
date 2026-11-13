@@ -1,5 +1,5 @@
 import { Ban, Check, ChevronDown, CircleAlert, CircleSlash, ClipboardList, FilePen, FileText, LoaderCircle, ScanSearch, Search, SquareTerminal, Wrench } from "lucide-react";
-import { memo, useEffect, useState } from "react";
+import { memo, useState } from "react";
 
 import type { ToolCallEntity, ToolKind } from "../../domain/model";
 import { TranscriptRowKeys } from "../../domain/model";
@@ -106,10 +106,6 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
   const open = manual?.phase === phase ? manual.open
     : childId !== undefined ? childRunning
       : (terminal !== undefined || tool.title === "exec_command") && tool.status === "in_progress";
-  useEffect(() => {
-    if (childId === undefined || controller === undefined) return;
-    void controller.ensureSessionListed(childId).catch(() => {});
-  }, [childId, controller]);
   const statusLabel = STATUS_LABELS[tool.status];
   const icon = tool.status === "completed" ? <Check size={14} /> : tool.status === "blocked" ? <Ban size={14} /> : tool.status === "failed" ? <CircleAlert size={14} /> : tool.status === "cancelled" ? <CircleSlash size={14} /> : tool.status === "in_progress" ? <LoaderCircle className="spin" size={14} /> : <KindIcon kind={tool.kind} />;
   const elapsed = tool.startedAtMs === undefined || tool.endedAtMs === undefined ? undefined : BigInt(tool.endedAtMs) - BigInt(tool.startedAtMs);

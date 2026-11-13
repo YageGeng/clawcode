@@ -94,6 +94,81 @@ async fn send_message_reaches_sibling_and_root() {
     assert!(!test.kernel.session_runtime(&b).expect("runtime").running);
 }
 
+/// A child's follow-up wakes an idle sibling like Codex: the sibling's answer
+/// goes to `/root`, and the initiator only gets the sibling's Session in the
+/// tool details for the UI, never the answer in its context.
+#[tokio::test]
+async fn child_followup_wakes_sibling_and_result_reaches_root() {
+    let test =
+        agents(KernelPolicy::default(), scripted(Arc::new(Notify::new())));
+    let owner = test.create("owner").await;
+    let b = spawn_named(&test, &owner, "b", "first").await;
+    idle(&test, &b).await;
+    let a = spawn_named(&test, &owner, "a", "go").await;
+    idle(&test, &a).await;
+    let sent = call(&test, &a, serde_json::json!([["f", protocol::FOLLOWUP_TASK_TOOL, {"target": "b", "message": "again"}]])).await;
+    assert_eq!(sent, vec!["Task sent to /root/b."]);
+    assert_eq!(
+        tool_result(&test, &a, "f").1,
+        Some(protocol::ToolResultDetails::Subagent {
+            session_id: b.clone()
+        })
+    );
+    let results_from_b = || {
+        test.agent_mails(&owner)
+            .iter()
+            .filter(|m| {
+                m.starts_with("Message Type: result")
+                    && m.contains("Sender: /root/b")
+            })
+            .count()
+    };
+    test.wait_until(|| results_from_b() == 2).await;
+    idle(&test, &b).await;
+    assert!(test.agent_mails(&b).iter().any(|m| m
+        == "Message Type: new_task\nTask name: /root/b\nSender: /root/a\nPayload:\nagain"));
+    assert!(
+        !test
+            .agent_mails(&a)
+            .iter()
+            .any(|m| m.contains("Sender: /root/b")),
+        "the initiator never receives the sibling's answer"
+    );
+}
+
+/// A child can interrupt a sibling but, like Codex, not itself.
+#[tokio::test]
+async fn child_interrupts_sibling_but_not_itself() {
+    let gate = Arc::new(Notify::new());
+    let test = agents(KernelPolicy::default(), scripted(Arc::clone(&gate)));
+    let owner = test.create("owner").await;
+    let b = spawn_named(&test, &owner, "b", "hold").await;
+    test.wait_until(|| {
+        test.kernel.session_runtime(&b).expect("runtime").running
+    })
+    .await;
+    let a = spawn_named(&test, &owner, "a", "go").await;
+    idle(&test, &a).await;
+    let replies = call(
+        &test,
+        &a,
+        serde_json::json!([
+            ["stop-b", protocol::INTERRUPT_AGENT_TOOL, {"target": "b"}],
+            ["stop-self", protocol::INTERRUPT_AGENT_TOOL, {"target": "/root/a"}]
+        ]),
+    )
+    .await;
+    assert_eq!(
+        replies,
+        vec![
+            r#"{"previous_status":"running"}"#,
+            "an agent cannot interrupt itself; return your result and let the parent interrupt you if needed"
+        ]
+    );
+    assert!(tool_failed(&test, &a, "stop-self"));
+    idle(&test, &b).await;
+}
+
 /// A follow-up wakes an idle child, reaches a busy one, and respects the limit.
 #[tokio::test]
 async fn followup_task_wakes_idle_child_and_extends_busy_child() {
@@ -269,11 +344,14 @@ async fn interrupt_agent_cancels_child_and_rejects_root() {
     assert_eq!(interrupted, vec![r#"{"previous_status":"running"}"#]);
     idle(&test, &reader).await;
     let listed = call(&test, &owner, serde_json::json!([["l", protocol::LIST_AGENTS_TOOL, {"path_prefix": "/root/reader"}]])).await;
+    let nickname = child(&test, &owner, "reader")
+        .ownership
+        .expect("edge")
+        .nickname;
     assert_eq!(
-        listed,
-        vec![
-            r#"{"agents":[{"agent_name":"/root/reader","agent_status":"interrupted"}]}"#
-        ]
+        serde_json::from_str::<serde_json::Value>(&listed[0])
+            .expect("list JSON"),
+        serde_json::json!({"agents": [{"agent_name": "/root/reader", "agent_status": "interrupted", "nickname": nickname}]})
     );
     let root = call(&test, &owner, serde_json::json!([
         ["i2", protocol::INTERRUPT_AGENT_TOOL, {"target": "/root"}],
@@ -314,7 +392,7 @@ async fn self_targets_and_empty_messages_are_rejected() {
 
 /// Children see exactly the three mailbox tools among the agent tools.
 #[tokio::test]
-async fn children_see_only_mailbox_tools() {
+async fn children_see_every_agent_tool_but_spawn() {
     let test =
         agents(KernelPolicy::default(), scripted(Arc::new(Notify::new())));
     let owner = test.create("owner").await;
@@ -340,7 +418,17 @@ async fn children_see_only_mailbox_tools() {
         .filter(|name| agent_tools.contains(name))
         .collect::<Vec<_>>();
     seen.sort_unstable();
-    assert_eq!(seen, vec!["list_agents", "send_message", "wait_agent"]);
+    // Like Codex, children may assign and interrupt work; nesting stays off.
+    assert_eq!(
+        seen,
+        vec![
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "wait_agent"
+        ]
+    );
 }
 
 /// Unknown and deleted targets read as missing paths.

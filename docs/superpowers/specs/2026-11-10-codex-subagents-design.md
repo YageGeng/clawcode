@@ -11,7 +11,7 @@
 - 模型通过 `spawn_agent` 派生子 agent 并立即拿回规范名称 `/root/<task_name>`；子 agent 的每次回答自动作为 `result` 邮件投入 `/root` 的 mailbox。
 - agent 之间的全部通信只走 mailbox，不使用用户的 steer / follow-up 队列：`send_message` 与完成通知只排队、不唤醒；`followup_task` 在对方空闲时唤醒、忙时进入 mailbox 并保证对方再跑一个 Turn。
 - `wait_agent` 在收到邮件、用户插话或超时时返回。
-- 子 agent 之间、子 agent 与 `/root` 之间可以互发消息；子 agent 不能派生、跟进或中断其他 agent，因此不存在互相唤醒的环。
+- 子 agent 之间、子 agent 与 `/root` 之间可以互发消息；与 Codex 一致，子 agent 也能 `followup_task` / `interrupt_agent` 兄弟，只有 `spawn_agent` 留给 `/root`（不嵌套）。任何 run 的最终回答只回 `/root`，发起跟进的兄弟只在工具卡片里看到对方的实时过程。
 - 不唤醒的邮件不会让一个本已结束的 run 多跑一个 Turn，也不会因 run 失败、取消或用户清空队列而丢失。
 - 父 agent 的上下文用 `<subagents>` 名单 note 声明当前子 agent，名单不变时不重复追加。
 - `fork_turns`、`model`、`reasoning_effort` 控制子 agent 的初始历史、模型与思考强度。
@@ -34,7 +34,8 @@
 | root / subagent usage hint（`prompts/src/model_messages/multi_agent.rs`） | `list_agents` 的 System Prompt guidelines + 子 agent 的 `subagent_role` note | 见「角色说明」；子 agent 的 hint 照 Codex 追加在继承历史之后 |
 | `max_concurrent_threads_per_session = 4`（含 root） | `subagent.max_agents = 3`（运行中的子 agent） | 偏离：Codex 按存活数计且 v2 无关闭工具；照搬会让第 4 次 spawn 永久失败 |
 | 任意深度嵌套 | 只有一层 | 偏离：子 agent 没有 `spawn_agent` |
-| 子 agent 拥有全部工具 | 子 agent 只有 `send_message` / `list_agents` / `wait_agent` | 偏离：消除唤醒环，无需跳数预算 |
+| 子 agent 拥有全部工具 | 子 agent 拥有除 `spawn_agent` 外的全部工具 | 只因不嵌套而去掉 spawn；与 Codex 一样可能出现兄弟互相唤醒的环，不设跳数预算 |
+| `notify_parent_of_terminal_turn` 只投给父级；发起者（`initiating_agent_path`）只收到 UI 的 SubAgentActivity | 结果只投给 `/root`；`followup_task` 返回目标的 `ToolResultDetails::Subagent`，发起者的工具卡片展开目标的实时过程 | 用现有子会话面板代替 SubAgentActivity 事件，同样不进入发起者的模型上下文 |
 | `wait_agent` 仅被 steer 的用户输入打断 | 用户 steer 与 follow-up 入队都打断 | 偏离：否则用户 follow-up 可能要等满 1 小时 |
 
 ## 名称与寻址
@@ -58,7 +59,7 @@ pub struct AgentPath(String);
 - `crates/protocol/assets/agent_names.txt` 复制 Codex 的 101 个名字；`THIRD_PARTY_NOTICES.md` 增加 `openai/codex`（Apache-2.0）条目。
 - `AgentNickname::allocate(used: &HashSet<String>, index: usize) -> String` 在 `protocol` 中保持确定性：以「已用次数」决定轮次，从本轮未用名字中取第 `index % 可用数` 个；全部用尽时进入下一轮，序数后缀格式与 Codex `format_agent_nickname` 相同（`Euclid the 2nd`、`the 11th`、`the 21st`）。
 - 随机下标由 kernel 以 `std::collections::hash_map::RandomState::new().hash_one(…)` 取得，不引入新依赖。
-- 昵称只给用户看；模型只看到 `task_name`（Codex 默认 `hide_spawn_agent_metadata = true`）。
+- `spawn_agent` 只返回 `task_name`（Codex 默认 `hide_spawn_agent_metadata = true`）；但用户在 WebUI 里按昵称称呼 agent，所以 `list_agents` 为每个子 agent 附带 `nickname`，供模型把昵称对应到路径，子 agent 的角色说明也写明自己的昵称（偏离 Codex）。
 
 ## 数据模型
 
@@ -175,16 +176,16 @@ enum ChildStatus {
 
 工具注册方式与原设计相同：在 `build_session` 中注册，持有 `Weak<Session>` 与一个 `Kernel` clone；extension 已提供同名工具时 kernel 不注册自己的版本。全部为 `ToolExposure::Direct`，属于 kernel 自有工具，因此直接通过 `PlanModeGate`（`plan/gate.rs:56`）。
 
-常量 `ROOT_ONLY_AGENT_TOOLS = ["spawn_agent", "followup_task", "interrupt_agent"]`；子会话经 `AgentSnapshot::without_tools` 禁用它们，保留 `send_message`、`list_agents`、`wait_agent`。
+常量 `ROOT_ONLY_AGENT_TOOLS = ["spawn_agent"]`；子会话经 `AgentSnapshot::without_tools` 禁用它，保留其余五个工具。
 
 | 工具 | 参数 | 行为 | 返回 |
 |---|---|---|---|
 | `spawn_agent` | `task_name`, `message`, `fork_turns?`, `model?`, `reasoning_effort?` | 创建子会话并以 `new_task` 邮件启动其首个 run；不等待 | `{"task_name":"/root/x"}`；details 为 `ToolResultDetails::Subagent { session_id }` |
 | `send_message` | `target`, `message` | `deliver_mail(Message)`，不唤醒 | `Message sent to /root/x.` |
-| `followup_task` | `target`, `message` | 目标必须是子 agent；`deliver_mail(NewTask)`：空闲时唤醒，忙时进入 mailbox 并保证再跑一个 Turn | `Task sent to /root/x.` |
+| `followup_task` | `target`, `message` | 目标必须是子 agent 且不是调用者自己；`deliver_mail(NewTask)`：空闲时唤醒，忙时进入 mailbox 并保证再跑一个 Turn | `Task sent to /root/x.`；details 为目标的 `ToolResultDetails::Subagent { session_id }` |
 | `wait_agent` | `timeout_ms?` | 等待本会话的邮箱活动、用户插话或超时 | `Wait completed.` / `Wait interrupted by new input.` / `Wait timed out.`，钳制时附 Codex 的提示句 |
-| `list_agents` | `path_prefix?` | 列出 `/root` 与全部子 agent；`path_prefix` 按 Codex 做不带结尾 `/` 的路径前缀过滤 | Codex 结构：`{"agents":[{"agent_name":"/root/x","agent_status":…}]}` |
-| `interrupt_agent` | `target` | 目标必须是子 agent；`cancel_session` 当前 run。只有 `/root` 拥有该工具，而 `/root` 作为目标已被拒绝，所以不存在「中断自己」 | `{"previous_status":…}` |
+| `list_agents` | `path_prefix?` | 列出 `/root` 与全部子 agent；`path_prefix` 按 Codex 做不带结尾 `/` 的路径前缀过滤 | Codex 结构，子 agent 另带昵称：`{"agents":[{"agent_name":"/root/x","agent_status":…,"nickname":"Euclid"}]}` |
+| `interrupt_agent` | `target` | 目标必须是子 agent；`cancel_session` 当前 run。子 agent 中断自己按 Codex 拒绝：`an agent cannot interrupt itself; return your result and let the parent interrupt you if needed` | `{"previous_status":…}` |
 
 `agent_status` 取值沿用 Codex `agent_status_output_schema`：活着且有 active run 的会话报告 `"running"`；否则子 agent 按 `ChildStatus` 报告 `"pending_init"`、`{"completed": <截断后的最终回答或 null>}`、`{"errored": "<message>"}`、`"interrupted"`。`/root` 有 active run 时报告 `"running"`，否则报告 `{"completed": null}`。
 
@@ -195,8 +196,8 @@ enum ChildStatus {
 - `spawn_agent`：Spawns an agent to work on the specified task. If you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task_3`; refer to it as `task_3` or `/root/task_3`. The spawned agent can send you and other running agents messages, and its final answer will be provided to you when it finishes. It cannot spawn agents of its own. Passing `fork_turns="none"` will not pass any surrounding context to the spawned agent, whereas `fork_turns="all"` (the default) provides it with all surrounding context.
 - `send_message`：Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.
 - `followup_task`：Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries or after the pending tool call completes.
-- `wait_agent`：Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input arrives. Does not return the content; returns either a summary of which agents have updates, an interruption summary for new input, or a timeout summary.
-- `list_agents`：List live agents in the current root thread tree. Optionally filter by task-path prefix.
+- `wait_agent`：Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input arrives. Does not return the content: it returns `Wait completed.` when mail arrived, `Wait interrupted by new input.` for new user input, or `Wait timed out.`; new mail enters your context before your next model request.（偏离 Codex 文案：Codex 描述承诺返回「哪些 agent 有更新的摘要」，但其实现同样只返回这三种固定短句，这里按实际行为描述。）
+- `list_agents`：List live agents in the current root thread tree. Spawned agents include the nickname the user sees; use it to map a nickname the user mentions to its task path. Optionally filter by task-path prefix.
 - `interrupt_agent`：Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.
 
 ### 参数校验
@@ -361,7 +362,7 @@ Codex 给 `/root` 与子 agent 各一段 usage hint。缺少它时，继承了�
 
 - **子 agent 角色 note**：`ForkedHistory::with_role_note` 在 spawn 时把一条 `display = false`、`include_in_context = true`、`custom_type = "subagent_role"` 的 Extension 消息写在继承历史之后、首条 `new_task` 之前（Codex 同样把 subagent hint 追加在 forked history 之后）。它只写一次，继承部分保持父会话发出时的样子，子 agent 自己的前缀之后也不再变化。`ForkedHistory` 丢弃所有 Extension，note 不会继续传递。正文（`{path}` 为子 agent 路径）：
 
-  > You are `{path}`, an agent spawned by `/root` in a team of agents collaborating on the user's goals. Messages before this note, if any, are `/root`'s conversation copied for context: the requests and tasks in them were given to `/root`, not to you, and their tool calls are historical records whose live processes you do not have. Your task is the `new_task` message addressed to `{path}`, and later `new_task` messages bring follow-up tasks. When you finish a task, your final answer is delivered to `/root` automatically, so never wait for your own result. You can use `send_message` to message `/root` or other agents, `list_agents` to see the team, and `wait_agent` to wait for messages, but you cannot spawn agents or assign tasks.
+  > You are `{path}` (shown to the user as {nickname}), an agent spawned by `/root` in a team of agents collaborating on the user's goals. Messages before this note, if any, are `/root`'s conversation copied for context: the requests and tasks in them were given to `/root`, not to you, and their tool calls are historical records whose live processes you do not have. Your task is the `new_task` message addressed to `{path}`, and later `new_task` messages bring follow-up tasks. When you finish a task, your final answer is delivered to `/root` automatically, so never wait for your own result. You can use `followup_task` to give another spawned agent a task and trigger its turn (its answer goes to `/root`, not to you), `send_message` to message `/root` or other agents without triggering a turn, `interrupt_agent` to stop another spawned agent's current turn, `list_agents` to see the team, and `wait_agent` to wait for messages, but you cannot spawn agents.
 
 - 不把角色文字放进 System Prompt：那会让 `/root` 与子 agent 的 System Prompt 不同。
 
@@ -371,6 +372,8 @@ Codex 给 `/root` 与子 agent 各一段 usage hint。缺少它时，继承了�
 - 完成通知与唤醒任务都在独立任务中执行，不持有发起方 gate 等待接收方。
 - 非 run 操作（压缩、Slash Command）从不投递邮件。
 - 因此不存在持有 gate 的等待环。`max_agents` 只在 spawn 与唤醒空闲子 agent 时检查，用户直接在子会话发起的 run 不计入。
+- 子 agent 的 `followup_task` 同样在 owner 的 `spawning` 锁内检查 `max_agents`，唤醒走接收方自己的后台任务，不等待接收方 gate，所以上述结论不变。
+- 唤醒环（A 跟进 B、B 再跟进 A）不是死锁而是持续消耗：与 Codex 一样不设跳数预算，`max_agents` 只限制同时运行的数量；需要时可在 `/root` 用 `interrupt_agent` 打断。
 
 ## 删除与替换
 

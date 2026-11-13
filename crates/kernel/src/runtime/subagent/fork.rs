@@ -20,14 +20,16 @@ impl ForkedHistory {
     ///
     /// Like Codex, the note follows the inherited messages instead of entering
     /// the System Prompt, so the inherited prefix stays as the owner sent it
-    /// and the child's own prefix is written once and never changes.
+    /// and the child's own prefix is written once and never changes. It also
+    /// names the nickname the user sees, so the child answers to it.
     pub(in crate::runtime) fn with_role_note(
         mut self,
         kernel: &Kernel,
         path: &AgentPath,
+        nickname: &str,
     ) -> Result<Vec<AgentMessage>, KernelError> {
         let text = format!(
-            "You are `{path}`, an agent spawned by `/root` in a team of agents collaborating on the user's goals. Messages before this note, if any, are `/root`'s conversation copied for context: the requests and tasks in them were given to `/root`, not to you, and their tool calls are historical records whose live processes you do not have. Your task is the `new_task` message addressed to `{path}`, and later `new_task` messages bring follow-up tasks. When you finish a task, your final answer is delivered to `/root` automatically, so never wait for your own result. You can use `send_message` to message `/root` or other agents, `list_agents` to see the team, and `wait_agent` to wait for messages, but you cannot spawn agents or assign tasks."
+            "You are `{path}` (shown to the user as {nickname}), an agent spawned by `/root` in a team of agents collaborating on the user's goals. Messages before this note, if any, are `/root`'s conversation copied for context: the requests and tasks in them were given to `/root`, not to you, and their tool calls are historical records whose live processes you do not have. Your task is the `new_task` message addressed to `{path}`, and later `new_task` messages bring follow-up tasks. When you finish a task, your final answer is delivered to `/root` automatically, so never wait for your own result. You can use `followup_task` to give another spawned agent a task and trigger its turn (its answer goes to `/root`, not to you), `send_message` to message `/root` or other agents without triggering a turn, `interrupt_agent` to stop another spawned agent's current turn, `list_agents` to see the team, and `wait_agent` to wait for messages, but you cannot spawn agents."
         );
         let extension = ExtensionMessage::builder()
             .extension_id(

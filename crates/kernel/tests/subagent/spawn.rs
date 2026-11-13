@@ -341,13 +341,15 @@ async fn child_lacks_root_only_tools() {
         .iter()
         .find(|r| last(r).starts_with("Message Type: new_task"))
         .expect("child request");
-    for name in [
-        protocol::SPAWN_AGENT_TOOL,
-        protocol::FOLLOWUP_TASK_TOOL,
-        protocol::INTERRUPT_AGENT_TOOL,
+    // Only spawning is reserved for `/root`; children keep Codex's other agent tools.
+    for (name, child_has) in [
+        (protocol::SPAWN_AGENT_TOOL, false),
+        (protocol::FOLLOWUP_TASK_TOOL, true),
+        (protocol::INTERRUPT_AGENT_TOOL, true),
     ] {
-        assert!(
-            !names(child_request).iter().any(|tool| tool == name),
+        assert_eq!(
+            names(child_request).iter().any(|tool| tool == name),
+            child_has,
             "{name}"
         );
     }
@@ -384,7 +386,9 @@ async fn child_starts_with_role_note_after_inherited_history() {
     )
     .await;
     for (name, inherits) in [("reader", true), ("solo", false)] {
-        let child = child(&test, &owner, name).session_id;
+        let summary = child(&test, &owner, name);
+        let nickname = summary.ownership.expect("edge").nickname;
+        let child = summary.session_id;
         test.wait_until(|| !test.agent_mails(&child).is_empty())
             .await;
         let transcript =
@@ -399,6 +403,18 @@ async fn child_starts_with_role_note_after_inherited_history() {
         let role = text(&note.content);
         assert!(
             role.starts_with(&format!("You are `/root/{name}`")),
+            "{role}"
+        );
+        // The child learns the nickname the user sees, so it answers to it.
+        assert!(
+            role.contains(&format!("shown to the user as {nickname}")),
+            "{role}"
+        );
+        // The note offers the Codex tools a child holds and withholds only spawning.
+        assert!(
+            role.contains("`followup_task`")
+                && role.contains("`interrupt_agent`")
+                && role.ends_with("but you cannot spawn agents."),
             "{role}"
         );
         assert_eq!(task > 1, inherits, "{name}");

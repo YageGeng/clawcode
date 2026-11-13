@@ -184,9 +184,13 @@ async fn failed_and_interrupted_children() {
         serde_json::json!({ "path_prefix": "/root/stuck" }),
     )
     .await;
+    let nickname = child(&test, &owner, "stuck")
+        .ownership
+        .expect("edge")
+        .nickname;
     assert_eq!(
         listed,
-        serde_json::json!({"agents": [{"agent_name": "/root/stuck", "agent_status": "interrupted"}]})
+        serde_json::json!({"agents": [{"agent_name": "/root/stuck", "agent_status": "interrupted", "nickname": nickname}]})
     );
     let broken = list(
         &test,
@@ -280,11 +284,16 @@ async fn list_agents_reports_codex_statuses() {
             .running
     })
     .await;
+    // Only spawned agents carry the nickname the user sees; `/root` has none.
+    let nickname = child(&test, &owner, "reader")
+        .ownership
+        .expect("edge")
+        .nickname;
     assert_eq!(
         list(&test, &owner, serde_json::json!({})).await,
         serde_json::json!({"agents": [
             {"agent_name": "/root", "agent_status": "running"},
-            {"agent_name": "/root/reader", "agent_status": "running"}
+            {"agent_name": "/root/reader", "agent_status": "running", "nickname": nickname}
         ]})
     );
     gate.notify_one();
@@ -298,7 +307,7 @@ async fn list_agents_reports_codex_statuses() {
         )
         .await,
         serde_json::json!({"agents": [
-            {"agent_name": "/root/reader", "agent_status": {"completed": "A whale."}}
+            {"agent_name": "/root/reader", "agent_status": {"completed": "A whale."}, "nickname": nickname}
         ]})
     );
 }
@@ -385,6 +394,11 @@ async fn registry_rebuilds_from_headers_after_restart() {
         .resume_session(owner.clone(), test.root.path().into())
         .await
         .expect("resume");
+    // The nickname survives a restart because the roster reloads it from the child header.
+    let nickname = child(&test, &owner, "reader")
+        .ownership
+        .expect("edge")
+        .nickname;
     assert_eq!(
         list(
             &test,
@@ -392,7 +406,7 @@ async fn registry_rebuilds_from_headers_after_restart() {
             serde_json::json!({"path_prefix": "/root/reader"})
         )
         .await,
-        serde_json::json!({"agents": [{"agent_name": "/root/reader", "agent_status": {"completed": null}}]})
+        serde_json::json!({"agents": [{"agent_name": "/root/reader", "agent_status": {"completed": null}, "nickname": nickname}]})
     );
 }
 

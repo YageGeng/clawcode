@@ -83,8 +83,8 @@ async function scenario(page) {
   await page.wait(`document.querySelectorAll(${JSON.stringify(RESULT_CARD)}).length >= 2`, MODEL_WAIT_MS);
   await page.wait(`!document.querySelector('.danger-button')`, MODEL_WAIT_MS);
 
-  // The collapsed mail summary keeps the routing label visible without its body.
-  const senders = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(RESULT_CARD)})].map((card) => card.querySelector('.agent-mail-card__route')?.textContent ?? '')`);
+  // The collapsed mail summary shows nicknames; its title keeps the canonical route.
+  const senders = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(RESULT_CARD)})].map((card) => card.querySelector('.agent-mail-card__route')?.title ?? '')`);
   assert(senders.some((text) => text.includes('/root/alpha')), `alpha result card: ${senders}`);
   assert(senders.some((text) => text.includes('/root/beta')), `beta result card: ${senders}`);
 

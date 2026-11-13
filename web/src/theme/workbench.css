@@ -3711,7 +3711,8 @@
   font-weight: 650;
 }
 
-.background-subagents__label b {
+.background-subagents__label b,
+.session-children > summary b {
   min-width: 16px;
   padding: 0 5px;
   border-radius: 999px;
@@ -3722,20 +3723,23 @@
   text-align: center;
 }
 
+/* Many children wrap into at most two rows that scroll vertically, so a mouse
+   wheel reaches every pill; `relative` keeps the absolutely positioned hidden
+   state labels inside this scroller instead of widening the conversation. */
 .background-subagents__list {
+  position: relative;
   display: flex;
   min-width: 0;
+  max-height: 66px;
   flex: 1;
+  flex-wrap: wrap;
   gap: 6px;
   margin: 0;
   padding: 4px 0;
-  overflow-x: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   list-style: none;
-  scrollbar-width: none;
-}
-
-.background-subagents__list::-webkit-scrollbar {
-  display: none;
+  scrollbar-width: thin;
 }
 
 .subagent-pill {
@@ -3847,28 +3851,10 @@
     animation: none !important;
   }
 }
-/* Inter-agent mail is folded by default: the summary carries the routing header
-   (sender → recipient plus kind) and the payload only mounts once expanded. */
-.agent-mail-card {
-  border-left: 3px solid var(--accent);
-  padding: 0;
-}
-.agent-mail-card[data-kind="result"] { border-left-color: var(--success, var(--accent)); }
-.agent-mail-card summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 11px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  list-style: none;
-}
-.agent-mail-card summary::-webkit-details-marker { display: none; }
-.agent-mail-card__route { color: var(--text-primary); font-weight: 650; }
-.agent-mail-card__kind { margin-left: auto; color: var(--text-secondary); }
-.agent-mail-card__chevron { transition: transform 160ms ease; }
-.agent-mail-card[open] .agent-mail-card__chevron { transform: rotate(180deg); }
+/* Inter-agent mail reuses the tool-card geometry (width, header, chevron); only
+   the kind colors the icon, and the payload body reads at message size. */
+.agent-mail-card[data-kind="result"] .tool-card__icon { color: var(--success); }
+.agent-mail-card[data-kind="message"] .tool-card__icon { color: var(--text-tertiary); }
 .agent-mail-card__body {
   padding: 10px 12px 12px;
   border-top: 1px solid var(--border-subtle);
@@ -3880,8 +3866,39 @@
 .agent-mail-card__body > :last-child { margin-bottom: 0; }
 /* A forked child's compact view collapses the history it inherited. */
 .inherited-history { margin: 0 0 12px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
-.session-children { padding-left: 14px; border-left: 1px solid var(--border-subtle); margin-left: 10px; }
-.session-children > summary { cursor: pointer; padding: 6px; font-size: 12px; color: var(--text-secondary); }
+.session-children { margin: 0 0 6px 10px; }
+/* Same disclosure pattern as the other summaries: no native marker, a rotating
+   chevron, and a rounded hit area so the global focus ring follows its corners. */
+.session-children > summary {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  padding: 4px 8px 4px 6px;
+  border-radius: var(--radius-small);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  list-style: none;
+  transition: color var(--motion-fast) ease, background var(--motion-fast) ease;
+}
+.session-children > summary::-webkit-details-marker { display: none; }
+.session-children > summary:hover { color: var(--accent-strong); background: var(--accent-soft); }
+.session-children > summary svg { color: var(--text-tertiary); transition: transform var(--motion-fast) ease; }
+.session-children[open] > summary svg { transform: rotate(90deg); }
+/* Expanded children scroll inside a bounded card instead of stretching the session list;
+   the translucent fill matches the sidebar rows instead of an opaque panel. */
+.session-children__list {
+  max-height: 280px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 42%);
+  scrollbar-width: thin;
+}
 
 /* Background terminals: commands that outlived their turn, shown above the composer. */
 .background-terminals {

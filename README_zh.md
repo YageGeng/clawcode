@@ -248,12 +248,13 @@ Session 的 thinking 级别会作为可移植的推理强度发送，由 rig 翻
 - `wait_agent { timeout_ms? }`：等待邮件、用户新输入或超时（默认 30 秒，范围 10 秒到 1 小时）。
 - `list_agents { path_prefix? }` 与 `interrupt_agent { target }`。
 
-子代理只有 `send_message`、`list_agents`、`wait_agent`，可以联系 `/root` 和兄弟代理，
-但不能派生或唤醒其他代理。代理之间的所有消息都进入接收方的 mailbox：在接收方下一次
-请求模型前进入上下文；接收方空闲时直接写入记录，不启动 Run。子代理的每次回答都以
-`result` 邮件投给 `/root`，不唤醒它；主代理调用 `wait_agent` 等待。主代理的上下文用
-一条隐藏的 `<subagents>` note 声明当前子代理。同时运行的子代理不超过
-`[subagent] max_agents`。
+与 Codex 一致，子代理拥有除 `spawn_agent` 外的全部代理工具：可以给 `/root` 的其他子代理
+发消息、派后续任务或打断它们，但不能派生。代理之间的所有消息都进入接收方的 mailbox：在
+接收方下一次请求模型前进入上下文；接收方空闲时直接写入记录，不启动 Run。子代理的每次回答
+都以 `result` 邮件投给 `/root`，不唤醒它，即使任务是兄弟派的；主代理调用 `wait_agent`
+等待。派任务的兄弟在自己的 `followup_task` 卡片里查看对方的实时过程。与 Codex 一样，
+代理之间可能互相唤醒成环，只有 `max_agents` 限制同时运行的数量。主代理的上下文用一条隐藏
+的 `<subagents>` note 声明当前子代理。同时运行的子代理不超过 `[subagent] max_agents`。
 
 ## MCP 发现与输出
 

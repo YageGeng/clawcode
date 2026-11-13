@@ -122,6 +122,40 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
   }, [retry]);
 
   const activeSession = sessions.find((session) => session.sessionId === activeSessionId);
+  // Unopened children get no live state notifications, so poll every child of
+  // an owner whose agents may be running: the viewed tree (the open owner, or
+  // the owner of the open child, whose siblings the Sidebar card shows), a
+  // running owner, or one with a running child, since a child can wake its
+  // siblings. The shell stays mounted with no Session open; a string key keeps
+  // unrelated running flips from resetting the timer.
+  const viewedOwner = activeSession?.ownership?.sessionId ?? activeSessionId;
+  const polledKey = useMemo(() => {
+    const busyOwners = new Set(sessions.flatMap((session) => session.ownership !== undefined && runningSessionIds.has(session.sessionId) ? [session.ownership.sessionId] : []));
+    return sessions.flatMap((session) => {
+      const owner = session.ownership?.sessionId;
+      return owner !== undefined && (owner === viewedOwner || runningSessionIds.has(owner) || busyOwners.has(owner)) ? [session.sessionId] : [];
+    }).join("\n");
+  }, [runningSessionIds, sessions, viewedOwner]);
+  const [activityError, setActivityError] = useState<string>();
+  useEffect(() => {
+    const ids = polledKey.length === 0 ? [] : polledKey.split("\n") as SessionId[];
+    if (ids.length === 0 || connection.type !== "ready") return;
+    let stopped = false;
+    let timer: number | undefined;
+    /** Schedules only after completion so slow requests never overlap polling rounds. */
+    const refresh = async () => {
+      let keepPolling = true;
+      try {
+        keepPolling = await controller.refreshSessionActivity(ids);
+        if (!stopped) setActivityError(undefined);
+      }
+      catch (reason: unknown) { if (!stopped) setActivityError(reason instanceof Error ? reason.message : String(reason)); }
+      if (!stopped && keepPolling) timer = window.setTimeout(() => { void refresh(); }, 5_000);
+    };
+    void refresh();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [connection.type, controller, polledKey]);
+
   const selectedMessage = useWorkspaceStore((state) => {
     if (activeSessionId === undefined || contextSelection?.type !== "message") return undefined;
     return state.sessionWorkspaces.get(activeSessionId)?.messages.get(contextSelection.messageId);
@@ -234,6 +268,8 @@ export function AppShell({ bootstrap, controller }: AppShellProps) {
             {retry?.type === "waiting" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts} · {(retryRemainingMs / 1_000).toFixed(1)}s</span> : null}
             {retry?.type === "running" ? <span className="runtime-chip" data-tone="warning">Retry {retry.attempt}/{retry.maxAttempts}</span> : null}
             {retry?.type === "finished" && !retry.success ? <span className="runtime-chip" data-tone="danger">Retry 失败</span> : null}
+            {/* A failure only matters while something is polled; an empty key never polls again to clear it. */}
+            {activityError === undefined || polledKey.length === 0 ? null : <span className="runtime-chip" data-tone="danger" role="alert" title={activityError}>子 agent 状态刷新失败</span>}
           </div>
           <button ref={inspectorTriggerRef} aria-expanded={inspectorOpen} aria-label={inspectorOpen ? "收起详情栏" : "展开详情栏"} className="icon-button" type="button" title={inspectorOpen ? "收起详情栏" : "展开详情栏"} onClick={() => {
             setInspectorOpen((value) => !value);

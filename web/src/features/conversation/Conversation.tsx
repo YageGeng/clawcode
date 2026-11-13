@@ -79,7 +79,7 @@ const ToolRow = memo(function ToolRow({ sessionId, controller, compact, toolCall
 const ExtensionRow = memo(function ExtensionRow({ sessionId, id }: Readonly<{ sessionId: SessionId; id: string }>) {
   const extension = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.extensions.get(id));
   if (extension === undefined) return null;
-  return extension.customType === AgentMails.TYPE ? <AgentMailCard extension={extension} /> : <ExtensionCard extension={extension} />;
+  return extension.customType === AgentMails.TYPE ? <AgentMailCard sessionId={sessionId} extension={extension} /> : <ExtensionCard extension={extension} />;
 });
 
 const CompactionRow = memo(function CompactionRow({ sessionId, entryId }: Readonly<{ sessionId: SessionId; entryId: EntryId }>) {

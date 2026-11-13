@@ -13,12 +13,11 @@ use crate::Model;
 use crate::runtime::plan::ModeChange;
 use crate::runtime::{Kernel, KernelError, Session, mcp, tools};
 
-/// Agent tools only `/root` may call; children keep the mailbox tools.
-pub(in crate::runtime) const ROOT_ONLY_AGENT_TOOLS: [&str; 3] = [
-    protocol::SPAWN_AGENT_TOOL,
-    protocol::FOLLOWUP_TASK_TOOL,
-    protocol::INTERRUPT_AGENT_TOOL,
-];
+/// Agent tools only `/root` may call. Like Codex, children keep every other
+/// agent tool and may assign or interrupt work; spawning stays with `/root`
+/// because agents do not nest.
+pub(in crate::runtime) const ROOT_ONLY_AGENT_TOOLS: [&str; 1] =
+    [protocol::SPAWN_AGENT_TOOL];
 
 /// Agent choices copied before a child's startup extensions observe it.
 struct AgentSnapshot {

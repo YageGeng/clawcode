@@ -272,14 +272,17 @@ multi-agent v2 tools:
   (30 s by default, 10 s to 1 h).
 - `list_agents { path_prefix? }` and `interrupt_agent { target }`.
 
-Children have only `send_message`, `list_agents`, and `wait_agent`, so they can
-reach `/root` and their siblings but never spawn or wake other agents. Every
-message between agents goes through the recipient's mailbox: it enters the
-context before the recipient's next model request, or is written into an idle
-recipient without starting a Run. Each answer a child gives is mailed to `/root`
-as a `result` without waking it; the main agent calls `wait_agent` to wait for
-it. The main agent's context states its children in a hidden `<subagents>` note.
-At most `[subagent] max_agents` children run at once.
+As in Codex, children hold every agent tool except `spawn_agent`: they can
+message, assign follow-up tasks to, and interrupt `/root`'s other children, but
+never spawn. Every message between agents goes through the recipient's mailbox:
+it enters the context before the recipient's next model request, or is written
+into an idle recipient without starting a Run. Each answer a child gives is
+mailed to `/root` as a `result` without waking it, even when a sibling assigned
+the task; the main agent calls `wait_agent` to wait for it. A sibling that
+assigned a task follows it in its `followup_task` card instead. Agents can wake
+each other in a loop, as in Codex; nothing but `max_agents` bounds it. The main
+agent's context states its children in a hidden `<subagents>` note. At most
+`[subagent] max_agents` children run at once.
 
 ## MCP discovery and output
 

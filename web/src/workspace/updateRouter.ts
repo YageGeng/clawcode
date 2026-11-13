@@ -24,6 +24,7 @@ export class SessionUpdateRouter {
   private readonly store: WorkspaceStoreAccess;
   private readonly refreshSessionRuntime: (sessionId: SessionId) => Promise<void>;
   private readonly refreshSessionTree: (sessionId: SessionId) => Promise<void>;
+  private readonly listSession: (sessionId: SessionId) => Promise<void>;
   private readonly recovery: SessionRecoveryBuffer;
   private readonly recoveryTrackers = new Map<SessionId, RecoveryTracker>();
   private receivedOrder = 0;
@@ -34,13 +35,15 @@ export class SessionUpdateRouter {
     namespace: string,
     store: WorkspaceStoreAccess,
     refreshSessionRuntime: (sessionId: SessionId) => Promise<void>,
-    refreshSessionTree: (sessionId: SessionId) => Promise<void>
+    refreshSessionTree: (sessionId: SessionId) => Promise<void>,
+    listSession: (sessionId: SessionId) => Promise<void>
   ) {
     this.decoder = new SessionUpdateDecoder(namespace);
     this.recovery = new SessionRecoveryBuffer(namespace);
     this.store = store;
     this.refreshSessionRuntime = refreshSessionRuntime;
     this.refreshSessionTree = refreshSessionTree;
+    this.listSession = listSession;
   }
 
   /** Routes every update into its owning Session, including background Sessions. */
@@ -54,6 +57,7 @@ export class SessionUpdateRouter {
     let workspaceDraft = current;
     const refreshRuntime = new Set<SessionId>();
     const refreshTree = new Set<SessionId>();
+    const childSessions = new Set<SessionId>();
     const touchedSessions = new Set<SessionId>();
     const stagers = new Map<SessionId, SessionWorkspaceStager>();
     try {
@@ -74,7 +78,10 @@ export class SessionUpdateRouter {
           if (decoded.scope === "global") {
             for (const action of decoded.actions) workspaceDraft = reduceWorkspace(workspaceDraft, action);
           } else {
-            for (const action of decoded.actions) stager.apply(action);
+            for (const action of decoded.actions) {
+              stager.apply(action);
+              if (action.type === "tool/upserted" && action.tool.subagentSessionId !== undefined) childSessions.add(action.tool.subagentSessionId);
+            }
             // Recovery reloads the Tree once it completes, so its replayed Turns do not each fetch one.
             if (decoded.refreshTree === true && !this.recoveryTrackers.has(batch.sessionId)) refreshTree.add(batch.sessionId);
           }
@@ -119,6 +126,10 @@ export class SessionUpdateRouter {
       });
     };
     for (const sessionId of refreshRuntime) void this.refreshSessionRuntime(sessionId).catch(report(sessionId));
+    // List children named by spawn and follow-up cards from the data path: the
+    // card is not mounted while another Session is open, so the Sidebar would
+    // lag until a Run idles.
+    for (const childId of childSessions) void this.listSession(childId).catch(() => {});
     // A runtime refresh reloads the Tree too, so one frame never fetches it twice.
     for (const sessionId of refreshTree) {
       if (!refreshRuntime.has(sessionId)) void this.refreshSessionTree(sessionId).catch(report(sessionId));

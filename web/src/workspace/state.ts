@@ -93,7 +93,14 @@ export function reduceWorkspace(
       const activeSessionId = state.activeSessionId !== undefined && sessionIds.has(state.activeSessionId)
         ? state.activeSessionId
         : undefined;
-      return { ...state, sessions: action.sessions, activeSessionId, sessionWorkspaces, runningSessionIds, drafts };
+      // The backend lists Sessions in directory order; creation order keeps
+      // children in spawn order and appends new ones instead of reshuffling.
+      const sessions = [...action.sessions].sort((left, right) => {
+        const leftTime = BigInt(left.createdAtMs ?? 0);
+        const rightTime = BigInt(right.createdAtMs ?? 0);
+        return leftTime === rightTime ? 0 : leftTime < rightTime ? -1 : 1;
+      });
+      return { ...state, sessions, activeSessionId, sessionWorkspaces, runningSessionIds, drafts };
     }
     case "session/activated": {
       if (state.sessionWorkspaces.has(action.sessionId)) {

@@ -20,17 +20,17 @@ use crate::runtime::{
     Session,
 };
 
-/// Builds one tool reply. A refusal (`Err`) stays correctable text for the
-/// model but is marked as an error, as Codex returns `RespondToModel` failures
-/// with `success: false`.
+/// Builds one tool reply from accepted text with optional details, or a
+/// refusal. A refusal (`Err`) stays correctable text for the model but is
+/// marked as an error, as Codex returns `RespondToModel` failures with
+/// `success: false`.
 fn reply(
     call_id: ToolCallId,
-    outcome: Result<String, String>,
-    details: Option<ToolResultDetails>,
+    outcome: Result<(String, Option<ToolResultDetails>), String>,
 ) -> ToolResult {
-    let (text, is_error) = match outcome {
-        Ok(text) => (text, false),
-        Err(text) => (text, true),
+    let (text, details, is_error) = match outcome {
+        Ok((text, details)) => (text, details, false),
+        Err(text) => (text, None, true),
     };
     let result = ToolResult::builder()
         .tool_call_id(call_id)
@@ -167,7 +167,7 @@ impl SpawnAgentTool {
         } else {
             ForkedHistory::default()
         }
-        .with_role_note(&self.kernel, &path)?;
+        .with_role_note(&self.kernel, &path, &nickname)?;
         tracing::info!(
             "started spawn of {} ({}) with fork {}",
             path,
@@ -290,11 +290,10 @@ impl AgentTool for SpawnAgentTool {
                 )?,
                 Err(text) => Err(text),
             };
-        let (outcome, details) = match spawned {
-            Ok((text, details)) => (Ok(text), Some(details)),
-            Err(text) => (Err(text), None),
-        };
-        Ok(reply(call.tool_call_id, outcome, details))
+        Ok(reply(
+            call.tool_call_id,
+            spawned.map(|(text, details)| (text, Some(details))),
+        ))
     }
 }
 
@@ -305,7 +304,8 @@ pub(super) struct ListAgentsTool {
 }
 
 impl ListAgentsTool {
-    /// Renders the tree as Codex's `{"agents": [...]}` JSON, filtered by path prefix.
+    /// Renders the tree as Codex's `{"agents": [...]}` JSON, filtered by path
+    /// prefix; spawned agents also carry the nickname the user sees.
     fn list(
         &self,
         session: &Arc<Session>,
@@ -315,13 +315,26 @@ impl ListAgentsTool {
         let tree = AgentTree::of(&self.kernel, &context.session_id, session)?;
         let root_status = ChildStatus::Completed(None)
             .report(tree.is_running(tree.owner_id()))?;
-        let mut agents = vec![(AgentPath::root(), root_status)];
+        let mut agents = vec![(
+            AgentPath::root(),
+            serde_json::json!({ "agent_name": AgentPath::root(), "agent_status": root_status }),
+        )];
         let children = tree.with_children(|children| {
             children
                 .iter()
                 .map(|(name, entry)| {
-                    let running = tree.is_running(&entry.session_id);
-                    Ok((AgentPath::child(name), entry.status.report(running)?))
+                    let path = AgentPath::child(name);
+                    let status = entry
+                        .status
+                        .report(tree.is_running(&entry.session_id))?;
+                    // Users name agents by the nickname shown in the WebUI, so
+                    // the model needs it to map their words to a task path.
+                    let listed = serde_json::json!({
+                        "agent_name": path,
+                        "agent_status": status,
+                        "nickname": entry.nickname,
+                    });
+                    Ok((path, listed))
                 })
                 .collect::<Result<Vec<_>, serde_json::Error>>()
         })??;
@@ -331,9 +344,7 @@ impl ListAgentsTool {
             .filter(|(path, _)| {
                 prefix.is_none_or(|prefix| path.as_ref().starts_with(prefix))
             })
-            .map(|(path, status)| {
-                serde_json::json!({ "agent_name": path, "agent_status": status })
-            })
+            .map(|(_, listed)| listed)
             .collect::<Vec<_>>();
         Ok(serde_json::json!({ "agents": agents }).to_string())
     }
@@ -341,11 +352,11 @@ impl ListAgentsTool {
 
 #[async_trait]
 impl AgentTool for ListAgentsTool {
-    /// Advertises Codex v2 `list_agents`.
+    /// Advertises Codex v2 `list_agents`, plus the nicknames users refer to.
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: protocol::LIST_AGENTS_TOOL.into(),
-            description: "List live agents in the current root thread tree. Optionally filter by task-path prefix.".into(),
+            description: "List live agents in the current root thread tree. Spawned agents include the nickname the user sees; use it to map a nickname the user mentions to its task path. Optionally filter by task-path prefix.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -389,7 +400,7 @@ impl AgentTool for ListAgentsTool {
                 tool: protocol::LIST_AGENTS_TOOL,
                 source,
             })?;
-        Ok(reply(call.tool_call_id, Ok(text), None))
+        Ok(reply(call.tool_call_id, Ok((text, None))))
     }
 }
 
@@ -426,13 +437,16 @@ pub(super) struct MailTool {
 
 impl MailTool {
     /// Resolves the target, checks the rules, and delivers one mail, or
-    /// returns a correctable refusal.
+    /// returns a correctable refusal. A task also returns the target's
+    /// Session, so the initiator's card can follow the turn it started;
+    /// like Codex, the answer itself still goes to `/root` only.
     async fn send(
         &self,
         session: &Arc<Session>,
         args: MessageArgs<'_>,
         context: &ToolExecutionContext,
-    ) -> Result<Result<String, String>, KernelError> {
+    ) -> Result<Result<(String, Option<ToolResultDetails>), String>, KernelError>
+    {
         let tree = AgentTree::of(&self.kernel, &context.session_id, session)?;
         let target = match tree.resolve(args.target)? {
             Ok(target) => target,
@@ -472,7 +486,7 @@ impl MailTool {
             .kernel
             .deliver_mail(
                 MailDelivery::builder()
-                    .recipient(recipient)
+                    .recipient(recipient.clone())
                     .mail(mail)
                     .link_trace(Some(context.trace_id.clone()))
                     .cancellation(Some(context.cancellation.clone()))
@@ -488,9 +502,14 @@ impl MailTool {
             })?;
         }
         Ok(Ok(if self.kind == MailKind::NewTask {
-            format!("Task sent to {path}.")
+            (
+                format!("Task sent to {path}."),
+                Some(ToolResultDetails::Subagent {
+                    session_id: recipient,
+                }),
+            )
         } else {
-            format!("Message sent to {path}.")
+            (format!("Message sent to {path}."), None)
         }))
     }
 
@@ -553,7 +572,7 @@ impl AgentTool for MailTool {
                 .map_err(|source| SubagentError::Kernel { tool, source })?,
             Err(text) => Err(text),
         };
-        Ok(reply(call.tool_call_id, outcome, None))
+        Ok(reply(call.tool_call_id, outcome))
     }
 }
 
@@ -624,11 +643,12 @@ impl WaitAgentTool {
 
 #[async_trait]
 impl AgentTool for WaitAgentTool {
-    /// Advertises Codex v2 `wait_agent`.
+    /// Advertises Codex v2 `wait_agent`. Codex's text promises a per-agent
+    /// summary its implementation never returns; this names the fixed replies.
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: protocol::WAIT_AGENT_TOOL.into(),
-            description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input arrives. Does not return the content; returns either a summary of which agents have updates, an interruption summary for new input, or a timeout summary.".into(),
+            description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input arrives. Does not return the content: it returns `Wait completed.` when mail arrived, `Wait interrupted by new input.` for new user input, or `Wait timed out.`; new mail enters your context before your next model request.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -662,7 +682,7 @@ impl AgentTool for WaitAgentTool {
             }
             _ => Ok(Self::wait(&session, requested, context).await?),
         };
-        Ok(reply(call.tool_call_id, outcome, None))
+        Ok(reply(call.tool_call_id, outcome.map(|text| (text, None))))
     }
 }
 
@@ -689,6 +709,11 @@ impl InterruptAgentTool {
             }
             Ok(AgentTarget::Child { path, session_id }) => (path, session_id),
         };
+        // Children hold this tool too; cancelling the caller's own Run from
+        // inside its tool call is refused with Codex's wording.
+        if &path == tree.caller() {
+            return Ok(Err("an agent cannot interrupt itself; return your result and let the parent interrupt you if needed".into()));
+        }
         let running = tree.is_running(&child);
         let previous = tree
             .with_children(|children| {
@@ -749,6 +774,6 @@ impl AgentTool for InterruptAgentTool {
             }
             None => Err("interrupt_agent needs target.".into()),
         };
-        Ok(reply(call.tool_call_id, outcome, None))
+        Ok(reply(call.tool_call_id, outcome.map(|text| (text, None))))
     }
 }

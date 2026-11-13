@@ -237,3 +237,41 @@ async fn creating_owned_session_requires_live_owner() {
     ));
     assert!(test.kernel.list_sessions(None).expect("list").is_empty());
 }
+
+/// A delete whose caller stops awaiting it still finishes. An ACP client that
+/// disconnects, or a Session whose own tool call requested the deletion and was
+/// killed by it, must not leave the Session half closed with every later Run
+/// cancelled on start.
+#[tokio::test]
+async fn dropped_delete_still_finishes() {
+    use futures::FutureExt as _;
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let held = std::sync::Arc::clone(&gate);
+    let test = TestKernel::new(move |_| super::agents::held(&held, "late"));
+    let session = test.create("doomed").await;
+    let run = test.start(&session, "hold");
+    test.wait_until(|| {
+        test.kernel
+            .session_runtime(&session)
+            .expect("runtime")
+            .running
+    })
+    .await;
+    // One poll runs the delete's synchronous start, which requests the close
+    // and then waits for the Run; the caller goes away right there.
+    assert!(
+        test.kernel
+            .delete_session(&session)
+            .now_or_never()
+            .is_none()
+    );
+    let _cancelled = run.await.expect("join");
+    test.wait_until(|| {
+        test.kernel
+            .list_sessions(None)
+            .expect("list")
+            .iter()
+            .all(|summary| summary.session_id != session)
+    })
+    .await;
+}

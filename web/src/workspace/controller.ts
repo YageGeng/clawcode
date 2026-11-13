@@ -89,7 +89,8 @@ export class WorkspaceController {
       bootstrap.product.slug,
       store,
       (sessionId) => this.refreshSessionRuntime(sessionId),
-      (sessionId) => this.refreshSessionTree(sessionId)
+      (sessionId) => this.refreshSessionTree(sessionId),
+      (sessionId) => this.ensureSessionListed(sessionId)
     );
   }
 

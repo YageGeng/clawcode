@@ -1,9 +1,10 @@
-import { Check, Edit3, LoaderCircle, PanelLeftClose, Plus, Search, Square, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, Edit3, LoaderCircle, PanelLeftClose, Plus, Search, Square, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { SessionId } from "../../acp/protocol";
 import type { SessionSummary } from "../../domain/model";
+import { AgentMails } from "../../domain/model";
 
 export type SessionSidebarProps = Readonly<{
   sessions: readonly SessionSummary[];
@@ -38,6 +39,8 @@ export function SessionSidebar(props: SessionSidebarProps) {
     const matched = props.sessions.filter((session) => normalized.length === 0 ||
       session.title.toLocaleLowerCase().includes(normalized) ||
       session.cwd.toLocaleLowerCase().includes(normalized) ||
+      // Child rows show their agent path (lowercase by validation), so it must be searchable too.
+      (session.ownership !== undefined && AgentMails.path(session.ownership).includes(normalized)) ||
       session.sessionId.toLocaleLowerCase().includes(normalized));
     const included = new Set(matched.map((session) => session.sessionId));
     const byId = new Map(props.sessions.map((session) => [session.sessionId, session]));
@@ -132,7 +135,8 @@ export function SessionSidebar(props: SessionSidebarProps) {
                       onClick={() => void run(() => props.onOpen(session.sessionId))}
                     >
                       <span className="session-item__title">{session.title}</span>
-                      <span className="session-item__cwd">{session.cwd}</span>
+                      {/* A child shares its owner's directory, so its agent path is what tells rows apart; the preview keeps the directory. */}
+                      <span className="session-item__cwd">{session.ownership === undefined ? session.cwd : AgentMails.path(session.ownership)}</span>
                     </button>
                     {running ? <span className="session-item__status" role="status"><LoaderCircle size={11} aria-hidden="true" />运行中</span> : null}
                     <span className="session-item__menu">
@@ -150,8 +154,11 @@ export function SessionSidebar(props: SessionSidebarProps) {
                   setDeletingSessionId(undefined);
                 })}>确认删除</button></div> : null}
               </div>{children.length === 0 ? null : <details className="session-children" open={children.some((child) => child.sessionId === props.activeSessionId) || undefined}>
-                <summary>子会话 · {children.length}</summary>
-                {children.map((child) => renderSession(child, visited))}
+                <summary><ChevronRight size={13} aria-hidden="true" />子会话<b>{children.length}</b></summary>
+                {/* Scroll events do not bubble, so the card closes the stale preview itself. */}
+                <div className="session-children__list" onScroll={() => setPreview(undefined)}>
+                  {children.map((child) => renderSession(child, visited))}
+                </div>
               </details>}</div>;
   };
 

@@ -1,8 +1,10 @@
 import { ChevronDown, Mail } from "lucide-react";
 import { useState } from "react";
 
+import type { SessionId } from "../../acp/protocol";
 import type { ExtensionEntity } from "../../domain/model";
 import { AgentMails, TranscriptRowKeys } from "../../domain/model";
+import { useWorkspaceStore } from "../../workspace/store";
 import { MarkdownContent } from "./MarkdownContent";
 
 const PAYLOAD_MARKER = "\nPayload:\n";
@@ -14,16 +16,26 @@ const KIND_LABELS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Renders one inter-agent mail as a collapsed row.
+ * Renders one inter-agent mail as a tool-card styled row.
  *
- * Agent-to-agent traffic is mostly noise for the human reader, so the card keeps
- * the payload folded and shows only the routing header (author → recipient plus
- * the mail kind). Expanding is a per-card, in-memory choice; a remounted card
- * folds again. The `<details>` summary intercepts the native toggle so React
- * owns the open state exactly once, mirroring `ReasoningBlock`.
+ * Messages and results are mostly noise for the human reader, so they keep the
+ * payload folded behind the routing header (author → recipient plus the mail
+ * kind). A `new_task` is the receiving agent's prompt, so it starts expanded.
+ * Agents show the nicknames used by the pills and Sidebar, with the canonical
+ * path as the title. Expanding is a per-card, in-memory choice; a remounted card
+ * resets. The `<details>` summary intercepts the native toggle so React owns the
+ * open state exactly once, mirroring `ReasoningBlock`.
  */
-export function AgentMailCard({ extension }: Readonly<{ extension: ExtensionEntity }>) {
-  const [open, setOpen] = useState(false);
+export function AgentMailCard({ sessionId, extension }: Readonly<{ sessionId: SessionId; extension: ExtensionEntity }>) {
+  const [open, setOpen] = useState(() => AgentMails.isNewTask(extension));
+  const author = AgentMails.detail(extension, "author") ?? "?";
+  const recipient = AgentMails.detail(extension, "recipient") ?? "?";
+  // Every mounted card's selector runs on each store commit, so it only picks
+  // the list reference (changed by a list refresh); the scans below then run
+  // on re-render, not on every streamed frame of any Session.
+  const sessions = useWorkspaceStore((state) => state.sessions);
+  const authorName = AgentMails.nickname(sessions, sessionId, author) ?? author;
+  const recipientName = AgentMails.nickname(sessions, sessionId, recipient) ?? recipient;
   const text = extension.blocks
     .map((block) => typeof block === "object" && block !== null && "text" in block && typeof block.text === "string" ? block.text : "")
     .join("");
@@ -33,7 +45,7 @@ export function AgentMailCard({ extension }: Readonly<{ extension: ExtensionEnti
   const kind = AgentMails.detail(extension, "kind") ?? "message";
   return (
     <details
-      className="extension-card agent-mail-card"
+      className="tool-card agent-mail-card"
       data-kind={kind}
       data-transcript-key={TranscriptRowKeys.extension(extension.id)}
       open={open}
@@ -44,12 +56,12 @@ export function AgentMailCard({ extension }: Readonly<{ extension: ExtensionEnti
         event.preventDefault();
         setOpen((current) => !current);
       }}>
-        <Mail size={13} aria-hidden="true" />
-        <span className="agent-mail-card__route">
-          {AgentMails.detail(extension, "author") ?? "?"} → {AgentMails.detail(extension, "recipient") ?? "?"}
+        <span className="tool-card__icon"><Mail size={14} aria-hidden="true" /></span>
+        <span className="tool-card__title agent-mail-card__route" title={`${author} → ${recipient}`}>
+          {authorName} → {recipientName}
         </span>
-        <small className="agent-mail-card__kind">{KIND_LABELS[kind] ?? kind}</small>
-        <ChevronDown className="agent-mail-card__chevron" size={14} aria-hidden="true" />
+        <span className="tool-card__status">{KIND_LABELS[kind] ?? kind}</span>
+        <ChevronDown className="tool-card__chevron" size={14} aria-hidden="true" />
       </summary>
       {open ? <div className="agent-mail-card__body"><MarkdownContent text={payload} /></div> : null}
     </details>

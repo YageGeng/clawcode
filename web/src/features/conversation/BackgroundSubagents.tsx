@@ -1,37 +1,22 @@
 import { Bot, CircleAlert, Square } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { SessionId } from "../../acp/protocol";
+import { AgentMails } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { useWorkspaceStore } from "../../workspace/store";
 
-/** Shows persistent background children as a slim pill strip and refreshes their lightweight runtime state. */
+/**
+ * Shows persistent background children as a slim pill strip. Their running
+ * state is polled by the shell, which stays mounted when no Session is open.
+ */
 export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessionId: SessionId; controller: WorkspaceController }>) {
   const sessions = useWorkspaceStore((state) => state.sessions);
   const running = useWorkspaceStore((state) => state.runningSessionIds);
-  const connection = useWorkspaceStore((state) => state.connection.type);
   // The ownership edge is persisted in the header, so nicknames are known before the title fact is listed.
   const children = useMemo(() => sessions.flatMap((session) => session.ownership?.sessionId === sessionId
-    ? [{ sessionId: session.sessionId, name: session.ownership.name, nickname: session.ownership.nickname }]
+    ? [{ sessionId: session.sessionId, path: AgentMails.path(session.ownership), nickname: session.ownership.nickname }]
     : []), [sessions, sessionId]);
-  const ids = useMemo(() => children.map((child) => child.sessionId), [children]);
   const [error, setError] = useState<string>();
-  useEffect(() => {
-    if (ids.length === 0 || connection !== "ready") return;
-    let stopped = false;
-    let timer: number | undefined;
-    /** Schedules only after completion so slow requests never overlap polling rounds. */
-    const refresh = async () => {
-      let keepPolling = true;
-      try {
-        keepPolling = await controller.refreshSessionActivity(ids);
-        if (!stopped) setError(undefined);
-      }
-      catch (reason: unknown) { if (!stopped) setError(reason instanceof Error ? reason.message : String(reason)); }
-      if (!stopped && keepPolling) timer = window.setTimeout(() => { void refresh(); }, 5_000);
-    };
-    void refresh();
-    return () => { stopped = true; window.clearTimeout(timer); };
-  }, [connection, controller, ids]);
   if (children.length === 0) return null;
   return <section className="background-subagents" aria-label="子 agent">
     <span className="background-subagents__label"><Bot size={13} aria-hidden="true" />子 agent<b>{children.length}</b></span>
@@ -39,7 +24,7 @@ export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessio
       {children.map((child) => {
         const active = running.has(child.sessionId);
         return <li key={child.sessionId} className="subagent-pill" data-running={active}>
-          <button className="subagent-pill__open" type="button" title={`/root/${child.name}`} onClick={() => {
+          <button className="subagent-pill__open" type="button" title={child.path} onClick={() => {
             void controller.openSession(child.sessionId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
           }}>
             <span className="subagent-pill__dot" aria-hidden="true" />
@@ -53,6 +38,6 @@ export function BackgroundSubagents({ sessionId, controller }: Readonly<{ sessio
         </li>;
       })}
     </ul>
-    {error === undefined ? null : <span className="background-subagents__error" role="alert" title={error}><CircleAlert size={12} aria-hidden="true" />状态刷新失败</span>}
+    {error === undefined ? null : <span className="background-subagents__error" role="alert" title={error}><CircleAlert size={12} aria-hidden="true" />打开失败</span>}
   </section>;
 }
