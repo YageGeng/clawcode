@@ -315,6 +315,32 @@ impl SessionTranscript {
         Ok(state.store.branch(leaf)?)
     }
 
+    /// Visits the active branch from leaf to root under the transcript lock
+    /// without cloning entries, for scans that read only a few of them.
+    pub(in crate::runtime) fn inspect_active_branch(
+        &self,
+        mut visit: impl FnMut(&SessionEntry),
+    ) -> Result<(), KernelError> {
+        let state = self.state.lock()?;
+        let mut visited = std::collections::HashSet::new();
+        let mut cursor = state.store.lane(&self.lane);
+        while let Some(entry_id) = cursor {
+            // A corrupt parent chain must end the walk, as `branch` does.
+            if !visited.insert(entry_id) {
+                return Err(store::StoreError::InvalidSession(format!(
+                    "session branch contains a cycle at {entry_id}"
+                ))
+                .into());
+            }
+            let entry = state.store.get_entry(entry_id).ok_or_else(|| {
+                store::StoreError::EntryNotFound(entry_id.clone())
+            })?;
+            visit(entry);
+            cursor = entry.parent_id.as_ref();
+        }
+        Ok(())
+    }
+
     /// Returns durable operation records for replay and recovery inspection.
     pub(super) fn records(&self) -> Result<Vec<SessionRecord>, KernelError> {
         self.state

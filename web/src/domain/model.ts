@@ -337,6 +337,8 @@ export type ToolCallEntity = Readonly<{
   rawInput?: unknown;
   rawOutput?: unknown;
   subagentSessionId?: SessionId;
+  /** Questions a `request_user_input_async` call asked, from its result details. */
+  userQuestions?: UserQuestions;
   output?: ToolOutputInfo;
   content: readonly unknown[];
   startedAtMs?: TimestampMs;
@@ -375,6 +377,75 @@ export type ExtensionEntity = Readonly<{
   timestampMs: TimestampMs;
   kind: "message" | "error";
 }>;
+
+/** One model-authored question asked through `request_user_input_async`; `multiSelect` allows several options. */
+export type AsyncQuestion = Readonly<{ title: string; options?: readonly string[]; multiSelect?: boolean }>;
+
+/** The questions one call asked, addressed by `requestId` and position. */
+export type UserQuestions = Readonly<{ requestId: string; questions: readonly AsyncQuestion[] }>;
+
+/** Identity of one asynchronous question; also its ACP wire shape. */
+export type QuestionKey = Readonly<{ requestId: string; index: number }>;
+
+/** One settlement a `question_reply` record carries, titled by the kernel; no answer means skipped. */
+export type QuestionSettlement = Readonly<{ key: QuestionKey; question: string; answer?: string }>;
+
+/** A question still waiting for the user, with the card that asked it. */
+export type OpenQuestion = Readonly<{ key: QuestionKey; toolCallId: ToolCallId; question: AsyncQuestion }>;
+
+/** Asynchronous questions and the `question_reply` records that settle them. */
+export const Questions = {
+  /** Tool that asks without waiting. */
+  TOOL: "request_user_input_async",
+  /** Extension custom type of one answer or skip record. */
+  REPLY_TYPE: "question_reply",
+  /** Stable string identity for sets and storage keys. */
+  id(key: QuestionKey): string {
+    return `${key.requestId}:${key.index}`;
+  },
+  /** Session storage key of one question's unsent free-text answer. */
+  draftKey(slug: string, sessionId: SessionId, key: QuestionKey): string {
+    return `${slug}:question-draft:${sessionId}:${Questions.id(key)}`;
+  },
+  /** Decodes `user_questions` tool details; anything else is not a question call. */
+  asked(details: Readonly<Record<string, unknown>> | undefined): UserQuestions | undefined {
+    if (details?.type !== "user_questions" || typeof details.request_id !== "string" || !Array.isArray(details.questions)) return undefined;
+    const questions = details.questions.flatMap((value: unknown): AsyncQuestion[] => {
+      if (typeof value !== "object" || value === null) return [];
+      const record = value as Record<string, unknown>;
+      if (typeof record.title !== "string") return [];
+      const options = Array.isArray(record.options) ? record.options.filter((option): option is string => typeof option === "string") : undefined;
+      return [{ title: record.title, ...(options === undefined ? {} : { options }), ...(record.multi_select === true ? { multiSelect: true } : {}) }];
+    });
+    return { requestId: details.request_id, questions };
+  },
+  /** Reads the settlements of a reply record's details; other details carry none. */
+  settlements(details: unknown): readonly QuestionSettlement[] {
+    if (typeof details !== "object" || details === null || !Array.isArray((details as Record<string, unknown>).items)) return [];
+    return ((details as Record<string, unknown>).items as unknown[]).flatMap((value): QuestionSettlement[] => {
+      if (typeof value !== "object" || value === null) return [];
+      const item = value as Record<string, unknown>;
+      if (typeof item.request_id !== "string" || typeof item.index !== "number") return [];
+      const settlement = { key: { requestId: item.request_id, index: item.index }, question: typeof item.question === "string" ? item.question : "" };
+      return [typeof item.answer === "string" ? { ...settlement, answer: item.answer } : settlement];
+    });
+  },
+  /** Drops this tab's in-flight ids that a now-visible reply record settles; same set when none. */
+  settled(settling: ReadonlySet<string>, extension: ExtensionEntity): ReadonlySet<string> {
+    if (settling.size === 0 || extension.customType !== Questions.REPLY_TYPE) return settling;
+    const ids = Questions.settlements(extension.details).map((settlement) => Questions.id(settlement.key)).filter((id) => settling.has(id));
+    if (ids.length === 0) return settling;
+    const remaining = new Set(settling);
+    for (const id of ids) remaining.delete(id);
+    return remaining;
+  },
+  /** Reads the settlements a queued message carries, if it is a reply record. */
+  queued(message: Readonly<Record<string, unknown>>): readonly QuestionSettlement[] {
+    const content = message.content as Record<string, unknown> | undefined;
+    const extension = content?.type === "extension" ? content.extension as Record<string, unknown> | undefined : undefined;
+    return extension?.custom_type === Questions.REPLY_TYPE ? Questions.settlements(extension.details) : [];
+  }
+} as const;
 
 /** Inter-agent mail persisted as `agent_message` extension messages. */
 export const AgentMails = {

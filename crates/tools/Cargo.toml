@@ -37,7 +37,7 @@ ignore = { workspace = true }
 tempfile = { workspace = true }
 
 # pty
-nix = { workspace = true }
+nix = { workspace = true, features = ["fs", "poll"] }
 portable-pty = { workspace = true }
 
 # misc

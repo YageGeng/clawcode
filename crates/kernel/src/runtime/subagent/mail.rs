@@ -175,10 +175,28 @@ impl Session {
         turn_id: &TurnId,
         mail: Vec<AgentMail>,
     ) -> Result<Vec<AgentMessage>, KernelError> {
-        let mut written = Vec::with_capacity(mail.len());
-        for mail in mail {
-            let extension = ExtensionMessage::try_from(mail)
-                .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let extensions = mail
+            .into_iter()
+            .map(|mail| {
+                ExtensionMessage::try_from(mail)
+                    .map_err(|error| KernelError::Protocol(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.write_extensions(kernel, emitter, turn_id, extensions)
+            .await
+    }
+
+    /// Persists kernel-authored Extension messages, such as mail and question
+    /// skips, in one Turn and emits each message lifecycle.
+    pub(in crate::runtime) async fn write_extensions(
+        &self,
+        kernel: &Kernel,
+        emitter: &EventEmitter,
+        turn_id: &TurnId,
+        extensions: Vec<ExtensionMessage>,
+    ) -> Result<Vec<AgentMessage>, KernelError> {
+        let mut written = Vec::with_capacity(extensions.len());
+        for extension in extensions {
             let message = kernel.message_now(
                 turn_id,
                 MessageContent::Extension { extension },

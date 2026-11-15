@@ -1,10 +1,11 @@
 mod operations;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use protocol::{
-    AgentMail, EntryId, PendingMessages, QueueId, QueueKind, QueuedMessage,
+    AgentMail, EntryId, ExtensionMessage, PendingMessages, QuestionKey,
+    QuestionReply, QueueId, QueueKind, QueuedMessage,
 };
 use serde::{Deserialize, Serialize};
 use store::{RecordKind, SessionRecord, SessionStore};
@@ -97,7 +98,16 @@ impl SessionExecution {
     pub(super) fn open_queue(&self) -> Result<(), KernelError> {
         let cancellation = self.cancellation.lock()?;
         self.queue.lock()?.open = !cancellation.is_cancelled();
+        self.queue_opened.notify_waiters();
         Ok(())
+    }
+
+    /// Resolves once a Run next opens the queue; enable it before checking
+    /// the queue so an opening in between is not missed.
+    pub(in crate::runtime) fn queue_opened(
+        &self,
+    ) -> tokio::sync::futures::Notified<'_> {
+        self.queue_opened.notified()
     }
 
     /// Closes acceptance before settlement or cancellation withdraws pending inputs.
@@ -121,6 +131,13 @@ impl SessionExecution {
                 .flatten()
         });
         if let Some(item) = item {
+            // A claimed reply is in neither the queue nor the transcript until
+            // it commits, so its questions stay closed through `reply_keys`.
+            if let Ok(reply) =
+                QuestionReply::try_from(&item.queued.message.content)
+            {
+                queue.reply_keys.extend(reply.keys());
+            }
             return Ok(ClaimOutcome::Item(Box::new(ClaimedItem {
                 item,
                 execution: Arc::clone(self),
@@ -152,6 +169,66 @@ impl SessionExecution {
             activity.mail = activity.mail.wrapping_add(1);
         });
         Ok(None)
+    }
+
+    /// Keeps a Run's first-input reply closed until the Run ends; the input
+    /// reaches the transcript only in the first Turn.
+    pub(in crate::runtime) fn reserve_reply_keys(
+        &self,
+        reply: &QuestionReply,
+    ) -> Result<(), KernelError> {
+        self.queue.lock()?.reply_keys.extend(reply.keys());
+        Ok(())
+    }
+
+    /// Returns every question settled by input that is not yet in the
+    /// transcript: queued replies and replies the active Run holds.
+    pub(in crate::runtime) fn settled_question_keys(
+        &self,
+    ) -> Result<BTreeSet<QuestionKey>, KernelError> {
+        let queue = self.queue.lock()?;
+        let mut keys = queue.reply_keys.clone();
+        let queued =
+            queue.steering.iter().chain(&queue.follow_up).map(|item| {
+                QuestionReply::try_from(&item.queued.message.content)
+            });
+        let held = queue.skips.iter().map(QuestionReply::try_from);
+        for reply in queued.chain(held).flatten() {
+            keys.extend(reply.keys());
+        }
+        Ok(keys)
+    }
+
+    /// Holds a skip for the active Run, or hands it back when no Run accepts input.
+    pub(in crate::runtime) fn queue_skip(
+        &self,
+        skip: ExtensionMessage,
+    ) -> Result<Option<ExtensionMessage>, KernelError> {
+        let mut queue = self.queue.lock()?;
+        if !queue.open {
+            return Ok(Some(skip));
+        }
+        queue.skips.push_back(skip);
+        Ok(None)
+    }
+
+    /// Removes every held skip in arrival order for writing.
+    pub(in crate::runtime) fn take_skips(
+        &self,
+    ) -> Result<Vec<ExtensionMessage>, KernelError> {
+        let mut queue = self.queue.lock()?;
+        let skips = queue.skips.drain(..).collect::<Vec<_>>();
+        // Taken skips are in neither the lane nor the transcript until written.
+        for reply in skips.iter().flat_map(QuestionReply::try_from) {
+            queue.reply_keys.extend(reply.keys());
+        }
+        Ok(skips)
+    }
+
+    /// Forgets the ended Run's in-flight replies; every one is now written or returned.
+    pub(super) fn clear_reply_keys(&self) -> Result<(), KernelError> {
+        self.queue.lock()?.reply_keys.clear();
+        Ok(())
     }
 
     /// Removes every queued mail in arrival order.
@@ -252,6 +329,14 @@ pub(in crate::runtime) struct PendingQueue {
     // ponytail: mail of a busy recipient lives only in memory and is lost with
     // a crashed Run; write lane records when crash recovery is required.
     mail: VecDeque<AgentMail>,
+    /// Questions settled by replies the active Run took off the queue or
+    /// started with but has not written yet; cleared when the Run ends.
+    reply_keys: BTreeSet<QuestionKey>,
+    /// Question skips for the active Run, written beside non-waking mail so a
+    /// skip never extends the Run.
+    // ponytail: skips of a busy Session live only in memory and are lost with
+    // a crashed Run, which reopens their questions; write lane records if that matters.
+    skips: VecDeque<ExtensionMessage>,
 }
 
 impl PendingQueue {

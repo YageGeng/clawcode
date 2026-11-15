@@ -181,6 +181,13 @@ pub struct TruncationDetails {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultDetails {
+    /// Questions asked through `request_user_input_async`.
+    UserQuestions {
+        /// Kernel-generated identity shared by every question in this call.
+        request_id: String,
+        /// Questions in display order; a question is addressed by its index.
+        questions: Vec<crate::AsyncQuestion>,
+    },
     /// Outcome of a plan submitted through `exit_plan_mode`.
     PlanApproval {
         /// Whether the user approved and plan mode ended.

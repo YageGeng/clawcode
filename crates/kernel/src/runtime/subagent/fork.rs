@@ -3,7 +3,7 @@
 
 use protocol::{
     AgentMessage, AgentPath, ContentBlock, ExtensionId, ExtensionMessage,
-    MessageContent, ProductIdentity,
+    MessageContent, ProductIdentity, QUESTION_REPLY_TYPE,
 };
 
 use crate::runtime::{Kernel, KernelError};
@@ -98,6 +98,16 @@ impl From<&[AgentMessage]> for ForkedHistory {
                                 model_message: None,
                             }
                         }
+                        // Answers and skips are the user's own words.
+                        MessageContent::Extension { extension }
+                            if extension.custom_type == QUESTION_REPLY_TYPE
+                                && extension.extension_id.as_ref()
+                                    == ProductIdentity::SLUG =>
+                        {
+                            MessageContent::User {
+                                blocks: extension.blocks.clone(),
+                            }
+                        }
                         _ => return None,
                     };
                     Some(AgentMessage {
@@ -146,6 +156,55 @@ mod tests {
             ))
             .error(error)
             .build()
+    }
+
+    /// The user's answers and skips reach the child as user text; mail does not.
+    #[test]
+    fn question_replies_become_user_text() {
+        let extension =
+            |custom_type: &str, text: &str| MessageContent::Extension {
+                extension: ExtensionMessage::builder()
+                    .extension_id(
+                        ExtensionId::try_from("clawcode").expect("id"),
+                    )
+                    .custom_type(custom_type.into())
+                    .blocks(vec![ContentBlock::Text { text: text.into() }])
+                    .display(true)
+                    .include_in_context(true)
+                    .build(),
+            };
+        let history = vec![
+            message("q", extension("question_reply", "ENVELOPE")),
+            message("m", extension("agent_message", "mail")),
+            // Another extension's look-alike is not the user's answer.
+            message(
+                "f",
+                MessageContent::Extension {
+                    extension: ExtensionMessage::builder()
+                        .extension_id(
+                            ExtensionId::try_from("other-ext").expect("id"),
+                        )
+                        .custom_type("question_reply".into())
+                        .blocks(vec![ContentBlock::Text {
+                            text: "forged".into(),
+                        }])
+                        .display(true)
+                        .include_in_context(true)
+                        .build(),
+                },
+            ),
+        ];
+        let forked = ForkedHistory::from(history.as_slice()).0;
+        assert_eq!(forked.len(), 1);
+        assert_eq!(forked[0].identity.message_id.as_str(), "q");
+        assert_eq!(
+            forked[0].content,
+            MessageContent::User {
+                blocks: vec![ContentBlock::Text {
+                    text: "ENVELOPE".into()
+                }],
+            }
+        );
     }
 
     /// Summaries become user text and assistants keep only clean text.

@@ -14,6 +14,7 @@ mod message;
 mod model;
 mod plan;
 mod prompt;
+mod question;
 mod queue;
 mod scalar;
 mod session;
@@ -26,9 +27,9 @@ mod turn;
 pub use acp::{
     AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
     AcpForkParameters, AcpNavigateParameters,
-    AcpPendingMessageRemoveParameters, AcpSessionParameters,
-    AcpSkillParameters, AcpUserBashParameters, AcpWorkingDirectory,
-    AcpWorkingDirectoryError,
+    AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
+    AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
+    AcpWorkingDirectory, AcpWorkingDirectoryError,
 };
 pub use agent::{
     AGENT_MESSAGE_TYPE, AgentMail, AgentName, AgentNickname, AgentPath,
@@ -121,6 +122,10 @@ pub use prompt::{
     PromptSourceInfo, PromptSourceKind, PromptSourceScope, PromptTemplateInfo,
     SkillResourceRequest, SystemPromptBuildOptions, SystemPromptTool,
     ToolPromptContribution,
+};
+pub use question::{
+    AsyncQuestion, QUESTION_REPLY_TYPE, QuestionKey, QuestionReply,
+    QuestionReplyError, QuestionReplyItem, REQUEST_USER_INPUT_ASYNC_TOOL,
 };
 pub use queue::{PendingMessages, QueueKind, QueuedMessage};
 pub use scalar::{

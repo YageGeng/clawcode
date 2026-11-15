@@ -1,3 +1,4 @@
+mod ask_user;
 #[allow(dead_code)]
 #[path = "../subagent/fixture.rs"]
 mod fixture;

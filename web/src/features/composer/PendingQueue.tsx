@@ -2,6 +2,7 @@ import { ArrowUpToLine, ChevronDown, ListOrdered, LoaderCircle, Trash2, X } from
 import { useId, useState } from "react";
 
 import type { PendingMessages, QueuedMessage } from "../../domain/model";
+import { Questions } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 
 type PendingQueueProps = Readonly<{
@@ -16,6 +17,9 @@ type QueueAction = { kind: "clear" } | { kind: "promote" | "remove"; queueId: st
 const QueuedMessageView = {
   /** Preserves the original command and attachment summary when inspecting queued input. */
   text(item: QueuedMessage): string {
+    // A queued answer shows what the user answered.
+    const answer = Questions.queued(item.message).map((settlement) => settlement.answer).find((text) => text !== undefined);
+    if (answer !== undefined) return `回答：${answer}`;
     const content = item.message.content;
     if (typeof content !== "object" || content === null || Array.isArray(content)) return item.queueId;
     const contentRecord = content as Record<string, unknown>;

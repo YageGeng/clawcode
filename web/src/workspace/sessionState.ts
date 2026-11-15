@@ -24,7 +24,7 @@ import type {
   ToolCallEntity,
   TranscriptEntry
 } from "../domain/model";
-import { AgentRunUsages, CacheMisses, EventOrdering as Ordering } from "../domain/model";
+import { AgentRunUsages, CacheMisses, EventOrdering as Ordering, Questions } from "../domain/model";
 
 export type SessionWorkspaceState = Readonly<{
   messages: ReadonlyMap<MessageId, MessageEntity>;
@@ -52,6 +52,8 @@ export type SessionWorkspaceState = Readonly<{
   compaction: CompactionStatus;
   outcomeUnknown: boolean;
   diagnostics: readonly string[];
+  /** Questions this tab is answering or skipping, by `Questions.id`; kept until the server shows the settlement. */
+  settlingQuestions: ReadonlySet<string>;
 }>;
 
 export type SessionWorkspaceAction =
@@ -82,7 +84,8 @@ export type SessionWorkspaceAction =
   | { readonly type: "retry/changed"; readonly retry: RetryStatus | undefined }
   | { readonly type: "compaction/changed"; readonly compaction: CompactionStatus }
   | { readonly type: "outcome/unknown"; readonly value: boolean }
-  | { readonly type: "diagnostic/added"; readonly message: string };
+  | { readonly type: "diagnostic/added"; readonly message: string }
+  | { readonly type: "questions/settling"; readonly ids: readonly string[]; readonly settling: boolean };
 
 /** Cap on retained ACP events; the performance blueprint treats these as debug-only. */
 export const MAX_RETAINED_SESSION_EVENTS = 2_000;
@@ -132,7 +135,8 @@ export const initialSessionWorkspaceState: SessionWorkspaceState = {
   retry: undefined,
   compaction: { type: "idle" },
   outcomeUnknown: false,
-  diagnostics: []
+  diagnostics: [],
+  settlingQuestions: new Set()
 };
 
 export const EventSequenceRanges = {
@@ -155,7 +159,9 @@ export function reduceSessionWorkspace(
       ...initialSessionWorkspaceState,
       // Clearing stale entities must not hide a disconnected Run whose final
       // outcome is still unknown until a successful replay completes.
-      outcomeUnknown: state.outcomeUnknown
+      outcomeUnknown: state.outcomeUnknown,
+      // A replay cannot show a skip the server still holds for its Run.
+      settlingQuestions: state.settlingQuestions
     };
     case "message/upserted": {
       const messages = new Map(state.messages);
@@ -216,7 +222,8 @@ export function reduceSessionWorkspace(
       extensions.set(action.extension.id, action.extension);
       const transcript = exists ? state.transcript : [...state.transcript, { type: "extension" as const, extensionEventId: action.extension.id, order: action.order }]
         .sort((left, right) => Ordering.compare(left.order, right.order));
-      return { ...state, extensions, transcript };
+      // Once the server shows a settlement, this tab stops hiding it on its own.
+      return { ...state, extensions, transcript, settlingQuestions: Questions.settled(state.settlingQuestions, action.extension) };
     }
     case "compaction/upserted": {
       const compactions = new Map(state.compactions);
@@ -316,7 +323,10 @@ export function reduceSessionWorkspace(
           ...state,
           running: false,
           retry: state.retry?.type === "finished" ? state.retry : undefined,
-          compaction: state.compaction.type === "running" ? { type: "idle" } : state.compaction
+          compaction: state.compaction.type === "running" ? { type: "idle" } : state.compaction,
+          // An idle server holds no skip: each one is written or was lost with
+          // its process, so a lost skip's question shows again.
+          settlingQuestions: initialSessionWorkspaceState.settlingQuestions
         };
     case "usage/changed": return { ...state, contextUsage: action.usage };
     case "config/replaced": return { ...state, configOptions: action.options };
@@ -327,5 +337,13 @@ export function reduceSessionWorkspace(
     case "compaction/changed": return { ...state, compaction: action.compaction };
     case "outcome/unknown": return { ...state, outcomeUnknown: action.value };
     case "diagnostic/added": return { ...state, diagnostics: [...state.diagnostics, action.message] };
+    case "questions/settling": {
+      const settlingQuestions = new Set(state.settlingQuestions);
+      for (const id of action.ids) {
+        if (action.settling) settlingQuestions.add(id);
+        else settlingQuestions.delete(id);
+      }
+      return { ...state, settlingQuestions };
+    }
   }
 }

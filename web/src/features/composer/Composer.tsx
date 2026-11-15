@@ -12,6 +12,7 @@ import { CommandPaletteModel } from "./commandPaletteModel";
 import { BackgroundTerminals } from "./BackgroundTerminals";
 import { PendingQueue } from "./PendingQueue";
 import { PlanPanel } from "./PlanPanel";
+import { QuestionPanel } from "./QuestionPanel";
 import { sessionWorkspace } from "../../workspace/state";
 import { backgroundTerminalCount } from "../../workspace/selectors";
 import { useWorkspaceStore } from "../../workspace/store";
@@ -244,6 +245,7 @@ export function Composer({ productSlug, sessionId, running, contextUsage, outcom
 
   return (
     <div className="composer-area">
+      <QuestionPanel sessionId={sessionId} controller={controller} />
       <PlanPanel sessionId={sessionId} />
       {pending.steering.length + pending.followUp.length === 0 ? null : <PendingQueue pending={pending} controller={controller} onError={queueError} onHint={setHint} />}
       {backgroundTerminals === 0 ? null : <BackgroundTerminals sessionId={sessionId} count={backgroundTerminals} controller={controller} onError={queueError} />}

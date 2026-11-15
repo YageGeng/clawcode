@@ -17,6 +17,8 @@ pub enum RunInput {
     Blocks(Vec<ContentBlock>),
     /// Inter-agent mail that wakes its recipient; never queued, never dispatched.
     Mail(crate::AgentMail),
+    /// Answers or skips for asynchronous questions; never dispatched as a command.
+    QuestionReply(crate::QuestionReply),
 }
 
 impl RunInput {
@@ -25,7 +27,7 @@ impl RunInput {
     pub fn slash_command_text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(text),
-            Self::Blocks(_) | Self::Mail(_) => None,
+            Self::Blocks(_) | Self::Mail(_) | Self::QuestionReply(_) => None,
         }
     }
 }

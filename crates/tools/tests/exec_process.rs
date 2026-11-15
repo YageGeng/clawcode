@@ -232,3 +232,28 @@ async fn daemon_left_by_exited_leader_is_killed_on_terminate() {
     .await;
     assert!(gone, "daemon {pid} still alive");
 }
+
+/// A background job that writes only after its leader exited is still
+/// drained, so a full terminal never freezes it.
+#[tokio::test]
+async fn pty_background_job_is_drained_after_exit() {
+    let dir = tempfile::tempdir().expect("dir");
+    let done = dir.path().join("done");
+    // The job starts writing after the post-exit grace, when output is closed.
+    let process = spawn(
+        dir.path(),
+        &format!(
+            "trap '' HUP; (sleep 1; head -c 300000 /dev/zero; touch '{}') & exit 0",
+            done.display()
+        ),
+        true,
+    );
+    finished(&process, Duration::from_secs(5)).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !done.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(done.exists(), "the background job froze on a full terminal");
+    process.terminate();
+}

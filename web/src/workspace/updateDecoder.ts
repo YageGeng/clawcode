@@ -1,5 +1,5 @@
 import { AcpProtocol } from "../acp/protocol";
-import { ModelUsages } from "../domain/model";
+import { ModelUsages, Questions } from "../domain/model";
 import type { EntryId, EventMeta, ImageContentBlock, MessageId, RunId, SessionId, SessionUpdateNotification, TimestampMs, TurnId } from "../acp/protocol";
 import type {
   AvailableCommandEntity,
@@ -171,11 +171,13 @@ export class SessionUpdateDecoder {
       const outputRecord = typeof rawOutput === "object" && rawOutput !== null && !Array.isArray(rawOutput) ? rawOutput as Record<string, unknown> : undefined;
       const messageContent = typeof outputRecord?.content === "object" && outputRecord.content !== null && !Array.isArray(outputRecord.content) ? outputRecord.content as Record<string, unknown> : undefined;
       const output = this.outputInfo(outputRecord?.output ?? messageContent?.output);
+      // Details of the persisted result message; the live tool end carries its own.
+      const persistedDetails = typeof messageContent?.details === "object" && messageContent.details !== null && !Array.isArray(messageContent.details)
+        ? messageContent.details as Record<string, unknown>
+        : undefined;
       const details = typeof outputRecord?.details === "object" && outputRecord.details !== null && !Array.isArray(outputRecord.details)
         ? outputRecord.details as Record<string, unknown>
-        : typeof messageContent?.details === "object" && messageContent.details !== null && !Array.isArray(messageContent.details)
-          ? messageContent.details as Record<string, unknown>
-          : undefined;
+        : persistedDetails;
       // A user's own `!` command arrives as a tool tagged with its origin.
       const userShell = productMeta?.origin === "user";
       const disposition = typeof productMeta?.disposition === "object" && productMeta.disposition !== null ? productMeta.disposition as Record<string, unknown> : undefined;
@@ -187,6 +189,9 @@ export class SessionUpdateDecoder {
           ? update.status
           : previous?.status ?? "pending";
       const kind = typeof update.kind === "string" && TOOL_KINDS.has(update.kind as ToolKind) ? update.kind as ToolKind : previous?.kind;
+      // Questions open once their result message is persisted: the live tool end
+      // arrives earlier, before the kernel can accept an answer or a skip.
+      const userQuestions = Questions.asked(persistedDetails) ?? previous?.userQuestions;
       const tool: ToolCallEntity = {
         toolCallId,
         title: typeof update.title === "string" ? update.title : previous?.title ?? update.toolCallId,
@@ -201,6 +206,7 @@ export class SessionUpdateDecoder {
         ...(details?.type === "subagent" && typeof details.session_id === "string"
           ? { subagentSessionId: details.session_id as SessionId }
           : previous?.subagentSessionId === undefined ? {} : { subagentSessionId: previous.subagentSessionId }),
+        ...(userQuestions === undefined ? {} : { userQuestions }),
         ...(output === undefined ? {} : { output }),
         // ACP v2 tool content follows the same omitted/clear/replace upsert contract as messages.
         content: !("content" in update) ? previous?.content ?? [] : Array.isArray(update.content) ? update.content : [],

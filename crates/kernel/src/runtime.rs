@@ -12,6 +12,7 @@ mod exec;
 mod extension;
 mod mcp;
 mod plan;
+mod question;
 mod run;
 mod session;
 mod subagent;
@@ -141,6 +142,9 @@ pub enum KernelError {
     /// The plan approval was already answered, withdrawn, or never pending.
     #[error("plan approval is already resolved: {0}")]
     PlanApprovalResolved(String),
+    /// The question was answered, skipped, already queued, or is not on the branch.
+    #[error("question {request_id}#{index} is no longer open")]
+    QuestionClosed { request_id: String, index: usize },
     /// The active branch has no model-visible history before its retention boundary.
     #[error("there is no context to compact")]
     NoContextToCompact,
@@ -178,6 +182,13 @@ impl KernelError {
             }
             Self::Model(error @ ModelError::AuthRequired { .. }) => {
                 Self::Model(error.clone())
+            }
+            // Clients map a closed question to its own refusal, not an internal error.
+            Self::QuestionClosed { request_id, index } => {
+                Self::QuestionClosed {
+                    request_id: request_id.clone(),
+                    index: *index,
+                }
             }
             other => Self::Protocol(other.to_string()),
         }

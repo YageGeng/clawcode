@@ -91,6 +91,42 @@ async fn snapshot_restores_functions_and_aliases() {
     assert_eq!(argv[1], "-c", "replay skips the login startup");
 }
 
+/// A profile function written with extglob patterns replays: the snapshot
+/// restores shell options before it parses the functions that need them.
+#[tokio::test]
+async fn snapshot_replays_functions_that_need_extglob() {
+    let (home, env) = home_with_profile(
+        "shopt -s extglob\nmatch_a() { case \"$1\" in +(a)) echo matched-extglob;; esac; }\n",
+    );
+    let snapshot = ShellSnapshot::new(
+        UserShell::from(PathBuf::from("/bin/bash")),
+        home.path().join("snapshot.sh"),
+    );
+
+    snapshot
+        .capture(
+            home.path(),
+            &env,
+            &ExecEnvironment::new(&config::ExecEnvPolicy::default()),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("capture");
+    let argv = snapshot.shell().argv(
+        "match_a aaa",
+        true,
+        Some(snapshot.path()),
+        &BTreeMap::new(),
+    );
+    let output = run(&argv, &env, home.path()).await;
+
+    let state = std::fs::read_to_string(snapshot.path()).unwrap_or_default();
+    assert!(
+        output.contains("matched-extglob"),
+        "{output}\n--- snapshot ---\n{state}"
+    );
+}
+
 /// Forced variables win over the ones the snapshot restores.
 #[tokio::test]
 async fn snapshot_does_not_override_forced_env() {

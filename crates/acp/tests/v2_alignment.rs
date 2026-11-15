@@ -243,6 +243,34 @@ impl Model for ScriptedModel {
                         .build(),
                 )),
             ]))),
+            "ask" => Ok(Box::pin(stream::iter([
+                Ok(ModelStreamEvent::ToolCall(
+                    protocol::ToolCall::builder()
+                        .tool_call_id(
+                            protocol::ToolCallId::try_from("ask-call")
+                                .expect("tool call id"),
+                        )
+                        .name("request_user_input_async".to_string())
+                        .arguments(serde_json::json!({
+                            "questions": [{ "title": "Which db?", "options": ["sqlite", "postgres"] }]
+                        }))
+                        .build(),
+                )),
+                Ok(ModelStreamEvent::Finished(
+                    ModelFinal::builder()
+                        .stop_reason(StopReason::ToolUse)
+                        .raw_stop_reason(None)
+                        .usage(protocol::ModelUsage::from(
+                            protocol::Usage::new()
+                                .input_tokens(1)
+                                .output_tokens(1)
+                                .cached_input_tokens(0)
+                                .cache_creation_input_tokens(0)
+                                .total_tokens(2),
+                        ))
+                        .build(),
+                )),
+            ]))),
             "hold" => {
                 tokio::select! {
                     () = self.release.notified() => Ok(Self::answer()),
@@ -3023,4 +3051,255 @@ async fn set_title_publishes_session_info_update() {
         },
     )
     .await;
+}
+
+/// A Session that asked the scripted question over ACP.
+struct AskedOverAcp<'a> {
+    connection: &'a V2ConnectionTo<Agent>,
+    session: wire::SessionId,
+    request_id: String,
+}
+
+impl<'a> AskedOverAcp<'a> {
+    /// Prompts `ask` and reads the question's request id from its tool update.
+    async fn ask(
+        connection: &'a V2ConnectionTo<Agent>,
+        session: wire::SessionId,
+        updates: &mut Updates,
+    ) -> Result<Self, agent_client_protocol::Error> {
+        connection
+            .send_request(prompt(&session, "ask"))
+            .block_task()
+            .await?;
+        let update = next_matching(updates, |value| {
+            value.pointer("/rawOutput/details/type")
+                == Some(&serde_json::json!("user_questions"))
+        })
+        .await;
+        let request_id = update
+            .pointer("/rawOutput/details/request_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("request id")
+            .to_string();
+        Ok(Self {
+            connection,
+            session,
+            request_id,
+        })
+    }
+
+    /// Sends `blocks` as an answer carrying `product` metadata.
+    async fn send(
+        &self,
+        blocks: Vec<wire::ContentBlock>,
+        product: serde_json::Value,
+    ) -> Result<wire::PromptResponse, agent_client_protocol::Error> {
+        self.connection
+            .send_request(
+                wire::PromptRequest::new(self.session.clone(), blocks).meta(
+                    wire::Meta::from_iter([("clawcode".into(), product)]),
+                ),
+            )
+            .block_task()
+            .await
+    }
+
+    /// Answers question `index` with `text`.
+    async fn answer(
+        &self,
+        index: i64,
+        text: &str,
+    ) -> Result<wire::PromptResponse, agent_client_protocol::Error> {
+        self.send(
+            vec![wire::ContentBlock::Text(wire::TextContent::new(text))],
+            serde_json::json!({ "questionReply": { "requestId": self.request_id, "index": index } }),
+        )
+        .await
+    }
+
+    /// Skips question `index` through the product method.
+    async fn dismiss(
+        &self,
+        parameters: serde_json::Value,
+    ) -> Result<serde_json::Value, agent_client_protocol::Error> {
+        exec_request(
+            self.connection,
+            protocol::AcpExtensionMethod::QuestionDismiss,
+            parameters,
+        )
+        .await
+    }
+
+    /// Every question reply on the Session's branch.
+    fn replies(&self, kernel: &Kernel) -> Vec<protocol::QuestionReply> {
+        kernel
+            .session_transcript(
+                &protocol::SessionId::try_from(self.session.to_string())
+                    .expect("session id"),
+            )
+            .expect("transcript")
+            .iter()
+            .filter_map(|message| {
+                protocol::QuestionReply::try_from(&message.content).ok()
+            })
+            .collect()
+    }
+}
+
+/// An answer prompt becomes a question reply the client sees projected.
+#[tokio::test]
+async fn question_reply_prompt_reaches_the_model_as_a_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let kernel = alignment_kernel(
+        root.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(
+        &acp(&kernel),
+        root.path(),
+        async |connection, session, updates| {
+            let asked = AskedOverAcp::ask(connection, session, updates).await?;
+            asked.answer(0, "postgres").await?;
+            next_matching(updates, |value| {
+                value.to_string().contains("question_reply")
+            })
+            .await;
+            let replies = asked.replies(&kernel);
+            assert_eq!(replies.len(), 1);
+            assert_eq!(replies[0].items[0].answer.as_deref(), Some("postgres"));
+            Ok(())
+        },
+    )
+    .await;
+}
+
+/// Malformed answers and answers to closed questions are invalid parameters.
+#[tokio::test]
+async fn invalid_question_reply_meta_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let kernel = alignment_kernel(
+        root.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(
+        &acp(&kernel),
+        root.path(),
+        async |connection, session, updates| {
+            let asked = AskedOverAcp::ask(connection, session, updates).await?;
+            let text = |text: &str| {
+                wire::ContentBlock::Text(wire::TextContent::new(text))
+            };
+            let target = serde_json::json!({ "requestId": asked.request_id, "index": 0 });
+            for (blocks, product) in [
+                (
+                    vec![text("a")],
+                    serde_json::json!({ "questionReply": target, "whenBusy": "steer" }),
+                ),
+                (
+                    vec![text("a"), text("b")],
+                    serde_json::json!({ "questionReply": target }),
+                ),
+                (vec![text("  ")], serde_json::json!({ "questionReply": target })),
+                (
+                    vec![text("a")],
+                    serde_json::json!({ "questionReply": { "requestId": "", "index": 0 } }),
+                ),
+                (
+                    vec![text("a")],
+                    serde_json::json!({ "questionReply": { "requestId": "r", "index": -1 } }),
+                ),
+                (
+                    vec![text("a")],
+                    serde_json::json!({ "questionReply": { "requestId": "r", "index": 0, "extra": 1 } }),
+                ),
+            ] {
+                let error = asked.send(blocks, product.clone()).await.unwrap_err();
+                assert_eq!(
+                    error.code,
+                    agent_client_protocol::ErrorCode::INVALID_PARAMS,
+                    "{product}"
+                );
+            }
+            asked.answer(0, "postgres").await?;
+            next_matching(updates, |value| is_idle(value, "end_turn")).await;
+            drain(updates).await;
+            let error = asked.answer(0, "again").await.unwrap_err();
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::INVALID_PARAMS
+            );
+            assert_eq!(
+                error.data.as_ref().map(|data| data["reason"].clone()),
+                Some(serde_json::json!("questionClosed"))
+            );
+            // A refusal before insertion starts no Run, so nothing settles.
+            assert!(
+                drain(updates)
+                    .await
+                    .iter()
+                    .all(|value| value["sessionUpdate"] != "state_update")
+            );
+            Ok(())
+        },
+    )
+    .await;
+}
+
+/// The skip method writes once and refuses unknown fields.
+#[tokio::test]
+async fn dismiss_method_round_trips() {
+    let root = tempfile::tempdir().unwrap();
+    let kernel = alignment_kernel(
+        root.path(),
+        &ScriptedModel::new(),
+        Arc::new(StaticExtensionFactory::default()),
+    );
+    with_session(
+        &acp(&kernel),
+        root.path(),
+        async |connection, session, updates| {
+            let asked = AskedOverAcp::ask(connection, session, updates).await?;
+            next_matching(updates, |value| is_idle(value, "end_turn")).await;
+            let parameters = serde_json::json!({
+                "sessionId": asked.session.to_string(),
+                "items": [{ "requestId": asked.request_id, "index": 0 }]
+            });
+            assert_eq!(
+                asked.dismiss(parameters.clone()).await?,
+                serde_json::json!({})
+            );
+            assert_eq!(asked.dismiss(parameters).await?, serde_json::json!({}));
+            assert_eq!(asked.replies(&kernel).len(), 1);
+            let error = asked
+                .dismiss(serde_json::json!({
+                    "sessionId": asked.session.to_string(),
+                    "items": [],
+                    "extra": 1
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                agent_client_protocol::ErrorCode::INVALID_PARAMS
+            );
+            Ok(())
+        },
+    )
+    .await;
+}
+
+/// Initialization advertises the skip method.
+#[tokio::test]
+async fn initialize_advertises_the_dismiss_method() {
+    let response = initialize_with(2).await.expect("initialize");
+    let json = serde_json::to_value(&response).expect("serialize");
+    assert!(
+        json["_meta"]["clawcode"]["methods"]
+            .as_array()
+            .expect("advertised methods")
+            .iter()
+            .any(|value| value == "_clawcode/session/question/dismiss")
+    );
 }

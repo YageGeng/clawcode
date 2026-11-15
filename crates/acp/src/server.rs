@@ -876,6 +876,7 @@ impl AcpServerFactory {
                         AcpExtensionMethod::PendingMessageRemove,
                         AcpExtensionMethod::PendingMessagePromote,
                         AcpExtensionMethod::ClearQueue,
+                        AcpExtensionMethod::QuestionDismiss,
                         AcpExtensionMethod::SessionRuntime,
                         AcpExtensionMethod::InvokeSkill,
                         AcpExtensionMethod::SkillList,
@@ -1539,13 +1540,35 @@ impl AcpServerFactory {
                                     .data(error.to_string())
                             })?;
                         active_watcher(&watchers, &session_id)?;
-                        let input = PromptInput::try_from(request.prompt)
-                            .map_err(|error| {
-                                agent_client_protocol::Error::invalid_params()
-                                    .data(error.to_string())
-                            })?
-                            .into_inner();
                         let options = PromptOptions::try_from(request.meta.as_ref())?;
+                        let input = match &options.question_reply {
+                            // An answer is exactly one non-blank text block;
+                            // checked before conversion joins text blocks.
+                            Some(key) => match request.prompt.as_slice() {
+                                [wire::ContentBlock::Text(text)]
+                                    if !text.text.trim().is_empty() =>
+                                {
+                                    protocol::RunInput::QuestionReply(protocol::QuestionReply {
+                                        // The kernel copies the question's title in.
+                                        items: vec![protocol::QuestionReplyItem::builder()
+                                            .request_id(key.request_id.clone())
+                                            .index(key.index)
+                                            .answer(Some(text.text.clone()))
+                                            .build()],
+                                    })
+                                }
+                                _ => {
+                                    return Err(agent_client_protocol::Error::invalid_params()
+                                        .data("questionReply needs one non-blank text block"));
+                                }
+                            },
+                            None => PromptInput::try_from(request.prompt)
+                                .map_err(|error| {
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.to_string())
+                                })?
+                                .into_inner(),
+                        };
                         let ticket = kernel.admission_ticket(&session_id).map_err(KernelFailure)?;
                         let (notice, insertion) = InsertionNotice::new();
 
@@ -1582,9 +1605,10 @@ impl AcpServerFactory {
                                 }
                                 // Refused before insertion, so no Run exists to
                                 // settle; the Kernel already logged the refusal.
-                                Err(KernelError::Model(
-                                    ModelError::AuthRequired { .. },
-                                )) => {}
+                                Err(
+                                    KernelError::Model(ModelError::AuthRequired { .. })
+                                    | KernelError::QuestionClosed { .. },
+                                ) => {}
                                 Err(error) => {
                                     tracing::error!(
                                         "Kernel Run for session {} failed: {}",
@@ -1935,6 +1959,8 @@ impl SessionConfigUpdate {
 pub(crate) struct PromptOptions {
     pub(crate) when_busy: Option<kernel::WhenBusy>,
     pub(crate) submission_id: Option<String>,
+    /// The asynchronous question this prompt answers, if any.
+    pub(crate) question_reply: Option<protocol::QuestionKey>,
 }
 
 impl TryFrom<Option<&wire::Meta>> for PromptOptions {
@@ -1945,6 +1971,7 @@ impl TryFrom<Option<&wire::Meta>> for PromptOptions {
         let mut options = Self {
             when_busy: None,
             submission_id: None,
+            question_reply: None,
         };
         let Some(value) = meta.and_then(|meta| meta.get("clawcode")) else {
             return Ok(options);
@@ -1971,6 +1998,25 @@ impl TryFrom<Option<&wire::Meta>> for PromptOptions {
                 })?;
             options.submission_id = Some(id.to_owned());
         }
+        if let Some(value) = product.get("questionReply") {
+            let key = <protocol::QuestionKey as serde::Deserialize>::deserialize(value)
+                .ok()
+                .filter(|key| {
+                    !key.request_id.is_empty()
+                        && key.request_id.chars().count() <= 128
+                })
+                .ok_or_else(|| {
+                    Self::Error::invalid_params().data(
+                        "questionReply needs a requestId of 1 to 128 characters and a non-negative index",
+                    )
+                })?;
+            // Answers always steer, so a placement would be silently ignored.
+            if options.when_busy.is_some() {
+                return Err(Self::Error::invalid_params()
+                    .data("questionReply cannot be combined with whenBusy"));
+            }
+            options.question_reply = Some(key);
+        }
         Ok(options)
     }
 }
@@ -1989,6 +2035,14 @@ impl From<KernelFailure> for agent_client_protocol::Error {
                     .data(serde_json::json!({ "methodId": method_id }))
             }
             error @ KernelError::SessionPersistenceUncertain => Self::internal_error().data(serde_json::json!({"outcomeUnknown": true, "message": error.to_string()})),
+            // Another tab or the user settled the question first.
+            KernelError::QuestionClosed { request_id, index } => {
+                Self::invalid_params().data(serde_json::json!({
+                    "reason": "questionClosed",
+                    "requestId": request_id,
+                    "index": index,
+                }))
+            }
             error => Self::internal_error().data(error.to_string()),
         }
     }

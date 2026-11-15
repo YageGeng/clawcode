@@ -204,6 +204,7 @@ impl SessionAssembly<'_> {
         crate::runtime::subagent::register(&runtime, kernel)?;
         crate::runtime::plan::register_exit_plan_mode(&runtime, kernel)?;
         crate::runtime::plan::register_todo_write(&runtime)?;
+        crate::runtime::question::register(&runtime, kernel)?;
         crate::runtime::exec::register(&runtime, kernel)?;
         if runtime.exec.is_some() {
             kernel.reconcile_lost_exec(&runtime)?;

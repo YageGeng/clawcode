@@ -1,5 +1,6 @@
 use protocol::{
-    AgentMail, ContentBlock, ExtensionMessage, MessageContent, SessionId,
+    AgentMail, ContentBlock, ExtensionMessage, MessageContent, QuestionReply,
+    SessionId,
 };
 
 use crate::runtime::{KernelError, Session};
@@ -15,11 +16,11 @@ pub(super) enum PromptInputExpansion {
         /// Skill read failure emitted by the active Kernel Run when present.
         diagnostic: Option<Box<protocol::SkillDiagnostic>>,
     },
-    /// Inter-agent mail persisted as its `agent_message` Extension message.
-    Mail {
-        /// Visible, context-included message that carries the mail.
+    /// Kernel-authored Extension message: inter-agent mail or a question reply.
+    Extension {
+        /// Visible, context-included message that carries the input.
         extension: ExtensionMessage,
-        /// Mail payload exposed to pre-Agent extension events.
+        /// Text exposed to pre-Agent extension events.
         text_projection: String,
     },
     /// Ordered non-command content plus its text-only extension projection.
@@ -50,9 +51,20 @@ impl PromptInputExpansion {
         let text_projection = mail.payload.clone();
         let extension = ExtensionMessage::try_from(mail)
             .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        Ok(Self::Mail {
+        Ok(Self::Extension {
             extension,
             text_projection,
+        })
+    }
+
+    /// Freezes one titled question reply as the Extension message its Run inserts.
+    pub(super) fn from_question_reply(
+        reply: &QuestionReply,
+    ) -> Result<Self, KernelError> {
+        Ok(Self::Extension {
+            text_projection: reply.to_string(),
+            extension: ExtensionMessage::try_from(reply)
+                .map_err(|error| KernelError::Protocol(error.to_string()))?,
         })
     }
 
@@ -63,7 +75,7 @@ impl PromptInputExpansion {
             Self::Blocks {
                 text_projection, ..
             }
-            | Self::Mail {
+            | Self::Extension {
                 text_projection, ..
             } => text_projection,
         }
@@ -73,7 +85,7 @@ impl PromptInputExpansion {
     pub(super) fn diagnostic(&self) -> Option<&protocol::SkillDiagnostic> {
         match self {
             Self::Text { diagnostic, .. } => diagnostic.as_deref(),
-            Self::Blocks { .. } | Self::Mail { .. } => None,
+            Self::Blocks { .. } | Self::Extension { .. } => None,
         }
     }
 
@@ -91,7 +103,7 @@ impl PromptInputExpansion {
                 },
             },
             Self::Blocks { blocks, .. } => MessageContent::User { blocks },
-            Self::Mail { extension, .. } => {
+            Self::Extension { extension, .. } => {
                 MessageContent::Extension { extension }
             }
         }

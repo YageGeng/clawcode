@@ -54,6 +54,9 @@ pub(in crate::runtime) struct SessionExecution {
     #[builder(default)]
     user_waits: AtomicUsize,
     idle_notify: Notify,
+    /// Wakes skips waiting for a Run to open its queue.
+    #[builder(default)]
+    pub(super) queue_opened: Notify,
     pub(super) cancellation: Mutex<CancellationToken>,
     pub(super) queue: Mutex<PendingQueue>,
     /// Counts mailbox and user-input arrivals that wake `wait_agent`.
@@ -499,6 +502,9 @@ impl Drop for ActiveRunLease {
     /// Clears only the active Run identity installed by this lease.
     fn drop(&mut self) {
         let _ = self.execution.close_queue();
+        // Only here are all of the Run's writes over; `close_queue` also runs
+        // mid-Run on cancel, before an unlocked first-input write can land.
+        let _ = self.execution.clear_reply_keys();
         if let Ok(mut active_run) = self.execution.active_run.lock()
             && active_run
                 .as_ref()

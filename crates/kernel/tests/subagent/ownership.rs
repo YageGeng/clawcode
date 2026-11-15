@@ -208,7 +208,12 @@ async fn owned_session_copies_owner_agent() {
         .find(|e| e.kind == "active_tools_change")
         .expect("tools")
         .payload["selection"];
-    for name in ["spawn_agent", "followup_task", "interrupt_agent"] {
+    for name in [
+        "spawn_agent",
+        "followup_task",
+        "interrupt_agent",
+        "request_user_input_async",
+    ] {
         assert!(
             policy["disabled"]
                 .as_array()
@@ -274,4 +279,44 @@ async fn dropped_delete_still_finishes() {
             .all(|summary| summary.session_id != session)
     })
     .await;
+}
+
+/// Children never see the root-only question tool, while the owner does.
+#[tokio::test]
+async fn child_sessions_lack_request_user_input_async() {
+    let test = TestKernel::new(|_| Route::answer("ok"));
+    let owner = test.create("owner").await;
+    let child = test
+        .kernel
+        .create_owned_session(
+            kernel::OwnedSessionRequest::builder()
+                .ownership(ownership(&owner))
+                .title(SessionTitle::try_from("child").expect("title"))
+                .model(None)
+                .build(),
+        )
+        .await
+        .expect("child");
+    test.run_text(&owner, "owner prompt")
+        .await
+        .expect("owner Run");
+    test.run_text(&child, "Summarize.")
+        .await
+        .expect("child Run");
+    let requests = test.model.requests.lock().expect("requests").clone();
+    let exposes = |prompt: &str| {
+        requests
+            .iter()
+            .find(|request| {
+                request.messages.iter().any(|message| {
+                    super::fixture::text(&message.content) == prompt
+                })
+            })
+            .expect("request")
+            .tools
+            .iter()
+            .any(|tool| tool.name == "request_user_input_async")
+    };
+    assert!(exposes("owner prompt"));
+    assert!(!exposes("Summarize."));
 }

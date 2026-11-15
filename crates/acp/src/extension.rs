@@ -9,9 +9,9 @@ use kernel::Kernel;
 use protocol::{
     AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
     AcpExtensionMethod, AcpForkParameters, AcpNavigateParameters,
-    AcpPendingMessageRemoveParameters, AcpSessionParameters,
-    AcpSkillParameters, AcpUserBashParameters, McpSessionRevisionNotification,
-    ProductIdentity,
+    AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
+    AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
+    McpSessionRevisionNotification, ProductIdentity,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -320,6 +320,16 @@ impl AcpExtensionDispatcher {
                     .promote_pending_message(&input.session_id, &input.queue_id)
                     .map_err(crate::server::KernelFailure)?;
                 serde_json::json!({ "promoted": promoted })
+            }
+            AcpExtensionMethod::QuestionDismiss => {
+                let input: AcpQuestionDismissParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                self.kernel
+                    .dismiss_questions(&input.session_id, input.items)
+                    .await
+                    .map_err(crate::server::KernelFailure)?;
+                serde_json::json!({})
             }
             AcpExtensionMethod::ClearQueue => {
                 let input: AcpSessionParameters =

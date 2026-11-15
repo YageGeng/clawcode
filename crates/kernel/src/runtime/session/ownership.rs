@@ -13,11 +13,13 @@ use crate::Model;
 use crate::runtime::plan::ModeChange;
 use crate::runtime::{Kernel, KernelError, Session, mcp, tools};
 
-/// Agent tools only `/root` may call. Like Codex, children keep every other
-/// agent tool and may assign or interrupt work; spawning stays with `/root`
-/// because agents do not nest.
-pub(in crate::runtime) const ROOT_ONLY_AGENT_TOOLS: [&str; 1] =
-    [protocol::SPAWN_AGENT_TOOL];
+/// Tools only `/root` may call. Like Codex, children keep every other agent
+/// tool and may assign or interrupt work; spawning stays with `/root` because
+/// agents do not nest, and only `/root` asks the user questions.
+pub(in crate::runtime) const ROOT_ONLY_TOOLS: [&str; 2] = [
+    protocol::SPAWN_AGENT_TOOL,
+    protocol::REQUEST_USER_INPUT_ASYNC_TOOL,
+];
 
 /// Agent choices copied before a child's startup extensions observe it.
 struct AgentSnapshot {
@@ -153,7 +155,7 @@ impl OwnedSessionSpawn<'_> {
         let _creation_guard = self.owner.owned_creation.read().await;
         self.owner.ensure_active()?;
         let mut snapshot = AgentSnapshot::try_from(self.owner.as_ref())?
-            .without_tools(&ROOT_ONLY_AGENT_TOOLS);
+            .without_tools(&ROOT_ONLY_TOOLS);
         if let Some(model) = &self.model {
             snapshot.model = Arc::clone(model);
         }

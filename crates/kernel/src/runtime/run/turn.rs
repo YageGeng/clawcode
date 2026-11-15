@@ -10,10 +10,10 @@ use ::tools::ToolRegistry;
 use futures::StreamExt;
 use protocol::{
     AgentEventPayload, AgentMessage, AgentOutcome, CompactionReason,
-    ContentBlock, ExtensionMessageDraft, MessageContent, MessageId,
-    ModelRequest, ModelStreamEvent, RunId, RunResult, SessionId, StopReason,
-    ThinkingLevel, TimestampMs, ToolCall, ToolResult, TraceId, TurnId,
-    TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
+    ContentBlock, ExtensionMessage, ExtensionMessageDraft, MessageContent,
+    MessageId, ModelRequest, ModelStreamEvent, RunId, RunResult, SessionId,
+    StopReason, ThinkingLevel, TimestampMs, ToolCall, ToolResult, TraceId,
+    TurnId, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
 };
 use store::RecordKind;
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,7 @@ use crate::runtime::compaction::{
     CompactionExecution, CompactionPolicyExt, OverflowRecovery,
 };
 use crate::runtime::plan::PlanModeGate;
+use crate::runtime::question::QuestionLedger;
 use crate::runtime::session::rename::SessionRename;
 use crate::runtime::tools::{ToolBatch, ToolBatchResult};
 use crate::runtime::{
@@ -361,6 +362,26 @@ impl RunScope<'_> {
         let Some(message) = user_message else {
             return Ok(());
         };
+        // A client prompt (one a submitter awaits) supersedes the questions
+        // still open. Their skip is written only once the prompt is about to
+        // enter history, and just before it, so the prompt stays the model's
+        // latest user input; internal and extension input never skips.
+        // ponytail: a stop during this prompt's own message hooks keeps the
+        // skip; commit both messages together if that window matters.
+        let from_client = match queued_item.as_ref() {
+            Some(item) => item.item().waiter.is_some(),
+            None => self.insertion.is_some(),
+        };
+        if from_client
+            && matches!(
+                message.content,
+                MessageContent::User { .. }
+                    | MessageContent::ExpandedUser { .. }
+            )
+            && !self.cancellation.is_cancelled()
+        {
+            self.skip_superseded_questions(turn_id, turn_loop).await?;
+        }
         let timestamp = message.timing.timestamp_ms;
         self.emitter
             .emit_at(
@@ -461,6 +482,15 @@ impl RunScope<'_> {
             let written = self
                 .session
                 .write_mail(kernel, self.emitter, turn_id, mail)
+                .await?;
+            turn_loop.produced_messages.extend(written);
+        }
+        // Question skips ride the same boundary and never add a Turn.
+        let skips = self.session.execution.take_skips()?;
+        if !skips.is_empty() {
+            let written = self
+                .session
+                .write_extensions(kernel, self.emitter, turn_id, skips)
                 .await?;
             turn_loop.produced_messages.extend(written);
         }
@@ -1400,6 +1430,65 @@ impl RunScope<'_> {
         Ok(Some(protocol::RunInput::Text(text)))
     }
 
+    /// Skips every question still open on behalf of the prompt being inserted.
+    ///
+    /// No admission ticket is held here, so an answer admitted in the same
+    /// instant may still settle a question this skip closes; the later
+    /// answer then wins in every view.
+    async fn skip_superseded_questions(
+        &self,
+        turn_id: &TurnId,
+        turn_loop: &mut TurnLoop<'_>,
+    ) -> Result<(), KernelError> {
+        let ledger = QuestionLedger::try_from(self.session.as_ref())?;
+        let Some(skip) = ledger.skip(ledger.open_keys()) else {
+            return Ok(());
+        };
+        tracing::info!(
+            "skipped {} open questions superseded by a prompt in session {}",
+            skip.items.len(),
+            self.session_id
+        );
+        let extension = ExtensionMessage::try_from(&skip)
+            .map_err(|error| KernelError::Protocol(error.to_string()))?;
+        let written = self
+            .session
+            .write_extensions(
+                self.kernel,
+                self.emitter,
+                turn_id,
+                vec![extension],
+            )
+            .await?;
+        turn_loop.produced_messages.extend(written);
+        Ok(())
+    }
+
+    /// Writes question skips that arrived after the last model request; like
+    /// queue-only mail they are written even when the Run was cancelled.
+    async fn write_back_skips(
+        &self,
+        execution: &Result<RunCompletion, KernelError>,
+        first_turn_id: &TurnId,
+    ) -> Result<(), KernelError> {
+        let skips = self.session.execution.take_skips()?;
+        if skips.is_empty() {
+            return Ok(());
+        }
+        let close_turn = match execution {
+            Ok(completion) => completion.turn_id.clone(),
+            Err(_) => first_turn_id.clone(),
+        };
+        tracing::info!(
+            "wrote back {} question skips at Run close",
+            skips.len()
+        );
+        self.session
+            .write_extensions(self.kernel, self.emitter, &close_turn, skips)
+            .await?;
+        Ok(())
+    }
+
     /// Writes mail that arrived after the last model request; a new task
     /// still owed a Turn wakes one next Run unless this one was cancelled, so
     /// a stopped agent never restarts by itself.
@@ -1472,6 +1561,7 @@ impl RunScope<'_> {
         self.session.execution.close_queue()?;
         kernel.publish_queue_changed(self.session_id);
         self.write_back_mail(&execution, &first_turn_id).await?;
+        self.write_back_skips(&execution, &first_turn_id).await?;
         if !matches!(&execution, Ok(completion) if matches!(completion.outcome, AgentOutcome::Succeeded))
         {
             kernel.withdraw_pending(self.session_id)?;

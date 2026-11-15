@@ -73,6 +73,9 @@ impl Kernel {
                     protocol::RunInput::Blocks(blocks) => {
                         PromptInputExpansion::from_blocks(blocks)
                     }
+                    protocol::RunInput::QuestionReply(reply) => {
+                        PromptInputExpansion::from_question_reply(&reply)?
+                    }
                     // Agent mail travels only through the mailbox lane.
                     protocol::RunInput::Mail(_) => {
                         return Err(KernelError::Protocol(

@@ -139,9 +139,12 @@ impl ShellSnapshot {
     /// Script printing the shell's re-sourceable state between the markers.
     fn capture_script(&self) -> Option<String> {
         let body = match self.shell.kind {
-            // `set +o posix` resets `expand_aliases`, so options precede shopt.
+            // `set +o posix` resets `expand_aliases`, so options precede shopt;
+            // options also precede the functions, whose bodies may need them
+            // to parse (bash-completion uses extglob patterns), and functions
+            // precede aliases so alias expansion never rewrites their bodies.
             ShellKind::Bash => {
-                "declare -f\nalias -p\nset +o\nshopt -p\nexport -p"
+                "set +o\nshopt -p\ndeclare -f\nalias -p\nexport -p"
             }
             ShellKind::Zsh => {
                 "functions\nsetopt | sed 's/^/setopt /'\nalias -L\nexport -p"

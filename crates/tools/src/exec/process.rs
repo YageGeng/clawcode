@@ -1,7 +1,10 @@
 //! One exec child: a PTY or plain pipes, its output, exit, and process group.
 
 use std::collections::BTreeMap;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
+// Unix writes through `PtyMaster::write_all`; other platforms write directly.
+#[cfg(not(unix))]
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +26,10 @@ const READ_CHUNK_BYTES: usize = 8 * 1024;
 const PTY_ROWS: u16 = 24;
 /// PTY width, as in codex.
 const PTY_COLS: u16 = 80;
+/// How long a PTY reader or writer waits for readiness before rechecking
+/// whether the child has exited.
+#[cfg(unix)]
+const PTY_POLL_MS: u16 = 100;
 
 /// Everything needed to start one child.
 #[derive(Debug, Clone, typed_builder::TypedBuilder)]
@@ -259,21 +266,40 @@ impl ExecProcess {
             .master
             .take_writer()
             .map_err(|error| ExecError::CreateProcess(error.to_string()))?;
+        #[cfg(unix)]
+        let (writer_master, reader_master) = {
+            let master = PtyMaster::new(pair.master.as_ref(), io)?;
+            (master.try_clone()?, master)
+        };
         let (input, mut queued) =
             tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         // One writer per child keeps input ordered; a child that stops reading
-        // blocks only this thread, which ends once the PTY hangs up.
+        // blocks only this thread, and only until the child exits.
         // shortcut: a Ctrl-C queued behind input the child never reads cannot reach the full PTY buffer, and the queue has no cap (codex behaves the same; `/stop` still kills); signal the terminal's foreground group when ISIG is on and cap the backlog if that shows up.
         tokio::task::spawn_blocking(move || {
             while let Some(bytes) = queued.blocking_recv() {
-                if let Err(error) =
-                    writer.write_all(&bytes).and_then(|()| writer.flush())
-                {
-                    tracing::warn!(
-                        "stopped writing to exec PTY input: {}",
-                        error
-                    );
-                    break;
+                #[cfg(unix)]
+                let written = writer_master.write_all(&mut writer, &bytes);
+                #[cfg(not(unix))]
+                let written = writer
+                    .write_all(&bytes)
+                    .and_then(|()| writer.flush())
+                    .map(|()| true);
+                match written {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::debug!(
+                            "dropped exec PTY input after the child exited"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "stopped writing to exec PTY input: {}",
+                            error
+                        );
+                        break;
+                    }
                 }
             }
         });
@@ -282,10 +308,27 @@ impl ExecProcess {
             let mut chunk = vec![0_u8; READ_CHUNK_BYTES];
             loop {
                 match reader.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(read) => {
                         reader_io.push(chunk.get(..read).unwrap_or_default());
                     }
+                    // Nothing to read: wait. A job left in the child's group
+                    // may still write, so draining goes on until every slave
+                    // closes (EIO above) and stops early only for an empty
+                    // group, whose escaped holders must not stall shutdown.
+                    #[cfg(unix)]
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        if !reader_master.ready(nix::poll::PollFlags::POLLIN)
+                            && reader_master.abandoned()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
             }
         });
@@ -512,6 +555,113 @@ impl PtyExit {
                 }
             }
         }
+    }
+}
+
+/// Non-blocking access to one PTY master for its reader and writer threads.
+///
+/// Both threads wait with `poll` and give up once the child has exited, rather
+/// than blocking in `read` or `write`: Linux 7.x keeps a write to a full PTY
+/// blocked after the slave side closed, which leaked the writer thread and
+/// stalled runtime shutdown.
+#[cfg(unix)]
+struct PtyMaster {
+    /// A duplicate of the master descriptor, used for `poll`; the reader and
+    /// writer share its open file description, so they are non-blocking too.
+    fd: std::os::fd::OwnedFd,
+    /// Child state, read to stop once the child has exited.
+    io: ProcessIo,
+}
+
+#[cfg(unix)]
+impl PtyMaster {
+    /// Duplicates the master descriptor and makes it non-blocking.
+    #[allow(unsafe_code)]
+    fn new(
+        master: &dyn portable_pty::MasterPty,
+        io: &ProcessIo,
+    ) -> Result<Self, ExecError> {
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        let failed = |error: &dyn std::fmt::Display| {
+            ExecError::CreateProcess(format!("PTY setup failed: {error}"))
+        };
+        let raw = master
+            .as_raw_fd()
+            .ok_or_else(|| failed(&"the PTY master has no descriptor"))?;
+        // SAFETY: `master` owns `raw` and is borrowed for this whole call, so
+        // the descriptor stays open while it is duplicated into an owned one.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) }
+            .try_clone_to_owned()
+            .map_err(|error| failed(&error))?;
+        let flags =
+            fcntl(&fd, FcntlArg::F_GETFL).map_err(|error| failed(&error))?;
+        fcntl(
+            &fd,
+            FcntlArg::F_SETFL(
+                OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK,
+            ),
+        )
+        .map_err(|error| failed(&error))?;
+        Ok(Self { fd, io: io.clone() })
+    }
+
+    /// Gives the other I/O thread its own handle on the same master.
+    fn try_clone(&self) -> Result<Self, ExecError> {
+        Ok(Self {
+            fd: self.fd.try_clone().map_err(|error| {
+                ExecError::CreateProcess(format!("PTY setup failed: {error}"))
+            })?,
+            io: self.io.clone(),
+        })
+    }
+
+    /// Reports whether the child has exited.
+    fn exited(&self) -> bool {
+        self.io.state.borrow().exited
+    }
+
+    /// Reports whether no group member is left to write: output is closed
+    /// and the group was empty when the leader was reaped.
+    fn abandoned(&self) -> bool {
+        self.io.state.borrow().output_closed
+            && self.io.group_empty.load(Ordering::Acquire)
+    }
+
+    /// Waits up to `PTY_POLL_MS` for `flags`; reports whether the master is ready.
+    fn ready(&self, flags: nix::poll::PollFlags) -> bool {
+        use std::os::fd::AsFd as _;
+        let mut fds = [nix::poll::PollFd::new(self.fd.as_fd(), flags)];
+        nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(PTY_POLL_MS))
+            .is_ok_and(|ready| ready > 0)
+    }
+
+    /// Writes all of `bytes`, waiting while the PTY is full; returns `false`
+    /// when the child exited first and the rest was dropped.
+    fn write_all(
+        &self,
+        writer: &mut dyn std::io::Write,
+        mut bytes: &[u8],
+    ) -> std::io::Result<bool> {
+        while !bytes.is_empty() {
+            match writer.write(bytes) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(written) => bytes = bytes.get(written..).unwrap_or_default(),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    // A full PTY drains only while the child reads it.
+                    if self.exited() {
+                        return Ok(false);
+                    }
+                    self.ready(nix::poll::PollFlags::POLLOUT);
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        writer.flush()?;
+        Ok(true)
     }
 }
 

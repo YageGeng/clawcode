@@ -4,7 +4,7 @@ import type { UiBootstrap } from "../../bootstrap/model";
 import { MessageActionModel } from "../../domain/messageActions";
 import type { EntryId, MessageId, RunId, SessionId } from "../../acp/protocol";
 import type { MessageEntity, SessionTreeEntry, ToolCallEntity } from "../../domain/model";
-import { AgentMails, TranscriptRowKeys } from "../../domain/model";
+import { AgentMails, Questions, TranscriptRowKeys } from "../../domain/model";
 import type { WorkspaceController } from "../../workspace/controller";
 import { initialSessionWorkspaceState } from "../../workspace/sessionState";
 import { sessionWorkspaceOf } from "../../workspace/selectors";
@@ -13,6 +13,7 @@ import type { ContextSelection } from "../inspector/ContextLens";
 import { Composer } from "../composer/Composer";
 import { MessageView } from "./MessageView";
 import { AgentMailCard } from "./AgentMailCard";
+import { QuestionReplyCard } from "./QuestionCards";
 import { ExtensionCard } from "./ExtensionCard";
 import { ToolCallCard } from "./ToolCallCard";
 import { BranchSummaryCard } from "./BranchSummaryCard";
@@ -73,12 +74,13 @@ const ToolRow = memo(function ToolRow({ sessionId, controller, compact, toolCall
   const tool = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.tools.get(toolCallId));
   // Bash tools and `!` commands use their tool call id as the terminal id.
   const terminal = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.terminals.get(toolCallId));
-  return tool === undefined ? null : <ToolCallCard tool={tool} controller={controller} inspecting={inspecting} {...(terminal === undefined ? {} : { terminal })} {...(compact ? {} : { onInspect })} />;
+  return tool === undefined ? null : <ToolCallCard tool={tool} sessionId={sessionId} controller={controller} inspecting={inspecting} {...(terminal === undefined ? {} : { terminal })} {...(compact ? {} : { onInspect })} />;
 });
 
 const ExtensionRow = memo(function ExtensionRow({ sessionId, id }: Readonly<{ sessionId: SessionId; id: string }>) {
   const extension = useWorkspaceStore((state) => sessionWorkspaceOf(state, sessionId)?.extensions.get(id));
   if (extension === undefined) return null;
+  if (extension.customType === Questions.REPLY_TYPE) return <QuestionReplyCard extension={extension} />;
   return extension.customType === AgentMails.TYPE ? <AgentMailCard sessionId={sessionId} extension={extension} /> : <ExtensionCard extension={extension} />;
 });
 

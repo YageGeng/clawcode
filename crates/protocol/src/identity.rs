@@ -143,6 +143,8 @@ pub enum AcpExtensionMethod {
     PendingMessagePromote,
     /// Clears queued messages.
     ClearQueue,
+    /// Skips asynchronous questions without answering them.
+    QuestionDismiss,
     /// Reads whether one Session currently owns an active Run.
     SessionRuntime,
     /// Invokes a discovered skill explicitly.
@@ -198,6 +200,7 @@ impl AcpExtensionMethod {
                 "_clawcode/session/pending_message/remove"
             }
             Self::ClearQueue => "_clawcode/session/clear_queue",
+            Self::QuestionDismiss => "_clawcode/session/question/dismiss",
             Self::SessionRuntime => "_clawcode/session/runtime",
             Self::InvokeSkill => "_clawcode/skill/invoke",
             Self::SkillList => "_clawcode/skill/list",
@@ -237,6 +240,7 @@ impl AcpExtensionMethod {
             | Self::PendingMessageRemove
             | Self::PendingMessagePromote
             | Self::ClearQueue
+            | Self::QuestionDismiss
             | Self::InvokeSkill
             | Self::McpReconnect
             | Self::McpOAuthContinue
@@ -259,6 +263,7 @@ impl AcpExtensionMethod {
             Self::PendingMessageRemove,
             Self::PendingMessagePromote,
             Self::ClearQueue,
+            Self::QuestionDismiss,
             Self::SessionRuntime,
             Self::InvokeSkill,
             Self::SkillList,

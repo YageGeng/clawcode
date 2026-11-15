@@ -1,6 +1,7 @@
 import { Ban, Check, ChevronDown, CircleAlert, CircleSlash, ClipboardList, FilePen, FileText, LoaderCircle, ScanSearch, Search, SquareTerminal, Wrench } from "lucide-react";
 import { memo, useState } from "react";
 
+import type { SessionId } from "../../acp/protocol";
 import type { ToolCallEntity, ToolKind } from "../../domain/model";
 import { TranscriptRowKeys } from "../../domain/model";
 import { CodeBlock, JsonBlock, MarkdownContent } from "./MarkdownContent";
@@ -8,6 +9,7 @@ import { TerminalView } from "./TerminalView";
 import type { TerminalEntity } from "../../workspace/terminals";
 import type { WorkspaceController } from "../../workspace/controller";
 import { useWorkspaceStore } from "../../workspace/store";
+import { AskedQuestions } from "./QuestionCards";
 import { SubagentPanel } from "./SubagentPanel";
 
 /** Parses one JSON object or array string once while tolerating arbitrary text. */
@@ -23,6 +25,8 @@ function parseJsonLike(text: string): Readonly<{ value: unknown }> | undefined {
 
 export type ToolCallCardProps = Readonly<{
   tool: ToolCallEntity;
+  /** Owning Session; question cards read their answers from it. */
+  sessionId?: SessionId;
   terminal?: TerminalEntity;
   inspecting?: boolean;
   onInspect?: (tool: ToolCallEntity) => void;
@@ -93,7 +97,7 @@ function ToolOutput({ content, rawOutput, terminal }: Pick<ToolCallEntity, "cont
 }
 
 /** Renders one ACP tool lifecycle with product-specific blocked refinement. */
-export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspecting = false, onInspect, controller }: ToolCallCardProps) {
+export const ToolCallCard = memo(function ToolCallCard({ tool, sessionId, terminal, inspecting = false, onInspect, controller }: ToolCallCardProps) {
   // Bash cards first mount from the in-progress ACP update, so reveal streamed
   // output immediately while preserving the user's later expand/collapse choice.
   const childId = tool.subagentSessionId;
@@ -125,6 +129,7 @@ export const ToolCallCard = memo(function ToolCallCard({ tool, terminal, inspect
       </summary>
       {open ? <div className="tool-card__details">
         {childId === undefined || controller === undefined ? null : <SubagentPanel sessionId={childId} controller={controller} />}
+        {tool.userQuestions === undefined || sessionId === undefined ? null : <AskedQuestions sessionId={sessionId} asked={tool.userQuestions} />}
         {onInspect === undefined ? null : <button className="tool-card__inspect" type="button" aria-label="在 Context Lens 中检查工具调用" aria-pressed={inspecting} onClick={() => onInspect(tool)}><ScanSearch size={13} aria-hidden="true" />Context Lens</button>}
         <div className="tool-card__lifecycle" aria-label="工具生命周期">
           <span><i data-phase="start" />Start{tool.startedAtMs === undefined ? " · 等待事件" : ` · ${tool.startedAtMs}`}</span>

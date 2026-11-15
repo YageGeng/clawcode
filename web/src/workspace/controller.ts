@@ -6,7 +6,8 @@ import { AcpProtocol } from "../acp/protocol";
 import type { InitializeRecovery, InitializeResult, NewSessionResult, PromptContentBlock, SessionId, SessionInfo, SessionListResult, SessionRecoveryPlan, SessionUpdateNotification, TimestampMs } from "../acp/protocol";
 import type { UiBootstrap } from "../bootstrap/model";
 import type { BranchEditPlan } from "../domain/messageActions";
-import type { ElicitationAnswer, ElicitationPrompt, McpCompletionResult, PermissionPrompt, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import type { ElicitationAnswer, ElicitationPrompt, McpCompletionResult, PermissionPrompt, McpPromptResult, McpResourceResult, McpSessionSnapshot, PendingMessages, PromptInput, QuestionKey, SessionRuntimeSnapshot, SessionSummary, SessionTree, SkillListResult } from "../domain/model";
+import { Questions } from "../domain/model";
 import { ElicitationForm, UnrenderableSchema } from "../features/mcp/elicitationForm";
 import { useWorkspaceStore } from "./store";
 import type { SessionWorkspaceAction } from "./sessionState";
@@ -28,6 +29,8 @@ type Submission = {
   submissionId: string;
   input: PromptInput;
   state: "sent" | "queued" | "disconnected" | "orphaned" | "unknown";
+  /** The asynchronous question this submission answers, if any. */
+  question?: QuestionKey;
 };
 
 /** Branch-summary choice sent with Tree navigation, as pi offers on navigate. */
@@ -214,20 +217,53 @@ export class WorkspaceController {
     const sessionId = useWorkspaceStore.getState().activeSessionId;
     if (sessionId === undefined) throw new Error("No active session");
     if (input.text.trim().length === 0 && input.resources.length === 0 && input.images.length === 0) throw new Error("Prompt is empty");
-    const connection = this.requireConnection();
+    this.requireConnection();
     const prompt: PromptContentBlock[] = [
       ...(input.text.length === 0 ? [] : [{ type: "text" as const, text: input.text }]),
       ...input.resources.map((resource) => ({ type: "resource_link" as const, name: resource.name, uri: resource.uri })),
       ...input.images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType }))
     ];
     const submission: Submission = { seq: ++this.submissionSequence, submissionId: crypto.randomUUID(), input, state: "sent" };
+    const whenBusy = this.bootstrap.whenBusy === "steer" ? "followUp" : "steer";
+    // The kernel skips questions this prompt supersedes, under its own ticket.
+    this.sendPrompt(sessionId, submission, prompt, options?.alternate === true ? { whenBusy } : {});
+  }
+
+  /** Answers one asynchronous question; the answer always steers into a running Run. */
+  answerQuestion(sessionId: SessionId, key: QuestionKey, text: string): void {
+    if (text.trim().length === 0) throw new Error("Answer is empty");
+    this.requireConnection();
+    const submission: Submission = {
+      seq: ++this.submissionSequence, submissionId: crypto.randomUUID(),
+      input: { text, resources: [], images: [] }, state: "sent", question: key
+    };
+    this.dispatchSession(sessionId, { type: "questions/settling", ids: [Questions.id(key)], settling: true });
+    this.sendPrompt(sessionId, submission, [{ type: "text", text }], { questionReply: key });
+  }
+
+  /** Skips questions; they stay hidden here until the server records the skip. */
+  async dismissQuestions(sessionId: SessionId, keys: readonly QuestionKey[]): Promise<void> {
+    const ids = keys.map((key) => Questions.id(key));
+    this.dispatchSession(sessionId, { type: "questions/settling", ids, settling: true });
+    try {
+      await this.requireConnection().request(this.methods.questionDismiss, { sessionId, items: keys });
+    } catch (reason: unknown) {
+      this.dispatchSession(sessionId, { type: "questions/settling", ids, settling: false });
+      // The question reappears, so the user learns why from a notice.
+      this.dispatch({ type: "notice/added", notice: { id: `dismiss-${crypto.randomUUID()}`, sessionId, title: "未能跳过待回答的问题，请重试" } });
+      throw reason;
+    }
+  }
+
+  /** Sends one prompt and settles its submission from the response. */
+  private sendPrompt(sessionId: SessionId, submission: Submission, prompt: PromptContentBlock[], product: Readonly<Record<string, unknown>>): void {
+    const connection = this.requireConnection();
     let records = this.submissions.get(sessionId);
     if (records === undefined) { records = new Map(); this.submissions.set(sessionId, records); }
     records.set(submission.submissionId, submission);
-    const whenBusy = this.bootstrap.whenBusy === "steer" ? "followUp" : "steer";
     void connection.request(AcpProtocol.methods.sessionPrompt, {
       sessionId, prompt,
-      _meta: { [this.bootstrap.product.slug]: { submissionId: submission.submissionId, ...(options?.alternate === true ? { whenBusy } : {}) } }
+      _meta: { [this.bootstrap.product.slug]: { submissionId: submission.submissionId, ...product } }
     }).then(() => {
       records.delete(submission.submissionId);
     }).catch((reason: unknown) => {
@@ -240,6 +276,13 @@ export class WorkspaceController {
       const data = reason.rpc.data;
       if (typeof data === "object" && data !== null && "outcomeUnknown" in data && data.outcomeUnknown === true) {
         this.markUnknown(sessionId, submission, "会话持久化异常，请关闭并重新打开会话");
+        return;
+      }
+      if (submission.question !== undefined && typeof data === "object" && data !== null && "reason" in data && data.reason === "questionClosed") {
+        // Another tab or a skip settled it first; the transcript shows which.
+        records.delete(submission.submissionId);
+        this.dispatchSession(sessionId, { type: "questions/settling", ids: [Questions.id(submission.question)], settling: false });
+        this.dispatch({ type: "notice/added", notice: { id: `closed-${submission.submissionId}`, sessionId, title: "该问题已在其他地方回答或跳过" } });
         return;
       }
       const authMethodId = reason.authMethodId;
@@ -298,6 +341,13 @@ export class WorkspaceController {
 
   /** Coalesces prompt rejections before prepending them to the latest, Session-scoped draft. */
   private returnInput(sessionId: SessionId, submission: Submission, error?: string): void {
+    if (submission.question !== undefined) {
+      // A returned answer goes back to its question, which opens again.
+      sessionStorage.setItem(Questions.draftKey(this.bootstrap.product.slug, sessionId, submission.question), submission.input.text);
+      this.dispatchSession(sessionId, { type: "questions/settling", ids: [Questions.id(submission.question)], settling: false });
+      this.dispatch({ type: "notice/added", notice: { id: `returned-${submission.submissionId}`, sessionId, title: error ?? "回答未发送，已放回问题面板" } });
+      return;
+    }
     const item = { submission, ...(error === undefined ? {} : { error }) };
     const existing = this.returnedInputs.get(sessionId);
     if (existing !== undefined) { existing.items.push(item); return; }

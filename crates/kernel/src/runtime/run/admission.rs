@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::queue::QueueRequest;
+use crate::runtime::question::QuestionLedger;
 use crate::runtime::{
     EventEmitter, EventSink, InsertionNotice, Kernel, KernelError,
     RunInvocation, SessionExecution, WhenBusy,
@@ -44,7 +45,7 @@ pub struct AdmissionTicket {
 
 impl AdmissionTicket {
     /// Waits for earlier admissions, including tickets dropped before their turn.
-    async fn wait(&self) -> Result<(), KernelError> {
+    pub(in crate::runtime) async fn wait(&self) -> Result<(), KernelError> {
         let mut next = self.execution.admission.lock()?.next.subscribe();
         loop {
             if self.cancellation.is_cancelled() {
@@ -159,7 +160,27 @@ impl Kernel {
                 "admission ticket belongs to another session".into(),
             ));
         }
-        let placement = request.when_busy.unwrap_or(self.when_busy);
+        // Every settlement holds a ticket, so openness checked here cannot
+        // change before this answer is queued or starts its Run.
+        // The same ledger scan validates the answer and copies its titles.
+        let placement = if let protocol::RunInput::QuestionReply(reply) =
+            &mut request.run.input
+        {
+            if let Err(error) =
+                QuestionLedger::try_from(session.as_ref())?.settle(reply)
+            {
+                tracing::info!(
+                    "rejected answer for session {}: {}",
+                    request.run.session_id,
+                    error
+                );
+                return Err(error);
+            }
+            // The model asked for this answer, so it enters before the next model call.
+            WhenBusy::Steer
+        } else {
+            request.when_busy.unwrap_or(self.when_busy)
+        };
         let direct = if let Some(text) = request.run.input.slash_command_text()
         {
             if protocol::UserBashInput::parse_prefixed(text).is_some() {

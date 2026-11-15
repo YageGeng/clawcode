@@ -94,6 +94,16 @@ pub struct AcpForkParameters {
     pub new_session_id: Option<SessionId>,
 }
 
+/// Parameters for skipping asynchronous questions.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcpQuestionDismissParameters {
+    /// Session that asked the questions.
+    pub session_id: SessionId,
+    /// Questions to skip; already settled ones are ignored.
+    pub items: Vec<crate::QuestionKey>,
+}
+
 /// Parameters for removing one queued message by its stable identifier.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

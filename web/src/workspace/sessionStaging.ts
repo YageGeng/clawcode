@@ -19,7 +19,7 @@ import type {
   ToolCallEntity,
   TranscriptEntry
 } from "../domain/model";
-import { AgentRunUsages, CacheMisses, EventOrdering as Ordering } from "../domain/model";
+import { AgentRunUsages, CacheMisses, EventOrdering as Ordering, Questions } from "../domain/model";
 import { EventSequenceRanges, initialSessionWorkspaceState, retainEvents } from "./sessionState";
 import type { SessionWorkspaceAction, SessionWorkspaceState } from "./sessionState";
 
@@ -80,6 +80,7 @@ export class SessionWorkspaceStager {
   private retry: RetryStatus | undefined;
   private compaction: CompactionStatus;
   private outcomeUnknown: boolean;
+  private settlingQuestions: ReadonlySet<string>;
 
   /** Creates one frame-local draft while preserving untouched collection identities. */
   constructor(base: SessionWorkspaceState) {
@@ -108,6 +109,7 @@ export class SessionWorkspaceStager {
     this.retry = base.retry;
     this.compaction = base.compaction;
     this.outcomeUnknown = base.outcomeUnknown;
+    this.settlingQuestions = base.settlingQuestions;
   }
 
   /** Applies one Session action using copy-on-write collections. */
@@ -202,6 +204,8 @@ export class SessionWorkspaceStager {
         if (!exists) {
           this.appendedTranscript.push({ type: "extension", extensionEventId: action.extension.id, order: action.order });
         }
+        // Mirrors the reducer: a visible settlement ends this tab's own hiding.
+        this.settlingQuestions = Questions.settled(this.settlingQuestions, action.extension);
         return;
       }
       case "compaction/upserted": {
@@ -289,6 +293,8 @@ export class SessionWorkspaceStager {
           this.running = false;
           if (this.retry?.type === "finished") this.retry = undefined;
           if (this.compaction.type === "running") this.compaction = { type: "idle" };
+          // Mirrors the reducer: an idle server holds no skip.
+          this.settlingQuestions = initialSessionWorkspaceState.settlingQuestions;
         }
         return;
       case "usage/changed": this.contextUsage = action.usage; return;
@@ -300,6 +306,16 @@ export class SessionWorkspaceStager {
       case "compaction/changed": this.compaction = action.compaction; return;
       case "outcome/unknown": this.outcomeUnknown = action.value; return;
       case "diagnostic/added": this.appendedDiagnostics.push(action.message); return;
+      // Mirrors the reducer; a staged replay keeps this tab's settlements.
+      case "questions/settling": {
+        const settling = new Set(this.settlingQuestions);
+        for (const id of action.ids) {
+          if (action.settling) settling.add(id);
+          else settling.delete(id);
+        }
+        this.settlingQuestions = settling;
+        return;
+      }
     }
   }
 
@@ -332,7 +348,8 @@ export class SessionWorkspaceStager {
       retry: this.retry,
       compaction: this.compaction,
       outcomeUnknown: this.outcomeUnknown,
-      diagnostics: this.diagnostics
+      diagnostics: this.diagnostics,
+      settlingQuestions: this.settlingQuestions
     };
   }
 
@@ -371,7 +388,8 @@ export class SessionWorkspaceStager {
       outcomeUnknown: this.outcomeUnknown,
       diagnostics: this.appendedDiagnostics.length === 0
         ? this.diagnostics
-        : [...this.diagnostics, ...this.appendedDiagnostics]
+        : [...this.diagnostics, ...this.appendedDiagnostics],
+      settlingQuestions: this.settlingQuestions
     };
   }
 

@@ -131,6 +131,16 @@ impl Kernel {
         let (_run_guard, cancellation) = session
             .acquire_operation_for_prompt(invocation.waiters())
             .await?;
+        let _active_run = session.execution.install_run(ActiveRunContext {
+            run_id: run_id.clone(),
+            turn_id: first_turn_id.clone(),
+            sink: Arc::clone(&sink),
+        })?;
+        // A first-input reply is written only in the first Turn; it is recorded
+        // before the ticket is released so the next settlement sees it.
+        if let protocol::RunInput::QuestionReply(reply) = &request.input {
+            session.execution.reserve_reply_keys(reply)?;
+        }
         if let Some(ticket) = &invocation.admission {
             ticket.release();
         }
@@ -139,11 +149,6 @@ impl Kernel {
             request.session_id,
             invocation.origin_phrase()
         );
-        let _active_run = session.execution.install_run(ActiveRunContext {
-            run_id: run_id.clone(),
-            turn_id: first_turn_id.clone(),
-            sink: Arc::clone(&sink),
-        })?;
         let emitter = EventEmitter {
             clock: Arc::clone(&self.clock),
             sink,
@@ -204,6 +209,9 @@ impl Kernel {
             }
             protocol::RunInput::Mail(mail) => {
                 PromptInputExpansion::from_mail(mail)?
+            }
+            protocol::RunInput::QuestionReply(reply) => {
+                PromptInputExpansion::from_question_reply(&reply)?
             }
         };
         if let Some(diagnostic) = expanded_input.diagnostic().cloned() {
