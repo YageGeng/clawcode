@@ -132,7 +132,7 @@ agent-client-protocol-http = { version = "5", default-features = false }
 clap = { version = "4", features = ["derive"] }
 
 # pty
-nix = { version = "0.31", features = ["signal", "process"] }
+nix = { version = "0.32", features = ["signal", "process"] }
 portable-pty = "0.9"
 
 # misc
