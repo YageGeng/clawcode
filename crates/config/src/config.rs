@@ -1,6 +1,7 @@
 //! Top-level application configuration types.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +17,9 @@ use crate::retry::RetryConfig;
 use crate::skills::SkillsConfig;
 use crate::subagent::SubagentConfig;
 use crate::tools::ToolsConfig;
-use protocol::{CompactionPolicy, ModelInputModalitiesError, ModelProfile};
+use protocol::{
+    CompactionPolicy, ModelInputModalitiesError, ModelProfile, ProductIdentity,
+};
 
 /// Context compaction settings: global budgets plus pi-style per-model overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -117,9 +120,30 @@ fn split_model_key(value: &str) -> Option<(&str, &str)> {
 /// File-backed session persistence settings.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionPersistenceConfig {
-    /// Optional override for the data directory that stores session transcripts.
+    /// Optional root for session logs, SQLite databases, credentials, and shell snapshots.
     #[serde(default)]
     pub data_home: Option<String>,
+}
+
+impl SessionPersistenceConfig {
+    /// Resolves the configured data root or the platform default.
+    #[must_use]
+    pub fn data_root(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.data_home {
+            return Some(PathBuf::from(path));
+        }
+
+        // Use the same XDG layout on macOS that dirs already provides on Linux.
+        #[cfg(target_os = "macos")]
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")));
+        #[cfg(not(target_os = "macos"))]
+        let base = dirs::data_local_dir();
+
+        base.map(|path| path.join(ProductIdentity::CONFIG_DIR_NAME))
+    }
 }
 
 /// Cross-field validation failures detected after TOML extraction.

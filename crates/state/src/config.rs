@@ -2,11 +2,23 @@
 
 use std::path::{Path, PathBuf};
 
-/// Session metadata and backfill state (Codex `state_<n>.sqlite`).
-pub const STATE_DB_FILENAME: &str = "state_1.sqlite";
+/// Derives both public constants from one literal so paths stay static and each
+/// database can change file formats independently of its SQLx migrations.
+macro_rules! database_file {
+    ($stem:literal, $version:ident = $number:literal, $filename:ident) => {
+        #[doc = concat!("On-disk file format version of the `", $stem, "` database.")]
+        pub const $version: u32 = $number;
+        #[doc = concat!("Filename for the current `", $stem, "` database.")]
+        pub const $filename: &str = concat!($stem, "_", $number, ".sqlite");
+    };
+}
 
-/// Paginated Session history (Codex `thread_history_<n>.sqlite`).
-pub const SESSION_HISTORY_DB_FILENAME: &str = "session_history_1.sqlite";
+database_file!("state", STATE_DB_VERSION = 1, STATE_DB_FILENAME);
+database_file!(
+    "session_history",
+    SESSION_HISTORY_DB_VERSION = 1,
+    SESSION_HISTORY_DB_FILENAME
+);
 
 /// Directory that holds every state database file.
 #[derive(Debug, Clone, PartialEq, Eq)]

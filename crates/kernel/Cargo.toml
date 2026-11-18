@@ -63,3 +63,6 @@ http = { workspace = true }
 # fs
 tempfile = { workspace = true }
 toml = { workspace = true }
+
+# database
+sqlx = { workspace = true }

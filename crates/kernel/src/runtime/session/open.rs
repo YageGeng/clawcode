@@ -33,19 +33,12 @@ impl Kernel {
         &self,
         mut options: SessionCreateOptions,
     ) -> Result<PathBuf, KernelError> {
-        // Probe before reserving the id, so a slow git never holds the reservation.
-        if options.provenance.is_none() {
-            options.provenance = Some(
-                super::provenance::ProvenanceProbe { cwd: &options.cwd }
-                    .collect()
-                    .await,
-            );
-        }
         let session_id = options.session_id.clone();
         let cwd = options.cwd.clone();
         tracing::info!("started Session creation {}", session_id);
         let result: Result<PathBuf, KernelError> = async {
-            let _reservation = self.reserve_session_build(&session_id)?;
+            let _reservation =
+                self.prepare_session_creation(&mut options).await?;
             let store = self.store_factory.create(options)?;
             let path = store.path().to_path_buf();
             // Listing the new Session right after creation must see it.
@@ -193,9 +186,8 @@ impl Kernel {
         // Resume stays scoped to the workspace the Session was created in.
         let metadata = self
             .catalog
-            .header(&session_id)
+            .header(&session_id, Some(&cwd))
             .await?
-            .filter(|metadata| metadata.cwd == cwd)
             .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
         let store = self.store_factory.open(&metadata.path)?;
         let path = store.path().to_path_buf();

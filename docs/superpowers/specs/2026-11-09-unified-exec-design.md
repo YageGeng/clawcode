@@ -292,7 +292,7 @@ terminal id 为启动进程的 `exec_command` 调用 ID。
 
 - **生成**：会话的首次 `exec_command` 触发后台生成，限时 10 秒。只打开会话查看历史、或从不执行命令的会话（包括子代理会话）不会启动 shell。生成完成前的命令照常用 `-lc`；失败记一条 `warn`，该会话不再使用 snapshot。
 - **支持**：bash、zsh、sh；Windows 不生成。
-- **采集**：以 login + interactive 方式运行采集脚本，记录函数（`declare -f` / `functions`）、alias（`alias -p` / `alias -L`）、选项（`shopt -p`、`set +o` / `setopt`）与导出变量（`export -p`），写入 `<data_root>/shell_snapshots/<session_id>.sh`，再以 `. <文件>` 校验一次。`data_root` 与 `sessions/`、`credentials/` 同级（`crates/app/src/lib.rs`：`session_persistence.data_home`，未配置时为 `dirs::data_local_dir()/clawcode`），由 app 组装时传给 Kernel。
+- **采集**：以 login + interactive 方式运行采集脚本，记录函数（`declare -f` / `functions`）、alias（`alias -p` / `alias -L`）、选项（`shopt -p`、`set +o` / `setopt`）与导出变量（`export -p`），写入 `<data_root>/shell_snapshots/<session_id>.sh`，再以 `. <文件>` 校验一次。app 从 `session_persistence` 解析会话、凭据和快照共用的数据根目录，将快照路径传给 Kernel。
 - **使用**：`login = true` 的命令改写为
 
   ```

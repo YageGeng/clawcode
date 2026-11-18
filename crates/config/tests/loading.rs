@@ -475,6 +475,32 @@ fn load_rejects_relative_claw_config_path() {
     });
 }
 
+/// macOS and Linux share the XDG data layout unless the app sets its own root.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn session_data_root_respects_xdg_and_explicit_overrides() {
+    #[allow(clippy::result_large_err)]
+    figment::Jail::expect_with(|jail| {
+        jail.clear_env();
+        let home = jail.directory().join("home");
+        jail.set_env("HOME", home.display());
+        let mut persistence = config::SessionPersistenceConfig::default();
+        let default = Some(home.join(".local/share/clawcode"));
+        assert_eq!(persistence.data_root(), default);
+
+        jail.set_env("XDG_DATA_HOME", "relative");
+        assert_eq!(persistence.data_root(), default);
+
+        let xdg = jail.directory().join("xdg");
+        jail.set_env("XDG_DATA_HOME", xdg.display());
+        assert_eq!(persistence.data_root(), Some(xdg.join("clawcode")));
+
+        persistence.data_home = Some("custom".to_owned());
+        assert_eq!(persistence.data_root(), Some(PathBuf::from("custom")));
+        Ok(())
+    });
+}
+
 /// `CLAW_CONFIG` remains the highest-priority explicit config path.
 #[test]
 fn load_prefers_claw_config_over_default_paths() {

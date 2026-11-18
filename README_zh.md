@@ -40,6 +40,12 @@ Agent Client Protocol（ACP）v2 提供 stdio、HTTP/SSE 和 WebSocket，并包�
 2. 平台配置目录下的产品目录。
 3. 仓库内的 TOML 文件。
 
+macOS 和 Linux 默认把会话日志、SQLite 数据库、凭据和 shell 快照存放在
+`~/.local/share/clawcode/`。如果 `XDG_DATA_HOME` 是绝对路径，默认目录为
+`$XDG_DATA_HOME/clawcode/`。显式设置的 `session_persistence.data_home`
+优先级最高，直接作为数据目录。要在原处打开 macOS 上的旧会话，可将它设为
+原目录 `~/Library/Application Support/clawcode/` 的绝对路径。
+
 示例：
 
 ```toml

@@ -7,7 +7,7 @@ use protocol::{
 use sqlx::{Acquire, Sqlite, SqliteConnection, Transaction};
 use store::{EntryKind, LogHeader, LogMutation, LoggedMutation, SessionEntry};
 
-use super::Cursor;
+use super::{Cursor, Position, STATE_POSITION, SourceRevision};
 use crate::StateError;
 use crate::error::SqlText;
 
@@ -21,7 +21,12 @@ pub(crate) struct StateSink<'a> {
     session_id: &'a SessionId,
     path: &'a str,
     cursor: Cursor,
+    #[builder(default)]
+    pub(super) source: Option<SourceRevision>,
+    #[builder(default)]
+    last_timestamp: Option<i64>,
     row_exists: bool,
+    pub(super) path_changed: bool,
 }
 
 impl<'a> StateSink<'a> {
@@ -31,18 +36,18 @@ impl<'a> StateSink<'a> {
         session_id: &'a SessionId,
         path: &'a str,
     ) -> Result<Self, StateError> {
-        let cursor: Option<Cursor> = sqlx::query_as(
-            "SELECT next_byte_offset, next_sequence FROM projection_state WHERE session_id = ?",
-        )
-        .bind(session_id.as_str())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let row: Option<Position> = sqlx::query_as(STATE_POSITION)
+            .bind(session_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
         Ok(Self::builder()
             .tx(tx)
             .session_id(session_id)
             .path(path)
-            .row_exists(cursor.is_some())
-            .cursor(cursor.unwrap_or_default())
+            .row_exists(row.is_some())
+            .path_changed(row.as_ref().is_some_and(|row| row.path != path))
+            .cursor(row.as_ref().map(|row| row.cursor).unwrap_or_default())
+            .source(row.map(|row| row.source))
             .build())
     }
 
@@ -58,15 +63,19 @@ impl<'a> StateSink<'a> {
             .execute(&mut *self.tx)
             .await?;
         self.cursor = Cursor::default();
+        self.source = None;
         self.row_exists = false;
+        self.last_timestamp = None;
+        self.path_changed = false;
         Ok(())
     }
 
-    /// Applies one line inside a savepoint and advances the cursor past it.
-    pub(crate) async fn apply(
+    /// Stages a line so the caller can discard it if the history write fails.
+    pub(super) async fn stage(
         &mut self,
         line: &LoggedMutation,
-    ) -> Result<(), StateError> {
+        message: Option<&AgentMessage>,
+    ) -> Result<Transaction<'_, Sqlite>, StateError> {
         // Dropping the savepoint on error rolls back only this line.
         let mut savepoint = (&mut *self.tx).begin().await?;
         StateLine {
@@ -74,27 +83,51 @@ impl<'a> StateSink<'a> {
             session_id: self.session_id,
             path: self.path,
         }
-        .apply(&line.mutation)
+        .apply(&line.mutation, message)
         .await?;
-        savepoint.commit().await?;
+        Ok(savepoint)
+    }
+
+    /// Advances past a line that both databases accepted.
+    pub(super) fn advance(
+        &mut self,
+        line: &LoggedMutation,
+        timestamp: Option<i64>,
+    ) {
         if matches!(line.mutation, LogMutation::Header(_)) {
             self.row_exists = true;
         }
+        if timestamp.is_some() {
+            self.last_timestamp = timestamp;
+        }
         self.cursor.advance(line);
-        Ok(())
     }
 
     /// Persists the cursor next to the row it describes and commits.
-    pub(crate) async fn commit(mut self) -> Result<(), StateError> {
+    pub(crate) async fn commit(
+        mut self,
+        source: &SourceRevision,
+    ) -> Result<(), StateError> {
+        if let Some(timestamp) = self.last_timestamp {
+            sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
+                .bind(timestamp)
+                .bind(self.session_id.as_str())
+                .execute(&mut *self.tx)
+                .await?;
+        }
         if self.row_exists {
             sqlx::query(
-                "INSERT INTO projection_state (session_id, next_byte_offset, next_sequence) \
-                 VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET \
-                 next_byte_offset = excluded.next_byte_offset, next_sequence = excluded.next_sequence",
+                "INSERT INTO projection_state (session_id, next_byte_offset, next_sequence, source_id, source_size, source_mtime) \
+                 VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET \
+                 next_byte_offset = excluded.next_byte_offset, next_sequence = excluded.next_sequence, \
+                 source_id = excluded.source_id, source_size = excluded.source_size, source_mtime = excluded.source_mtime",
             )
             .bind(self.session_id.as_str())
             .bind(i64::try_from(self.cursor.next_byte_offset)?)
             .bind(i64::try_from(self.cursor.next_sequence)?)
+            .bind(&source.source_id)
+            .bind(i64::try_from(source.source_size)?)
+            .bind(&source.source_mtime)
             .execute(&mut *self.tx)
             .await?;
         }
@@ -115,13 +148,17 @@ impl StateLine<'_> {
     async fn apply(
         &mut self,
         mutation: &LogMutation,
+        message: Option<&AgentMessage>,
     ) -> Result<(), StateError> {
         match mutation {
             LogMutation::Header(header) => self.insert_session(header).await,
-            LogMutation::Entry { entry, .. } => self.apply_entry(entry).await,
-            LogMutation::Record(record) => {
-                self.touch(record.timestamp_ms).await
-            }
+            LogMutation::Entry { entry, .. } => match message {
+                Some(message) => {
+                    self.apply_message(message, entry.timestamp_ms).await
+                }
+                None => self.apply_entry(entry).await,
+            },
+            LogMutation::Record(_) => Ok(()),
             LogMutation::Name { name, .. } => {
                 sqlx::query("UPDATE sessions SET name = ? WHERE id = ?")
                     .bind(name.as_deref())
@@ -177,12 +214,10 @@ impl StateLine<'_> {
         &mut self,
         entry: &SessionEntry,
     ) -> Result<(), StateError> {
-        self.touch(entry.timestamp_ms).await?;
         let field = |name: &str| {
             entry.payload.get(name).and_then(serde_json::Value::as_str)
         };
         match entry.kind {
-            EntryKind::Message => self.apply_message(entry).await,
             EntryKind::ModelChange => {
                 sqlx::query(
                     "UPDATE sessions SET provider_id = COALESCE(?, provider_id), \
@@ -225,22 +260,29 @@ impl StateLine<'_> {
     /// Applies user and assistant message rules through the protocol message type.
     async fn apply_message(
         &mut self,
-        entry: &SessionEntry,
+        message: &AgentMessage,
+        at: TimestampMs,
     ) -> Result<(), StateError> {
-        let message: AgentMessage = serde_json::from_value(
-            serde_json::Value::Object(entry.payload.clone()),
-        )?;
-        let user_text = match &message.content {
+        let preview: Option<String> = match &message.content {
             MessageContent::User { blocks } => Some(
                 blocks
                     .iter()
                     .filter_map(ContentBlock::text)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                    .enumerate()
+                    .flat_map(|(i, text)| {
+                        (i > 0).then_some('\n').into_iter().chain(text.chars())
+                    })
+                    .take(PREVIEW_CHARS)
+                    .collect(),
             ),
-            MessageContent::ExpandedUser { expansion } => {
-                Some(expansion.invocation.original.clone())
-            }
+            MessageContent::ExpandedUser { expansion } => Some(
+                expansion
+                    .invocation
+                    .original
+                    .chars()
+                    .take(PREVIEW_CHARS)
+                    .collect(),
+            ),
             MessageContent::Assistant { metadata, .. } => {
                 let tokens = metadata.usage.as_ref().total_tokens.unwrap_or(0);
                 sqlx::query(
@@ -257,28 +299,17 @@ impl StateLine<'_> {
             }
             _ => None,
         };
-        if let Some(text) = user_text {
-            let preview = text.chars().take(PREVIEW_CHARS).collect::<String>();
+        if let Some(preview) = preview {
             sqlx::query(
                 "UPDATE sessions SET has_user_message = 1, recency_at_ms = ?, \
                  preview = CASE WHEN preview = '' THEN ? ELSE preview END WHERE id = ?",
             )
-            .bind(i64::try_from(entry.timestamp_ms.get())?)
+            .bind(i64::try_from(at.get())?)
             .bind(preview)
             .bind(self.session_id.as_str())
             .execute(&mut *self.connection)
             .await?;
         }
-        Ok(())
-    }
-
-    /// Records the timestamp of the latest timestamped mutation.
-    async fn touch(&mut self, at: TimestampMs) -> Result<(), StateError> {
-        sqlx::query("UPDATE sessions SET updated_at_ms = ? WHERE id = ?")
-            .bind(i64::try_from(at.get())?)
-            .bind(self.session_id.as_str())
-            .execute(&mut *self.connection)
-            .await?;
         Ok(())
     }
 

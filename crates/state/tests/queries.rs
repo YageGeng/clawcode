@@ -355,6 +355,24 @@ async fn branch_walks_root_to_leaf() {
     );
 }
 
+/// Older indexes with a broken parent report the offending entry instead of a partial branch.
+#[tokio::test]
+async fn branch_requires_a_root_in_an_existing_index() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("old-index"));
+    let root = log.user("root");
+    let leaf = log.user("leaf");
+    log.sync();
+    project(&fixture, &log).await;
+    sqlx::query("UPDATE entries SET parent_id = 'missing' WHERE entry_id = ?")
+        .bind(root.as_str())
+        .execute(&fixture.history_pool().await)
+        .await
+        .expect("old index");
+    assert!(matches!(fixture.runtime.branch(&log.id(), &leaf).await,
+        Err(state::StateError::InvalidParent { entry_id, .. }) if entry_id == root));
+}
+
 /// Runs page by start position, and one Run's entries come back in log order.
 #[tokio::test]
 async fn runs_and_run_entries_page_in_log_order() {
@@ -423,6 +441,7 @@ async fn history_reads_refresh_first() {
     log.sync();
     project(&fixture, &log).await;
     let late = log.user("two");
+    log.name(Some("Offline title"));
     log.sync();
 
     let snapshot = fixture
@@ -436,4 +455,59 @@ async fn history_reads_refresh_first() {
         snapshot.entries.last().map(|entry| &entry.entry_id),
         Some(&late)
     );
+    assert_eq!(snapshot.name.as_deref(), Some("Offline title"));
+}
+
+/// An idle history reader proceeds while external connections hold both writer locks.
+#[tokio::test]
+async fn caught_up_history_needs_no_writer_lock() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("idle"));
+    log.user("projected");
+    log.sync();
+    project(&fixture, &log).await;
+    let pool = fixture.state_pool().await;
+    let held = pool.begin_with("BEGIN IMMEDIATE").await.expect("writer");
+    let history = fixture.history_pool().await;
+    let held_history = history
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("history writer");
+    let rows = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        fixture.runtime.user_entries(&log.id()),
+    )
+    .await;
+    held.rollback().await.expect("release writer");
+    held_history
+        .rollback()
+        .await
+        .expect("release history writer");
+    assert_eq!(
+        rows.expect("read while writer is held")
+            .expect("history")
+            .len(),
+        1
+    );
+}
+
+/// An empty text preview still represents an interactive user message.
+#[tokio::test]
+async fn user_message_without_preview_is_visible() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("empty"));
+    log.message(protocol::MessageContent::User {
+        blocks: vec![protocol::ContentBlock::Image {
+            data: "AA==".into(),
+            mime_type: "image/png".into(),
+        }],
+    });
+    log.sync();
+    project(&fixture, &log).await;
+    for scope in [SessionScope::Visible, SessionScope::Interactive] {
+        assert_eq!(
+            ids(&fixture, SessionFilter::builder().scope(scope).build()).await,
+            ["empty"]
+        );
+    }
 }

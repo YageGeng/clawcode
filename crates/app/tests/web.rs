@@ -123,22 +123,23 @@ impl WebFixture {
             .build()
             .build()
             .expect("kernel");
-        let application = Application {
-            kernel: Arc::new(kernel),
-            ui_bootstrap: UiBootstrapResponse::builder()
-                .product(ProductInfo {
-                    name: ProductIdentity::NAME.to_string(),
-                    slug: ProductIdentity::SLUG.to_string(),
-                })
-                .acp_path(ProductIdentity::DEFAULT_ACP_PATH.to_string())
-                .default_cwd("/workspace".to_string())
-                .active_model(ActiveModelInfo {
-                    id: "provider/model".to_string(),
-                    display_name: "Model".to_string(),
-                })
-                .build(),
-            state_worker: None,
-        };
+        let application = Application::builder()
+            .kernel(Arc::new(kernel))
+            .ui_bootstrap(
+                UiBootstrapResponse::builder()
+                    .product(ProductInfo {
+                        name: ProductIdentity::NAME.to_string(),
+                        slug: ProductIdentity::SLUG.to_string(),
+                    })
+                    .acp_path(ProductIdentity::DEFAULT_ACP_PATH.to_string())
+                    .default_cwd("/workspace".to_string())
+                    .active_model(ActiveModelInfo {
+                        id: "provider/model".to_string(),
+                        display_name: "Model".to_string(),
+                    })
+                    .build(),
+            )
+            .build();
         let router = application
             .http_router(
                 WebServerOptions::builder()

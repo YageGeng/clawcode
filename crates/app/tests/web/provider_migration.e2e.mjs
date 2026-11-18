@@ -3,8 +3,10 @@ import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { AcpProtocol } from '../../../../web/src/acp/protocol.ts';
 import { Page, openBlankPage, startChrome } from './cdp_page.mjs';
 
+// Run with node --experimental-strip-types on Node releases with opt-in TypeScript support.
 // Run against the production app and its configured provider; no model or backend is substituted.
 const base = new URL(process.argv[2] ?? 'http://127.0.0.1:3001');
 const work = resolve(process.argv[3] ?? '/tmp/clawcode-rig-core-e2e/work');
@@ -31,10 +33,29 @@ class AuditPage extends Page {
   rpc(method, params) {
     return this.evaluate(`window.__audit.rpc(${JSON.stringify(method)},${JSON.stringify(params)})`);
   }
+  /** Drains this Session's new notifications through the production batch decoder. */
+  async takeUpdates(sessionId) {
+    const pending = await this.evaluate(`window.__audit.received.get(${JSON.stringify(sessionId)})?.splice(0) ?? []`);
+    return pending.flatMap(params => AcpProtocol.expandSessionUpdateBatch(params, this.namespace))
+      .map(({ update }) => update);
+  }
   /** Waits for the authoritative final assistant snapshot and idle state of one session. */
   async answer(sessionId, marker) {
-    await this.wait(`window.__audit.received.flat().some(frame=>frame.method==='session/update'&&frame.params.sessionId===${JSON.stringify(sessionId)}&&frame.params.update.sessionUpdate==='agent_message'&&JSON.stringify(frame.params.update.content).includes(${JSON.stringify(marker)}))`);
-    await this.wait(`window.__audit.received.flat().filter(frame=>frame.method==='session/update'&&frame.params.sessionId===${JSON.stringify(sessionId)}&&frame.params.update.sessionUpdate==='state_update').at(-1)?.params.update.state==='idle'`);
+    let answered = false;
+    let state;
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      for (const update of await this.takeUpdates(sessionId)) {
+        if (update.sessionUpdate === 'agent_message' && JSON.stringify(update.content).includes(marker)) {
+          answered = true;
+          state = undefined; // Require an idle transition after this answer.
+        }
+        if (update.sessionUpdate === 'state_update') state = update.state;
+      }
+      if (answered && state === 'idle') return;
+      await delay(100);
+    }
+    assert.fail(`Timed out waiting for ${marker} in ${sessionId}: answered=${answered}, state=${state}`);
   }
   /** Captures the actual rendered production page for later review. */
   async screenshot(name) {
@@ -50,10 +71,20 @@ try {
   await page.call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1100, deviceScaleFactor: 1, mobile: false });
   // Observe genuine ACP traffic and DOM snapshots; never fabricate provider replies.
   await page.call('Page.addScriptToEvaluateOnNewDocument', { source: `
-    window.__audit={sent:[],received:[],samples:[],socket:null,rpcId:0};
+    window.__audit={sent:[],received:new Map(),samples:[],socket:null,rpcId:0};
     const NativeWebSocket=window.WebSocket;
     window.WebSocket=class extends NativeWebSocket {
-      constructor(...args){super(...args);window.__audit.socket=this;this.addEventListener('message',event=>{try{window.__audit.received.push(JSON.parse(event.data))}catch{}})}
+      constructor(...args) {
+        super(...args);
+        window.__audit.socket=this;
+        this.addEventListener('message', ({data}) => {
+          const {method, params} = JSON.parse(data);
+          if (method !== 'session/update') return;
+          const {received} = window.__audit;
+          if (!received.has(params.sessionId)) received.set(params.sessionId, []);
+          received.get(params.sessionId).push(params);
+        });
+      }
       send(value){try{window.__audit.sent.push(JSON.parse(value))}catch{}return super.send(value)}
     };
     window.__audit.rpc=(method,params)=>new Promise((resolve,reject)=>{const socket=window.__audit.socket;const id='audit-'+(++window.__audit.rpcId);const listener=event=>{const frame=JSON.parse(event.data);if(frame.id!==id)return;socket.removeEventListener('message',listener);frame.error?reject(Error(JSON.stringify(frame.error))):resolve(frame.result)};socket.addEventListener('message',listener);socket.send(JSON.stringify({jsonrpc:'2.0',id,method,params}))});
@@ -61,6 +92,7 @@ try {
   ` });
   await page.call('Page.navigate', { url: base.href });
   const bootstrap = await (await fetch(new URL('/api/ui/bootstrap', base))).json();
+  page.namespace = bootstrap.product.slug;
   results.push({ scenario: 'production-bootstrap', model: bootstrap.activeModel.id });
   await page.wait(`!![...document.querySelectorAll('button')].find(item=>item.textContent.trim()==='新建'&&!item.disabled)`, 20000);
   await page.click('新建');
@@ -70,12 +102,16 @@ try {
   await page.send('这是隔离目录的迁移验收。请先单独用 exec_command 执行 printf RIG_MIGRATION_ONE，收到结果后再单独执行 printf RIG_MIGRATION_TWO。不要使用子代理，不读取或写入文件。完成后只回答 RIG_MIGRATION_DONE。');
   await page.wait(`[...document.querySelectorAll('.message[data-role=assistant] .message__body')].some(node=>node.innerText.includes('RIG_MIGRATION_DONE'))&&!document.querySelector('.danger-button')&&document.querySelectorAll('.agent-usage').length>0`);
   const sessionId = await page.evaluate(`window.__audit.sent.find(frame=>frame.method==='session/prompt').params.sessionId`);
-  const first = await page.evaluate(`({usage:[...document.querySelectorAll('.agent-usage')].map(node=>node.textContent),samples:window.__audit.samples,frames:window.__audit.received})`);
+  const first = await page.evaluate(`({usage:[...document.querySelectorAll('.agent-usage')].map(node=>node.textContent),samples:window.__audit.samples})`);
   assert(first.samples.length > 0, 'Visible intermediate streaming state was captured');
-  const updates = first.frames.flat().filter(frame=>frame.method==='session/update').map(frame=>frame.params.update);
-  const tools = updates.filter(update=>update.sessionUpdate==='tool_call_update'&&update.status==='completed');
-  assert(tools.length>=2, 'Two actual tools completed');
-  assert(JSON.stringify(tools).includes('RIG_MIGRATION_ONE') && JSON.stringify(tools).includes('RIG_MIGRATION_TWO'), 'Both real tool outputs arrived');
+  const updates = await page.takeUpdates(sessionId);
+  const completed = updates.filter(update => update.sessionUpdate === 'tool_call_update' && update.status === 'completed');
+  const calls = ['RIG_MIGRATION_ONE', 'RIG_MIGRATION_TWO'].map(marker => {
+    const call = completed.find(update => update.rawOutput?.blocks?.some(block => block.type === 'text' && block.text.includes(marker)));
+    assert.ok(call?.toolCallId, `Missing completed tool output ${marker}`);
+    return call.toolCallId;
+  });
+  assert.notEqual(calls[0], calls[1], 'Both outputs came from distinct tool calls');
   await writeFile(join(evidence, 'updates.json'), JSON.stringify(updates, null, 2));
   results.push({ scenario: 'two-tool-turns-and-streaming', sessionId, intermediateSamples: first.samples.length, usage: first.usage });
   await page.screenshot('tool-loop');

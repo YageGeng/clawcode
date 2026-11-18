@@ -512,13 +512,26 @@ async fn header_only_session_gets_initial_timestamps() {
     assert_eq!(state_cursor(&fixture, "session-h").await.1, 1);
 }
 
-/// Preview truncation counts characters and never splits one.
+/// A large message retains its complete payload while the preview spans text blocks only.
 #[tokio::test]
 async fn preview_keeps_200_chars_on_char_boundaries() {
     let fixture = Fixture::new().await;
-    let text = "汉😀".repeat(150);
+    let text = "汉😀".repeat(40_000);
     let mut log = fixture.session(fixture.options("session-p"));
-    log.user(&text);
+    let id = log.entry(
+        store::EntryKind::Message,
+        serde_json::json!({
+            "message_id": "message-p", "turn_id": "turn-p",
+            "timestamp_ms": protocol::TimestampMs::from(10), "started_at_ms": protocol::TimestampMs::from(10),
+            "ended_at_ms": protocol::TimestampMs::from(11),
+            "extensionField": {"keep": true},
+            "content": {"type": "user", "blocks": [
+                {"type": "text", "text": "开头"},
+                {"type": "image", "data": "eA==", "mime_type": "image/png"},
+                {"type": "text", "text": text}
+            ]}
+        }),
+    );
     log.sync();
     fixture
         .runtime
@@ -528,7 +541,17 @@ async fn preview_keeps_200_chars_on_char_boundaries() {
     let preview: String =
         session_row(&fixture, "session-p").await.get("preview");
     assert_eq!(preview.chars().count(), 200);
-    assert_eq!(preview, text.chars().take(200).collect::<String>());
+    assert_eq!(
+        preview,
+        format!("开头\n{}", text.chars().take(197).collect::<String>())
+    );
+    let (entry,): (sqlx::types::Json<SessionEntry>,) =
+        sqlx::query_as("SELECT entry_json FROM entries WHERE entry_id = ?")
+            .bind(id.as_str())
+            .fetch_one(&fixture.history_pool().await)
+            .await
+            .expect("history");
+    assert_eq!(&entry.0, log.store.get_entry(&id).expect("original"));
 }
 
 /// Projection stops at the first line it cannot apply and keeps everything before it.
@@ -579,7 +602,7 @@ async fn failed_line_rolls_back_its_partial_updates() {
         .await
         .get("updated_at_ms");
 
-    // `touch` runs before message decoding fails on this payload.
+    // Invalid protocol content must leave the timestamp of the preceding valid entry intact.
     log.entry(
         store::EntryKind::Message,
         serde_json::json!({"not": "a message"}),
@@ -592,4 +615,192 @@ async fn failed_line_rolls_back_its_partial_updates() {
         .await
         .get("updated_at_ms");
     assert_eq!(after, before);
+}
+
+/// A missing parent stops projection before the invalid entry becomes visible.
+#[tokio::test]
+async fn imported_entry_requires_an_earlier_parent() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("ancestry"));
+    let root = log.user("root");
+    let last_valid = timestamp(&log, &root);
+    log.user("child");
+    log.sync();
+    let path = log.path();
+    let id = log.id();
+    drop(log);
+    let data = std::fs::read_to_string(&path).expect("log").replace(
+        &format!("\"parentId\":\"{root}\""),
+        "\"parentId\":\"missing\"",
+    );
+    std::fs::write(&path, data).expect("import");
+    assert!(matches!(
+        fixture.runtime.refresh(&id, &path).await,
+        Err(StateError::Projection { .. })
+    ));
+    assert_eq!(entry_count(&fixture, id.as_str()).await, 1);
+    assert_eq!(
+        session_row(&fixture, id.as_str())
+            .await
+            .get::<i64, _>("updated_at_ms"),
+        last_valid
+    );
+}
+
+/// Readers can observe a committed prefix while a long, previously unseen log is projected.
+#[tokio::test]
+async fn long_projection_releases_writers_between_batches() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("long"));
+    for _ in 0..1024 {
+        log.user("message");
+    }
+    log.sync();
+    let id = log.id();
+    let path = log.path();
+    let history = fixture.history_pool().await;
+    let observe = async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM entries")
+                .fetch_one(&history)
+                .await
+                .expect("count");
+            if count > 0 {
+                return count;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    let (applied, first_visible) = tokio::join!(
+        fixture.runtime.refresh(&id, &path),
+        tokio::time::timeout(std::time::Duration::from_secs(10), observe)
+    );
+    applied.expect("project");
+    let first_visible = first_visible.expect("a committed prefix");
+    assert!(
+        (1..1024).contains(&first_visible),
+        "first visible count {first_visible}"
+    );
+    assert_eq!(entry_count(&fixture, id.as_str()).await, 1024);
+}
+
+/// Both the hot path and startup notice same-length edits without a sequence change.
+#[tokio::test]
+async fn same_length_rewrites_replace_metadata_and_history() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("rewrite"));
+    log.user("first");
+    log.name(Some("first"));
+    log.sync();
+    let path = log.path();
+    let id = log.id();
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("initial index");
+    let original = std::fs::read_to_string(&path).expect("log");
+    for (title, startup) in [("other", false), ("third", true)] {
+        let bytes = original.replace("first", title);
+        if startup {
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, bytes).expect("replacement");
+            std::fs::rename(tmp, &path).expect("replace atomically");
+            fixture
+                .runtime
+                .sync_logs(&fixture.factory)
+                .await
+                .expect("startup");
+        } else {
+            // A deterministic mtime change also works on coarse filesystems.
+            let file = std::fs::File::create(&path).expect("truncate");
+            (&file).write_all(bytes.as_bytes()).expect("rewrite");
+            file.set_modified(std::time::UNIX_EPOCH).expect("stamp");
+            fixture.runtime.refresh(&id, &path).await.expect("refresh");
+        }
+        let row = fixture
+            .runtime
+            .session(&id)
+            .await
+            .expect("read")
+            .expect("session");
+        assert_eq!(row.name.as_deref(), Some(title));
+        assert_eq!(row.preview, title);
+        let payload: String = sqlx::query_scalar(
+            "SELECT entry_json FROM entries WHERE session_id = ?",
+        )
+        .bind(id.as_str())
+        .fetch_one(&fixture.history_pool().await)
+        .await
+        .expect("entry");
+        assert!(payload.contains(title));
+    }
+}
+
+/// Legacy non-string names clear the title in replay, fallback listing and SQLite alike.
+#[tokio::test]
+async fn legacy_non_string_fact_stays_readable_after_projection() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("legacy"));
+    log.name(Some("old"));
+    log.name(Some("sentinel"));
+    log.user("following entry");
+    log.sync();
+    let path = log.path();
+    let content = std::fs::read_to_string(&path)
+        .expect("log")
+        .replace("\"sentinel\"", "42");
+    std::fs::write(&path, content).expect("legacy fact");
+    assert!(
+        fixture
+            .factory
+            .open(&path)
+            .expect("replay")
+            .name()
+            .is_none()
+    );
+    assert!(fixture.factory.list(None).expect("list")[0].name.is_none());
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("index");
+    let row = fixture
+        .runtime
+        .session(&log.id())
+        .await
+        .expect("read")
+        .expect("session");
+    assert!(row.name.is_none());
+    assert_eq!(row.preview, "following entry");
+}
+
+/// A timestamp-heavy log updates the indexed listing timestamp once per committed batch.
+#[tokio::test]
+async fn listing_timestamp_is_written_once_per_batch() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("batch-time"));
+    for _ in 0..260 {
+        log.entry(store::EntryKind::Custom, serde_json::json!({}));
+    }
+    log.sync();
+    let pool = fixture.state_pool().await;
+    sqlx::query("CREATE TABLE timestamp_writes (at INTEGER)")
+        .execute(&pool)
+        .await
+        .expect("counter");
+    sqlx::query("CREATE TRIGGER count_timestamp AFTER UPDATE OF updated_at_ms ON sessions BEGIN INSERT INTO timestamp_writes VALUES (NEW.updated_at_ms); END")
+        .execute(&pool).await.expect("observe updates");
+    fixture
+        .runtime
+        .refresh(&log.id(), &log.path())
+        .await
+        .expect("project");
+    let times: Vec<i64> =
+        sqlx::query_scalar("SELECT at FROM timestamp_writes ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .expect("timestamps");
+    assert_eq!(times.len(), 3);
+    assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
 }

@@ -120,6 +120,11 @@ impl SessionRename<'_> {
                 return Ok(());
             }
             self.session.sync_store()?;
+            // All live rename paths publish the durable title before notifying observers.
+            self.kernel
+                .catalog
+                .refresh(self.session_id, &transcript.path()?)
+                .await;
             // Chosen under the lock, so the event joins the Run active now.
             match announcement {
                 Announcement::Silent => {}
@@ -226,12 +231,6 @@ impl Kernel {
                             KernelError::SessionNotFound(_)
                             | KernelError::SessionClosing,
                         ) => continue,
-                        Ok(()) => {
-                            // The next listing must already show the new title.
-                            let path = session.transcript.path()?;
-                            self.catalog.refresh(session_id, &path).await;
-                            return Ok(());
-                        }
                         result => return result,
                     }
                 }
@@ -255,13 +254,16 @@ impl Kernel {
                     // file. Looking the file up under it reports a deletion that
                     // finished first as SessionNotFound, not a raw I/O error.
                     // Nothing observes an unloaded Session, so no event.
-                    let header =
-                        self.catalog.header(session_id).await?.ok_or_else(
-                            || KernelError::SessionNotFound(session_id.clone()),
-                        )?;
+                    let header = self
+                        .catalog
+                        .header(session_id, None)
+                        .await?
+                        .ok_or_else(|| {
+                        KernelError::SessionNotFound(session_id.clone())
+                    })?;
                     // One appended fact, not a replay, keeps the reservation short.
-                    self.store_factory.set_name_at(
-                        &header.path,
+                    self.store_factory.rename_session(
+                        &header,
                         Some(title.as_str().to_string()),
                     )?;
                     self.catalog.refresh(session_id, &header.path).await;

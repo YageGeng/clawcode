@@ -18,6 +18,8 @@ pub enum SinkError {
 #[async_trait]
 pub trait EventSink: Send + Sync {
     /// Publishes one fully correlated event without changing kernel state.
+    /// Live Session events arrive in sequence order. Return once this event is
+    /// accepted so the Session can deliver its next event.
     async fn emit(&self, event: AgentEvent) -> Result<(), SinkError>;
 }
 

@@ -1,24 +1,22 @@
 //! Background catch-up of Sessions after each durable store sync.
-//!
-//! Stores call [`store::SyncObserver`] while their owners may hold locks, so
-//! the observer only enqueues; this task merges queued events per Session and
-//! refreshes each one, keeping metadata and history eventually consistent.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use protocol::SessionId;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 
-use crate::StateRuntime;
+use crate::{StateError, StateRuntime};
 
-/// One queued request for the worker.
+type Flush = oneshot::Sender<Result<(), StateError>>;
+
+/// A flush is a barrier for preceding notifications, including failed writes.
 enum WorkerMessage {
-    /// A Session log became durable.
     Synced(SessionId, PathBuf),
-    /// Answer once every earlier message has been processed.
-    Flush(oneshot::Sender<()>),
+    Flush(Flush),
 }
 
 /// Sync observer that projects Sessions on a background task.
@@ -32,67 +30,164 @@ impl StateWorker {
         runtime: Arc<StateRuntime>,
     ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let task = tokio::spawn(WorkerLoop { runtime, receiver }.run());
+        let task = tokio::spawn(
+            WorkerLoop {
+                runtime,
+                receiver,
+                failed: BTreeMap::new(),
+            }
+            .run(),
+        );
         (Arc::new(Self { sender }), task)
     }
 
-    /// Waits until every event queued before this call has been projected.
-    pub async fn flush(&self) {
+    /// Confirms that every preceding sync reached SQLite, or identifies a failed Session.
+    pub async fn flush(&self) -> Result<(), StateError> {
         let (done, wait) = oneshot::channel();
-        if self.sender.send(WorkerMessage::Flush(done)).is_ok() {
-            // A dropped worker has nothing left to flush.
-            let _ = wait.await;
-        }
+        self.sender
+            .send(WorkerMessage::Flush(done))
+            .map_err(|_closed| StateError::WorkerStopped)?;
+        wait.await.map_err(|_closed| StateError::WorkerStopped)?
     }
 }
 
 impl store::SyncObserver for StateWorker {
     /// Enqueues a catch-up without blocking the syncing store.
     fn synced(&self, session_id: &SessionId, path: &Path) {
-        // A stopped worker means the process is shutting down; the next backfill repairs.
-        let _ = self.sender.send(WorkerMessage::Synced(
-            session_id.clone(),
-            path.to_path_buf(),
-        ));
+        if self
+            .sender
+            .send(WorkerMessage::Synced(
+                session_id.clone(),
+                path.to_path_buf(),
+            ))
+            .is_err()
+        {
+            tracing::warn!(
+                "state worker stopped before projecting session {}",
+                session_id
+            );
+        }
     }
+}
+
+/// A transient failure gets a delayed retry; other failures wait for a new sync or flush.
+struct FailedSync {
+    path: PathBuf,
+    error: StateError,
+    retry: Option<(Instant, Duration)>,
 }
 
 /// Receiving side of the worker channel.
 struct WorkerLoop {
     runtime: Arc<StateRuntime>,
     receiver: mpsc::UnboundedReceiver<WorkerMessage>,
+    failed: BTreeMap<SessionId, FailedSync>,
 }
 
 impl WorkerLoop {
-    /// Processes batches until the channel closes.
+    /// Drains bounded batches up to the next flush, including transient work that is due.
     async fn run(mut self) {
-        while let Some(first) = self.receiver.recv().await {
+        loop {
+            let deadline = self
+                .failed
+                .values()
+                .filter_map(|item| item.retry.map(|r| r.0))
+                .min();
+            let first = match deadline {
+                Some(at) => tokio::select! {
+                    message = self.receiver.recv() => message,
+                    () = tokio::time::sleep_until(at) => None,
+                },
+                None => self.receiver.recv().await,
+            };
+            let closed = first.is_none()
+                && self.receiver.is_closed()
+                && self.receiver.is_empty();
             let mut pending = BTreeMap::new();
-            let mut flushes = Vec::new();
-            let mut message = Some(first);
-            // Merge everything already queued so a burst of syncs costs one refresh each.
-            while let Some(next) = message {
-                match next {
-                    WorkerMessage::Synced(id, path) => {
-                        pending.insert(id, path);
+            let mut flush = None;
+            if let Some(first) = first {
+                for message in std::iter::once(first)
+                    .chain(std::iter::from_fn(|| self.receiver.try_recv().ok()))
+                    .take(128)
+                {
+                    match message {
+                        WorkerMessage::Synced(id, path) => {
+                            pending.insert(id, path);
+                        }
+                        WorkerMessage::Flush(done) => {
+                            flush = Some(done);
+                            break;
+                        }
                     }
-                    WorkerMessage::Flush(done) => flushes.push(done),
                 }
-                message = self.receiver.try_recv().ok();
+            }
+            let now = Instant::now();
+            for (id, failure) in &self.failed {
+                if flush.is_some()
+                    || closed
+                    || failure.retry.is_some_and(|(at, _)| at <= now)
+                {
+                    pending
+                        .entry(id.clone())
+                        .or_insert_with(|| failure.path.clone());
+                }
             }
             for (id, path) in pending {
-                if let Err(error) = self.runtime.refresh(&id, &path).await {
+                let previous = self.failed.remove(&id);
+                if let Err(error) = self.project(&id, &path).await {
+                    let retry = error.is_busy().then(|| {
+                        let delay = previous
+                            .and_then(|p| p.retry)
+                            .map_or(Duration::from_millis(100), |(_, d)| {
+                                (d * 2).min(Duration::from_secs(5))
+                            });
+                        (Instant::now() + delay, delay)
+                    });
                     tracing::warn!(
                         "failed to project session {} after sync: {}",
                         id,
                         error
                     );
+                    self.failed.insert(id, FailedSync { path, error, retry });
                 }
             }
-            for done in flushes {
-                let _ = done.send(());
+            if let Some(done) = flush {
+                let result = self.failed.first_key_value().map_or(
+                    Ok(()),
+                    |(id, failure)| {
+                        Err(StateError::WorkerProjection {
+                            count: self.failed.len(),
+                            session_id: id.clone(),
+                            reason: failure.error.to_string(),
+                        })
+                    },
+                );
+                let _ = done.send(result);
+            }
+            if closed {
+                break;
             }
         }
-        tracing::info!("stopped state worker");
+        tracing::info!(
+            "stopped state worker with {} outstanding sessions",
+            self.failed.len()
+        );
+    }
+
+    /// A queued sync may race deletion or a move; only remove rows for the vanished path.
+    async fn project(
+        &self,
+        id: &SessionId,
+        path: &Path,
+    ) -> Result<(), StateError> {
+        match self.runtime.refresh(id, path).await {
+            Err(StateError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                let path = std::path::absolute(path)?;
+                self.runtime.delete_session_at(id, Some(&path)).await
+            }
+            result => result,
+        }
     }
 }

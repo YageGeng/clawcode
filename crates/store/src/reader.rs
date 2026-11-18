@@ -12,10 +12,7 @@ use protocol::{
 };
 
 use crate::factory::{HeaderKind, V4Header};
-use crate::state::{
-    EntryMutation, LabelFactMutation, LaneMutation, NameFactMutation,
-    RecordMutation,
-};
+use crate::state::{EntryMutation, LaneMutation, RecordMutation};
 use crate::{SessionEntry, SessionRecord, StoreError};
 
 /// Public read-only view of one v4 JSONL header line.
@@ -41,10 +38,16 @@ pub struct LogHeader {
     pub app_version: Option<String>,
 }
 
-impl From<V4Header> for LogHeader {
+impl TryFrom<V4Header> for LogHeader {
+    type Error = StoreError;
     /// Drops the format discriminants that a validated header no longer needs.
-    fn from(header: V4Header) -> Self {
-        Self::builder()
+    fn try_from(header: V4Header) -> Result<Self, Self::Error> {
+        if header.kind != HeaderKind::Header || header.version != 4 {
+            return Err(StoreError::InvalidSession(
+                "unsupported or missing v4 header".to_owned(),
+            ));
+        }
+        Ok(Self::builder()
             .id(header.id)
             .created_at(header.created_at)
             .cwd(header.cwd)
@@ -52,7 +55,7 @@ impl From<V4Header> for LogHeader {
             .ownership(header.ownership)
             .git(header.git)
             .app_version(header.app_version)
-            .build()
+            .build())
     }
 }
 
@@ -63,12 +66,7 @@ impl TryFrom<&[u8]> for LogHeader {
     fn try_from(line: &[u8]) -> Result<Self, Self::Error> {
         let header: V4Header = serde_json::from_slice(line)
             .map_err(|error| StoreError::InvalidSession(error.to_string()))?;
-        if header.kind != HeaderKind::Header || header.version != 4 {
-            return Err(StoreError::InvalidSession(
-                "unsupported or missing v4 header".to_string(),
-            ));
-        }
-        Ok(header.into())
+        header.try_into()
     }
 }
 
@@ -114,6 +112,13 @@ pub enum LogMutation {
 }
 
 impl LogMutation {
+    /// Reads the name fact without decoding unrelated entries during a fallback listing.
+    pub(crate) fn name_fact(value: &serde_json::Value) -> Option<Option<&str>> {
+        (value.get("kind")?.as_str()? == "fact"
+            && value.get("fact")?.as_str()? == "name")
+            .then(|| value.get("name").and_then(serde_json::Value::as_str))
+    }
+
     /// Returns the shared log sequence, or `None` for the header.
     #[must_use]
     pub fn sequence(&self) -> Option<u64> {
@@ -134,14 +139,38 @@ impl TryFrom<&[u8]> for LogMutation {
     /// Decodes one complete line by its `kind` and, for facts, its `fact` tag.
     fn try_from(line: &[u8]) -> Result<Self, Self::Error> {
         let value: serde_json::Value = serde_json::from_slice(line)?;
-        let tag = |field: &str| {
+        Self::try_from(value)
+    }
+}
+
+impl TryFrom<serde_json::Value> for LogMutation {
+    type Error = StoreError;
+
+    /// Decodes one owned JSON object with the same fact semantics used by replay and listing.
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let tag =
+            |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        let sequence = || {
             value
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
+                .get("seq")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|seq| Sequence::try_from(seq).ok())
+                .ok_or_else(|| {
+                    StoreError::InvalidSession(
+                        "mutation has invalid sequence".to_owned(),
+                    )
+                })
         };
-        match (tag("kind").as_deref(), tag("fact").as_deref()) {
-            (Some("header"), _) => Ok(Self::Header(LogHeader::try_from(line)?)),
+        if let Some(name) = Self::name_fact(&value) {
+            return Ok(Self::Name {
+                sequence: sequence()?,
+                name: name.map(ToOwned::to_owned),
+            });
+        }
+        match (tag("kind"), tag("fact")) {
+            (Some("header"), _) => Ok(Self::Header(
+                serde_json::from_value::<V4Header>(value)?.try_into()?,
+            )),
             (Some("lane"), _) => {
                 let mutation: LaneMutation = serde_json::from_value(value)?;
                 Ok(Self::Lane {
@@ -161,19 +190,18 @@ impl TryFrom<&[u8]> for LogMutation {
                 let mutation: RecordMutation = serde_json::from_value(value)?;
                 Ok(Self::Record(mutation.record))
             }
-            (Some("fact"), Some("name")) => {
-                let fact: NameFactMutation = serde_json::from_value(value)?;
-                Ok(Self::Name {
-                    sequence: fact.sequence,
-                    name: fact.name,
-                })
-            }
             (Some("fact"), Some("label")) => {
-                let fact: LabelFactMutation = serde_json::from_value(value)?;
+                let target = tag("targetId").ok_or_else(|| {
+                    StoreError::InvalidSession(
+                        "label fact has no targetId".to_owned(),
+                    )
+                })?;
                 Ok(Self::Label {
-                    sequence: fact.sequence,
-                    target_id: fact.target_id,
-                    label: fact.label,
+                    sequence: sequence()?,
+                    target_id: EntryId::try_from(target).map_err(|error| {
+                        StoreError::InvalidSession(error.to_string())
+                    })?,
+                    label: tag("label").map(ToOwned::to_owned),
                 })
             }
             (kind, fact) => Err(StoreError::InvalidSession(format!(

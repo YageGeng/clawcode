@@ -2179,6 +2179,7 @@ dependencies = [
  "serde",
  "serde_json",
  "skill",
+ "sqlx",
  "state",
  "store",
  "tempfile",
@@ -4024,6 +4025,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "typed-builder",
 ]

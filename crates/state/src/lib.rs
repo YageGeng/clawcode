@@ -20,9 +20,10 @@ mod runtime;
 mod sessions;
 mod worker;
 
-pub use backfill::BackfillOutcome;
+pub use backfill::{BackfillOutcome, StartupBackfill};
 pub use config::{
-    SESSION_HISTORY_DB_FILENAME, STATE_DB_FILENAME, SqliteConfig,
+    SESSION_HISTORY_DB_FILENAME, SESSION_HISTORY_DB_VERSION, STATE_DB_FILENAME,
+    STATE_DB_VERSION, SqliteConfig,
 };
 pub use error::StateError;
 pub use history::RunRow;

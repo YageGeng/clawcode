@@ -19,11 +19,10 @@ impl StateRuntime {
     /// Opens and migrates both databases under the configured home.
     pub async fn init(config: &SqliteConfig) -> Result<Arc<Self>, StateError> {
         tokio::fs::create_dir_all(config.home()).await?;
-        let mut state_migrator = sqlx::migrate!("./migrations");
+        let mut state_migrator = sqlx::migrate!("./migrations/state");
         // Older binaries may open a database a newer binary migrated (Codex rule).
         state_migrator.set_ignore_missing(true);
-        let mut history_migrator =
-            sqlx::migrate!("./session_history_migrations");
+        let mut history_migrator = sqlx::migrate!("./migrations/history");
         history_migrator.set_ignore_missing(true);
         let state_path = config.state_db_path();
         let state = DatabaseOpener {
@@ -46,15 +45,11 @@ impl StateRuntime {
                 return Err(error);
             }
         };
-        let status: String = sqlx::query_scalar(
-            "SELECT status FROM backfill_state WHERE id = 1",
-        )
-        .fetch_one(&state)
-        .await?;
         Ok(Arc::new(Self {
             state,
             history,
-            backfill_complete: AtomicBool::new(status == "complete"),
+            // A previous run's watermark cannot certify either database after an offline change.
+            backfill_complete: AtomicBool::new(false),
         }))
     }
 

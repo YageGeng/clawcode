@@ -34,7 +34,7 @@
 | `codex-state` crate | `crates/state` | 同名同职责 |
 | `StateRuntime` | `state::StateRuntime` | 持有两个连接池 |
 | `SqliteConfig`、`state_5.sqlite`、`thread_history_1.sqlite` | `state::SqliteConfig`、`state_1.sqlite`、`session_history_1.sqlite` | `<用途>_<代号>.sqlite`，不兼容变更时代号加一，新文件由 backfill 重建 |
-| `migrations/`、`thread_history_migrations/` | `crates/state/migrations/`、`crates/state/session_history_migrations/` | `sqlx::migrate!` 嵌入，运行时 migrator `ignore_missing = true` |
+| `migrations/`、`thread_history_migrations/` | `crates/state/migrations/state/`、`crates/state/migrations/history/` | `sqlx::migrate!` 分别嵌入对应目录，两个 migrator 均设置 `ignore_missing = true` |
 | `threads` | `sessions` | 逐列映射见 2.1 |
 | `thread_spawn_edges` | `sessions.owner_session_id` + `idx_sessions_owner` | ownership 不可变，无需独立边表 |
 | `backfill_state` | `backfill_state` | 同结构，时间戳改毫秒 |
@@ -84,7 +84,7 @@ crates/app      打开 StateRuntime（失败 warn 并传 None）、安装 SyncOb
 
 所有业务列均可由 JSONL 派生。约束策略与 Codex 一致：结构性约束（单行表、布尔、跨列一致性）使用 `CHECK`，表间从属使用外键 `ON DELETE CASCADE`；由 JSONL 原样镜像的枚举值（`runs.status`、`runs.operation`、`entries.kind`、`entries.message_type`）不加枚举 `CHECK`，否则一个新取值会让整个会话投影失败。Codex 只对自己写入的数据（如 `thread_goals.status`）使用枚举 `CHECK`。外键依赖 sqlx `SqliteConnectOptions` 默认开启的 `foreign_keys`，与 Codex 相同。SQLite 不支持跨库外键，两库之间以 `session_id` 在应用层关联。
 
-### 2.1 `state_1.sqlite`：`crates/state/migrations/0001_sessions.sql`
+### 2.1 `state_1.sqlite` 的[元数据迁移](../../../crates/state/migrations/state/)
 
 `sessions` 与 Codex `threads` 的列映射：
 
@@ -147,19 +147,19 @@ CREATE INDEX idx_sessions_cwd_recency_at_ms ON sessions(cwd, recency_at_ms DESC,
 
 -- Visible listing hides Sessions that never received a user message.
 CREATE INDEX idx_sessions_visible_created_at_ms ON sessions(created_at_ms DESC, id DESC)
-    WHERE preview <> '';
+    WHERE has_user_message = 1;
 CREATE INDEX idx_sessions_visible_updated_at_ms ON sessions(updated_at_ms DESC, id DESC)
-    WHERE preview <> '';
+    WHERE has_user_message = 1;
 CREATE INDEX idx_sessions_visible_recency_at_ms ON sessions(recency_at_ms DESC, id DESC)
-    WHERE preview <> '';
+    WHERE has_user_message = 1;
 
 -- Interactive listing additionally hides owned subagent Sessions.
 CREATE INDEX idx_sessions_interactive_created_at_ms ON sessions(created_at_ms DESC, id DESC)
-    WHERE preview <> '' AND owner_session_id IS NULL;
+    WHERE has_user_message = 1 AND owner_session_id IS NULL;
 CREATE INDEX idx_sessions_interactive_updated_at_ms ON sessions(updated_at_ms DESC, id DESC)
-    WHERE preview <> '' AND owner_session_id IS NULL;
+    WHERE has_user_message = 1 AND owner_session_id IS NULL;
 CREATE INDEX idx_sessions_interactive_recency_at_ms ON sessions(recency_at_ms DESC, id DESC)
-    WHERE preview <> '' AND owner_session_id IS NULL;
+    WHERE has_user_message = 1 AND owner_session_id IS NULL;
 
 -- Owned children: close cascades, rosters, and mail delivery by agent name.
 CREATE INDEX idx_sessions_owner ON sessions(owner_session_id, agent_name)
@@ -172,13 +172,17 @@ CREATE INDEX idx_sessions_provider ON sessions(provider_id);
 CREATE TABLE projection_state (
     session_id       TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     next_byte_offset INTEGER NOT NULL,
-    next_sequence    INTEGER NOT NULL
+    next_sequence    INTEGER NOT NULL,
+    source_id        TEXT NOT NULL DEFAULT '',
+    source_size      INTEGER NOT NULL DEFAULT 0,
+    source_mtime     TEXT NOT NULL DEFAULT ''
 );
 
 -- One-time filesystem backfill with lease and resumable watermark (codex `backfill_state`).
 CREATE TABLE backfill_state (
     id                 INTEGER PRIMARY KEY CHECK (id = 1),
     status             TEXT NOT NULL CHECK (status IN ('pending', 'running', 'complete')),
+    lease_owner        TEXT,
     last_watermark     TEXT,
     last_success_at_ms INTEGER,
     updated_at_ms      INTEGER NOT NULL
@@ -190,7 +194,7 @@ VALUES (1, 'pending', CAST(strftime('%s', 'now') AS INTEGER) * 1000);
 - `projection_state.next_byte_offset` 是第一条未投影完整行的起点，`next_sequence` 是该行应有的 seq。
 - `backfill_state.last_watermark` 是已处理的最后一个文件相对 sessions 根目录的路径；`updated_at_ms` 兼作租约心跳。
 
-### 2.2 `session_history_1.sqlite`：`crates/state/session_history_migrations/0001_session_history.sql`
+### 2.2 `session_history_1.sqlite` 的[历史迁移](../../../crates/state/migrations/history/)
 
 ```sql
 -- History projection cursor for one Session file (codex `thread_history_projection_state`).
@@ -198,7 +202,10 @@ CREATE TABLE projection_state (
     session_id       TEXT PRIMARY KEY,
     path             TEXT NOT NULL,
     next_byte_offset INTEGER NOT NULL,
-    next_sequence    INTEGER NOT NULL
+    next_sequence    INTEGER NOT NULL,
+    source_id        TEXT NOT NULL DEFAULT '',
+    source_size      INTEGER NOT NULL DEFAULT 0,
+    source_mtime     TEXT NOT NULL DEFAULT ''
 );
 
 -- One durable operation from operation_started to operation_finished (codex `thread_turns`).
@@ -222,6 +229,9 @@ CREATE TABLE runs (
 );
 -- Runs of one Session in log order.
 CREATE UNIQUE INDEX idx_runs_page ON runs(session_id, start_sequence);
+-- Find the newest open Run on the entry's lane.
+CREATE INDEX idx_runs_open_lane ON runs(session_id, lane, start_sequence DESC)
+    WHERE status = 'in_progress';
 -- Finished Runs paged by completion position.
 CREATE INDEX idx_runs_end_page ON runs(session_id, end_sequence, run_id)
     WHERE end_sequence IS NOT NULL;
@@ -267,16 +277,17 @@ CREATE TABLE lanes (
 - `entries.message_type`：message entry 的 `content.type`（user / expanded_user / assistant / tool_result / extension / system），其他 entry 为 NULL。
 - `entries.run_id`：追加时该 lane 上 `status = 'in_progress'` 的 run，没有则为 NULL。
 - `entries.created_at_ms` 为存储时间戳；`started_at_ms` / `completed_at_ms` 取 message 的 `started_at_ms` / `ended_at_ms`；`entry_json` 为完整 entry，无损。
-- 分支遍历从 `lanes.leaf_id` 沿 `parent_id` 递归 CTE 上行，每步命中主键，不需要额外索引。
+- 写入有父节点的 entry 时按会话和主键确认父节点已存在且序号更小。分支查询沿父链接按序号严格递减，遇到旧索引中的断链时返回出错的 entry ID。
 
 ### 2.3 索引使用规则
 
-- SQLite 仅当查询 WHERE 蕴含部分索引的 WHERE 时才使用该索引。列表 SQL 必须字面写出 `preview <> ''` 与 `owner_session_id IS NULL`（与 Codex `0064_thread_listing_indexes.sql` 的注释要求相同），并由 7.1 的 `EXPLAIN QUERY PLAN` 测试守护。
+- SQLite 仅当查询 WHERE 蕴含部分索引的 WHERE 时才使用该索引。列表 SQL 必须字面写出 `has_user_message = 1` 与 `owner_session_id IS NULL`（与 Codex `0064_thread_listing_indexes.sql` 的注释要求相同），并由 7.1 的 `EXPLAIN QUERY PLAN` 测试守护。
+- 列表使用 `(排序时间, id) < (?, ?)` 定位下一页的起点。复合索引同时处理同一时间戳下的 ID 排序。
 - 投影器查找 lane 上未结束的 run 使用 `(session_id, run_id)` 主键前缀，每会话 run 数量小，不另建索引。
 
 ### 2.4 扩展方式
 
-沿用 Codex：新增派生列时新建迁移，先 `ALTER TABLE ... ADD COLUMN`，再 `UPDATE backfill_state SET status = 'pending', last_watermark = NULL`，下次启动 backfill 重新抽取。不兼容变更时文件代号加一（`state_2.sqlite`），旧文件留给旧版本二进制。
+新增派生列时在原库执行 SQLx 迁移，先 `ALTER TABLE ... ADD COLUMN`，再 `UPDATE backfill_state SET status = 'pending', last_watermark = NULL`，下次启动 backfill 重新抽取。元数据库和历史库的文件版本由程序分别用 `STATE_DB_VERSION` 和 `SESSION_HISTORY_DB_VERSION` 定义。某个库的文件格式发生不兼容变更时，只递增该库的版本。新版本使用对应的新文件名，旧文件留给旧版本程序。
 
 ## 3 投影、触发、backfill 与读修复
 
@@ -284,11 +295,11 @@ CREATE TABLE lanes (
 
 输入为 `session_id` 与规范 `path`，单次追赶步骤：
 
-1. 按固定顺序（先 state，后 session_history）对两库各开 `BEGIN IMMEDIATE` 写事务，在事务内读取各自 `projection_state`。固定顺序避免跨进程死锁；事务内读取游标保证并发写者（server 与 GUI 同时追赶）不会重复应用：后到者在 busy_timeout 上等待，拿到锁时游标已前进。**凡是同时写两库的操作（投影、整会话重投影、`delete_session`）都必须按同一顺序开事务**；任何一处反过来，都会与投影器互相等待，直到 busy_timeout 超时。
+1. 先只读查询两库的路径、字节偏移和序号。两库记录的文件身份、大小和修改时间也与当前日志一致，且游标都位于文件末尾的完整行边界时直接返回。需要追赶时，每批依次在 state 和 session_history 上开启 `BEGIN IMMEDIATE`，重新读取游标并打开日志。投影、重建和删除均使用相同的加锁顺序。
 2. 游标语义：行不存在视为 `next_byte_offset = 0`、`next_sequence = 0`。偏移 0 处必须是 header，应用后 `next_sequence` 变为 1；之后每条 mutation 的 seq 必须等于 `next_sequence`，应用后加一。
-3. 以两游标较小者为起点，用 `tokio::fs` 读取文件剩余字节，交给 `store::MutationReader` 解析；只处理以 `\n` 结尾的完整行，半截尾行留待下次。
-4. 校验失败即整会话重投影（清空该会话两库的行与游标，从偏移 0 重来）：文件长度小于游标、游标前一个字节不是 `\n`（文件被改写，游标落在行中间）、行 seq 不等于 `next_sequence`、history `projection_state.path` 与规范路径不同。header ID 与预期不符时重投影无法修复，投影器只校验一次并报错，不写任何行。
-5. 每条 mutation 按 seq 分发给尚未应用它的库，随后推进游标并提交两个事务。
+3. 从较小的字节偏移读取到本次追赶开始时的文件末尾。每批最多处理 128 行，读完一行后累计达到 256 KiB 也会提交。超大的单行仍可完整读取，半截尾行留待下次。
+4. 任一库缺少文件版本信息、文件被替换或等长改写、路径发生变化、文件变短、游标落在行内、相同偏移对应不同序号，或下一行序号不匹配时，从日志起点重建该会话。再次遇到序号错误或发现 header 属于其他会话时返回错误。
+5. 每条 mutation 只交给需要它的库。两个库都接受这一行后才完成元数据的保存点，每批分别提交两库的游标并释放写锁。
 
 state 库应用规则：
 
@@ -300,7 +311,7 @@ state 库应用规则：
 | message（assistant） | `provider_id`、`model_id`；`tokens_used += total_tokens`（未上报按 0） |
 | `model_change` / `thinking_level_change` | `provider_id`、`model_id` / `thinking_level` |
 | custom entry，`extensionId == ProductIdentity::SLUG` 且 `customType == "session_mode"` | `session_mode` 取 `data.mode`（与 `crates/kernel/src/runtime/session/custom.rs` 的识别规则一致，第三方扩展的同名 customType 不生效） |
-| 任意带时间戳的 entry / record | `updated_at_ms`（fact 无时间戳，不更新） |
+| 任意带时间戳的 entry / record | 每批提交时将 `updated_at_ms` 更新为该批最后一条被两库接受的时间戳。fact 无时间戳 |
 
 history 库应用规则：
 
@@ -313,7 +324,7 @@ history 库应用规则：
 | record `operation_finished` | 回填 `status`、`error_json`、结束 seq / 偏移、`completed_at_ms`、`duration_ms` |
 | 其他 record、label fact | 不入库（Codex 亦不存原始记录；内容保留在 JSONL） |
 
-message entry 一律用 protocol 类型（`AgentMessage`、`ModelUsage`）反序列化后取值，不按原始 JSON 路径读取：`ModelUsage` 序列化为 `{"format":"rig-core-v1","usage":{...}}`，计数均为可选值，且兼容旧格式，只有 protocol 的反序列化能正确处理这些情况。
+每条 message 从借用的 payload 解码一次 `AgentMessage`，元数据和历史共用解码结果。token 计数沿用 `ModelUsage` 的旧格式兼容逻辑。预览只收集前 200 个 Unicode 字符，历史表保留完整原始 entry 和扩展字段。
 
 单会话投影失败（坏 JSON、未知 mutation、违反 CHECK）时在第一条无法应用的行处停止：该行的改动回滚，此前已应用的行与推进到该行起点的游标照常提交；记 warn，`refresh` 返回错误，不影响其他会话。下次追赶从该行重试。
 
@@ -322,29 +333,30 @@ message entry 一律用 protocol 类型（`AgentMessage`、`ModelUsage`）反序
 | 场景 | 方式 |
 |---|---|
 | create / create_owned / fork 之后 | kernel 在 async 调用点 await `SessionCatalog::refresh(id, path)` |
-| `set_name_at`、live 会话改名之后 | rename 为 async，await `refresh` |
+| `set_name_at`、live 会话改名之后 | 离线改名持久化后刷新。在线改名由 `SessionRename::apply` 在持久化之后、发送事件之前刷新，覆盖命令、扩展和子会话 |
 | delete | `store_factory.delete` 之后 await `SessionCatalog::record_deleted(id)`，两库各删一行，外键级联 |
 | `JsonlSessionStore::sync` 成功之后 | 调用 `SyncObserver::synced(session_id, path)`；`StateWorker` 经 unbounded channel 收到事件，按 ID 合并已排队事件后逐个追赶 |
 | `JsonlStoreFactory::set_name_at` 之后 | 同样调用 `SyncObserver` |
 | 外部读 history 之前 | `StateRuntime` 的 history 查询先对该会话追赶 |
 
-关闭时 `StateWorker` 处理完 channel 中剩余事件再退出。
+关闭时先请求回填任务保存水位并释放本进程的租约，再等待 `StateWorker::flush`。投影遇到 SQLite 锁时自动退避重试，其他失败保留到下次同步或 flush 重试。flush 仍有失败时会返回未投影的会话数量和示例错误。
 
 观察者的挂载位置：`JsonlStoreFactory` 新增 `sync_observer: Option<Arc<dyn SyncObserver>>` 字段（字段数 3，不需要 builder）及 `with_sync_observer` 方法；`JsonlSessionStore` 的 builder 新增同类型字段（`#[builder(default)]`）。factory 的 `create`、`create_owned`、`open`、`fork` 产出的每个 store 都携带该观察者，因此所有 `sync` 路径都会触发通知。`SyncObserver::synced` 只往 unbounded channel 发送事件，不阻塞，也不要求在 tokio runtime 内调用，在 transcript 持锁时调用是安全的。
 
 ### 3.3 Backfill
 
-- app 在 kernel 构建成功后启动后台任务 `StateRuntime::sync_logs`，不阻塞 server；构建失败不会留下租约。
-- `backfill_state.status = 'complete'` 则跳过；`running` 且 `updated_at_ms` 在租约期内则等待（另一进程在跑），每 1 秒（Codex `STARTUP_BACKFILL_POLL_INTERVAL`）重新列目录并重试，直到对方完成或租约过期后由本进程接手；否则写入 `running` 与心跳抢占租约。
-- 遍历 `JsonlStoreFactory::session_paths()`（按相对路径排序），跳过不大于水位者。每个文件先读 header：库中已有该 ID 且路径不同则跳过（Codex 规则：不改已选路径，处理重复文件）；否则对两库完整投影。
-- 每处理 100 个文件写一次水位与心跳；全部完成后写 `complete` 与 `last_success_at_ms`。
-- `StateRuntime` 缓存一个 `AtomicBool` 表示 backfill 已完成；`SessionCatalog` 在其为假时一律回退扫描。
-- 对账：backfill 完成（本进程或他进程）后，`sync_logs` 用同一份文件列表对账，只 stat 不读内容：库中没有的文件按 backfill 规则投影（同 ID 异路径跳过），长度与 state 游标不同的文件 `refresh`（缩短或重写由投影器整会话重投影），库中有行但文件已不存在的删除该行。它修复 SQLite 未获通知期间的漂移：旧版本二进制写的会话、init 失败的进程、超过 busy 超时的 refresh、非正常退出丢失的队列事件。
+- app 在 kernel 构建成功后持有 `StartupBackfill` 任务，开始提供服务。
+- `backfill_state.status = 'complete'` 则跳过；`running` 且 `updated_at_ms` 在租约期内则等待（另一进程在跑），每 1 秒（Codex `STARTUP_BACKFILL_POLL_INTERVAL`）只查询租约状态，直到对方完成或租约过期后由本进程接手；否则写入 `running` 与心跳抢占租约。
+- 按相对路径排序遍历 `JsonlStoreFactory::session_paths()` 返回的路径，跳过已处理的水位。遇到相同 ID 时保留仍然存在的规范文件。原文件已移走时，本轮直接采纳新路径。
+- 每处理 100 个文件保存水位。单个长日志投影期间也定时续租。正常退出时按持有者标记保存水位并释放租约，下一进程可立即接手。全部完成后写 `complete` 与 `last_success_at_ms`。
+- 每次启动都先用 JSONL 提供目录查询。回填结束后逐个比较两库保存的文件身份、大小、修改时间、路径、偏移和序号。两库游标一致且到达文件末尾时仅检查文件元数据。任一库丢失或落后时按其游标追赶。
+- 对账只清除仍指向已消失路径的记录，包括中断删除时单独遗留的历史记录。有效日志全部对账成功后，`StateRuntime` 才将目录标记为就绪。
 
 ### 3.4 读修复
 
-- `header(id)` / `exists`：库中有行时 stat 其路径，存在即返回，不存在则删除该行并回退扫描；库中无行时回退 store 扫描（已有按文件名后缀的快速路径），命中后 `refresh` 补入。
-- `list`：直接使用库中结果，不逐行 stat。
+- `header(id)` 和 `exists` 检查索引中的路径，仅在文件系统确认路径不存在时删除记录。权限等检查错误保留索引并回退到 store 扫描。
+- 目录就绪时，列表直接读取 SQLite。会话身份写入、改名或删除的同步投影失败后，列表、摘要和子会话查询改读 JSONL。读取仍然走 JSONL 时，每次后台修复会覆盖全部待处理 ID，持续失败后至少等待一秒才会再次尝试，全部修复后恢复索引查询。
+- 历史树先追赶日志，再读最新标题。entry 列表和 lane 叶节点共用一个历史库读事务。
 - 已知局限：运行期间外部手工删除的文件，在下次按 ID 查询或下次启动对账时清理；运行期间外部拷入的文件在下次启动对账时可见。
 
 ### 3.5 kernel 调用点迁移
@@ -367,8 +379,8 @@ message entry 一律用 protocol 类型（`AgentMessage`、`ModelUsage`）反序
 
 ### 3.6 git 与 `app_version` 采集
 
-- kernel 在创建会话（含 owned 与 fork）前于 cwd 执行 `git rev-parse HEAD`、`git rev-parse --abbrev-ref HEAD`、`git remote get-url origin`（与 Codex `collect_git_info` 相同），使用 `tokio::process` 并设置超时，任一失败则对应字段为 None，非 git 目录整体为 None。
-- 与 Codex 相同，detached HEAD 输出的 `HEAD` 不记为分支；origin URL 按 Codex `SanitizedGitUrl` 去除凭据后写入：保留 remote-helper 前缀（`transport::`），删除主机前的 userinfo（SSH 约定的 `git` 用户保留、其密码删除），含空白字符的 URL（helper 命令行可能带密钥）整体丢弃。header 不可修改，凭据一旦写入无法撤回。
+- kernel 在创建会话（含 owned 与 fork）前于 cwd 执行 `git rev-parse HEAD --abbrev-ref HEAD`、`git remote get-url origin`，使用 `tokio::process` 并设置超时，任一失败则对应字段为 None，非 git 目录整体为 None。
+- detached HEAD 的分支留空。origin 保留 remote-helper 前缀和 SSH 约定的 `git` 用户，去除其他 userinfo。HTTP(S) 还会移除完整 query 和 fragment。含空白的 helper 命令行整体丢弃。清理发生在新会话写入 header 之前。
 - `ProductIdentity` 新增 `VERSION` 常量（`env!("CARGO_PKG_VERSION")`）。
 - protocol 新增 `SessionGitInfo { sha, branch, origin_url }` 与 `SessionProvenance { git, app_version }`；`SessionCreateOptions` 新增 `provenance: Option<SessionProvenance>`。
 - store `V4Header` 新增可选字段 `git`（camelCase：`sha`、`branch`、`originUrl`）与 `appVersion`，`skip_serializing_if = "Option::is_none"`；不含这些字段的旧 header 照常读取。
@@ -377,11 +389,11 @@ message entry 一律用 protocol 类型（`AgentMessage`、`ModelUsage`）反序
 
 `ApplicationFactory::build` 改为 async：`data_root` 在 `build` 内部解析，`StateRuntime::init` 是 async，而 `SyncObserver` 必须在 `build` 内构造 `JsonlStoreFactory` 时装上。现有调用方只有 `crates/app/src/main.rs` 的 async `run()` 和 `crates/app/tests/extensions.rs`。`build` 按以下顺序装配：
 
-1. 解析 `data_root`。
+1. 按进程启动目录将配置的 `data_root` 转为绝对路径，两个库都记录可跨工作目录读取的日志位置。
 2. `StateRuntime::init(SqliteConfig)`；失败则 warn 并得到 `None`。
 3. 有 runtime 时创建 `StateWorker`，用 `with_sync_observer` 装到 `JsonlStoreFactory` 上。
 4. 通过 `KernelFactory` 新增的 `state: Option<Arc<StateRuntime>>`（`#[builder(default)]`）把 runtime 交给 kernel，由 kernel 构造 `SessionCatalog`。
-5. `KernelFactory::build` 成功后 spawn `sync_logs` 后台任务（backfill、租约轮询、对账）。
+5. Kernel 构建成功后由 `Application` 持有回填任务，关闭服务时等待任务退出。
 
 kernel 测试构造 `KernelFactory` 时不传 `state`，`SessionCatalog` 退回扫描，现有测试不受影响。
 
@@ -399,7 +411,7 @@ kernel 测试构造 `KernelFactory` 时不传 `state`，`SessionCatalog` 退回�
 | 两进程同时迁移新库 | 后到者的 `CREATE TABLE` 报已存在、事务回滚；迁移错误与 SQLITE_BUSY 一样按 100ms / 200ms 重试，重试时迁移已记录为已应用 |
 | `StateWorker` channel 关闭 | 处理完剩余事件后退出 |
 
-连接参数照搬 Codex：新库 `journal_mode = WAL`、`auto_vacuum = INCREMENTAL`；WAL 连接 `synchronous = NORMAL`；连接池 `max_connections = 5`；迁移使用 `ignore_missing = true` 的运行时 migrator，使旧版本二进制可打开被新版本迁移过的库。
+初始化在迁移前设置持久化的 `auto_vacuum = INCREMENTAL` 和 `journal_mode = WAL`。后续池连接使用 `synchronous = NORMAL`，连接数上限为 5。迁移使用 `ignore_missing = true`，使旧版本二进制可打开被新版本迁移过的库。
 
 日志只记录初始化结果、backfill 开始 / 检查点 / 完成、因校验失败触发的整会话重投影与各错误路径；不按行或按 mutation 记录，不记录消息正文。
 

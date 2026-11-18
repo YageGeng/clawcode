@@ -296,3 +296,150 @@ async fn missing_file_row_is_repaired_on_lookup() {
     ));
     assert!(state.session(&id).await.expect("lookup").is_none());
 }
+
+/// A failed identity projection must not hide children from listing or cascading deletion.
+#[tokio::test]
+async fn failed_projection_keeps_jsonl_authoritative_until_repaired() {
+    let test = ready().await;
+    let owner = test.create("owner").await;
+    let config = state::SqliteConfig::new(
+        test.state_home.as_ref().expect("state home").path(),
+    );
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(config.state_db_path()),
+    )
+    .await
+    .expect("writer");
+    sqlx::query("CREATE TRIGGER fail_projection BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'test write failure'); END")
+        .execute(&pool).await.expect("fail metadata writes");
+    let child = test
+        .kernel
+        .create_owned_session(
+            kernel::OwnedSessionRequest::builder()
+                .ownership(SessionOwnership {
+                    session_id: owner.clone(),
+                    name: protocol::AgentName::try_from("reader")
+                        .expect("name"),
+                    nickname: "Reader".into(),
+                })
+                .title(SessionTitle::try_from("Reader").expect("title"))
+                .build(),
+        )
+        .await
+        .expect("child");
+    assert!(listed(&test, &child).await);
+    assert!(
+        test.kernel
+            .session_summary(&child)
+            .await
+            .expect("summary")
+            .is_some()
+    );
+    test.kernel
+        .delete_session(&owner)
+        .await
+        .expect("delete owner");
+    let store = JsonlStoreFactory::new(
+        test.root.path().join("sessions"),
+        Arc::new(store::SystemClock),
+    );
+    assert!(!store.exists(&child).expect("child log"));
+
+    let id = test.create("recover").await;
+    sqlx::query("DROP TRIGGER fail_projection")
+        .execute(&pool)
+        .await
+        .expect("restore writes");
+    let state = test.state.as_ref().expect("state");
+    test.wait_until(async || {
+        listed(&test, &id).await
+            && state.session(&id).await.expect("row").is_some()
+    })
+    .await;
+}
+
+/// Internal live renames publish their metadata before returning, even without a worker.
+#[tokio::test]
+async fn internal_rename_is_visible_immediately() {
+    let test = ready().await;
+    let id = test.create("rename").await;
+    test.kernel
+        .rename_session(&id, SessionTitle::try_from("Internal").expect("title"))
+        .await
+        .expect("rename");
+    let row = test
+        .kernel
+        .session_summary(&id)
+        .await
+        .expect("summary")
+        .expect("row");
+    assert_eq!(row.name.as_deref(), Some("Internal"));
+}
+
+/// A transient stat error preserves the existing index for an inaccessible log.
+#[cfg(unix)]
+#[tokio::test]
+async fn inaccessible_directory_preserves_the_session_row() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test = ready().await;
+    let id = test.create("permission").await;
+    test.kernel.close_session(&id).await.expect("close");
+    let state = test.state.as_ref().expect("state");
+    let path = state.session(&id).await.expect("query").expect("row").path;
+    let dir = path.parent().expect("parent");
+    let original = std::fs::metadata(dir).expect("directory").permissions();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000))
+        .expect("restrict");
+    let inaccessible = std::fs::metadata(&path).is_err();
+    let lookup = test.kernel.session_runtime(&id).await;
+    std::fs::set_permissions(dir, original).expect("restore");
+    if inaccessible {
+        lookup.expect_err("the store must report the inaccessible directory");
+    }
+    assert!(
+        state
+            .session(&id)
+            .await
+            .expect("row after lookup")
+            .is_some()
+    );
+}
+
+/// Rejecting an imported Session in a different workspace must not publish its metadata.
+#[tokio::test]
+async fn wrong_workspace_resume_leaves_unindexed_log_untouched() {
+    let test = ready().await;
+    let id = test.create("foreign").await;
+    test.kernel.close_session(&id).await.expect("close");
+    let state = test.state.as_ref().expect("state");
+    state.delete_session(&id).await.expect("simulate import");
+    let wrong = test.root.path().join("elsewhere");
+    assert!(matches!(
+        test.kernel.resume_session(id.clone(), wrong).await,
+        Err(KernelError::SessionNotFound(_))
+    ));
+    assert!(state.session(&id).await.expect("lookup").is_none());
+    test.kernel
+        .resume_session(id.clone(), test.root.path().into())
+        .await
+        .expect("right workspace");
+    assert!(state.session(&id).await.expect("lookup").is_some());
+    test.kernel.close_session(&id).await.expect("close again");
+    let path = state.session(&id).await.expect("query").expect("row").path;
+    std::fs::remove_file(path).expect("remove offline");
+    assert!(matches!(
+        test.kernel
+            .resume_session(id.clone(), test.root.path().join("elsewhere"))
+            .await,
+        Err(KernelError::SessionNotFound(_))
+    ));
+    assert!(
+        state
+            .session(&id)
+            .await
+            .expect("foreign row kept")
+            .is_some()
+    );
+}

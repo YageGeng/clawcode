@@ -167,39 +167,29 @@ impl ExtensionDiagnosticSink for KernelExtensionDiagnostics {
         let Some(sink) = sink else {
             return;
         };
-        let sequence = match self.execution.next_sequence() {
-            Ok(sequence) => sequence,
-            Err(error) => {
-                tracing::error!(
-                    "extension diagnostic sequence failed for extension {} at {} during {}: {}",
-                    extension_id,
-                    point,
-                    DiagnosticStage::Sequence,
-                    error
-                );
-                return;
-            }
-        };
-        if let Err(error) = sink
-            .emit(protocol::AgentEvent {
-                metadata: protocol::EventMetadata {
-                    turn_id,
-                    timestamp_ms: self.clock.now(),
-                    sequence,
-                },
-                payload: protocol::AgentEventPayload::ExtensionHandlerFailed {
+        if let Err(error) = self
+            .execution
+            .emit(
+                sink.as_ref(),
+                turn_id,
+                self.clock.now(),
+                protocol::AgentEventPayload::ExtensionHandlerFailed {
                     extension_id: extension_id.clone(),
                     point: point.to_string(),
                     message: error_message.to_string(),
                 },
-            })
+            )
             .await
         {
             tracing::error!(
                 "extension diagnostic event emission failed for extension {} at {} during {}: {}",
                 extension_id,
                 point,
-                DiagnosticStage::Sink,
+                if matches!(error, crate::KernelError::Sink(_)) {
+                    DiagnosticStage::Sink
+                } else {
+                    DiagnosticStage::Sequence
+                },
                 error
             );
         }

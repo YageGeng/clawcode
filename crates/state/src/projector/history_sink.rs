@@ -4,23 +4,18 @@ use protocol::{EntryId, LaneId, MessageTiming, SessionId};
 use sqlx::types::Json;
 use sqlx::{Acquire, Sqlite, SqliteConnection, Transaction};
 use store::{
-    EntryKind, LogMutation, LoggedMutation, RecordKind, SessionEntry,
-    SessionRecord,
+    LogMutation, LoggedMutation, RecordKind, SessionEntry, SessionRecord,
 };
 
-use super::Cursor;
+use super::{Cursor, HISTORY_POSITION, Position, SourceRevision};
 use crate::StateError;
 
 /// Status of a Run whose `operation_finished` record has not been read yet.
 const IN_PROGRESS: &str = "in_progress";
 
-/// History cursor row, which also records the projected log path.
-#[derive(sqlx::FromRow)]
-struct HistoryCursor {
-    path: String,
-    #[sqlx(flatten)]
-    cursor: Cursor,
-}
+/// Selects the latest active run using only the partial index for this lane.
+const OPEN_RUN_SQL: &str = "SELECT run_id FROM runs WHERE session_id = ? AND lane = ? AND status = 'in_progress' \
+             ORDER BY start_sequence DESC LIMIT 1";
 
 /// History-database side of one projection pass.
 #[derive(typed_builder::TypedBuilder)]
@@ -29,8 +24,10 @@ pub(crate) struct HistorySink<'a> {
     session_id: &'a SessionId,
     path: &'a str,
     cursor: Cursor,
+    #[builder(default)]
+    pub(super) source: Option<SourceRevision>,
     row_exists: bool,
-    path_changed: bool,
+    pub(super) path_changed: bool,
 }
 
 impl<'a> HistorySink<'a> {
@@ -40,30 +37,24 @@ impl<'a> HistorySink<'a> {
         session_id: &'a SessionId,
         path: &'a str,
     ) -> Result<Self, StateError> {
-        let row: Option<HistoryCursor> = sqlx::query_as(
-            "SELECT path, next_byte_offset, next_sequence FROM projection_state WHERE session_id = ?",
-        )
-        .bind(session_id.as_str())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let row: Option<Position> = sqlx::query_as(HISTORY_POSITION)
+            .bind(session_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
         Ok(Self::builder()
             .tx(tx)
             .session_id(session_id)
             .path(path)
             .row_exists(row.is_some())
             .path_changed(row.as_ref().is_some_and(|row| row.path != path))
-            .cursor(row.map(|row| row.cursor).unwrap_or_default())
+            .cursor(row.as_ref().map(|row| row.cursor).unwrap_or_default())
+            .source(row.map(|row| row.source))
             .build())
     }
 
     /// Returns the position of the next line this database needs.
     pub(crate) fn cursor(&self) -> Cursor {
         self.cursor
-    }
-
-    /// Reports whether the canonical log path differs from the projected one.
-    pub(crate) fn path_changed(&self) -> bool {
-        self.path_changed
     }
 
     /// Deletes the cursor row; runs, entries, and lanes cascade with it.
@@ -73,6 +64,7 @@ impl<'a> HistorySink<'a> {
             .execute(&mut *self.tx)
             .await?;
         self.cursor = Cursor::default();
+        self.source = None;
         self.row_exists = false;
         self.path_changed = false;
         Ok(())
@@ -82,6 +74,7 @@ impl<'a> HistorySink<'a> {
     pub(crate) async fn apply(
         &mut self,
         line: &LoggedMutation,
+        timing: Option<MessageTiming>,
     ) -> Result<(), StateError> {
         // Dropping the savepoint on error rolls back only this line.
         let mut savepoint = (&mut *self.tx).begin().await?;
@@ -91,7 +84,7 @@ impl<'a> HistorySink<'a> {
             .path(self.path)
             .line(line)
             .build()
-            .apply()
+            .apply(timing)
             .await?;
         savepoint.commit().await?;
         if matches!(line.mutation, LogMutation::Header(_)) {
@@ -103,15 +96,21 @@ impl<'a> HistorySink<'a> {
     }
 
     /// Persists the cursor and canonical path, then commits.
-    pub(crate) async fn commit(mut self) -> Result<(), StateError> {
+    pub(crate) async fn commit(
+        mut self,
+        source: &SourceRevision,
+    ) -> Result<(), StateError> {
         if self.row_exists {
             sqlx::query(
-                "UPDATE projection_state SET path = ?, next_byte_offset = ?, next_sequence = ? \
+                "UPDATE projection_state SET path = ?, next_byte_offset = ?, next_sequence = ?, source_id = ?, source_size = ?, source_mtime = ? \
                  WHERE session_id = ?",
             )
             .bind(self.path)
             .bind(i64::try_from(self.cursor.next_byte_offset)?)
             .bind(i64::try_from(self.cursor.next_sequence)?)
+            .bind(&source.source_id)
+            .bind(i64::try_from(source.source_size)?)
+            .bind(&source.source_mtime)
             .bind(self.session_id.as_str())
             .execute(&mut *self.tx)
             .await?;
@@ -132,12 +131,15 @@ struct HistoryLine<'c> {
 
 impl HistoryLine<'_> {
     /// Routes the line to its history update.
-    async fn apply(&mut self) -> Result<(), StateError> {
+    async fn apply(
+        &mut self,
+        timing: Option<MessageTiming>,
+    ) -> Result<(), StateError> {
         let line = self.line;
         match &line.mutation {
             LogMutation::Header(_) => self.insert_cursor().await,
             LogMutation::Entry { lane, entry } => {
-                self.insert_entry(lane, entry).await
+                self.insert_entry(lane, entry, timing).await
             }
             LogMutation::Lane { lane, leaf_id, .. } => {
                 self.move_lane(lane, leaf_id.as_ref()).await
@@ -174,40 +176,33 @@ impl HistoryLine<'_> {
         &mut self,
         lane: &LaneId,
         entry: &SessionEntry,
+        timing: Option<MessageTiming>,
     ) -> Result<(), StateError> {
-        let run_id: Option<String> = sqlx::query_scalar(
-            "SELECT run_id FROM runs WHERE session_id = ? AND lane = ? AND status = ? \
-             ORDER BY start_sequence DESC LIMIT 1",
-        )
-        .bind(self.session_id.as_str())
-        .bind(lane.as_str())
-        .bind(IN_PROGRESS)
-        .fetch_optional(&mut *self.connection)
-        .await?;
-        let (message_type, timing) = if entry.kind == EntryKind::Message {
-            let message_type = entry
+        let run_id: Option<String> = sqlx::query_scalar(OPEN_RUN_SQL)
+            .bind(self.session_id.as_str())
+            .bind(lane.as_str())
+            .fetch_optional(&mut *self.connection)
+            .await?;
+        let message_type = timing.and_then(|_| {
+            entry
                 .payload
                 .get("content")
                 .and_then(|content| content.get("type"))
                 .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned);
-            let timing: MessageTiming = serde_json::from_value(
-                serde_json::Value::Object(entry.payload.clone()),
-            )?;
-            (message_type, Some(timing))
-        } else {
-            (None, None)
-        };
+        });
         let started = timing
             .map(|timing| i64::try_from(timing.started_at_ms.get()))
             .transpose()?;
         let completed = timing
             .map(|timing| i64::try_from(timing.ended_at_ms.get()))
             .transpose()?;
-        sqlx::query(
+        // An imported parent must already exist earlier in this Session's log.
+        let inserted = sqlx::query(
             "INSERT INTO entries (session_id, entry_id, sequence, lane, parent_id, run_id, kind, \
              message_type, created_at_ms, started_at_ms, completed_at_ms, entry_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 \
+             WHERE ?5 IS NULL OR EXISTS (SELECT 1 FROM entries \
+             WHERE session_id = ?1 AND entry_id = ?5 AND sequence < ?3)",
         )
         .bind(self.session_id.as_str())
         .bind(entry.id.as_str())
@@ -216,18 +211,24 @@ impl HistoryLine<'_> {
         .bind(entry.parent_id.as_ref().map(EntryId::as_str))
         .bind(run_id.as_deref())
         .bind(entry.kind.as_str())
-        .bind(message_type.as_deref())
+        .bind(message_type)
         .bind(i64::try_from(entry.timestamp_ms.get())?)
         .bind(started)
         .bind(completed)
         .bind(Json(entry))
         .execute(&mut *self.connection)
         .await?;
+        if inserted.rows_affected() == 0 {
+            return Err(StateError::InvalidParent {
+                session_id: self.session_id.clone(),
+                entry_id: entry.id.clone(),
+            });
+        }
         self.move_lane(lane, Some(&entry.id)).await?;
         let Some(run_id) = run_id else {
             return Ok(());
         };
-        let link = match message_type.as_deref() {
+        let link = match message_type {
             Some("user" | "expanded_user") => Some(
                 "UPDATE runs SET first_user_entry_id = COALESCE(first_user_entry_id, ?) \
                  WHERE session_id = ? AND run_id = ?",
@@ -336,5 +337,46 @@ impl HistoryLine<'_> {
         .execute(&mut *self.connection)
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OPEN_RUN_SQL;
+    use sqlx::Row;
+
+    /// The per-entry run lookup never walks the Session's completed runs.
+    #[tokio::test]
+    async fn open_run_uses_lane_index() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("memory database");
+        sqlx::migrate!("./migrations/history")
+            .run(&pool)
+            .await
+            .expect("schema");
+        let plan = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {OPEN_RUN_SQL}"
+        )))
+        .bind("session")
+        .bind("lane")
+        .fetch_all(&pool)
+        .await
+        .expect("plan");
+        let details: Vec<String> =
+            plan.iter().map(|row| row.get("detail")).collect();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH runs USING")
+                    && detail.contains("idx_runs_open_lane")),
+            "{details:?}"
+        );
+        assert!(
+            !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "{details:?}"
+        );
     }
 }

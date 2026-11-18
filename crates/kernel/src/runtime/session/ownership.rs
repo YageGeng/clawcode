@@ -162,16 +162,15 @@ impl OwnedSessionSpawn<'_> {
         if let Some(level) = self.thinking_level {
             snapshot.thinking_level = level;
         }
-        // Probe before reserving the id, so a slow git never holds the reservation.
-        let provenance = super::provenance::ProvenanceProbe {
-            cwd: &self.owner.cwd,
-        }
-        .collect()
-        .await;
         let child =
             SessionId::try_from(self.kernel.id_generator.next(IdKind::Session))
                 .map_err(|e| KernelError::Protocol(e.to_string()))?;
-        let _reservation = self.kernel.reserve_session_build(&child)?;
+        let mut create = SessionCreateOptions::builder()
+            .session_id(child.clone())
+            .cwd(self.owner.cwd.clone())
+            .build();
+        let _reservation =
+            self.kernel.prepare_session_creation(&mut create).await?;
         tracing::info!(
             "started owned Session creation {} for owner {}",
             child,
@@ -180,11 +179,7 @@ impl OwnedSessionSpawn<'_> {
         let result: Result<(), KernelError> = async {
             let store = self.kernel.store_factory.create_owned(
                 OwnedSessionCreateOptions {
-                    create: SessionCreateOptions::builder()
-                        .session_id(child.clone())
-                        .cwd(self.owner.cwd.clone())
-                        .provenance(provenance)
-                        .build(),
+                    create,
                     ownership: self.ownership.clone(),
                 },
             )?;
@@ -289,7 +284,7 @@ impl Kernel {
             }
             cursor = self
                 .catalog
-                .header(&id)
+                .header(&id, None)
                 .await?
                 .and_then(|header| header.ownership)
                 .map(|edge| edge.session_id);
@@ -328,7 +323,7 @@ impl Kernel {
             }
             let owner_in_workspace = self
                 .catalog
-                .header(owner)
+                .header(owner, None)
                 .await?
                 .is_some_and(|header| header.cwd == cwd);
             if !owner_in_workspace {

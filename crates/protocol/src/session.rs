@@ -173,13 +173,13 @@ pub struct SessionOwnership {
 #[serde(rename_all = "camelCase")]
 pub struct SessionGitInfo {
     /// Commit checked out when the Session was created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
     /// Branch checked out when the Session was created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// URL of the `origin` remote, when one is configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_url: Option<String>,
 }
 

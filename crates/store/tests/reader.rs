@@ -181,3 +181,27 @@ fn session_paths_are_sorted_jsonl_files() {
     assert_eq!(factory.session_paths().expect("paths"), expected);
     assert_eq!(factory.sessions_root(), root.path());
 }
+
+/// Directory traversal releases descriptors even when workspaces outnumber the process limit.
+#[cfg(unix)]
+#[test]
+fn listing_many_workspaces_releases_directory_handles() {
+    const CHILD: &str = "CLAWCODE_TEST_LIMITED_SESSION_FDS";
+    if std::env::var_os(CHILD).is_none() {
+        // Apply the soft limit to this test alone, leaving parallel tests unaffected.
+        let status = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n 64 && exec \"$1\" --exact listing_many_workspaces_releases_directory_handles", "test"])
+            .arg(std::env::current_exe().expect("test executable"))
+            .env(CHILD, "1").status().expect("run under descriptor limit");
+        assert!(status.success());
+        return;
+    }
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
+    for n in 0..96 {
+        let dir = root.path().join(n.to_string());
+        fs::create_dir(&dir).expect("workspace");
+        fs::write(dir.join("log.jsonl"), []).expect("log path");
+    }
+    assert_eq!(factory.session_paths().expect("all paths").len(), 96);
+}

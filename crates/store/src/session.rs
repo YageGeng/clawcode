@@ -11,8 +11,8 @@ use crate::state::{
     NameFactMutation, RecordMutation, SessionState,
 };
 use crate::{
-    Clock, EntryKind, NewEntry, NewRecord, SessionEntry, SessionRecord,
-    SessionStore, StoreError, SyncObserver,
+    Clock, EntryKind, LogMutation, NewEntry, NewRecord, SessionEntry,
+    SessionRecord, SessionStore, StoreError, SyncObserver,
 };
 
 #[derive(typed_builder::TypedBuilder)]
@@ -59,9 +59,8 @@ impl JsonlSessionStore {
         mutation: &T,
     ) -> Result<(), StoreError> {
         let value = serde_json::to_value(mutation)?;
-        // Validation consumes its copy; replay passes owned lines without one.
-        let validated = Self::validate(&self.state, value.clone())?;
-        self.append(&value)?;
+        let validated = Self::validate(&self.state, value)?;
+        self.append(mutation)?;
         // State advances only after the complete JSONL line reaches the OS;
         // crash durability is guaranteed by the explicit `sync` checkpoints.
         Self::commit(&mut self.state, validated);
@@ -82,23 +81,13 @@ impl JsonlSessionStore {
     fn validate(
         state: &SessionState,
         value: serde_json::Value,
-    ) -> Result<ValidatedMutation, StoreError> {
-        // Owned, so the typed decode below can move the value out.
-        let kind = value
-            .get("kind")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                StoreError::InvalidSession("mutation has no kind".to_string())
-            })?
-            .to_owned();
-        let sequence = value
-            .get("seq")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| {
-                StoreError::InvalidSession(
-                    "mutation has invalid sequence".to_string(),
-                )
-            })?;
+    ) -> Result<LogMutation, StoreError> {
+        let mutation = LogMutation::try_from(value)?;
+        let sequence = mutation.sequence().ok_or_else(|| {
+            StoreError::InvalidSession(
+                "unexpected header inside session".to_owned(),
+            )
+        })?;
         if sequence != state.next_sequence.saturating_add(1) {
             return Err(StoreError::InvalidSession(format!(
                 "mutation sequence {sequence} is not consecutive after {}",
@@ -106,31 +95,27 @@ impl JsonlSessionStore {
             )));
         }
 
-        match kind.as_str() {
-            "lane" => {
-                let mutation: LaneMutation = serde_json::from_value(value)?;
-                if let Some(target) = &mutation.leaf_id
+        match &mutation {
+            LogMutation::Lane { lane, leaf_id, .. } => {
+                if let Some(target) = leaf_id
                     && !state.entries.contains_key(target)
                 {
                     return Err(StoreError::InvalidSession(format!(
                         "lane {} references missing entry {target}",
-                        mutation.lane
+                        lane
                     )));
                 }
-                Ok(ValidatedMutation::Lane(mutation))
             }
-            "entry" => {
-                let mutation: EntryMutation = serde_json::from_value(value)?;
-                if mutation.entry.kind == EntryKind::Compaction {
-                    let data: CompactionData =
-                        serde_json::from_value(serde_json::Value::Object(
-                            mutation.entry.payload.clone(),
+            LogMutation::Entry { lane, entry } => {
+                if entry.kind == EntryKind::Compaction {
+                    let data: CompactionData = serde_json::from_value(
+                        serde_json::Value::Object(entry.payload.clone()),
+                    )
+                    .map_err(|error| {
+                        StoreError::InvalidSession(format!(
+                            "invalid compaction payload: {error}"
                         ))
-                        .map_err(|error| {
-                            StoreError::InvalidSession(format!(
-                                "invalid compaction payload: {error}"
-                            ))
-                        })?;
+                    })?;
                     let details = data.details.ok_or_else(|| {
                         StoreError::InvalidSession(
                             "compaction details are required".to_string(),
@@ -147,152 +132,81 @@ impl JsonlSessionStore {
                         ));
                     }
                 }
-                if state.entries.contains_key(&mutation.entry.id) {
-                    return Err(StoreError::DuplicateEntry(mutation.entry.id));
+                if state.entries.contains_key(&entry.id) {
+                    return Err(StoreError::DuplicateEntry(entry.id.clone()));
                 }
-                let leaf =
-                    state.lanes.get(&mutation.lane).ok_or_else(|| {
-                        StoreError::InvalidSession(format!(
-                            "entry references missing lane {}",
-                            mutation.lane
-                        ))
-                    })?;
-                if leaf != &mutation.entry.parent_id {
+                let leaf = state.lanes.get(lane).ok_or_else(|| {
+                    StoreError::InvalidSession(format!(
+                        "entry references missing lane {}",
+                        lane
+                    ))
+                })?;
+                if leaf != &entry.parent_id {
                     return Err(StoreError::InvalidSession(
                         "entry does not chain to lane leaf".to_string(),
                     ));
                 }
-                Ok(ValidatedMutation::Entry(mutation))
             }
-            "record" => {
-                let mutation: RecordMutation = serde_json::from_value(value)?;
-                if !state.lanes.contains_key(&mutation.record.lane) {
+            LogMutation::Record(record) => {
+                if !state.lanes.contains_key(&record.lane) {
                     return Err(StoreError::InvalidSession(format!(
                         "record references missing lane {}",
-                        mutation.record.lane
+                        record.lane
                     )));
                 }
-                if state.used_record_ids.contains(&mutation.record.id) {
+                if state.used_record_ids.contains(&record.id) {
                     return Err(StoreError::InvalidSession(format!(
                         "duplicate record id {}",
-                        mutation.record.id
+                        record.id
                     )));
                 }
-                Ok(ValidatedMutation::Record(mutation))
             }
-            "fact" => {
-                let fact = value
-                    .get("fact")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        StoreError::InvalidSession(
-                            "fact mutation has no fact type".to_string(),
-                        )
-                    })?;
-                match fact {
-                    "name" => Ok(ValidatedMutation::Name {
-                        sequence,
-                        name: value
-                            .get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned),
-                    }),
-                    "label" => {
-                        let target = value
-                            .get("targetId")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| {
-                                StoreError::InvalidSession(
-                                    "label fact has no targetId".to_string(),
-                                )
-                            })?;
-                        let target_id =
-                            EntryId::try_from(target).map_err(|error| {
-                                StoreError::InvalidSession(error.to_string())
-                            })?;
-                        if !state.entries.contains_key(&target_id) {
-                            return Err(StoreError::EntryNotFound(target_id));
-                        }
-                        Ok(ValidatedMutation::Label {
-                            sequence,
-                            target_id,
-                            label: value
-                                .get("label")
-                                .and_then(serde_json::Value::as_str)
-                                .map(ToOwned::to_owned),
-                        })
-                    }
-                    other => Err(StoreError::InvalidSession(format!(
-                        "unknown fact type {other}"
-                    ))),
-                }
+            LogMutation::Label { target_id, .. }
+                if !state.entries.contains_key(target_id) =>
+            {
+                return Err(StoreError::EntryNotFound(target_id.clone()));
             }
-            other => Err(StoreError::InvalidSession(format!(
-                "unknown mutation kind {other}"
-            ))),
+            _ => {}
         }
+        Ok(mutation)
     }
 
     /// Applies a mutation that already passed validation; it cannot fail.
-    fn commit(state: &mut SessionState, mutation: ValidatedMutation) {
+    fn commit(state: &mut SessionState, mutation: LogMutation) {
+        let Some(sequence) = mutation.sequence() else {
+            return;
+        };
+        state.next_sequence = sequence;
         match mutation {
-            ValidatedMutation::Lane(mutation) => {
-                state.next_sequence = mutation.sequence.get();
-                state.lanes.insert(mutation.lane, mutation.leaf_id);
+            LogMutation::Lane { lane, leaf_id, .. } => {
+                state.lanes.insert(lane, leaf_id);
             }
-            ValidatedMutation::Entry(mutation) => {
-                state.next_sequence = mutation.entry.sequence.get();
-                state
-                    .lanes
-                    .insert(mutation.lane, Some(mutation.entry.id.clone()));
-                state.entry_order.push(mutation.entry.id.clone());
-                state
-                    .entries
-                    .insert(mutation.entry.id.clone(), mutation.entry);
+            LogMutation::Entry { lane, entry } => {
+                state.lanes.insert(lane, Some(entry.id.clone()));
+                state.entry_order.push(entry.id.clone());
+                state.entries.insert(entry.id.clone(), entry);
             }
-            ValidatedMutation::Record(mutation) => {
-                state.next_sequence = mutation.record.sequence.get();
-                state.used_record_ids.insert(mutation.record.id.clone());
-                state.records.push(mutation.record);
+            LogMutation::Record(record) => {
+                state.used_record_ids.insert(record.id.clone());
+                state.records.push(record);
             }
-            ValidatedMutation::Name { sequence, name } => {
-                state.next_sequence = sequence;
+            LogMutation::Name { name, .. } => {
                 state.name = name;
                 state.named = true;
             }
-            ValidatedMutation::Label {
-                sequence,
-                target_id,
-                label,
-            } => {
-                state.next_sequence = sequence;
-                match label {
-                    Some(label) => {
-                        state.labels.insert(target_id, label);
-                    }
-                    None => {
-                        state.labels.remove(&target_id);
-                    }
+            LogMutation::Label {
+                target_id, label, ..
+            } => match label {
+                Some(label) => {
+                    state.labels.insert(target_id, label);
                 }
-            }
+                None => {
+                    state.labels.remove(&target_id);
+                }
+            },
+            LogMutation::Header(_) => {}
         }
     }
-}
-
-/// One decoded mutation that passed validation against the current state.
-enum ValidatedMutation {
-    Lane(LaneMutation),
-    Entry(EntryMutation),
-    Record(RecordMutation),
-    Name {
-        sequence: u64,
-        name: Option<String>,
-    },
-    Label {
-        sequence: u64,
-        target_id: EntryId,
-        label: Option<String>,
-    },
 }
 
 impl SessionStore for JsonlSessionStore {

@@ -9,19 +9,19 @@ use protocol::{
 };
 use store::SessionEntry;
 
-use crate::{SessionRow, StateError, StateRuntime};
+use crate::{StateError, StateRuntime};
 
 /// User-authored messages, served by `idx_entries_user_messages`.
 const USER_ENTRIES_SQL: &str = "SELECT entry_json FROM entries WHERE session_id = ? \
      AND message_type IN ('user', 'expanded_user') ORDER BY sequence";
 
 /// Ancestors of one entry walked through the primary key, root first.
-const BRANCH_SQL: &str = "WITH RECURSIVE chain(entry_id, parent_id, entry_json, depth) AS ( \
-     SELECT entry_id, parent_id, entry_json, 0 FROM entries WHERE session_id = ? AND entry_id = ? \
+const BRANCH_SQL: &str = "WITH RECURSIVE chain(entry_id, parent_id, entry_json, sequence) AS ( \
+     SELECT entry_id, parent_id, entry_json, sequence FROM entries WHERE session_id = ?1 AND entry_id = ?2 \
      UNION ALL \
-     SELECT entries.entry_id, entries.parent_id, entries.entry_json, chain.depth + 1 \
-     FROM entries JOIN chain ON entries.session_id = ? AND entries.entry_id = chain.parent_id) \
-     SELECT entry_json FROM chain ORDER BY depth DESC";
+     SELECT e.entry_id, e.parent_id, e.entry_json, e.sequence FROM entries e JOIN chain \
+     ON e.session_id = ?1 AND e.entry_id = chain.parent_id AND e.sequence < chain.sequence) \
+     SELECT entry_json, parent_id IS NULL AS is_root FROM chain ORDER BY sequence";
 
 /// One Run row with typed identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
@@ -114,6 +114,14 @@ struct EntryJson {
     entry_json: SessionEntry,
 }
 
+/// A branch walk must reach a root, including when reading a previously built index.
+#[derive(sqlx::FromRow)]
+struct Ancestor {
+    #[sqlx(flatten)]
+    entry: EntryJson,
+    is_root: bool,
+}
+
 impl From<EntryJson> for SessionTreeEntry {
     /// Projects a stored entry the same way the kernel's tree snapshot does.
     fn from(row: EntryJson) -> Self {
@@ -129,25 +137,27 @@ impl From<EntryJson> for SessionTreeEntry {
 }
 
 impl StateRuntime {
-    /// Catches a known Session up with its log; unknown Sessions return `None`.
+    /// Catches a known Session up with its log and reports whether it was found.
     ///
     /// A failed catch-up is logged and the read continues with the rows already
     /// projected, so a damaged log never hides the history before the damage.
-    async fn caught_up(
-        &self,
-        id: &SessionId,
-    ) -> Result<Option<SessionRow>, StateError> {
-        let Some(row) = self.session(id).await? else {
-            return Ok(None);
+    async fn caught_up(&self, id: &SessionId) -> Result<bool, StateError> {
+        let path: Option<String> =
+            sqlx::query_scalar("SELECT path FROM sessions WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&self.state)
+                .await?;
+        let Some(path) = path else {
+            return Ok(false);
         };
-        if let Err(error) = self.refresh(id, &row.path).await {
+        if let Err(error) = self.refresh(id, path.as_ref()).await {
             tracing::warn!(
                 "serving projected history of session {} without catch-up: {}",
                 id,
                 error
             );
         }
-        Ok(Some(row))
+        Ok(true)
     }
 
     /// Rebuilds the kernel's tree snapshot of one lane without ACP.
@@ -156,22 +166,33 @@ impl StateRuntime {
         id: &SessionId,
         lane: &LaneId,
     ) -> Result<Option<SessionTreeSnapshot>, StateError> {
-        let Some(row) = self.caught_up(id).await? else {
+        if !self.caught_up(id).await? {
+            return Ok(None);
+        }
+        let name: Option<Option<String>> =
+            sqlx::query_scalar("SELECT name FROM sessions WHERE id = ?")
+                .bind(id.as_str())
+                .fetch_optional(&self.state)
+                .await?;
+        let Some(name) = name else {
             return Ok(None);
         };
+        // The lane leaf and its entries must come from the same history snapshot.
+        let mut tx = self.history.begin().await?;
         let entries: Vec<EntryJson> = sqlx::query_as(
             "SELECT entry_json FROM entries WHERE session_id = ? ORDER BY sequence",
         )
         .bind(id.as_str())
-        .fetch_all(&self.history)
+        .fetch_all(&mut *tx)
         .await?;
         let leaf: Option<Option<String>> = sqlx::query_scalar(
             "SELECT leaf_id FROM lanes WHERE session_id = ? AND lane = ?",
         )
         .bind(id.as_str())
         .bind(lane.as_str())
-        .fetch_optional(&self.history)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
         // A lane that was never written starts at the root, like the store's `main`.
         Ok(Some(
             SessionTreeSnapshot::builder()
@@ -181,7 +202,7 @@ impl StateRuntime {
                 .entries(
                     entries.into_iter().map(SessionTreeEntry::from).collect(),
                 )
-                .name(row.name)
+                .name(name)
                 .build(),
         ))
     }
@@ -192,16 +213,23 @@ impl StateRuntime {
         id: &SessionId,
         leaf: &EntryId,
     ) -> Result<Vec<SessionTreeEntry>, StateError> {
-        if self.caught_up(id).await?.is_none() {
+        if !self.caught_up(id).await? {
             return Ok(Vec::new());
         }
-        let rows: Vec<EntryJson> = sqlx::query_as(BRANCH_SQL)
+        let rows: Vec<Ancestor> = sqlx::query_as(BRANCH_SQL)
             .bind(id.as_str())
             .bind(leaf.as_str())
-            .bind(id.as_str())
             .fetch_all(&self.history)
             .await?;
-        Ok(rows.into_iter().map(SessionTreeEntry::from).collect())
+        if let Some(first) = rows.first()
+            && !first.is_root
+        {
+            return Err(StateError::InvalidParent {
+                session_id: id.clone(),
+                entry_id: first.entry.entry_json.id.clone(),
+            });
+        }
+        Ok(rows.into_iter().map(|row| row.entry.into()).collect())
     }
 
     /// Pages Runs in log order after `after_start_sequence`.
@@ -211,7 +239,7 @@ impl StateRuntime {
         after_start_sequence: Option<u64>,
         limit: u32,
     ) -> Result<Vec<RunRow>, StateError> {
-        if self.caught_up(id).await?.is_none() {
+        if !self.caught_up(id).await? {
             return Ok(Vec::new());
         }
         let after = after_start_sequence.map(i64::try_from).transpose()?;
@@ -235,7 +263,7 @@ impl StateRuntime {
         id: &SessionId,
         run: &RunId,
     ) -> Result<Vec<SessionTreeEntry>, StateError> {
-        if self.caught_up(id).await?.is_none() {
+        if !self.caught_up(id).await? {
             return Ok(Vec::new());
         }
         let rows: Vec<EntryJson> = sqlx::query_as(
@@ -253,7 +281,7 @@ impl StateRuntime {
         &self,
         id: &SessionId,
     ) -> Result<Vec<SessionTreeEntry>, StateError> {
-        if self.caught_up(id).await?.is_none() {
+        if !self.caught_up(id).await? {
             return Ok(Vec::new());
         }
         let rows: Vec<EntryJson> = sqlx::query_as(USER_ENTRIES_SQL)
@@ -279,7 +307,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("memory database");
-        sqlx::migrate!("./session_history_migrations")
+        sqlx::migrate!("./migrations/history")
             .run(&pool)
             .await
             .expect("migrate");

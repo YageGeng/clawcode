@@ -1097,3 +1097,23 @@ fn observer_silent_when_set_name_at_fails() {
     assert!(factory.set_name_at(&missing, Some("n".into())).is_err());
     assert!(observer.records().is_empty());
 }
+
+/// An imported filename and a known catalog header still notify the observer with the original id.
+#[test]
+fn rename_imported_session_uses_header_identity() {
+    let root = tempfile::tempdir().expect("root");
+    let (factory, observer) = observed_factory(root.path());
+    let old = synced_session(&factory, root.path());
+    let path = old.with_file_name("imported.jsonl");
+    std::fs::rename(old, &path).expect("import log");
+    let id = SessionId::try_from("session-observed").expect("id");
+    let header = factory.header(&id).expect("lookup").expect("header");
+    factory
+        .rename_session(&header, Some("imported".into()))
+        .expect("rename");
+    assert_eq!(observer.records().last(), Some(&(id, path.clone())));
+    assert_eq!(
+        factory.open(&path).expect("replay").name(),
+        Some("imported")
+    );
+}

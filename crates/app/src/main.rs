@@ -56,56 +56,75 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
     // moves into the composition factory.
     let max_batch_size = config.current().app.recovery.max_batch_size;
     let application = ApplicationFactory::new(config).build().await?;
-    match cli.command {
-        Command::Stdio => {
-            tracing::info!(
-                "starting {} stdio transport",
-                ProductIdentity::NAME
-            );
-            let server = AcpServerFactory::new(
-                Arc::clone(&application.kernel),
-                max_batch_size,
-            );
-            tokio::select! {
-                result = server.serve_stdio() => result?,
-                () = application.kernel.wait_for_shutdown() => {},
-            }
-            tracing::info!("stopped {} stdio transport", ProductIdentity::NAME);
-        }
-        Command::Serve {
-            bind,
-            path,
-            web_root,
-        } => {
-            let bind = LocalBindAddress::try_from(bind)?;
-            let router = application.http_router(
-                WebServerOptions::builder()
-                    .acp_path(path)
-                    .web_root(web_root)
-                    .browser_origin(bind.http_origin())
-                    .health_endpoint(true)
-                    .max_batch_size(max_batch_size)
-                    .build(),
-            )?;
-            let bind = bind.into_inner();
-            let listener = tokio::net::TcpListener::bind(bind).await?;
-            tracing::info!(
-                "starting {} HTTP transport at http://{}",
-                ProductIdentity::NAME,
-                bind
-            );
-            let shutdown_kernel = Arc::clone(&application.kernel);
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    shutdown_kernel.wait_for_shutdown().await;
-                })
-                .await?;
-            tracing::info!("stopped {} HTTP transport", ProductIdentity::NAME);
-        }
+    let served = cli.command.serve(&application, max_batch_size).await;
+    let shutdown = application.shutdown().await;
+    if let Err(error) = &shutdown {
+        tracing::error!("application shutdown failed: {}", error);
     }
-    // Background commands must not outlive the server that started them.
-    application.kernel.terminate_exec_processes().await;
-    // Queued Session syncs reach SQLite before the process exits.
-    application.flush_state().await;
-    Ok(())
+    served?;
+    Ok(shutdown?)
+}
+
+impl Command {
+    /// Runs one transport until it closes or reports an error.
+    async fn serve(
+        self,
+        application: &app::Application,
+        max_batch_size: std::num::NonZeroUsize,
+    ) -> anyhow::Result<()> {
+        match self {
+            Command::Stdio => {
+                tracing::info!(
+                    "starting {} stdio transport",
+                    ProductIdentity::NAME
+                );
+                let server = AcpServerFactory::new(
+                    Arc::clone(&application.kernel),
+                    max_batch_size,
+                );
+                tokio::select! {
+                    result = server.serve_stdio() => result?,
+                    () = application.kernel.wait_for_shutdown() => {},
+                }
+                tracing::info!(
+                    "stopped {} stdio transport",
+                    ProductIdentity::NAME
+                );
+            }
+            Command::Serve {
+                bind,
+                path,
+                web_root,
+            } => {
+                let bind = LocalBindAddress::try_from(bind)?;
+                let router = application.http_router(
+                    WebServerOptions::builder()
+                        .acp_path(path)
+                        .web_root(web_root)
+                        .browser_origin(bind.http_origin())
+                        .health_endpoint(true)
+                        .max_batch_size(max_batch_size)
+                        .build(),
+                )?;
+                let bind = bind.into_inner();
+                let listener = tokio::net::TcpListener::bind(bind).await?;
+                tracing::info!(
+                    "starting {} HTTP transport at http://{}",
+                    ProductIdentity::NAME,
+                    bind
+                );
+                let shutdown_kernel = Arc::clone(&application.kernel);
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        shutdown_kernel.wait_for_shutdown().await;
+                    })
+                    .await?;
+                tracing::info!(
+                    "stopped {} HTTP transport",
+                    ProductIdentity::NAME
+                );
+            }
+        }
+        Ok(())
+    }
 }

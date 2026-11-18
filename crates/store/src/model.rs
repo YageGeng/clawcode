@@ -405,6 +405,15 @@ pub trait StoreFactory: Send + Sync {
     /// Removes every persisted log owned by the stable session identifier.
     fn delete(&self, session_id: &SessionId) -> Result<(), StoreError>;
 
+    /// Renames an unloaded Session whose header the caller has already located.
+    fn rename_session(
+        &self,
+        header: &SessionHeader,
+        name: Option<String>,
+    ) -> Result<(), StoreError> {
+        self.set_name_at(&header.path, name)
+    }
+
     /// Durably sets the name fact of a persisted Session that is not loaded.
     ///
     /// The default replays the whole log; backends that can append without

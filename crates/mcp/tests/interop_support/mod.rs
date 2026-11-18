@@ -109,15 +109,22 @@ pub async fn verify_client(
     assert_eq!(client.protocol(), protocol);
     assert_eq!(client.server_id(), server_id);
     let catalog = client.discover().await?;
-    assert_eq!(catalog.tools.len(), 3);
+    // The reference server can add or reorder tools without changing the inspect call.
+    let remote_tool = |name: &str| {
+        catalog
+            .tools
+            .iter()
+            .find(|tool| tool.reference.remote_name.as_str() == name)
+    };
+    for name in ["ask", "visit", "large.report", "hidden_probe"] {
+        assert!(remote_tool(name).is_some(), "missing reference tool {name}");
+    }
     assert_eq!(catalog.prompts.len(), 1);
     assert_eq!(catalog.resources.len(), 61);
     assert_eq!(catalog.resource_templates.len(), 1);
 
-    let tool = catalog
-        .tools
-        .first()
-        .expect("reference Tool")
+    let tool = remote_tool("inspect")
+        .expect("reference inspect tool")
         .reference
         .clone();
     let tool_result = client

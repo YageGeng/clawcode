@@ -79,11 +79,23 @@ impl SessionExtensionHost {
     ) -> Result<(), ExtensionHostError> {
         let sink = self.event_sink()?;
         if let Some(sink) = sink {
-            let event =
-                self.kernel.available_commands_event(session_id).map_err(
-                    |error| ExtensionHostError::Operation(error.to_string()),
-                )?;
-            sink.emit(event).await.map_err(|error| {
+            async {
+                self.session
+                    .execution
+                    .emit(
+                        sink.as_ref(),
+                        self.kernel.new_turn_id()?,
+                        self.clock.now(),
+                        protocol::AgentEventPayload::AvailableCommandsChanged {
+                            commands: self
+                                .kernel
+                                .available_commands(session_id)?,
+                        },
+                    )
+                    .await
+            }
+            .await
+            .map_err(|error| {
                 ExtensionHostError::Operation(error.to_string())
             })?;
         }
@@ -208,24 +220,20 @@ impl ExtensionHost for SessionExtensionHost {
         })?;
         let sink = self.event_sink()?;
         if let Some(sink) = sink {
-            let sequence =
-                self.session.execution.next_sequence().map_err(|error| {
+            self.session
+                .execution
+                .emit(
+                    sink.as_ref(),
+                    message.identity.turn_id.clone(),
+                    self.clock.now(),
+                    protocol::AgentEventPayload::MessageEnd {
+                        message: message.clone(),
+                    },
+                )
+                .await
+                .map_err(|error| {
                     ExtensionHostError::Operation(error.to_string())
                 })?;
-            sink.emit(protocol::AgentEvent {
-                metadata: protocol::EventMetadata {
-                    turn_id: message.identity.turn_id.clone(),
-                    timestamp_ms: self.clock.now(),
-                    sequence,
-                },
-                payload: protocol::AgentEventPayload::MessageEnd {
-                    message: message.clone(),
-                },
-            })
-            .await
-            .map_err(|error| {
-                ExtensionHostError::Operation(error.to_string())
-            })?;
         }
         Ok(message)
     }

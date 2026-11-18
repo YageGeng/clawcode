@@ -2,10 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use protocol::SessionId;
+use protocol::{EntryId, SessionId};
 
 /// SQLite primary result code for a busy database.
 const SQLITE_BUSY: i32 = 5;
+/// SQLite primary result code for a locked table or shared cache.
+const SQLITE_LOCKED: i32 = 6;
 /// SQLite primary result code for a malformed database image.
 const SQLITE_CORRUPT: i32 = 11;
 /// SQLite primary result code for a file that is not a database.
@@ -20,6 +22,24 @@ pub enum StateError {
     /// Embedded migration failure.
     #[error("state database migration failed: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// The projection task could not acknowledge pending syncs.
+    #[error("state projection worker stopped before flushing")]
+    WorkerStopped,
+    /// At least one durable Session still has unapplied lines.
+    #[error(
+        "{count} sessions still need projection, including {session_id}: {reason}"
+    )]
+    WorkerProjection {
+        /// Number of retained Sessions.
+        count: usize,
+        /// One Session whose log needs attention.
+        session_id: SessionId,
+        /// Cause of its latest failure.
+        reason: String,
+    },
+    /// Another process took over the backfill lease.
+    #[error("state backfill lease ownership changed")]
+    LeaseLost,
     /// Filesystem failure.
     #[error("state database I/O failed: {0}")]
     Io(#[from] std::io::Error),
@@ -38,6 +58,14 @@ pub enum StateError {
     /// A count or timestamp does not fit SQLite's signed integers.
     #[error("state integer out of range: {0}")]
     IntegerRange(#[from] std::num::TryFromIntError),
+    /// A history entry points outside the preceding entries in its Session.
+    #[error("entry {entry_id} in session {session_id} has no earlier parent")]
+    InvalidParent {
+        /// Session containing the entry.
+        session_id: SessionId,
+        /// Entry whose parent link cannot be followed.
+        entry_id: EntryId,
+    },
     /// One Session log line could not be applied.
     #[error(
         "projection of session {session_id} stopped at byte {offset}: {reason}"
@@ -65,7 +93,8 @@ impl StateError {
     /// Reports whether another connection held the lock past the busy timeout.
     #[must_use]
     pub fn is_busy(&self) -> bool {
-        self.primary_code() == Some(SQLITE_BUSY)
+        matches!(self.primary_code(), Some(SQLITE_BUSY | SQLITE_LOCKED))
+            || matches!(self, Self::Sqlx(sqlx::Error::PoolTimedOut))
     }
 
     /// Extracts the SQLite primary result code from a wrapped database error.

@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use protocol::{
-    AgentEvent, AgentEventPayload, EntryId, EventMetadata, ExtensionInvocation,
-    IdKind, ModelProfile, ModelSelectEvent, ModelSelectSource, SessionId,
-    SessionMode, SessionSettings, ThinkingLevel, ThinkingLevelSelectEvent,
-    TurnId,
+    AgentEventPayload, EntryId, ExtensionInvocation, IdKind, ModelProfile,
+    ModelSelectEvent, ModelSelectSource, SessionId, SessionMode,
+    SessionSettings, ThinkingLevel, ThinkingLevelSelectEvent, TurnId,
 };
 use store::{EntryKind, NewEntry, SessionEntry};
 
@@ -196,41 +195,27 @@ impl SessionSettingsUpdate<'_> {
 
     /// Reports both current values; the change is already durable, so a sink failure only warns.
     pub(in crate::runtime) async fn publish(&self) {
-        let event = match self.settings_event() {
-            Ok(event) => event,
-            Err(error) => {
-                tracing::warn!(
-                    "failed to build settings event for Session {}: {}",
-                    self.session_id,
-                    error
-                );
-                return;
-            }
-        };
-        if let Err(error) =
-            self.kernel.session_sink(self.session_id).emit(event).await
-        {
+        let published = async {
+            self.session
+                .execution
+                .emit(
+                    self.kernel.session_sink(self.session_id).as_ref(),
+                    self.turn_id()?,
+                    self.kernel.clock.now(),
+                    AgentEventPayload::SettingsChanged {
+                        settings: self.session.settings()?,
+                    },
+                )
+                .await
+        }
+        .await;
+        if let Err(error) = published {
             tracing::warn!(
                 "failed to report settings change for Session {}: {}",
                 self.session_id,
                 error
             );
         }
-    }
-
-    /// Snapshots the current selection into one `SettingsChanged` event.
-    fn settings_event(&self) -> Result<AgentEvent, KernelError> {
-        let turn_id = self.turn_id()?;
-        Ok(AgentEvent {
-            metadata: EventMetadata {
-                turn_id,
-                timestamp_ms: self.kernel.clock.now(),
-                sequence: self.session.execution.next_sequence()?,
-            },
-            payload: AgentEventPayload::SettingsChanged {
-                settings: self.session.settings()?,
-            },
-        })
     }
 }
 

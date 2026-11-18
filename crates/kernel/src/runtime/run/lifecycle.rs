@@ -62,6 +62,9 @@ pub(in crate::runtime) struct SessionExecution {
     /// Counts mailbox and user-input arrivals that wake `wait_agent`.
     #[builder(default = tokio::sync::watch::channel(MailboxActivity::default()).0)]
     pub(super) mailbox: tokio::sync::watch::Sender<MailboxActivity>,
+    /// Orders live sink delivery across the Run, queue snapshots, and Session observers.
+    #[builder(default)]
+    event_delivery: AsyncMutex<()>,
     sequence: AtomicU64,
 }
 
@@ -329,18 +332,28 @@ impl SessionExecution {
         let active_run = self.active_run()?.ok_or_else(|| {
             KernelError::Protocol("Session has no active Run".to_string())
         })?;
-        let sequence = self.next_sequence()?;
-        active_run
-            .sink
-            .emit(AgentEvent {
-                metadata: EventMetadata {
-                    turn_id,
-                    timestamp_ms,
-                    sequence,
-                },
-                payload,
-            })
-            .await?;
+        self.emit(active_run.sink.as_ref(), turn_id, timestamp_ms, payload)
+            .await
+    }
+
+    /// Assigns the sequence and publishes under one permit so recovery cursors cannot skip an event.
+    pub(in crate::runtime) async fn emit(
+        &self,
+        sink: &dyn EventSink,
+        turn_id: TurnId,
+        timestamp_ms: TimestampMs,
+        payload: AgentEventPayload,
+    ) -> Result<(), KernelError> {
+        let _delivery = self.event_delivery.lock().await;
+        sink.emit(AgentEvent {
+            metadata: EventMetadata {
+                turn_id,
+                timestamp_ms,
+                sequence: self.next_sequence()?,
+            },
+            payload,
+        })
+        .await?;
         Ok(())
     }
 
@@ -627,6 +640,71 @@ mod tests {
                 .sequence(std::sync::atomic::AtomicU64::new(0))
                 .build(),
         )
+    }
+
+    /// A queue snapshot cannot overtake the idle transition on the same Session stream.
+    #[tokio::test]
+    async fn concurrent_publication_preserves_settlement_sequence() {
+        #[derive(Default)]
+        struct PausedSettlement {
+            release: Notify,
+            delivered: Mutex<Vec<Sequence>>,
+        }
+
+        #[async_trait]
+        impl EventSink for PausedSettlement {
+            /// Pauses the terminal event before it becomes visible to the consumer.
+            async fn emit(&self, event: AgentEvent) -> Result<(), SinkError> {
+                if matches!(
+                    event.payload,
+                    AgentEventPayload::AgentSettled { .. }
+                ) {
+                    self.release.notified().await;
+                }
+                self.delivered.lock().unwrap().push(event.metadata.sequence);
+                Ok(())
+            }
+        }
+
+        let execution = execution();
+        let sink = Arc::new(PausedSettlement::default());
+        let run_id = RunId::try_from("run-1").unwrap();
+        let turn_id = TurnId::try_from("turn-1").unwrap();
+        let _lease = execution
+            .install_run(ActiveRunContext {
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                sink: sink.clone(),
+            })
+            .unwrap();
+        let mut settlement = std::pin::pin!(execution.emit_to_run(
+            turn_id.clone(),
+            TimestampMs::now(),
+            AgentEventPayload::AgentSettled {
+                run_id,
+                outcome: protocol::AgentOutcome::Cancelled,
+                usage: protocol::ModelUsage::default(),
+            },
+        ));
+        let mut snapshot = std::pin::pin!(execution.emit_to_run(
+            turn_id,
+            TimestampMs::now(),
+            AgentEventPayload::QueueChanged {
+                pending: execution.pending_snapshot().unwrap(),
+            },
+        ));
+        assert!(futures::poll!(&mut settlement).is_pending());
+        assert!(
+            futures::poll!(&mut snapshot).is_pending(),
+            "queue snapshot overtook settlement"
+        );
+        sink.release.notify_one();
+        futures::try_join!(settlement, snapshot).unwrap();
+        let delivered = sink.delivered.lock().unwrap();
+        assert_eq!(
+            delivered.iter().map(|seq| seq.get()).collect::<Vec<_>>(),
+            [1, 2]
+        );
     }
 
     /// Publishes and clears active Run correlation as one lifecycle value.

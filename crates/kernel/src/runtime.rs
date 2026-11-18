@@ -34,10 +34,9 @@ use ::extension::ExtensionFactory;
 use ::tools::{ToolFactory, ToolRegistry};
 use config::TurnLimit;
 use protocol::{
-    AgentEvent, AgentEventPayload, CompactionReason, EventMetadata,
-    ExtensionFlagDefinition, IdGenerator, IdKind, McpSessionSnapshot,
-    MessageId, QueueId, RetryPolicy, RunRequest, RunResult, SessionId,
-    TimestampMs, TurnId,
+    AgentEventPayload, CompactionReason, ExtensionFlagDefinition, IdGenerator,
+    IdKind, McpSessionSnapshot, MessageId, QueueId, RetryPolicy, RunRequest,
+    RunResult, SessionId, TimestampMs, TurnId,
 };
 use store::{Clock, RecordKind, StoreFactory};
 use tokio::sync::broadcast;
@@ -709,18 +708,10 @@ impl EventEmitter {
         timestamp_ms: TimestampMs,
         payload: AgentEventPayload,
     ) -> Result<(), KernelError> {
-        let sequence = self.session.execution.next_sequence()?;
-        self.sink
-            .emit(AgentEvent {
-                metadata: EventMetadata {
-                    turn_id,
-                    timestamp_ms,
-                    sequence,
-                },
-                payload,
-            })
-            .await?;
-        Ok(())
+        self.session
+            .execution
+            .emit(self.sink.as_ref(), turn_id, timestamp_ms, payload)
+            .await
     }
 }
 

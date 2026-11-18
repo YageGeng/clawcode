@@ -201,30 +201,21 @@ impl Kernel {
         old_leaf_id: Option<EntryId>,
         new_leaf_id: Option<EntryId>,
     ) {
-        let event =
-            protocol::TurnId::try_from(self.id_generator.next(IdKind::Turn))
-                .map_err(|error| KernelError::Protocol(error.to_string()))
-                .and_then(|turn_id| {
-                    Ok(protocol::AgentEvent {
-                        metadata: protocol::EventMetadata {
-                            turn_id,
-                            timestamp_ms: self.clock.now(),
-                            sequence: session.execution.next_sequence()?,
-                        },
-                        payload: protocol::AgentEventPayload::BranchNavigated {
-                            old_leaf_id,
-                            new_leaf_id,
-                        },
-                    })
-                });
-        let reported = match event {
-            Ok(event) => self
-                .session_sink(session_id)
-                .emit(event)
+        let reported = async {
+            session
+                .execution
+                .emit(
+                    self.session_sink(session_id).as_ref(),
+                    self.new_turn_id()?,
+                    self.clock.now(),
+                    protocol::AgentEventPayload::BranchNavigated {
+                        old_leaf_id,
+                        new_leaf_id,
+                    },
+                )
                 .await
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
+        }
+        .await;
         if let Err(error) = reported {
             tracing::warn!(
                 "failed to report branch navigation for Session {}: {}",

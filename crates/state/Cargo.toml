@@ -20,6 +20,7 @@ tracing = { workspace = true }
 
 # async
 tokio = { workspace = true, features = ["fs", "sync", "time"] }
+tokio-util = { workspace = true }
 
 # serde
 serde = { workspace = true, features = ["derive"] }

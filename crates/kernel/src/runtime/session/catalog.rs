@@ -4,20 +4,45 @@
 //! never fails a lookup, it only routes it to the original `StoreFactory`
 //! scans. Writes into SQLite are best effort for the same reason.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use protocol::{SessionId, SessionSummary};
-use state::{SessionFilter, StateRuntime};
+use state::{SessionFilter, StateError, StateRuntime};
 use store::{SessionHeader, StoreFactory};
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::{Duration, Instant};
 
 use crate::runtime::KernelError;
+
+/// Filesystem writes and stale-path repairs use the same failure tracking.
+enum CatalogChange<'a> {
+    Refresh(&'a Path),
+    Delete(Option<&'a Path>),
+}
 
 /// Metadata lookups over the store and its optional SQLite mirror.
 #[derive(Clone)]
 pub(in crate::runtime) struct SessionCatalog {
     store_factory: Arc<dyn StoreFactory>,
     state: Option<Arc<StateRuntime>>,
+    repairs: Arc<CatalogRepairs>,
+}
+
+/// Reads never wait for a repair's disk or SQLite I/O.
+#[derive(Default)]
+struct CatalogRepairs {
+    status: Mutex<RepairStatus>,
+    /// Order an identity repair against concurrent create, rename and delete writes.
+    writers: RwLock<()>,
+}
+
+#[derive(Default)]
+struct RepairStatus {
+    dirty: BTreeSet<SessionId>,
+    running: bool,
+    retry_after: Option<Instant>,
 }
 
 impl SessionCatalog {
@@ -29,12 +54,77 @@ impl SessionCatalog {
         Self {
             store_factory,
             state,
+            repairs: Arc::default(),
         }
     }
 
-    /// Returns the mirror only once its backfill made SQLite complete.
-    fn ready(&self) -> Option<&StateRuntime> {
-        self.state.as_deref().filter(|state| state.is_ready())
+    /// Chooses the indexed read path, scheduling at most one eligible repair pass.
+    fn state_for_read(&self) -> Option<&StateRuntime> {
+        let state = self.state.as_ref().filter(|state| state.is_ready())?;
+        let mut status = self.repairs.status.try_lock().ok()?;
+        if status.dirty.is_empty() {
+            return Some(state);
+        }
+        if !status.running
+            && status.retry_after.is_none_or(|at| Instant::now() >= at)
+        {
+            status.running = true;
+            self.spawn_repair(
+                status.dirty.iter().cloned().collect(),
+                Arc::clone(state),
+            );
+        }
+        None
+    }
+
+    /// Attempts every pending identity before backing off persistent failures.
+    fn spawn_repair(&self, ids: Vec<SessionId>, state: Arc<StateRuntime>) {
+        let catalog = self.clone();
+        tokio::spawn(async move {
+            let mut failed = false;
+            for id in ids {
+                let _order = catalog.repairs.writers.write().await;
+                match catalog.repair(&id, &state).await {
+                    Ok(()) => {
+                        catalog.repairs.status.lock().await.dirty.remove(&id);
+                    }
+                    Err(error) => {
+                        failed = true;
+                        tracing::warn!(
+                            "could not repair session {} in SQLite: {}",
+                            id,
+                            error
+                        );
+                    }
+                }
+            }
+            let mut status = catalog.repairs.status.lock().await;
+            status.running = false;
+            status.retry_after =
+                failed.then(|| Instant::now() + Duration::from_secs(1));
+            if status.dirty.is_empty() {
+                tracing::info!(
+                    "repaired session identities in SQLite; resuming indexed lookups"
+                );
+            }
+        });
+    }
+
+    /// Resolves the current file off the async executor; it may have moved or been deleted.
+    async fn repair(
+        &self,
+        id: &SessionId,
+        state: &StateRuntime,
+    ) -> Result<(), StateError> {
+        let store = Arc::clone(&self.store_factory);
+        let lookup = id.clone();
+        let header = tokio::task::spawn_blocking(move || store.header(&lookup))
+            .await
+            .map_err(std::io::Error::other)??;
+        match header {
+            Some(header) => state.refresh(id, &header.path).await,
+            None => state.delete_session(id).await,
+        }
     }
 
     /// Lists Sessions newest first, optionally within one working directory.
@@ -42,7 +132,7 @@ impl SessionCatalog {
         &self,
         cwd: Option<&Path>,
     ) -> Result<Vec<SessionSummary>, KernelError> {
-        if let Some(state) = self.ready() {
+        if let Some(state) = self.state_for_read() {
             match state
                 .list_sessions(SessionFilter::builder().cwd(cwd).build())
                 .await
@@ -73,7 +163,7 @@ impl SessionCatalog {
         &self,
         id: &SessionId,
     ) -> Result<Option<SessionSummary>, KernelError> {
-        if let Some(state) = self.ready() {
+        if let Some(state) = self.state_for_read() {
             match state.session(id).await {
                 Ok(row) => return Ok(row.map(SessionSummary::from)),
                 Err(error) => tracing::warn!(
@@ -98,24 +188,35 @@ impl SessionCatalog {
     pub(in crate::runtime) async fn header(
         &self,
         id: &SessionId,
+        cwd: Option<&Path>,
     ) -> Result<Option<SessionHeader>, KernelError> {
-        if let Some(state) = self.ready() {
+        if let Some(state) = self.state_for_read() {
             match state.session(id).await {
-                Ok(Some(row))
-                    if tokio::fs::try_exists(&row.path)
-                        .await
-                        .unwrap_or(false) =>
-                {
-                    return Ok(Some(row.into()));
-                }
-                Ok(Some(row)) => {
-                    tracing::warn!(
-                        "session {} log {} is gone; removing its state row",
+                Ok(Some(row)) => match tokio::fs::try_exists(&row.path).await {
+                    Ok(true) => {
+                        return Ok(cwd
+                            .is_none_or(|cwd| cwd == row.cwd)
+                            .then(|| row.into()));
+                    }
+                    Ok(false) if cwd.is_some_and(|cwd| cwd != row.cwd) => {
+                        // A scoped fallback may find a moved log; it may not evict a different workspace.
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            "session {} log {} is gone; removing its state row",
+                            id,
+                            row.path.display()
+                        );
+                        self.update(id, CatalogChange::Delete(Some(&row.path)))
+                            .await;
+                    }
+                    Err(error) => tracing::warn!(
+                        "could not check session {} log {}; keeping its index and scanning logs: {}",
                         id,
-                        row.path.display()
-                    );
-                    self.record_deleted(id).await;
-                }
+                        row.path.display(),
+                        error
+                    ),
+                },
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
                     "state lookup of session {} failed; scanning session logs: {}",
@@ -124,7 +225,10 @@ impl SessionCatalog {
                 ),
             }
         }
-        let header = self.store_factory.header(id)?;
+        let header = self
+            .store_factory
+            .header(id)?
+            .filter(|header| cwd.is_none_or(|cwd| header.cwd == cwd));
         if let Some(header) = &header {
             self.refresh(id, &header.path).await;
         }
@@ -136,7 +240,7 @@ impl SessionCatalog {
         &self,
         id: &SessionId,
     ) -> Result<bool, KernelError> {
-        Ok(self.header(id).await?.is_some())
+        Ok(self.header(id, None).await?.is_some())
     }
 
     /// Lists the Sessions owned by `owner`, created in its `cwd`.
@@ -145,7 +249,7 @@ impl SessionCatalog {
         owner: &SessionId,
         cwd: &Path,
     ) -> Result<Vec<SessionHeader>, KernelError> {
-        if let Some(state) = self.ready() {
+        if let Some(state) = self.state_for_read() {
             match state.children(owner).await {
                 Ok(rows) => {
                     return Ok(rows
@@ -184,7 +288,12 @@ impl SessionCatalog {
 
     /// Reports whether SQLite can answer children lookups right now.
     pub(in crate::runtime) fn is_ready(&self) -> bool {
-        self.ready().is_some()
+        self.state.as_ref().is_some_and(|state| state.is_ready())
+            && self
+                .repairs
+                .status
+                .try_lock()
+                .is_ok_and(|status| status.dirty.is_empty())
     }
 
     /// Projects one Session's log; failures are logged and repaired later.
@@ -193,25 +302,29 @@ impl SessionCatalog {
         id: &SessionId,
         path: &Path,
     ) {
-        // Writes happen before the backfill finishes too, so they are never lost.
-        if let Some(state) = &self.state
-            && let Err(error) = state.refresh(id, path).await
-        {
-            tracing::warn!(
-                "failed to project session {} into state: {}",
-                id,
-                error
-            );
-        }
+        self.update(id, CatalogChange::Refresh(path)).await;
     }
 
     /// Drops one deleted Session from SQLite; failures are logged.
     pub(in crate::runtime) async fn record_deleted(&self, id: &SessionId) {
-        if let Some(state) = &self.state
-            && let Err(error) = state.delete_session(id).await
-        {
+        self.update(id, CatalogChange::Delete(None)).await;
+    }
+
+    /// Orders identity changes against repair and immediately degrades the catalog on failure.
+    async fn update(&self, id: &SessionId, change: CatalogChange<'_>) {
+        let Some(state) = &self.state else { return };
+        // Healthy writers can overlap. A repair must finish before a newer change publishes.
+        let _order = self.repairs.writers.read().await;
+        let result = match change {
+            CatalogChange::Refresh(path) => state.refresh(id, path).await,
+            CatalogChange::Delete(path) => {
+                state.delete_session_at(id, path).await
+            }
+        };
+        if let Err(error) = result {
+            self.repairs.status.lock().await.dirty.insert(id.clone());
             tracing::warn!(
-                "failed to remove session {} from state: {}",
+                "failed to update session {} in SQLite; using session logs until repaired: {}",
                 id,
                 error
             );

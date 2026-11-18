@@ -22,7 +22,11 @@ fn production_catalog_contains_command_guard() {
 async fn application_rejects_an_extension_not_compiled_at_build_time() {
     let missing = ExtensionId::try_from("hook-examples")
         .expect("hook example extension id");
+    let home = tempfile::tempdir().expect("isolated data home");
     let config = AppConfig {
+        session_persistence: config::SessionPersistenceConfig {
+            data_home: Some(home.path().to_str().expect("utf8").to_owned()),
+        },
         extensions: ExtensionsConfig {
             enabled: vec![missing.clone()],
         },

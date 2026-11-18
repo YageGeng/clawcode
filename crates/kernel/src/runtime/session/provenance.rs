@@ -10,22 +10,39 @@ use protocol::{ProductIdentity, SessionGitInfo, SessionProvenance};
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Reads git state of one working directory for a new Session.
-pub(in crate::runtime) struct ProvenanceProbe<'a> {
-    pub(in crate::runtime) cwd: &'a Path,
+struct ProvenanceProbe<'a> {
+    cwd: &'a Path,
+}
+
+impl crate::runtime::Kernel {
+    /// Captures fresh provenance before reserving the id so slow git probes never block other builders.
+    pub(super) async fn prepare_session_creation(
+        &self,
+        options: &mut store::SessionCreateOptions,
+    ) -> Result<super::SessionIdReservation, crate::runtime::KernelError> {
+        if options.provenance.is_none() {
+            options.provenance =
+                Some(ProvenanceProbe { cwd: &options.cwd }.collect().await);
+        }
+        self.reserve_session_build(&options.session_id)
+    }
 }
 
 impl ProvenanceProbe<'_> {
     /// Collects commit, branch, and origin; any failing command leaves its field empty.
-    pub(in crate::runtime) async fn collect(&self) -> SessionProvenance {
-        let (sha, branch, origin_url) = tokio::join!(
-            self.git(&["rev-parse", "HEAD"]),
-            self.git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+    async fn collect(&self) -> SessionProvenance {
+        let (head, origin_url) = tokio::join!(
+            self.git(&["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]),
             self.git(&["remote", "get-url", "origin"]),
         );
+        let mut head = head.as_deref().into_iter().flat_map(str::lines);
         let git = SessionGitInfo {
-            sha,
+            sha: head.next().map(str::to_owned),
             // A detached checkout reports the literal `HEAD`, which names no branch.
-            branch: branch.filter(|branch| branch != "HEAD"),
+            branch: head
+                .next()
+                .filter(|branch| *branch != "HEAD")
+                .map(str::to_owned),
             origin_url: origin_url.as_deref().and_then(sanitized_remote),
         };
         SessionProvenance {
@@ -85,13 +102,19 @@ fn sanitized_remote(url: &str) -> Option<String> {
         Some((scheme, rest)) => (Some(scheme), rest),
         None => (None, address),
     };
-    // Git treats `?` and `#` as authority text on non-HTTP transports.
-    let authority_end = if matches!(scheme, Some("http" | "https")) {
-        rest.find(['/', '?', '#'])
-    } else {
-        rest.find('/')
+    if scheme.is_some_and(|s| {
+        s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https")
+    }) {
+        // Keep only the repository locator; signed query and fragment data are private.
+        let mut remote = url::Url::parse(address).ok()?;
+        remote.set_password(None).ok()?;
+        remote.set_username("").ok()?;
+        remote.set_query(None);
+        remote.set_fragment(None);
+        return Some(format!("{helper}{remote}"));
     }
-    .unwrap_or(rest.len());
+    // Git treats `?` and `#` as authority text on non-HTTP transports.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
     let (authority, path) = rest.split_at(authority_end);
     let Some((userinfo, host)) = authority.rsplit_once('@') else {
         return Some(url.to_owned());
@@ -126,7 +149,11 @@ mod tests {
             ),
             (
                 "https://example.com/o/r.git?q=a@b",
-                Some("https://example.com/o/r.git?q=a@b"),
+                Some("https://example.com/o/r.git"),
+            ),
+            (
+                "persistent-https::HTTPS://u:p@example.com:8443/o/r.git?sig=test#private",
+                Some("persistent-https::https://example.com:8443/o/r.git"),
             ),
             ("git@github.com:o/r.git", Some("git@github.com:o/r.git")),
             ("alice@host:o/r.git", Some("host:o/r.git")),

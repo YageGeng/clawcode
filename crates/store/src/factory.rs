@@ -49,6 +49,48 @@ impl JsonlStoreFactory {
     fn observer(&self) -> Option<Arc<dyn SyncObserver>> {
         self.sync_observer.as_ref().map(Arc::clone)
     }
+    /// Appends one name fact after the log's final sequence without replaying it.
+    ///
+    /// A log whose final line is not a complete mutation, either header-only
+    /// or a torn append, falls back to the replay that repairs it.
+    fn append_name(
+        &self,
+        path: &Path,
+        name: Option<String>,
+        known_id: Option<&SessionId>,
+    ) -> Result<(), StoreError> {
+        let Some(last) = Self::last_sequence(path)? else {
+            let mut store = self.open(path)?;
+            store.set_name(name)?;
+            return store.sync();
+        };
+        let sequence = last
+            .checked_add(1)
+            .and_then(|next| Sequence::try_from(next).ok())
+            .ok_or(StoreError::SequenceExhausted)?;
+        let mutation = NameFactMutation::new(sequence, name);
+        // Resolve an imported file's identity before writing when the caller knows only its path.
+        let header_id = if known_id.is_none() && self.sync_observer.is_some() {
+            let mut line = Vec::new();
+            BufReader::new(fs::File::open(path)?)
+                .read_until(b'\n', &mut line)?;
+            Some(LogHeader::try_from(line.trim_ascii_end())?.id)
+        } else {
+            None
+        };
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        let mut line = serde_json::to_vec(&mutation)?;
+        line.push(b'\n');
+        file.write_all(&line)?;
+        file.sync_data()?;
+        if let (Some(observer), Some(id)) =
+            (&self.sync_observer, known_id.or(header_id.as_ref()))
+        {
+            observer.synced(id, path);
+        }
+        Ok(())
+    }
+
     /// Writes a new v4 header with an optional owner edge and no global index.
     fn create_with(
         &self,
@@ -98,39 +140,22 @@ impl JsonlStoreFactory {
 }
 
 impl StoreFactory for JsonlStoreFactory {
-    /// Appends one name fact after the log's final sequence without replaying it.
-    ///
-    /// A log whose final line is not a complete mutation, either header-only
-    /// or a torn append, falls back to the replay that repairs it.
+    /// Appends with the identity already read by the catalog.
+    fn rename_session(
+        &self,
+        header: &SessionHeader,
+        name: Option<String>,
+    ) -> Result<(), StoreError> {
+        self.append_name(&header.path, name, Some(&header.id))
+    }
+
+    /// Supports callers that located a persisted log by path only.
     fn set_name_at(
         &self,
         path: &Path,
         name: Option<String>,
     ) -> Result<(), StoreError> {
-        let Some(last) = Self::last_sequence(path)? else {
-            let mut store = self.open(path)?;
-            store.set_name(name)?;
-            return store.sync();
-        };
-        let sequence = last
-            .checked_add(1)
-            .and_then(|next| Sequence::try_from(next).ok())
-            .ok_or(StoreError::SequenceExhausted)?;
-        let mutation = NameFactMutation::new(sequence, name);
-        let mut file = OpenOptions::new().append(true).open(path)?;
-        let mut line = serde_json::to_vec(&mutation)?;
-        line.push(b'\n');
-        file.write_all(&line)?;
-        file.sync_data()?;
-        if let Some(observer) = &self.sync_observer {
-            // The append path never opened the log, so the header supplies the identity.
-            let mut header = Vec::new();
-            BufReader::new(fs::File::open(path)?)
-                .read_until(b'\n', &mut header)?;
-            let header = LogHeader::try_from(header.trim_ascii_end())?;
-            observer.synced(&header.id, path);
-        }
-        Ok(())
+        self.append_name(path, name, None)
     }
 
     /// Looks up identity using the common header-only path.
@@ -306,8 +331,7 @@ impl StoreFactory for JsonlStoreFactory {
         cwd: Option<&Path>,
     ) -> Result<Vec<SessionMetadata>, StoreError> {
         let mut sessions = Vec::new();
-        for entry in self.session_files(cwd)? {
-            let path = entry.path();
+        for path in self.session_files(cwd)? {
             let content = fs::read_to_string(&path)?;
             let Some(header_line) = content.lines().next() else {
                 continue;
@@ -326,19 +350,11 @@ impl StoreFactory for JsonlStoreFactory {
                 else {
                     continue;
                 };
-                if value.get("kind").and_then(serde_json::Value::as_str)
-                    == Some("fact")
-                    && value.get("fact").and_then(serde_json::Value::as_str)
-                        == Some("name")
-                {
-                    name = value
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned);
+                if let Some(fact) = crate::LogMutation::name_fact(&value) {
+                    name = fact.map(ToOwned::to_owned);
                 }
             }
-            let modified = entry
-                .metadata()?
+            let modified = fs::metadata(&path)?
                 .modified()?
                 .duration_since(UNIX_EPOCH)
                 .map_or(0_u128, |duration| duration.as_millis());
@@ -390,11 +406,7 @@ impl JsonlStoreFactory {
 
     /// Lists every session log under the sessions root in path order.
     pub fn session_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
-        let mut paths = self
-            .session_files(None)?
-            .iter()
-            .map(fs::DirEntry::path)
-            .collect::<Vec<_>>();
+        let mut paths = self.session_files(None)?;
         paths.sort();
         Ok(paths)
     }
@@ -403,16 +415,16 @@ impl JsonlStoreFactory {
     fn session_files(
         &self,
         cwd: Option<&Path>,
-    ) -> Result<Vec<fs::DirEntry>, StoreError> {
+    ) -> Result<Vec<PathBuf>, StoreError> {
         let mut directories = Vec::new();
         if let Some(cwd) = cwd {
             let directory = self
                 .sessions_root
                 .join(CwdSessionDirectory::from(cwd).as_str());
-            if directory.exists() {
+            if directory.try_exists()? {
                 directories.push(directory);
             }
-        } else if self.sessions_root.exists() {
+        } else if self.sessions_root.try_exists()? {
             for entry in fs::read_dir(&self.sessions_root)? {
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
@@ -424,14 +436,14 @@ impl JsonlStoreFactory {
         for directory in directories {
             for entry in fs::read_dir(directory)? {
                 let entry = entry?;
-                if entry.file_type()?.is_file()
-                    && entry
-                        .path()
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        == Some("jsonl")
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+                    && entry.file_type()?.is_file()
                 {
-                    files.push(entry);
+                    // DirEntry can retain the directory descriptor on Unix.
+                    files.push(path);
                 }
             }
         }
@@ -481,12 +493,11 @@ impl JsonlStoreFactory {
     ) -> Result<Vec<SessionHeader>, StoreError> {
         let suffix = session_id.map(|id| format!("_{id}.jsonl"));
         let mut headers = Vec::new();
-        for entry in self.session_files(cwd)? {
-            let path = entry.path();
+        for path in self.session_files(cwd)? {
             if suffix.as_ref().is_some_and(|suffix| {
-                !entry
+                !path
                     .file_name()
-                    .to_str()
+                    .and_then(|name| name.to_str())
                     .is_some_and(|name| name.ends_with(suffix))
             }) {
                 continue;
@@ -582,10 +593,10 @@ pub(crate) struct V4Header {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub(crate) ownership: Option<SessionOwnership>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub(crate) git: Option<SessionGitInfo>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub(crate) app_version: Option<String>,
 }

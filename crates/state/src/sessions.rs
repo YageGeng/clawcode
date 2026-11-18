@@ -276,11 +276,13 @@ impl SessionListQuery<'_> {
         }
         match self.filter.scope {
             SessionScope::All => {}
-            SessionScope::Visible => condition(&mut query, "preview <> ''"),
+            SessionScope::Visible => {
+                condition(&mut query, "has_user_message = 1")
+            }
             SessionScope::Interactive => {
                 condition(
                     &mut query,
-                    "preview <> '' AND owner_session_id IS NULL",
+                    "has_user_message = 1 AND owner_session_id IS NULL",
                 );
             }
         }
@@ -304,14 +306,13 @@ impl SessionListQuery<'_> {
         }
         if let Some(anchor) = &self.filter.anchor {
             let at = i64::try_from(anchor.at_ms.get())?;
-            condition(&mut query, &format!("({column} < "));
+            // The ordering index can seek directly to this compound key.
+            condition(&mut query, &format!("({column}, id) < ("));
             query
                 .push_bind(at)
-                .push(format!(" OR ({column} = "))
-                .push_bind(at)
-                .push(" AND id < ")
+                .push(", ")
                 .push_bind(anchor.id.as_str().to_owned())
-                .push("))");
+                .push(")");
         }
         query.push(format!(" ORDER BY {column} DESC, id DESC"));
         if let Some(limit) = self.filter.limit {
@@ -390,14 +391,29 @@ impl StateRuntime {
         &self,
         id: &SessionId,
     ) -> Result<(), StateError> {
+        self.delete_session_at(id, None).await
+    }
+
+    /// A stale filesystem listing may remove only rows still pointing at the missing path.
+    pub async fn delete_session_at(
+        &self,
+        id: &SessionId,
+        path: Option<&Path>,
+    ) -> Result<(), StateError> {
+        let path = path.map(SqlText::sql_text).transpose()?;
         let mut state = self.state.begin_with("BEGIN IMMEDIATE").await?;
         let mut history = self.history.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM sessions WHERE id = ?")
+        sqlx::query(
+            "DELETE FROM sessions WHERE id = ? AND (? IS NULL OR path = ?)",
+        )
+        .bind(id.as_str())
+        .bind(path)
+        .bind(path)
+        .execute(&mut *state)
+        .await?;
+        sqlx::query("DELETE FROM projection_state WHERE session_id = ? AND (? IS NULL OR path = ?)")
             .bind(id.as_str())
-            .execute(&mut *state)
-            .await?;
-        sqlx::query("DELETE FROM projection_state WHERE session_id = ?")
-            .bind(id.as_str())
+            .bind(path).bind(path)
             .execute(&mut *history)
             .await?;
         state.commit().await?;
@@ -420,7 +436,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("memory database");
-        sqlx::migrate!("./migrations")
+        sqlx::migrate!("./migrations/state")
             .run(&pool)
             .await
             .expect("migrate");
@@ -447,6 +463,19 @@ mod tests {
     async fn list_queries_use_expected_indexes() {
         let pool = schema().await;
         let cwd = Path::new("/work");
+        let anchored = SessionFilter::builder()
+            .anchor(Some(SessionAnchor {
+                at_ms: 42.into(),
+                id: SessionId::try_from("anchor").expect("id"),
+            }))
+            .build();
+        let deep_page = plan(&pool, anchored).await;
+        assert!(
+            deep_page.contains(
+                "SEARCH sessions USING INDEX idx_sessions_updated_at_ms"
+            ),
+            "{deep_page}"
+        );
         for (filter, index) in [
             (
                 SessionFilter::builder().build(),

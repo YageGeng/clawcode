@@ -41,6 +41,13 @@ Configuration is loaded once at startup. Search order is:
 2. The product directory under the platform config directory.
 3. The repository-local TOML file.
 
+On macOS and Linux, session logs, SQLite databases, credentials, and shell
+snapshots default to `~/.local/share/clawcode/`. An absolute `XDG_DATA_HOME`
+changes that to `$XDG_DATA_HOME/clawcode/`. An explicit
+`session_persistence.data_home` takes precedence and names the directory itself.
+To reopen older macOS sessions in place, set it to the absolute path of your
+previous `~/Library/Application Support/clawcode/` directory.
+
 Example:
 
 ```toml

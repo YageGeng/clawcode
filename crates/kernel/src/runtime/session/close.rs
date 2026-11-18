@@ -179,7 +179,7 @@ impl Kernel {
                     Ok(session) => (Some(session.cwd.clone()), session.ownership.clone()),
                     Err(KernelError::SessionNotFound(_)) => self
                         .catalog
-                        .header(session_id)
+                        .header(session_id, None)
                         .await?
                         .map_or((None, None), |header| (Some(header.cwd), header.ownership)),
                     Err(error) => return Err(error),

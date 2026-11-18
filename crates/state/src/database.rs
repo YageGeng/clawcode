@@ -3,11 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sqlx::migrate::Migrator;
 use sqlx::sqlite::{
-    SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePool,
-    SqlitePoolOptions, SqliteSynchronous,
+    SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
+use sqlx::{SqliteConnection, migrate::Migrator};
 
 use store::{Clock, SystemClock};
 
@@ -72,8 +71,6 @@ impl DatabaseOpener<'_> {
         let options = SqliteConnectOptions::new()
             .filename(self.path)
             .create_if_missing(true)
-            .auto_vacuum(SqliteAutoVacuum::Incremental)
-            .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(BUSY_TIMEOUT);
@@ -81,12 +78,36 @@ impl DatabaseOpener<'_> {
             .max_connections(MAX_CONNECTIONS)
             .connect_with(options)
             .await?;
-        if let Err(error) = self.migrator.run(&pool).await {
+        let mut conn = pool.acquire().await?;
+        let result = self.prepare(&mut conn).await;
+        drop(conn);
+        if let Err(error) = result {
             pool.close().await;
-            return Err(error.into());
+            return Err(error);
         }
         tracing::info!("opened state database {}", self.path.display());
         Ok(pool)
+    }
+
+    /// Sets persistent file modes before migration, leaving future pooled reads lock-free.
+    async fn prepare(
+        &self,
+        conn: &mut SqliteConnection,
+    ) -> Result<(), StateError> {
+        // Setting auto_vacuum requests a write lock even when the value already matches.
+        let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&mut *conn)
+            .await?;
+        if mode != 2 {
+            sqlx::query("PRAGMA auto_vacuum = INCREMENTAL")
+                .execute(&mut *conn)
+                .await?;
+        }
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&mut *conn)
+            .await?;
+        self.migrator.run(conn).await?;
+        Ok(())
     }
 
     /// Renames the database and its WAL sidecars to `<name>.corrupt-<unix ms>`.

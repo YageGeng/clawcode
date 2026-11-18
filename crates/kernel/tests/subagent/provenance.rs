@@ -80,7 +80,7 @@ async fn session_header_drops_origin_credentials_and_detached_head() {
             "remote",
             "add",
             "origin",
-            "https://user:token@example.com/o/r.git",
+            "https://user:token@example.com/o/r.git?signature=test#private",
         ],
     );
 

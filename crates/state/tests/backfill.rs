@@ -112,11 +112,22 @@ async fn sync_becomes_ready_after_held_lease_completes() {
         .execute(&pool)
         .await
         .expect("hold lease");
+    // Enumerating this root would fail immediately while the peer holds its lease.
+    let root = fixture.factory.sessions_root();
+    let parked = fixture.home.path().join("parked-logs");
+    std::fs::rename(root, &parked).expect("park sessions");
+    std::fs::write(root, b"unavailable").expect("unlistable root");
     let runtime = std::sync::Arc::clone(&fixture.runtime);
     let factory = std::sync::Arc::clone(&fixture.factory);
     let sync = tokio::spawn(async move { runtime.sync_logs(&factory).await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     assert!(!fixture.runtime.is_ready());
+    assert!(
+        !sync.is_finished(),
+        "lease polling attempted to enumerate the root"
+    );
+    std::fs::remove_file(root).expect("restore directory");
+    std::fs::rename(parked, root).expect("restore logs");
 
     sqlx::query("UPDATE backfill_state SET status = 'complete' WHERE id = 1")
         .execute(&pool)
@@ -241,4 +252,251 @@ async fn backfill_counts_unreadable_file_as_failed() {
         }
     );
     assert!(fixture.runtime.is_ready());
+}
+
+/// A rebuilt history database must catch up even when the state file survived intact.
+#[tokio::test]
+async fn sync_repairs_a_missing_history_cursor() {
+    let fixture = Fixture::new().await;
+    three_sessions(&fixture);
+    backfill(&fixture).await;
+    // Keep only a consistent metadata snapshot, then let startup recreate history from scratch.
+    let recovered =
+        state::SqliteConfig::new(fixture.home.path().join("recovered"));
+    std::fs::create_dir(recovered.home()).expect("recovery directory");
+    sqlx::query("VACUUM INTO ?")
+        .bind(recovered.state_db_path().to_str().expect("path"))
+        .execute(&fixture.state_pool().await)
+        .await
+        .expect("metadata snapshot");
+    let runtime = state::StateRuntime::init(&recovered).await.expect("reopen");
+    assert!(!runtime.is_ready());
+    runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("reconcile");
+    let history = support::external(&recovered.session_history_db_path()).await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM entries")
+        .fetch_one(&history)
+        .await
+        .expect("external reader");
+    assert_eq!(count, 6);
+}
+
+/// The startup catalog stays on JSONL until the identity of every readable log is indexed.
+#[tokio::test]
+async fn sync_reports_failed_identity_writes_until_repaired() {
+    let fixture = Fixture::new().await;
+    backfill(&fixture).await;
+    let log = fixture.session(fixture.options("waiting"));
+    let pool = fixture.state_pool().await;
+    sqlx::query("CREATE TRIGGER reject_header BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'unavailable'); END")
+        .execute(&pool).await.expect("reject header");
+    let error = fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect_err("rejected header");
+    assert!(matches!(error, state::StateError::Projection { .. }));
+    assert!(!fixture.runtime.is_ready());
+    sqlx::query("DROP TRIGGER reject_header")
+        .execute(&pool)
+        .await
+        .expect("restore writes");
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("repair");
+    assert!(fixture.runtime.is_ready());
+    assert!(
+        fixture
+            .runtime
+            .session(&log.id())
+            .await
+            .expect("lookup")
+            .is_some()
+    );
+}
+
+/// A restart after the metadata half of a deletion clears any orphaned history.
+#[tokio::test]
+async fn sync_finishes_a_partially_committed_deletion() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("removed"));
+    log.user("remove");
+    log.sync();
+    backfill(&fixture).await;
+    std::fs::remove_file(log.path()).expect("remove log");
+    sqlx::query("DELETE FROM sessions")
+        .execute(&fixture.state_pool().await)
+        .await
+        .expect("remove metadata");
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("reconcile");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM entries")
+        .fetch_one(&fixture.history_pool().await)
+        .await
+        .expect("history");
+    assert_eq!(count, 0);
+}
+
+/// A moved log replaces its missing canonical path within the same reconciliation.
+#[tokio::test]
+async fn sync_adopts_a_moved_log_in_one_pass() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("moved"));
+    log.user("keep");
+    log.sync();
+    let id = log.id();
+    let old = log.path();
+    drop(log);
+    backfill(&fixture).await;
+    let moved = old.with_file_name("imported.jsonl");
+    std::fs::rename(old, &moved).expect("rename log");
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("reconcile");
+    let row = fixture
+        .runtime
+        .session(&id)
+        .await
+        .expect("query")
+        .expect("moved session");
+    assert_eq!(row.path, moved);
+    assert_eq!(row.preview, "keep");
+}
+
+/// Closing a waiter preserves its peer's lease; closing the owner immediately permits takeover.
+#[tokio::test]
+async fn graceful_shutdown_only_releases_the_owned_lease() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    let fixture = Fixture::new().await;
+    three_sessions(&fixture);
+    let pool = fixture.state_pool().await;
+    let history = fixture.history_pool().await;
+    let lock = history
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("pause projection");
+    let start = || {
+        state::StartupBackfill::spawn(
+            Arc::clone(&fixture.runtime),
+            Arc::clone(&fixture.factory),
+        )
+    };
+    let owner = start();
+    let token = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let token: Option<String> =
+                sqlx::query_scalar("SELECT lease_owner FROM backfill_state")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("lease");
+            if let Some(token) = token {
+                break token;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("owner acquired lease");
+    let waiter = start();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    waiter.shutdown().await.expect("close waiter");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT lease_owner FROM backfill_state"
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("original owner"),
+        token
+    );
+    lock.rollback().await.expect("unlock");
+    owner.shutdown().await.expect("close owner");
+    let (status, token): (String, Option<String>) =
+        sqlx::query_as("SELECT status, lease_owner FROM backfill_state")
+            .fetch_one(&pool)
+            .await
+            .expect("released");
+    assert_eq!((status.as_str(), token), ("pending", None));
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("resume immediately");
+    assert_eq!(token_totals(&fixture).await.len(), 3);
+}
+
+/// Startup adopts an old relative catalog path even if it resolves to a file in the current cwd.
+#[tokio::test]
+async fn reconciliation_replaces_legacy_relative_paths_in_both_databases() {
+    let fixture = Fixture::new().await;
+    let log = fixture.session(fixture.options("relative"));
+    backfill(&fixture).await;
+    let state = fixture.state_pool().await;
+    let history = fixture.history_pool().await;
+    sqlx::query("UPDATE sessions SET path = 'Cargo.toml'")
+        .execute(&state)
+        .await
+        .expect("legacy metadata");
+    sqlx::query("UPDATE projection_state SET path = 'Cargo.toml'")
+        .execute(&history)
+        .await
+        .expect("legacy history");
+    fixture
+        .runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("adopt absolute path");
+    let row = fixture
+        .runtime
+        .session(&log.id())
+        .await
+        .expect("read")
+        .expect("row");
+    assert!(row.path.is_absolute());
+    assert_eq!(row.path, log.path());
+    let path: String = sqlx::query_scalar("SELECT path FROM projection_state")
+        .fetch_one(&history)
+        .await
+        .expect("history path");
+    assert_eq!(PathBuf::from(path), log.path());
+}
+
+/// A relative spelling of the same root must not turn its logs into duplicate Sessions.
+#[tokio::test]
+async fn alternate_root_spelling_reconciles_the_same_log() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("alias"));
+    log.name(Some("first"));
+    log.sync();
+    backfill(&fixture).await;
+    let path = log.path();
+    let original = std::fs::read_to_string(&path).expect("log");
+    std::fs::write(&path, original.replace("first", "other")).expect("rewrite");
+    let root = fixture.factory.sessions_root().join("..").join("sessions");
+    let alias = std::sync::Arc::new(store::JsonlStoreFactory::new(
+        root,
+        std::sync::Arc::new(store::SystemClock),
+    ));
+    fixture
+        .runtime
+        .sync_logs(&alias)
+        .await
+        .expect("reconcile alias");
+    let row = fixture
+        .runtime
+        .session(&log.id())
+        .await
+        .expect("lookup")
+        .expect("session");
+    assert_eq!(row.name.as_deref(), Some("other"));
 }

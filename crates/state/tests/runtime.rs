@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use state::{SqliteConfig, StateRuntime};
+use state::{
+    SESSION_HISTORY_DB_VERSION, STATE_DB_FILENAME, STATE_DB_VERSION,
+    SqliteConfig, StateRuntime,
+};
 
 /// Opens an independent pool on one database file, as an external reader would.
 async fn reader(path: &Path) -> SqlitePool {
@@ -49,11 +52,17 @@ async fn init_creates_both_databases() {
     let home = tempfile::tempdir().expect("home");
     let config = SqliteConfig::new(home.path().join("nested"));
     StateRuntime::init(&config).await.expect("init");
-    assert!(config.state_db_path().ends_with("state_1.sqlite"));
-    assert!(
+    assert_eq!(
+        config.state_db_path(),
         config
-            .session_history_db_path()
-            .ends_with("session_history_1.sqlite")
+            .home()
+            .join(format!("state_{STATE_DB_VERSION}.sqlite"))
+    );
+    assert_eq!(
+        config.session_history_db_path(),
+        config.home().join(format!(
+            "session_history_{SESSION_HISTORY_DB_VERSION}.sqlite"
+        ))
     );
 
     let state = reader(&config.state_db_path()).await;
@@ -68,13 +77,18 @@ async fn init_creates_both_databases() {
             .iter()
             .all(|name| name.starts_with("idx_sessions_"))
     );
-    let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
-        .fetch_one(&state)
-        .await
-        .expect("journal mode");
-    assert_eq!(journal, "wal");
-
     let history = reader(&config.session_history_db_path()).await;
+    for pool in [&state, &history] {
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(pool)
+            .await
+            .expect("journal mode");
+        let vacuum: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(pool)
+            .await
+            .expect("auto vacuum mode");
+        assert_eq!((journal.as_str(), vacuum), ("wal", 2));
+    }
     assert_eq!(
         names(&history, "table").await,
         ["entries", "lanes", "projection_state", "runs"]
@@ -86,6 +100,7 @@ async fn init_creates_both_databases() {
             "idx_entries_page",
             "idx_entries_user_messages",
             "idx_runs_end_page",
+            "idx_runs_open_lane",
             "idx_runs_page",
         ]
     );
@@ -151,6 +166,7 @@ async fn init_backs_up_corrupt_database() {
 
     StateRuntime::init(&config).await.expect("init");
 
+    let backup_prefix = format!("{STATE_DB_FILENAME}.corrupt-");
     let backups = std::fs::read_dir(home.path())
         .expect("home listing")
         .filter_map(Result::ok)
@@ -158,7 +174,7 @@ async fn init_backs_up_corrupt_database() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with("state_1.sqlite.corrupt-")
+                .starts_with(&backup_prefix)
         })
         .count();
     assert_eq!(backups, 1);

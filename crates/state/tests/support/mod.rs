@@ -32,6 +32,7 @@ impl Clock for TickClock {
 }
 
 /// Temporary data home with a JSONL factory and an initialized state runtime.
+#[derive(typed_builder::TypedBuilder)]
 pub struct Fixture {
     pub home: tempfile::TempDir,
     pub factory: Arc<JsonlStoreFactory>,
@@ -49,12 +50,12 @@ impl Fixture {
         ));
         let config = SqliteConfig::new(home.path().join("state"));
         let runtime = StateRuntime::init(&config).await.expect("init");
-        Self {
-            home,
-            factory,
-            runtime,
-            config,
-        }
+        Self::builder()
+            .home(home)
+            .factory(factory)
+            .runtime(runtime)
+            .config(config)
+            .build()
     }
 
     /// Returns default creation options for `id` in the `project` cwd.
@@ -184,7 +185,7 @@ impl SessionLog {
     }
 
     /// Appends one kernel-shaped message entry.
-    fn message(&mut self, content: MessageContent) -> EntryId {
+    pub fn message(&mut self, content: MessageContent) -> EntryId {
         let n = self.next();
         let at = TimestampMs::from(500 + n);
         let message = AgentMessage {

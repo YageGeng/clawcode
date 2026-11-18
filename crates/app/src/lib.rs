@@ -3,7 +3,6 @@
 mod logging;
 mod web;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use kernel::{
@@ -14,7 +13,7 @@ use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
 use prompt::FilesystemPromptFactory;
 use protocol::ProductIdentity;
 use skill::FilesystemSkillFactory;
-use state::{SqliteConfig, StateRuntime, StateWorker};
+use state::{SqliteConfig, StartupBackfill, StateRuntime, StateWorker};
 use store::{
     FileSecretStore, JsonlStoreFactory, StoreFactory, SyncObserver, SystemClock,
 };
@@ -75,21 +74,38 @@ pub enum ApplicationError {
 }
 
 /// Fully composed application services shared by every ACP transport.
+#[derive(typed_builder::TypedBuilder)]
 pub struct Application {
     /// Session-owning agent kernel.
     pub kernel: Arc<Kernel>,
     /// Immutable browser bootstrap response captured from startup config.
     pub ui_bootstrap: UiBootstrapResponse,
     /// Background projector of synced Sessions, when SQLite state opened.
+    #[builder(default)]
     pub state_worker: Option<Arc<StateWorker>>,
+    /// Startup reconciliation and the lease this process owns.
+    #[builder(default)]
+    startup_backfill: Option<StartupBackfill>,
 }
 
 impl Application {
     /// Waits until every Session sync queued so far reached SQLite.
-    pub async fn flush_state(&self) {
+    pub async fn flush_state(&self) -> Result<(), state::StateError> {
         if let Some(worker) = &self.state_worker {
-            worker.flush().await;
+            worker.flush().await?;
         }
+        Ok(())
+    }
+
+    /// Stops background processes, releases our backfill lease and verifies all queued syncs.
+    pub async fn shutdown(mut self) -> Result<(), state::StateError> {
+        self.kernel.terminate_exec_processes().await;
+        let backfill = match self.startup_backfill.take() {
+            Some(task) => task.shutdown().await,
+            None => Ok(()),
+        };
+        self.flush_state().await?;
+        backfill
     }
 }
 
@@ -129,12 +145,13 @@ impl ApplicationFactory {
         // unavailable runtime selection fails startup without side effects.
         let extension_factory = extensions::compiled_extensions()?
             .select(&snapshot.extensions.enabled)?;
-        let data_root = match &snapshot.session_persistence.data_home {
-            Some(data_home) => PathBuf::from(data_home),
-            None => dirs::data_local_dir()
-                .ok_or(ApplicationError::MissingDataDirectory)?
-                .join(ProductIdentity::CONFIG_DIR_NAME),
-        };
+        let data_root = snapshot
+            .session_persistence
+            .data_root()
+            .ok_or(ApplicationError::MissingDataDirectory)?;
+        // Persisted JSONL locations must resolve the same way for other processes.
+        tokio::fs::create_dir_all(&data_root).await?;
+        let data_root = tokio::fs::canonicalize(&data_root).await?;
         let sessions_root = data_root.join("sessions");
         let secret_store: Arc<dyn store::SecretStore> =
             Arc::new(FileSecretStore::new(data_root.join("credentials"))?);
@@ -252,20 +269,13 @@ impl ApplicationFactory {
             .build()
             .build()?;
         // Started only once the Kernel exists, so a failed build leaves no lease behind.
-        if let Some(runtime) = state {
-            tokio::spawn(async move {
-                if let Err(error) = runtime.sync_logs(&store_factory).await {
-                    tracing::warn!(
-                        "state sync with session logs failed; lookups keep scanning logs: {}",
-                        error
-                    );
-                }
-            });
-        }
-        Ok(Application {
-            kernel: Arc::new(kernel),
-            ui_bootstrap,
-            state_worker,
-        })
+        let startup_backfill =
+            state.map(|runtime| StartupBackfill::spawn(runtime, store_factory));
+        Ok(Application::builder()
+            .kernel(Arc::new(kernel))
+            .ui_bootstrap(ui_bootstrap)
+            .state_worker(state_worker)
+            .startup_backfill(startup_backfill)
+            .build())
     }
 }

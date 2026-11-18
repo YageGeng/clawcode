@@ -272,7 +272,9 @@ impl Kernel {
                     .store_factory
                     .delete(session_id)
                     .map_err(KernelError::from);
-                self.catalog.record_deleted(session_id).await;
+                if deleted.is_ok() {
+                    self.catalog.record_deleted(session_id).await;
+                }
                 deleted
             } else {
                 Ok(())
