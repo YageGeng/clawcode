@@ -51,6 +51,9 @@ impl ProductIdentity {
     /// Lowercase product identifier used in machine-readable contexts.
     pub const SLUG: &str = "clawcode";
 
+    /// Product version recorded in new Session headers.
+    pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
     /// Namespace used by ACP extension methods and metadata.
     pub const ACP_NAMESPACE: &str = "clawcode";
 

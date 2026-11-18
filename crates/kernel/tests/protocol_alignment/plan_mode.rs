@@ -359,7 +359,7 @@ async fn note_waits_for_the_tool_results() {
     });
     let session = test.create("plan-note-tools").await;
     let prompt = test.start(&session, "run");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.sinks.payloads(&session).iter().any(|payload| {
             matches!(payload, AgentEventPayload::ToolExecutionStart { .. })
         })
@@ -411,7 +411,7 @@ async fn note_precedes_a_streaming_reply() {
     });
     let session = test.create("plan-note-streaming").await;
     let prompt = test.start(&session, "first");
-    test.wait_until(|| !requests(&test).is_empty()).await;
+    test.wait_until(async || !requests(&test).is_empty()).await;
     test.kernel
         .set_session_mode(&session, SessionMode::Plan)
         .await
@@ -1173,7 +1173,7 @@ async fn submit_plan(
         .await
         .expect("set mode");
     let prompt = test.start(session, "plan it");
-    test.wait_until(|| !approval_requests(test, session).is_empty())
+    test.wait_until(async || !approval_requests(test, session).is_empty())
         .await;
     let request = approval_requests(test, session)
         .into_iter()
@@ -1513,7 +1513,7 @@ async fn submit_plan_again(
 ) {
     let before = approval_requests(test, session).len();
     let prompt = test.start(session, "plan it");
-    test.wait_until(|| approval_requests(test, session).len() > before)
+    test.wait_until(async || approval_requests(test, session).len() > before)
         .await;
     let request = approval_requests(test, session)
         .into_iter()

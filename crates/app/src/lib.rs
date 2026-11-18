@@ -14,7 +14,10 @@ use mcp::{RmcpConnector, RuntimeMcpServer, SessionMcpFactory};
 use prompt::FilesystemPromptFactory;
 use protocol::ProductIdentity;
 use skill::FilesystemSkillFactory;
-use store::{FileSecretStore, JsonlStoreFactory, SystemClock};
+use state::{SqliteConfig, StateRuntime, StateWorker};
+use store::{
+    FileSecretStore, JsonlStoreFactory, StoreFactory, SyncObserver, SystemClock,
+};
 use tools::BuiltinToolFactory;
 
 pub use logging::{LoggingError, LoggingFactory};
@@ -77,6 +80,17 @@ pub struct Application {
     pub kernel: Arc<Kernel>,
     /// Immutable browser bootstrap response captured from startup config.
     pub ui_bootstrap: UiBootstrapResponse,
+    /// Background projector of synced Sessions, when SQLite state opened.
+    pub state_worker: Option<Arc<StateWorker>>,
+}
+
+impl Application {
+    /// Waits until every Session sync queued so far reached SQLite.
+    pub async fn flush_state(&self) {
+        if let Some(worker) = &self.state_worker {
+            worker.flush().await;
+        }
+    }
 }
 
 /// Composition factory that keeps construction policy outside domain modules.
@@ -99,7 +113,7 @@ impl ApplicationFactory {
     }
 
     /// Builds provider, tool, MCP, skill, store, extension, and kernel factories.
-    pub fn build(self) -> Result<Application, ApplicationError> {
+    pub async fn build(self) -> Result<Application, ApplicationError> {
         let snapshot = self.config.current();
         // ponytail: approval prompts are not implemented, so every tool runs
         // without asking whatever the policy says; wire ACP permission requests
@@ -176,13 +190,37 @@ impl ApplicationFactory {
             None
         };
         let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
+        // SQLite only mirrors JSONL, so failing to open it costs speed, not data.
+        let state = match StateRuntime::init(&SqliteConfig::new(&data_root))
+            .await
+        {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                tracing::warn!(
+                    "SQLite state at {} is unavailable; scanning session logs: {}",
+                    data_root.display(),
+                    error
+                );
+                None
+            }
+        };
+        let state_worker = state
+            .as_ref()
+            .map(|runtime| StateWorker::spawn(Arc::clone(runtime)).0);
+        let mut store_factory =
+            JsonlStoreFactory::new(sessions_root, Arc::clone(&clock));
+        if let Some(worker) = &state_worker {
+            store_factory =
+                store_factory.with_sync_observer(
+                    Arc::clone(worker) as Arc<dyn SyncObserver>
+                );
+        }
+        let store_factory = Arc::new(store_factory);
         let kernel = KernelFactory::builder()
             .model_factory(model_factory)
             .tool_factory(Arc::new(builtin_tools))
-            .store_factory(Arc::new(JsonlStoreFactory::new(
-                sessions_root,
-                Arc::clone(&clock),
-            )))
+            .store_factory(Arc::clone(&store_factory) as Arc<dyn StoreFactory>)
+            .state(state.as_ref().map(Arc::clone))
             .extension_factory(Arc::new(extension_factory))
             .clock(clock)
             .id_generator(Arc::new(NanoidIdGenerator))
@@ -213,9 +251,21 @@ impl ApplicationFactory {
             }))
             .build()
             .build()?;
+        // Started only once the Kernel exists, so a failed build leaves no lease behind.
+        if let Some(runtime) = state {
+            tokio::spawn(async move {
+                if let Err(error) = runtime.sync_logs(&store_factory).await {
+                    tracing::warn!(
+                        "state sync with session logs failed; lookups keep scanning logs: {}",
+                        error
+                    );
+                }
+            });
+        }
         Ok(Application {
             kernel: Arc::new(kernel),
             ui_bootstrap,
+            state_worker,
         })
     }
 }

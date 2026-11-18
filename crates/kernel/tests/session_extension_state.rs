@@ -217,11 +217,12 @@ async fn extension_session_state_is_persisted_and_restored() {
         .expect("build kernel");
     let session_id = SessionId::try_from("session-state").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel

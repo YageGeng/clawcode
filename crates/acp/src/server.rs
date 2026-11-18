@@ -1021,7 +1021,7 @@ impl AcpServerFactory {
                             .as_ref()
                             .map(|path| path.as_ref());
                         let sessions = kernel
-                            .list_sessions(cwd)
+                            .list_sessions(cwd).await
                             .map_err(agent_client_protocol::Error::into_internal_error)?
                             .into_iter()
                             .map(|session| {
@@ -1618,7 +1618,7 @@ impl AcpServerFactory {
                                     // An enqueue can fail while another Run
                                     // still owns the Session.
                                     let idle = kernel
-                                        .session_runtime(&task_session_id)
+                                        .session_runtime(&task_session_id).await
                                         .is_ok_and(|runtime| !runtime.running);
                                     if idle
                                         && let Err(fallback_error) = projections

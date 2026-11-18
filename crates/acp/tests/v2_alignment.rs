@@ -1562,7 +1562,7 @@ async fn user_bash_survives_disconnect_and_resumes_idle_after_completion() {
     let accepted = accepted.expect("accepted id");
     let id = protocol::SessionId::try_from(session_id.to_string()).expect("id");
     tokio::time::timeout(WAIT, async {
-        while kernel.session_runtime(&id).expect("runtime").running {
+        while kernel.session_runtime(&id).await.expect("runtime").running {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })

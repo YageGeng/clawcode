@@ -771,11 +771,12 @@ async fn run_dispatches_pi_lifecycle_order() {
     let session_id =
         SessionId::try_from("session-lifecycle").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -839,11 +840,12 @@ async fn terminal_events_follow_durability_checkpoints() {
     let session_id =
         SessionId::try_from("session-durability-order").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     order.lock().expect("durability lock").clear();
@@ -909,11 +911,12 @@ async fn create_session_sync_failure_rolls_back_registration() {
         SessionId::try_from("session-sync-rollback").expect("session id");
 
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect_err("startup sync should fail");
 
@@ -927,6 +930,7 @@ async fn create_session_sync_failure_rolls_back_registration() {
     assert!(
         kernel
             .list_sessions(None)
+            .await
             .expect("list persisted sessions")
             .is_empty()
     );
@@ -968,11 +972,12 @@ async fn startup_rollback_preserves_primary_error_when_delete_fails() {
         .expect("session id");
 
     let error = kernel
-        .create_session(SessionCreateOptions {
-            session_id,
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id)
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect_err("startup sync must remain primary");
 
@@ -1011,11 +1016,12 @@ async fn close_sync_failure_does_not_leave_session_stuck_closing() {
     let session_id =
         SessionId::try_from("session-close-sync-failure").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     fail_sync.store(true, Ordering::SeqCst);
@@ -1088,11 +1094,12 @@ async fn queue_mutations_sync_before_returning() {
     let session_id =
         SessionId::try_from("session-queue-durability").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     order.lock().expect("durability lock").clear();
@@ -1184,11 +1191,12 @@ async fn session_runtime_tracks_active_run_without_blocking() {
     let session_id =
         SessionId::try_from("session-runtime-snapshot").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -1209,6 +1217,7 @@ async fn session_runtime_tracks_active_run_without_blocking() {
 
     let active = kernel
         .session_runtime(&session_id)
+        .await
         .expect("read active runtime");
     assert_eq!(active.session_id, session_id);
     assert!(active.running);
@@ -1218,6 +1227,7 @@ async fn session_runtime_tracks_active_run_without_blocking() {
 
     let idle = kernel
         .session_runtime(&session_id)
+        .await
         .expect("read idle runtime");
     assert!(!idle.running);
 
@@ -1227,6 +1237,7 @@ async fn session_runtime_tracks_active_run_without_blocking() {
         .expect("unload persisted session");
     let unloaded = kernel
         .session_runtime(&session_id)
+        .await
         .expect("read unloaded persisted runtime");
     assert_eq!(unloaded.session_id, session_id);
     assert!(!unloaded.running);
@@ -1287,11 +1298,12 @@ async fn queue_lifecycle_is_logged_without_message_content() {
             let session_id =
                 SessionId::try_from("session-queue-log").expect("session id");
             kernel
-                .create_session(SessionCreateOptions {
-                    session_id: session_id.clone(),
-                    cwd,
-                    parent_session_id: None,
-                })
+                .create_session(
+                    SessionCreateOptions::builder()
+                        .session_id(session_id.clone())
+                        .cwd(cwd)
+                        .build(),
+                )
                 .await
                 .expect("create session");
             let run_kernel = Arc::clone(&kernel);
@@ -1383,11 +1395,12 @@ async fn queue_rejection_is_logged_before_returning() {
             let session_id = SessionId::try_from("session-queue-rejection-log")
                 .expect("session id");
             kernel
-                .create_session(SessionCreateOptions {
-                    session_id: session_id.clone(),
-                    cwd,
-                    parent_session_id: None,
-                })
+                .create_session(
+                    SessionCreateOptions::builder()
+                        .session_id(session_id.clone())
+                        .cwd(cwd)
+                        .build(),
+                )
                 .await
                 .expect("create session");
 
@@ -1448,11 +1461,12 @@ async fn rename_session_syncs_before_returning() {
     let session_id =
         SessionId::try_from("session-rename-durability").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     order.lock().expect("durability lock").clear();
@@ -1505,11 +1519,12 @@ async fn root_navigation_event_preserves_previous_leaf() {
     let session_id =
         SessionId::try_from("session-root-event").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1576,11 +1591,12 @@ async fn session_maintenance_operations_sync_before_returning() {
     let session_id = SessionId::try_from("session-maintenance-durability")
         .expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1673,11 +1689,12 @@ async fn session_lifecycle_boundaries_are_logged_without_prompt_content() {
             let session_id = SessionId::try_from("session-lifecycle-log")
                 .expect("session id");
             kernel
-                .create_session(SessionCreateOptions {
-                    session_id: session_id.clone(),
-                    cwd: cwd.clone(),
-                    parent_session_id: None,
-                })
+                .create_session(
+                    SessionCreateOptions::builder()
+                        .session_id(session_id.clone())
+                        .cwd(cwd.clone())
+                        .build(),
+                )
                 .await
                 .expect("create session");
             kernel
@@ -1801,11 +1818,10 @@ async fn session_creation_failure_is_logged_before_returning() {
                 .expect("build kernel");
             let session_id = SessionId::try_from("session-duplicate-log")
                 .expect("session id");
-            let options = SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd,
-                parent_session_id: None,
-            };
+            let options = SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build();
             kernel
                 .create_session(options.clone())
                 .await
@@ -1871,11 +1887,12 @@ async fn session_deletion_failure_is_logged_before_returning() {
             let session_id = SessionId::try_from("session-delete-failure-log")
                 .expect("session id");
             kernel
-                .create_session(SessionCreateOptions {
-                    session_id: session_id.clone(),
-                    cwd,
-                    parent_session_id: None,
-                })
+                .create_session(
+                    SessionCreateOptions::builder()
+                        .session_id(session_id.clone())
+                        .cwd(cwd)
+                        .build(),
+                )
                 .await
                 .expect("create session");
 
@@ -1929,11 +1946,12 @@ async fn user_bash_message_syncs_before_publication() {
     let session_id =
         SessionId::try_from("session-bash-durability").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     order.lock().expect("durability lock").clear();
@@ -1994,11 +2012,12 @@ async fn compaction_end_follows_its_durability_checkpoint() {
     let session_id = SessionId::try_from("session-compaction-durability")
         .expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -2061,11 +2080,12 @@ async fn idle_extension_user_message_uses_the_normal_input_pipeline() {
     let session_id =
         SessionId::try_from("session-extension-input").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -2143,11 +2163,12 @@ async fn prompt_order_matches_pi_before_agent_lifecycle() {
     let session_id =
         SessionId::try_from("session-prompt-order").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -2308,11 +2329,12 @@ async fn unreadable_extension_resource_is_reported_without_aborting_startup() {
     let session_id = SessionId::try_from("session-retry").expect("session id");
 
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("diagnostic-only resource failure must not abort startup");
 
@@ -2329,5 +2351,12 @@ async fn unreadable_extension_resource_is_reported_without_aborting_startup() {
                 .message
                 .contains("failed to read Prompt Template")
     }));
-    assert_eq!(kernel.list_sessions(None).expect("list sessions").len(), 1);
+    assert_eq!(
+        kernel
+            .list_sessions(None)
+            .await
+            .expect("list sessions")
+            .len(),
+        1
+    );
 }

@@ -26,12 +26,15 @@ fn mcp_content_round_trips_through_session_store() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-mcp-content")
-                .expect("session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-mcp-content")
+                        .expect("session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("create session");
     let lane = LaneId::try_from("main").expect("lane id");
     let timestamp = TimestampMs::from(9_007_199_254_741_002_u64);

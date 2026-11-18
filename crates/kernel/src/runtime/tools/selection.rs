@@ -287,11 +287,10 @@ mod tests {
         );
         let store = store::StoreFactory::create(
             &factory,
-            store::SessionCreateOptions {
-                session_id: protocol::SessionId::try_from("loads").expect("id"),
-                cwd: root.path().into(),
-                parent_session_id: None,
-            },
+            store::SessionCreateOptions::builder()
+                .session_id(protocol::SessionId::try_from("loads").expect("id"))
+                .cwd(root.path().into())
+                .build(),
         )
         .expect("store");
         let transcript = SessionTranscript::restored(

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use protocol::{
     EntryId, ExtensionEntryData, LaneId, RecordId, RunId, Sequence, SessionId,
-    SessionOwnership, TimestampMs,
+    SessionOwnership, SessionProvenance, TimestampMs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ impl Clock for SystemClock {
 }
 
 /// Options required to create one persisted session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
 pub struct SessionCreateOptions {
     /// Stable session identifier.
     pub session_id: SessionId,
@@ -37,7 +37,12 @@ pub struct SessionCreateOptions {
     pub cwd: PathBuf,
 
     /// Source session when this session was forked.
+    #[builder(default)]
     pub parent_session_id: Option<SessionId>,
+
+    /// Creation-time git and product facts written into the header.
+    #[builder(default, setter(strip_option))]
+    pub provenance: Option<SessionProvenance>,
 }
 
 /// Creation options for a Session owned by another Session.
@@ -84,6 +89,21 @@ impl From<SessionMetadata> for SessionHeader {
             .cwd(metadata.cwd)
             .ownership(metadata.ownership)
             .path(metadata.path)
+            .build()
+    }
+}
+
+impl From<SessionMetadata> for protocol::SessionSummary {
+    /// Exposes scanned metadata through the storage-neutral summary.
+    fn from(metadata: SessionMetadata) -> Self {
+        Self::builder()
+            .session_id(metadata.id)
+            .cwd(metadata.cwd)
+            .created_at_ms(metadata.created_at_ms)
+            .modified_at_ms(metadata.modified_at_ms)
+            .parent_session_id(metadata.parent_session_id)
+            .ownership(metadata.ownership)
+            .name(metadata.name)
             .build()
     }
 }
@@ -311,6 +331,15 @@ pub enum StoreError {
     /// A fact referenced an entry that does not exist.
     #[error("entry not found: {0}")]
     EntryNotFound(EntryId),
+}
+
+/// Receives a notification each time a Session log becomes durable.
+///
+/// Implementations must not block: stores call it while their owners may hold
+/// locks, so an observer should only enqueue work for later.
+pub trait SyncObserver: Send + Sync {
+    /// Reports that the log at `path` for `session_id` was synced to storage.
+    fn synced(&self, session_id: &SessionId, path: &Path);
 }
 
 /// Factory interface used by kernel construction to acquire session stores.

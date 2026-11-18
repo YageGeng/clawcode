@@ -17,6 +17,7 @@ mcp = { workspace = true }
 prompt = { workspace = true }
 protocol = { workspace = true }
 skill = { workspace = true }
+state = { workspace = true }
 store = { workspace = true }
 tools = { workspace = true }
 

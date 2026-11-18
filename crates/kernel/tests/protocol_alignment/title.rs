@@ -57,7 +57,7 @@ async fn set_session_title_uses_active_turn_while_running() {
             )
             .await
     });
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.sinks.saw(&session, |payload| {
             matches!(payload, AgentEventPayload::TurnStart { .. })
         })
@@ -142,7 +142,7 @@ async fn set_session_title_renames_a_persisted_session_that_is_not_loaded() {
         .await
         .expect("set title on an unloaded Session");
 
-    let listed = test.kernel.list_sessions(None).expect("list");
+    let listed = test.kernel.list_sessions(None).await.expect("list");
     let summary = listed
         .iter()
         .find(|summary| summary.session_id == session)
@@ -308,7 +308,7 @@ async fn set_session_title_waits_for_a_closing_session() {
     shutdown.release.notify_one();
     close.await.unwrap().expect("close");
     title.await.unwrap().expect("title after close");
-    let listed = test.kernel.list_sessions(None).expect("list");
+    let listed = test.kernel.list_sessions(None).await.expect("list");
     let summary = listed
         .iter()
         .find(|summary| summary.session_id == session)

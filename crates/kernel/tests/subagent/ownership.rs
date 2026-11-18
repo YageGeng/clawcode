@@ -32,11 +32,12 @@ async fn deleting_owner_only_reads_headers_for_ownership() {
     std::fs::rename(path, &imported).expect("rename owner log");
     let other = SessionId::try_from("unrelated").expect("id");
     let store = factory
-        .create(store::SessionCreateOptions {
-            session_id: other.clone(),
-            cwd: test.root.path().join("another-project"),
-            parent_session_id: None,
-        })
+        .create(
+            store::SessionCreateOptions::builder()
+                .session_id(other.clone())
+                .cwd(test.root.path().join("another-project"))
+                .build(),
+        )
         .expect("other");
     let path = store.path().to_path_buf();
     drop(store);
@@ -176,7 +177,7 @@ async fn owned_session_copies_owner_agent() {
         )
         .await
         .expect("child");
-    let children = test.owned_children(&owner);
+    let children = test.owned_children(&owner).await;
     let summary = children.first().expect("child summary");
     assert_eq!(summary.ownership, Some(ownership(&owner)));
     assert_eq!(summary.name.as_deref(), Some("subagent: x"));
@@ -240,7 +241,13 @@ async fn creating_owned_session_requires_live_owner() {
             .await,
         Err(KernelError::OwnerUnavailable(_))
     ));
-    assert!(test.kernel.list_sessions(None).expect("list").is_empty());
+    assert!(
+        test.kernel
+            .list_sessions(None)
+            .await
+            .expect("list")
+            .is_empty()
+    );
 }
 
 /// A delete whose caller stops awaiting it still finishes. An ACP client that
@@ -255,9 +262,10 @@ async fn dropped_delete_still_finishes() {
     let test = TestKernel::new(move |_| super::agents::held(&held, "late"));
     let session = test.create("doomed").await;
     let run = test.start(&session, "hold");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&session)
+            .await
             .expect("runtime")
             .running
     })
@@ -271,9 +279,10 @@ async fn dropped_delete_still_finishes() {
             .is_none()
     );
     let _cancelled = run.await.expect("join");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .list_sessions(None)
+            .await
             .expect("list")
             .iter()
             .all(|summary| summary.session_id != session)

@@ -1,0 +1,37 @@
+[package]
+name = "state"
+edition.workspace = true
+version.workspace = true
+description = "SQLite session state and history mirrored from JSONL sessions"
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+protocol = { workspace = true }
+store = { workspace = true }
+
+# error
+thiserror = { workspace = true }
+
+# tracing & log
+tracing = { workspace = true }
+
+# async
+tokio = { workspace = true, features = ["fs", "sync", "time"] }
+
+# serde
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# database
+libsqlite3-sys = { workspace = true }
+sqlx = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+[dev-dependencies]
+# fs
+tempfile = { workspace = true }

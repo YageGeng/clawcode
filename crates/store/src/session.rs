@@ -12,7 +12,7 @@ use crate::state::{
 };
 use crate::{
     Clock, EntryKind, NewEntry, NewRecord, SessionEntry, SessionRecord,
-    SessionStore, StoreError,
+    SessionStore, StoreError, SyncObserver,
 };
 
 #[derive(typed_builder::TypedBuilder)]
@@ -22,6 +22,8 @@ pub(super) struct JsonlSessionStore {
     clock: Arc<dyn Clock>,
     file: BufWriter<std::fs::File>,
     state: SessionState,
+    #[builder(default)]
+    sync_observer: Option<Arc<dyn SyncObserver>>,
 }
 
 impl JsonlSessionStore {
@@ -514,10 +516,13 @@ impl SessionStore for JsonlSessionStore {
         self.state.labels.get(target_id).map(String::as_str)
     }
 
-    /// Forces the held buffered writer to durable storage.
+    /// Forces the held buffered writer to durable storage, then notifies the observer.
     fn sync(&mut self) -> Result<(), StoreError> {
         self.file.flush()?;
         self.file.get_ref().sync_data()?;
+        if let Some(observer) = &self.sync_observer {
+            observer.synced(&self.session_id, &self.path);
+        }
         Ok(())
     }
 }

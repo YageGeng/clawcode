@@ -137,6 +137,7 @@ impl WebFixture {
                     display_name: "Model".to_string(),
                 })
                 .build(),
+            state_worker: None,
         };
         let router = application
             .http_router(

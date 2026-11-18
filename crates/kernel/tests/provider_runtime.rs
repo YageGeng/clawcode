@@ -1091,11 +1091,12 @@ async fn failed_and_retried_provider_requests_share_the_run_trace() {
     let session_id =
         protocol::SessionId::try_from("provider-retry").expect("session id");
     kernel
-        .create_session(store::SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: root.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            store::SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(root.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel

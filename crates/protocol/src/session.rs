@@ -168,6 +168,32 @@ pub struct SessionOwnership {
     pub nickname: String,
 }
 
+/// Git state of a Session's working directory, captured once at creation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionGitInfo {
+    /// Commit checked out when the Session was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// Branch checked out when the Session was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// URL of the `origin` remote, when one is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
+}
+
+/// Creation-time facts persisted in the Session header so indexes stay rebuildable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProvenance {
+    /// Git state of the working directory, absent outside a repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<SessionGitInfo>,
+    /// Product version that created the Session.
+    pub app_version: String,
+}
+
 /// Persisted session metadata exposed without leaking a storage implementation.
 #[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
 pub struct SessionSummary {

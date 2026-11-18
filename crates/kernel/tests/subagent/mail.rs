@@ -71,6 +71,7 @@ async fn mail_to_idle_session_is_written_without_a_run() {
         !test
             .kernel
             .session_runtime(&session)
+            .await
             .expect("runtime")
             .running
     );
@@ -85,12 +86,14 @@ async fn new_task_to_idle_session_wakes_a_run() {
         .mail(&session, "/root/a", MailKind::NewTask, "Survey.")
         .await;
     assert_eq!(placement, MailPlacement::Woken);
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     assert!(last_text(&test, 0).starts_with("Message Type: new_task\n"));
-    test.wait_until(|| {
+    test.wait_until(async || {
         !test
             .kernel
             .session_runtime(&session)
+            .await
             .expect("runtime")
             .running
     })
@@ -117,7 +120,8 @@ async fn queue_only_mail_does_not_extend_a_finishing_run() {
     let test = TestKernel::new(move |_| held(&route_gate, "answer"));
     let session = test.create("busy").await;
     let run = test.start(&session, "start");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     let placement = test
         .mail(&session, "/root/a", MailKind::Message, "later")
         .await;
@@ -148,7 +152,8 @@ async fn mail_enters_the_next_request() {
     });
     let session = test.create("tools").await;
     let run = test.start(&session, "start");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     test.mail(&session, "/root/a", MailKind::Message, "context")
         .await;
     gate.notify_one();
@@ -170,7 +175,8 @@ async fn new_task_extends_a_finishing_run() {
     });
     let session = test.create("extend").await;
     let run = test.start(&session, "start");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     let placement = test
         .mail(&session, "/root/a", MailKind::NewTask, "More.")
         .await;
@@ -189,7 +195,8 @@ async fn mail_survives_cancel_and_clear() {
     let test = TestKernel::new(|_| Route::Hang);
     let session = test.create("cancel").await;
     let run = test.start(&session, "start");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     test.mail(&session, "/root/a", MailKind::Message, "note")
         .await;
     test.mail(&session, "/root/a", MailKind::NewTask, "task")
@@ -229,17 +236,20 @@ async fn leftover_new_task_wakes_after_turn_limit() {
     );
     let session = test.create("limited").await;
     let run = test.start(&session, "start");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     test.mail(&session, "/root/a", MailKind::NewTask, "follow")
         .await;
     gate.notify_one();
     let _ = run.await.expect("join");
-    test.wait_until(|| test.model.request_count() == 2).await;
+    test.wait_until(async || test.model.request_count() == 2)
+        .await;
     assert!(last_text(&test, 1).starts_with("Message Type: new_task\n"));
-    test.wait_until(|| {
+    test.wait_until(async || {
         !test
             .kernel
             .session_runtime(&session)
+            .await
             .expect("runtime")
             .running
     })
@@ -271,18 +281,20 @@ async fn leftover_new_tasks_wake_one_run() {
     );
     let session = test.create("limited").await;
     let run = test.start(&session, "start");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     test.mail(&session, "/root/a", MailKind::NewTask, "follow-a")
         .await;
     test.mail(&session, "/root/a", MailKind::NewTask, "follow-b")
         .await;
     gate.notify_one();
     let _ = run.await.expect("join");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.agent_mails(&session).len() == 2
             && !test
                 .kernel
                 .session_runtime(&session)
+                .await
                 .expect("runtime")
                 .running
     })
@@ -301,10 +313,11 @@ async fn mail_input_never_dispatches_commands() {
     for payload in ["!echo x", "/compact"] {
         test.mail(&session, "/root/a", MailKind::NewTask, payload)
             .await;
-        test.wait_until(|| {
+        test.wait_until(async || {
             !test
                 .kernel
                 .session_runtime(&session)
+                .await
                 .expect("runtime")
                 .running
                 && test

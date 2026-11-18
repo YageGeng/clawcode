@@ -345,9 +345,12 @@ impl AcpExtensionDispatcher {
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
                 serde_json::to_value(
-                    self.kernel.session_runtime(&input.session_id).map_err(
-                        agent_client_protocol::Error::into_internal_error,
-                    )?,
+                    self.kernel
+                        .session_runtime(&input.session_id)
+                        .await
+                        .map_err(
+                            agent_client_protocol::Error::into_internal_error,
+                        )?,
                 )
                 .map_err(agent_client_protocol::Error::into_internal_error)?
             }

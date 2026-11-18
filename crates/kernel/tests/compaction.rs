@@ -630,11 +630,12 @@ impl CompactionFixture {
         let session_id =
             SessionId::try_from("session-compact").expect("session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: cwd.clone(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(cwd.clone())
+                    .build(),
+            )
             .await
             .expect("create session");
         if prepare_history {
@@ -1469,11 +1470,12 @@ async fn failed_compaction_append_settles_started_lifecycle() {
     let session_id =
         SessionId::try_from("session-persistence-failure").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1981,11 +1983,12 @@ async fn threshold_kernel_configured(
         .build()
         .expect("build kernel");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -2260,11 +2263,12 @@ impl OverflowFixture {
         let session_id =
             SessionId::try_from("session-overflow").expect("session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd,
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(cwd)
+                    .build(),
+            )
             .await
             .expect("create session");
         kernel
@@ -2511,11 +2515,12 @@ async fn new_prompt_compacts_previous_threshold_before_model_request() {
         .build()
         .expect("build first kernel");
     first_kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     first_kernel
@@ -3340,12 +3345,15 @@ async fn override_kernel(
         .build()
         .build()?;
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: SessionId::try_from("session-override")
-                .expect("session id"),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-override")
+                        .expect("session id"),
+                )
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     Ok(kernel)

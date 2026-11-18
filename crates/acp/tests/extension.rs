@@ -1217,11 +1217,12 @@ async fn assistant_usage_replays_at_run_end() {
     let session_id =
         SessionId::try_from("session-usage-replay").expect("session id");
     let mut store = store_factory
-        .create(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: workspace.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(workspace.path().to_path_buf())
+                .build(),
+        )
         .expect("create persisted session");
     let timestamp = TimestampMs::from(2_000);
     let assistant = AgentMessage {
@@ -1470,11 +1471,12 @@ async fn compaction_card_replays_in_persisted_branch_order() {
     let session_id =
         SessionId::try_from("session-compaction-replay").expect("session id");
     let mut store = store_factory
-        .create(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: workspace.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(workspace.path().to_path_buf())
+                .build(),
+        )
         .expect("create persisted session");
     let first_timestamp = TimestampMs::from(1_000);
     let first = AgentMessage {

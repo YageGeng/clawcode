@@ -65,11 +65,12 @@ impl Audit {
         let kernel = server.kernel(directory.path(), retry, self.extensions());
         let session = SessionId::try_from("audit").expect("session ID");
         kernel
-            .create_session(store::SessionCreateOptions {
-                session_id: session.clone(),
-                cwd: directory.path().into(),
-                parent_session_id: None,
-            })
+            .create_session(
+                store::SessionCreateOptions::builder()
+                    .session_id(session.clone())
+                    .cwd(directory.path().into())
+                    .build(),
+            )
             .await
             .expect("create session");
         let (sender, _receiver) = tokio::sync::mpsc::channel(1024);

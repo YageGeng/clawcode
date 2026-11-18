@@ -13,6 +13,7 @@ use protocol::{
     MessageContent, ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent,
     SessionId, SessionSummary, StopReason, TimestampMs,
 };
+use state::{SqliteConfig, StateRuntime};
 use store::{Clock, JsonlStoreFactory, SessionCreateOptions};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -316,6 +317,12 @@ pub struct TestKernel {
     pub root: tempfile::TempDir,
     pub sinks: Arc<RecordingSinks>,
     pub model: Arc<RoutedModel>,
+    /// SQLite state shared with the Kernel, when the test enables it.
+    #[builder(default)]
+    pub state: Option<Arc<StateRuntime>>,
+    /// Keeps the state databases alive for the test's duration.
+    #[builder(default)]
+    pub state_home: Option<tempfile::TempDir>,
 }
 
 impl TestKernel {
@@ -345,6 +352,7 @@ impl TestKernel {
             },
             KernelPolicy::default(),
             protocol::CompactionPolicy::default(),
+            None,
         )
     }
 
@@ -366,6 +374,7 @@ impl TestKernel {
             },
             KernelPolicy::default(),
             compaction,
+            None,
         )
     }
 
@@ -385,6 +394,7 @@ impl TestKernel {
             store,
             KernelPolicy::default(),
             protocol::CompactionPolicy::default(),
+            None,
         )
     }
 
@@ -401,7 +411,41 @@ impl TestKernel {
             },
             policy,
             protocol::CompactionPolicy::default(),
+            None,
         )
+    }
+
+    /// Shares a fresh SQLite state runtime with the Kernel; `ready` runs the
+    /// (empty) backfill so the catalog answers from SQLite immediately.
+    pub async fn with_state(
+        route: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
+        store: impl FnOnce(
+            &std::path::Path,
+            Arc<dyn Clock>,
+        ) -> Arc<dyn store::StoreFactory>,
+        ready: bool,
+    ) -> Self {
+        let home = tempfile::tempdir().expect("state home");
+        let runtime = StateRuntime::init(&SqliteConfig::new(home.path()))
+            .await
+            .expect("state runtime");
+        let mut test = Self::with_factories(
+            route,
+            Arc::new(StaticExtensionFactory::default()),
+            store,
+            KernelPolicy::default(),
+            protocol::CompactionPolicy::default(),
+            Some(Arc::clone(&runtime)),
+        );
+        if ready {
+            runtime
+                .backfill(&test.root.path().join("sessions"), &[])
+                .await
+                .expect("empty backfill");
+        }
+        test.state = Some(runtime);
+        test.state_home = Some(home);
+        test
     }
 
     /// Composes the existing fixture with explicit extension and storage boundaries.
@@ -414,6 +458,7 @@ impl TestKernel {
         ) -> Arc<dyn store::StoreFactory>,
         policy: KernelPolicy,
         compaction: protocol::CompactionPolicy,
+        state: Option<Arc<StateRuntime>>,
     ) -> Self {
         let root = tempfile::tempdir().expect("root");
         let model = Arc::new(RoutedModel {
@@ -434,6 +479,7 @@ impl TestKernel {
                     .unwrap_or(config::SubagentConfig::default().max_agents),
             )
             .compaction_policy(compaction)
+            .state(state)
             .model_factory(Arc::new(StaticModelFactory(Arc::clone(&model))))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(store(root.path(), Arc::clone(&clock)))
@@ -472,20 +518,21 @@ impl TestKernel {
     pub async fn create(&self, id: &str) -> SessionId {
         let session = SessionId::try_from(id).expect("id");
         self.kernel
-            .create_session(SessionCreateOptions {
-                session_id: session.clone(),
-                cwd: self.root.path().into(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session.clone())
+                    .cwd(self.root.path().into())
+                    .build(),
+            )
             .await
             .expect("create");
         session
     }
 
     /// Bounds asynchronous observations to expose hangs without unbounded test waits.
-    pub async fn wait_until(&self, check: impl Fn() -> bool) {
+    pub async fn wait_until(&self, check: impl AsyncFn() -> bool) {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !check() {
+            while !check().await {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -577,9 +624,13 @@ impl TestKernel {
     }
 
     /// Lists persisted ownership edges through the public metadata API.
-    pub fn owned_children(&self, owner: &SessionId) -> Vec<SessionSummary> {
+    pub async fn owned_children(
+        &self,
+        owner: &SessionId,
+    ) -> Vec<SessionSummary> {
         self.kernel
             .list_sessions(Some(self.root.path()))
+            .await
             .expect("list")
             .into_iter()
             .filter(|s| {

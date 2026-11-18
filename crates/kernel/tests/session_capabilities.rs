@@ -914,11 +914,12 @@ async fn validate_session_attachment_does_not_wait_for_active_run() {
     let session_id =
         SessionId::try_from("session-attachment").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -971,11 +972,12 @@ async fn validate_session_attachment_rejects_cwd_mismatch() {
     let session_id =
         SessionId::try_from("session-attachment-cwd").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -1038,11 +1040,12 @@ async fn resume_cancellation_shuts_down_unregistered_mcp() {
     let session_id =
         SessionId::try_from("session-cancel-resume").expect("session id");
     let session_path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1082,11 +1085,12 @@ async fn concurrent_resume_reserves_session_before_construction() {
     let session_id =
         SessionId::try_from("session-concurrent-resume").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1158,11 +1162,12 @@ async fn delete_rejects_session_reserved_by_resume_construction() {
     let session_id =
         SessionId::try_from("session-delete-reserved").expect("session id");
     let session_path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1213,11 +1218,12 @@ async fn starting_session_rejects_close_until_resources_are_ready() {
     let create_session_id = session_id.clone();
     let create = tokio::spawn(async move {
         create_kernel
-            .create_session(SessionCreateOptions {
-                session_id: create_session_id,
-                cwd,
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(create_session_id)
+                    .cwd(cwd)
+                    .build(),
+            )
             .await
     });
     entered.notified().await;
@@ -1262,11 +1268,12 @@ async fn live_resume_rechecks_lifecycle_after_before_switch_hook() {
     let session_id =
         SessionId::try_from("session-live-resume-close").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -1340,11 +1347,12 @@ async fn session_management_dispatches_declared_extension_hooks() {
     let session_id =
         SessionId::try_from("session-extension-hooks").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -1466,11 +1474,12 @@ async fn denied_project_trust_excludes_project_prompt_and_skill_resources() {
     let session_id =
         SessionId::try_from("session-untrusted-project").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create untrusted project Session");
     kernel
@@ -1604,11 +1613,12 @@ async fn available_commands_merge_session_sources_deterministically() {
     let session_id =
         SessionId::try_from("session-available-commands").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create Session");
 
@@ -1689,11 +1699,12 @@ async fn prompt_snapshot_is_stable_until_session_resume() {
     let session_id =
         SessionId::try_from("session-prompt-snapshot").expect("session id");
     let session_path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create Session");
     fs::write(&instruction_path, "UPDATED PRIVATE INSTRUCTION")
@@ -1765,11 +1776,12 @@ async fn queued_follow_up_survives_close_and_resume_until_removed() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -1861,11 +1873,12 @@ async fn queue_racing_final_checkpoint_recovers_exactly_once() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -2008,11 +2021,12 @@ async fn queued_messages_expand_session_resources_before_persistence() {
     let session_id =
         SessionId::try_from("session-queue-expansion").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create Session");
     let running_kernel = Arc::clone(&kernel);
@@ -2120,11 +2134,12 @@ async fn first_user_message_sets_default_title_and_manual_rename_wins() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -2180,7 +2195,9 @@ async fn first_user_message_sets_default_title_and_manual_rename_wins() {
         Some("Manual")
     );
     assert_eq!(
-        kernel.list_sessions(None).expect("list")[0].name.as_deref(),
+        kernel.list_sessions(None).await.expect("list")[0]
+            .name
+            .as_deref(),
         Some("Manual")
     );
 }
@@ -2215,11 +2232,12 @@ async fn skills_return_metadata_without_file_bodies() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -2269,11 +2287,12 @@ async fn queued_skill_diagnostic_uses_latest_active_turn() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     fs::remove_file(&skill_path).expect("remove discovered Skill file");
@@ -2401,11 +2420,12 @@ async fn skill_expansion_failure_preserves_input_and_emits_diagnostic() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     fs::remove_file(&skill_path).expect("remove Skill after discovery");
@@ -2486,11 +2506,12 @@ async fn mcp_status_is_available_from_the_registered_session() {
         .finish();
     let dispatch = tracing::Dispatch::new(subscriber);
     tracing_futures::WithSubscriber::with_subscriber(
-        kernel.create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        }),
+        kernel.create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        ),
         dispatch,
     )
     .await
@@ -2527,11 +2548,12 @@ async fn delete_session_removes_active_and_persisted_state_idempotently() {
     let cwd = root.path().join("workspace");
     fs::create_dir_all(&cwd).expect("create project cwd");
     let path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -2544,6 +2566,7 @@ async fn delete_session_removes_active_and_persisted_state_idempotently() {
     assert!(
         kernel
             .list_sessions(None)
+            .await
             .expect("list sessions")
             .is_empty()
     );
@@ -2601,11 +2624,12 @@ async fn set_session_title_reports_a_starting_session_left_by_a_cancelled_startu
     let create_session_id = session_id.clone();
     let create = tokio::spawn(async move {
         create_kernel
-            .create_session(SessionCreateOptions {
-                session_id: create_session_id,
-                cwd,
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(create_session_id)
+                    .cwd(cwd)
+                    .build(),
+            )
             .await
     });
     entered.notified().await;
@@ -2643,11 +2667,12 @@ async fn set_session_title_succeeds_when_its_notification_fails() {
     let session_id =
         SessionId::try_from("session-closed-sink").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     kernel

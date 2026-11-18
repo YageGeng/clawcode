@@ -29,7 +29,7 @@ async fn spawn_returns_immediately_and_starts_child() {
     )
     .await;
     assert_eq!(results, vec![r#"{"task_name":"/root/reader"}"#]);
-    let summary = child(&test, &owner, "reader");
+    let summary = child(&test, &owner, "reader").await;
     let edge = summary.ownership.clone().expect("edge");
     assert_eq!(edge.session_id, owner);
     assert!(!edge.nickname.is_empty());
@@ -41,7 +41,7 @@ async fn spawn_returns_immediately_and_starts_child() {
             session_id: summary.session_id.clone()
         })
     );
-    test.wait_until(|| !test.agent_mails(&summary.session_id).is_empty())
+    test.wait_until(async || !test.agent_mails(&summary.session_id).is_empty())
         .await;
     let task = test.agent_mails(&summary.session_id).remove(0);
     assert!(
@@ -72,7 +72,7 @@ async fn fork_all_copies_filtered_history_without_usage() {
     .await;
     assert_eq!(results[3], "fork_turns must be `none` or `all`");
     for name in ["all", "three"] {
-        let child = child(&test, &owner, name).session_id;
+        let child = child(&test, &owner, name).await.session_id;
         let transcript =
             test.kernel.session_transcript(&child).expect("transcript");
         let inherited = transcript
@@ -108,7 +108,7 @@ async fn fork_all_copies_filtered_history_without_usage() {
             _ => true,
         }));
     }
-    let none = child(&test, &owner, "none").session_id;
+    let none = child(&test, &owner, "none").await.session_id;
     assert!(matches!(
         test.kernel
             .session_transcript(&none)
@@ -139,21 +139,21 @@ async fn spawn_applies_model_and_reasoning_overrides() {
         ]),
     )
     .await;
-    let settings = |name| {
+    let settings = async |name| {
         test.kernel
-            .session_settings(&child(&test, &owner, name).session_id)
+            .session_settings(&child(&test, &owner, name).await.session_id)
             .expect("settings")
     };
-    assert_eq!(settings("high").thinking_level, ThinkingLevel::High);
-    assert_eq!(settings("off").thinking_level, ThinkingLevel::Off);
-    assert_eq!(settings("off").model.model_id, "primary");
+    assert_eq!(settings("high").await.thinking_level, ThinkingLevel::High);
+    assert_eq!(settings("off").await.thinking_level, ThinkingLevel::Off);
+    assert_eq!(settings("off").await.model.model_id, "primary");
     assert!(
         results[2].starts_with("unknown model 'nope/x'"),
         "{}",
         results[2]
     );
     assert!(results[3].contains("reasoning_effort"), "{}", results[3]);
-    assert_eq!(test.owned_children(&owner).len(), 2);
+    assert_eq!(test.owned_children(&owner).await.len(), 2);
     gate.notify_waiters();
     test.kernel.close_session(&owner).await.expect("close");
 }
@@ -183,7 +183,7 @@ async fn invalid_and_duplicate_names_are_plain_replies() {
     assert_eq!(results[2], "agent_name `root` is reserved");
     assert_eq!(results[3], "agent_name must not contain `/`");
     assert_eq!(results[4], "message must not be empty");
-    assert!(test.owned_children(&owner).is_empty());
+    assert!(test.owned_children(&owner).await.is_empty());
     spawn(
         &test,
         &owner,
@@ -224,7 +224,7 @@ async fn concurrent_same_name_spawns_create_one_child() {
             r#"{"task_name":"/root/reader"}"#.to_string(),
         ]
     );
-    assert_eq!(test.owned_children(&owner).len(), 1);
+    assert_eq!(test.owned_children(&owner).await.len(), 1);
     gate.notify_waiters();
     test.kernel.close_session(&owner).await.expect("close");
 }
@@ -286,7 +286,7 @@ async fn closing_an_unstarted_child_releases_its_slot() {
         serde_json::json!([["a", {"task_name": "one", "message": "Go."}]]),
     )
     .await;
-    let first = child(&test, &owner, "one").session_id;
+    let first = child(&test, &owner, "one").await.session_id;
     test.kernel
         .close_session(&first)
         .await
@@ -314,7 +314,7 @@ async fn child_lacks_root_only_tools() {
         serde_json::json!([["a", {"task_name": "reader", "message": "Go."}]]),
     )
     .await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.model
             .requests
             .lock()
@@ -386,10 +386,10 @@ async fn child_starts_with_role_note_after_inherited_history() {
     )
     .await;
     for (name, inherits) in [("reader", true), ("solo", false)] {
-        let summary = child(&test, &owner, name);
+        let summary = child(&test, &owner, name).await;
         let nickname = summary.ownership.expect("edge").nickname;
         let child = summary.session_id;
-        test.wait_until(|| !test.agent_mails(&child).is_empty())
+        test.wait_until(async || !test.agent_mails(&child).is_empty())
             .await;
         let transcript =
             test.kernel.session_transcript(&child).expect("transcript");
@@ -438,7 +438,7 @@ async fn owner_and_child_share_one_system_prompt() {
     .await;
     let is_child =
         |r: &ModelRequest| last(r).starts_with("Message Type: new_task");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.model
             .requests
             .lock()

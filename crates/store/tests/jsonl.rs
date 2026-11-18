@@ -25,11 +25,10 @@ fn header_queries_ignore_bodies_and_respect_cwd() {
     };
     let store = factory
         .create_owned(store::OwnedSessionCreateOptions {
-            create: SessionCreateOptions {
-                session_id: child.clone(),
-                cwd: cwd.clone(),
-                parent_session_id: None,
-            },
+            create: SessionCreateOptions::builder()
+                .session_id(child.clone())
+                .cwd(cwd.clone())
+                .build(),
             ownership: ownership.clone(),
         })
         .expect("child");
@@ -42,11 +41,12 @@ fn header_queries_ignore_bodies_and_respect_cwd() {
         .write_all(&[0xff])
         .expect("opaque body");
     let other = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("other").expect("id"),
-            cwd: root.path().join("other-project"),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(SessionId::try_from("other").expect("id"))
+                .cwd(root.path().join("other-project"))
+                .build(),
+        )
         .expect("other");
     let other_path = other.path().to_path_buf();
     drop(other);
@@ -82,11 +82,12 @@ fn deleting_session_ignores_opaque_history_in_other_workspaces() {
         (other.clone(), root.path().join("two")),
     ] {
         let store = factory
-            .create(SessionCreateOptions {
-                session_id: id,
-                cwd,
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(id)
+                    .cwd(cwd)
+                    .build(),
+            )
             .expect("store");
         let path = store.path().to_path_buf();
         drop(store);
@@ -109,11 +110,12 @@ fn deleting_session_finds_renamed_copies_by_header() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let id = SessionId::try_from("imported").expect("id");
     let first = factory
-        .create(SessionCreateOptions {
-            session_id: id.clone(),
-            cwd: root.path().join("one"),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(id.clone())
+                .cwd(root.path().join("one"))
+                .build(),
+        )
         .expect("first");
     let original = first.path().to_path_buf();
     drop(first);
@@ -124,11 +126,12 @@ fn deleting_session_finds_renamed_copies_by_header() {
         renamed
     );
     let second = factory
-        .create(SessionCreateOptions {
-            session_id: id.clone(),
-            cwd: root.path().join("two"),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(id.clone())
+                .cwd(root.path().join("two"))
+                .build(),
+        )
         .expect("copy");
     let generated = second.path().to_path_buf();
     drop(second);
@@ -144,11 +147,12 @@ fn existence_lookup_does_not_read_transcript_body() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let id = SessionId::try_from("header-only").expect("id");
     let store = factory
-        .create(SessionCreateOptions {
-            session_id: id.clone(),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(id.clone())
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("create");
     let path = store.path().to_path_buf();
     drop(store);
@@ -174,11 +178,12 @@ fn existence_lookup_validates_candidate_header() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let id = SessionId::try_from("candidate").expect("id");
     let store = factory
-        .create(SessionCreateOptions {
-            session_id: id.clone(),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(id.clone())
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("create");
     let path = store.path().to_path_buf();
     drop(store);
@@ -211,11 +216,10 @@ fn owned_header_round_trips_struct_ownership() {
     };
     let store = factory
         .create_owned(store::OwnedSessionCreateOptions {
-            create: SessionCreateOptions {
-                session_id: SessionId::try_from("child").expect("child id"),
-                cwd: root.path().into(),
-                parent_session_id: None,
-            },
+            create: SessionCreateOptions::builder()
+                .session_id(SessionId::try_from("child").expect("child id"))
+                .cwd(root.path().into())
+                .build(),
             ownership: ownership.clone(),
         })
         .expect("owned store");
@@ -247,12 +251,14 @@ fn create_session_writes_v4_header_without_global_index() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-1")
-                .expect("valid session id"),
-            cwd: "/home/user/project".into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-1").expect("valid session id"),
+                )
+                .cwd("/home/user/project".into())
+                .build(),
+        )
         .expect("session should be created");
 
     let content = fs::read_to_string(store.path()).expect("read session file");
@@ -290,12 +296,14 @@ fn append_entry_moves_lane_and_links_parent() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-1")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-1").expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("session should be created");
 
     let lane = LaneId::try_from("main").expect("valid lane id");
@@ -346,12 +354,15 @@ fn rejected_append_keeps_sequence_available_for_retry_and_reopen() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-retry")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-retry")
+                        .expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("session should be created");
     let lane = LaneId::try_from("main").expect("valid lane id");
     let path = store.path().to_path_buf();
@@ -400,12 +411,14 @@ fn append_record_and_facts_use_pi_v4_mutations() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-1")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-1").expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("session should be created");
     let lane = LaneId::try_from("main").expect("valid lane id");
     store
@@ -467,12 +480,14 @@ fn open_repairs_torn_json_tail_and_recovers_lanes() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-1")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-1").expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("session should be created");
     let lane = LaneId::try_from("main").expect("valid lane id");
     store
@@ -522,12 +537,15 @@ fn fork_copies_selected_branch_and_sets_parent_session() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut source = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("source-session")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("source-session")
+                        .expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("source should be created");
     let main = LaneId::try_from("main").expect("valid lane id");
     source
@@ -574,12 +592,13 @@ fn fork_copies_selected_branch_and_sets_parent_session() {
         .fork(
             &source_path,
             SessionForkOptions {
-                create: SessionCreateOptions {
-                    session_id: SessionId::try_from("fork-session")
-                        .expect("valid session id"),
-                    cwd: root.path().into(),
-                    parent_session_id: None,
-                },
+                create: SessionCreateOptions::builder()
+                    .session_id(
+                        SessionId::try_from("fork-session")
+                            .expect("valid session id"),
+                    )
+                    .cwd(root.path().into())
+                    .build(),
                 source_leaf: EntryId::try_from("entry-2")
                     .expect("valid entry id"),
                 lane: main.clone(),
@@ -610,12 +629,15 @@ fn list_and_reopen_restore_complete_session_state_without_index() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let cwd = root.path().join("workspace");
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-state")
-                .expect("valid session id"),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-state")
+                        .expect("valid session id"),
+                )
+                .cwd(cwd.clone())
+                .build(),
+        )
         .expect("session should be created");
     let main = LaneId::try_from("main").expect("valid lane id");
     let first_id = EntryId::try_from("entry-root").expect("valid entry id");
@@ -657,12 +679,15 @@ fn branch_read_returns_root_to_leaf_order() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-branch")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-branch")
+                        .expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("session should be created");
     let main = LaneId::try_from("main").expect("valid lane id");
     for id in ["entry-1", "entry-2", "entry-3"] {
@@ -696,12 +721,14 @@ fn list_returns_latest_name_fact_without_an_index_file() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut session = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-named")
-                .expect("session id"),
-            cwd: root.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-named").expect("session id"),
+                )
+                .cwd(root.path().to_path_buf())
+                .build(),
+        )
         .expect("create");
     session
         .set_name(Some("First".to_string()))
@@ -722,12 +749,15 @@ fn append_rejects_compaction_without_required_details_before_persistence() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut session = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-bad-compaction")
-                .expect("session id"),
-            cwd: root.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-bad-compaction")
+                        .expect("session id"),
+                )
+                .cwd(root.path().to_path_buf())
+                .build(),
+        )
         .expect("create");
     let error = session
         .append_entry(
@@ -759,11 +789,12 @@ fn delete_session_removes_history_idempotently() {
     let session_id =
         SessionId::try_from("session-delete").expect("valid session id");
     let store = factory
-        .create(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: root.path().join("workspace"),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(root.path().join("workspace"))
+                .build(),
+        )
         .expect("create session");
     let path = store.path().to_path_buf();
     drop(store);
@@ -785,11 +816,14 @@ fn set_name_at_appends_after_the_last_sequence_without_replay() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let create = |id: &str| {
         factory
-            .create(SessionCreateOptions {
-                session_id: SessionId::try_from(id).expect("valid session id"),
-                cwd: root.path().into(),
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(
+                        SessionId::try_from(id).expect("valid session id"),
+                    )
+                    .cwd(root.path().into())
+                    .build(),
+            )
             .expect("session should be created")
     };
     let lane = LaneId::try_from("main").expect("valid lane id");
@@ -851,12 +885,14 @@ fn cleared_name_still_counts_as_named() {
     let root = tempfile::tempdir().expect("temporary root");
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-1")
-                .expect("valid session id"),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-1").expect("valid session id"),
+                )
+                .cwd(root.path().into())
+                .build(),
+        )
         .expect("session should be created");
     assert!(!store.was_named());
     store.set_name(None).expect("clear name");
@@ -864,4 +900,200 @@ fn cleared_name_still_counts_as_named() {
     let path = store.path().to_path_buf();
     drop(store);
     assert!(factory.open(&path).expect("reopen").was_named());
+}
+
+/// Reads the persisted header line of one Session log as JSON.
+fn header_json(path: &std::path::Path) -> serde_json::Value {
+    let content = fs::read_to_string(path).expect("read session log");
+    let line = content.lines().next().expect("header line");
+    serde_json::from_str(line).expect("header json")
+}
+
+/// Creation provenance is written into the immutable v4 header.
+#[test]
+fn header_persists_provenance_fields() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let store = factory
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(SessionId::try_from("session-git").expect("id"))
+                .cwd(root.path().join("project"))
+                .provenance(protocol::SessionProvenance {
+                    git: Some(protocol::SessionGitInfo {
+                        sha: Some("abc123".into()),
+                        branch: Some("main".into()),
+                        origin_url: Some("git@example.com:o/r.git".into()),
+                    }),
+                    app_version: "9.9.9".into(),
+                })
+                .build(),
+        )
+        .expect("create");
+    let header = header_json(store.path());
+    assert_eq!(header["git"]["sha"], "abc123");
+    assert_eq!(header["git"]["branch"], "main");
+    assert_eq!(header["git"]["originUrl"], "git@example.com:o/r.git");
+    assert_eq!(header["appVersion"], "9.9.9");
+}
+
+/// Sessions created without provenance keep the original header shape.
+#[test]
+fn header_omits_absent_provenance() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let store = factory
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(SessionId::try_from("session-plain").expect("id"))
+                .cwd(root.path().join("project"))
+                .build(),
+        )
+        .expect("create");
+    let header = header_json(store.path());
+    let object = header.as_object().expect("header object");
+    assert!(!object.contains_key("git"));
+    assert!(!object.contains_key("appVersion"));
+}
+
+/// Headers written before provenance existed still list normally.
+#[test]
+fn legacy_header_without_provenance_still_lists() {
+    let root = tempfile::tempdir().expect("root");
+    let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
+    let directory = root.path().join("--legacy--");
+    fs::create_dir_all(&directory).expect("legacy directory");
+    fs::write(
+        directory.join("1_session-legacy.jsonl"),
+        "{\"kind\":\"header\",\"version\":4,\"id\":\"session-legacy\",\"createdAt\":\"1\",\"cwd\":\"/legacy\"}\n",
+    )
+    .expect("legacy log");
+    let sessions = factory.list(None).expect("list");
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.id.as_str() == "session-legacy")
+    );
+}
+
+/// Records every sync notification for assertions.
+#[derive(Default)]
+struct RecordingObserver(
+    std::sync::Mutex<Vec<(SessionId, std::path::PathBuf)>>,
+);
+
+impl RecordingObserver {
+    /// Returns the notifications received so far.
+    fn records(&self) -> Vec<(SessionId, std::path::PathBuf)> {
+        self.0.lock().expect("records").clone()
+    }
+}
+
+impl store::SyncObserver for RecordingObserver {
+    /// Stores one notification.
+    fn synced(&self, session_id: &SessionId, path: &std::path::Path) {
+        self.0
+            .lock()
+            .expect("records")
+            .push((session_id.clone(), path.to_path_buf()));
+    }
+}
+
+/// Builds a factory that reports syncs to a shared recording observer.
+fn observed_factory(
+    root: &std::path::Path,
+) -> (JsonlStoreFactory, Arc<RecordingObserver>) {
+    let observer = Arc::new(RecordingObserver::default());
+    let factory = JsonlStoreFactory::new(root, Arc::new(FixedClock))
+        .with_sync_observer(
+            Arc::clone(&observer) as Arc<dyn store::SyncObserver>
+        );
+    (factory, observer)
+}
+
+/// Creates a Session and appends one synced entry through the given factory.
+fn synced_session(
+    factory: &JsonlStoreFactory,
+    root: &std::path::Path,
+) -> std::path::PathBuf {
+    let mut store = factory
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-observed").expect("id"),
+                )
+                .cwd(root.join("project"))
+                .build(),
+        )
+        .expect("create");
+    store
+        .append_entry(
+            &LaneId::try_from("main").expect("lane"),
+            NewEntry {
+                id: EntryId::try_from("entry-1").expect("entry"),
+                kind: EntryKind::Custom,
+                payload: serde_json::json!({"customType": "note"}),
+            },
+        )
+        .expect("append");
+    store.sync().expect("sync");
+    store.path().to_path_buf()
+}
+
+/// A successful store sync reports the Session identity and log path.
+#[test]
+fn observer_fires_after_store_sync() {
+    let root = tempfile::tempdir().expect("root");
+    let (factory, observer) = observed_factory(root.path());
+    let path = synced_session(&factory, root.path());
+    assert_eq!(
+        observer.records(),
+        vec![(SessionId::try_from("session-observed").expect("id"), path)]
+    );
+}
+
+/// The append-only rename path reports once after its own sync.
+#[test]
+fn observer_fires_after_set_name_at_fast_path() {
+    let root = tempfile::tempdir().expect("root");
+    let (factory, observer) = observed_factory(root.path());
+    let path = synced_session(&factory, root.path());
+    factory
+        .set_name_at(&path, Some("n".into()))
+        .expect("rename");
+    let records = observer.records();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1].1, path);
+    assert_eq!(records[1].0.as_str(), "session-observed");
+}
+
+/// The replay rename path reports exactly once.
+#[test]
+fn observer_fires_once_for_set_name_at_replay_path() {
+    let root = tempfile::tempdir().expect("root");
+    let (factory, observer) = observed_factory(root.path());
+    let store = factory
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(SessionId::try_from("session-header").expect("id"))
+                .cwd(root.path().join("project"))
+                .build(),
+        )
+        .expect("create");
+    let path = store.path().to_path_buf();
+    drop(store);
+    factory
+        .set_name_at(&path, Some("n".into()))
+        .expect("rename");
+    assert_eq!(observer.records().len(), 1);
+}
+
+/// A failed rename reports nothing.
+#[test]
+fn observer_silent_when_set_name_at_fails() {
+    let root = tempfile::tempdir().expect("root");
+    let (factory, observer) = observed_factory(root.path());
+    let missing = root.path().join("missing.jsonl");
+    assert!(factory.set_name_at(&missing, Some("n".into())).is_err());
+    assert!(observer.records().is_empty());
 }

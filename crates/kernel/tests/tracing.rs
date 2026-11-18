@@ -276,11 +276,12 @@ impl Fixture {
         std::fs::create_dir_all(&cwd).expect("workspace");
         let session_id = SessionId::try_from(name).expect("session id");
         self.kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd,
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(cwd)
+                    .build(),
+            )
             .await
             .expect("create session");
         session_id
@@ -623,6 +624,7 @@ async fn spawned_child_links_the_owner_trace() {
     let child = fixture
         .kernel
         .list_sessions(Some(&fixture.root.path().join("tracing-spawn-owner")))
+        .await
         .expect("list")
         .into_iter()
         .find(|summary| summary.ownership.is_some())

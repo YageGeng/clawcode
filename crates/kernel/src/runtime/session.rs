@@ -1,6 +1,7 @@
 //! Session state and lifecycle: registry, assembly, history, settings, and naming.
 
 mod assembly;
+pub(in crate::runtime) mod catalog;
 mod close;
 mod custom;
 mod fork;
@@ -8,6 +9,7 @@ pub(super) mod model_state;
 mod open;
 mod ownership;
 mod prompt;
+mod provenance;
 pub(super) mod rename;
 mod replay;
 pub(super) mod resources;
@@ -47,27 +49,20 @@ impl Drop for SessionIdReservation {
 }
 
 impl Kernel {
-    /// Lists persisted sessions by scanning v4 headers instead of a global index.
-    pub fn list_sessions(
+    /// Lists persisted Sessions newest first, from SQLite once it is ready.
+    pub async fn list_sessions(
         &self,
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SessionSummary>, KernelError> {
-        Ok(self
-            .store_factory
-            .list(cwd)?
-            .into_iter()
-            .map(|metadata| {
-                SessionSummary::builder()
-                    .session_id(metadata.id)
-                    .cwd(metadata.cwd)
-                    .created_at_ms(metadata.created_at_ms)
-                    .modified_at_ms(metadata.modified_at_ms)
-                    .parent_session_id(metadata.parent_session_id)
-                    .ownership(metadata.ownership)
-                    .name(metadata.name)
-                    .build()
-            })
-            .collect())
+        self.catalog.list(cwd).await
+    }
+
+    /// Returns one persisted Session's listing summary.
+    pub async fn session_summary(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionSummary>, KernelError> {
+        self.catalog.summary(session_id).await
     }
 
     /// Returns the live Session's current display title, if it has one.
@@ -79,7 +74,7 @@ impl Kernel {
     }
 
     /// Reads active Run state without waiting for the Session operation gate.
-    pub fn session_runtime(
+    pub async fn session_runtime(
         &self,
         session_id: &SessionId,
     ) -> Result<protocol::SessionRuntimeSnapshot, KernelError> {
@@ -88,7 +83,7 @@ impl Kernel {
             Err(KernelError::SessionNotFound(_)) => {
                 // Persisted Sessions are idle before their first Resume in this
                 // process, so runtime discovery must not require loading them.
-                if self.store_factory.exists(session_id).map_err(|error| {
+                if self.catalog.exists(session_id).await.map_err(|error| {
                     tracing::warn!(
                         "failed persisted Session lookup {}: {}",
                         session_id,
@@ -273,9 +268,12 @@ impl Kernel {
             runtime.extensions.runtime_ref().invalidate();
             let mcp_result = runtime.mcp.shutdown().await;
             let delete_result = if delete_persisted {
-                self.store_factory
+                let deleted = self
+                    .store_factory
                     .delete(session_id)
-                    .map_err(KernelError::from)
+                    .map_err(KernelError::from);
+                self.catalog.record_deleted(session_id).await;
+                deleted
             } else {
                 Ok(())
             };
@@ -287,6 +285,7 @@ impl Kernel {
         }
         if delete_persisted {
             self.store_factory.delete(session_id)?;
+            self.catalog.record_deleted(session_id).await;
         }
         Ok(())
     }

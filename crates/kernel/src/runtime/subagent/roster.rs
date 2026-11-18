@@ -74,6 +74,40 @@ impl AgentRoster {
         Ok(())
     }
 
+    /// Fills an unloaded cache from the owner's child headers; a loaded cache wins.
+    pub(in crate::runtime) fn seed(
+        &self,
+        owner: &SessionId,
+        headers: impl IntoIterator<Item = store::SessionHeader>,
+    ) -> Result<(), KernelError> {
+        let mut children = self.children.lock()?;
+        if children.is_none() {
+            let loaded = headers
+                .into_iter()
+                .filter_map(|header| {
+                    let edge = header.ownership?;
+                    (&edge.session_id == owner).then_some((
+                        edge.name,
+                        ChildEntry {
+                            session_id: header.id,
+                            nickname: edge.nickname,
+                            status: ChildStatus::Completed(None),
+                        },
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+            // Runs carry the Session in their span, so the line omits it.
+            tracing::info!("loaded {} children from headers", loaded.len());
+            *children = Some(loaded);
+        }
+        Ok(())
+    }
+
+    /// Reports whether the cache was filled from headers yet.
+    fn is_loaded(&self) -> Result<bool, KernelError> {
+        Ok(self.children.lock()?.is_some())
+    }
+
     /// Drops a deleted child from the cached roster; an unloaded roster
     /// rereads headers, which no longer list it.
     pub(in crate::runtime) fn forget_child(
@@ -88,44 +122,25 @@ impl AgentRoster {
 }
 
 impl Session {
-    /// Loads this owner's children from headers on first use, then runs `f`
-    /// on the cached roster; header scans are synchronous, so the lock never
-    /// crosses an `await`.
+    /// Runs `f` on the cached roster, loading it from child headers on first use.
+    ///
+    /// Owners built while SQLite is ready arrive seeded; only the fallback
+    /// scans, and it does so before taking the lock, which never crosses an `await`.
     pub(in crate::runtime) fn with_children<R>(
         &self,
         kernel: &Kernel,
         f: impl FnOnce(&mut BTreeMap<AgentName, ChildEntry>) -> R,
     ) -> Result<R, KernelError> {
+        if !self.roster.is_loaded()? {
+            let owner_id = self.transcript.session_id()?;
+            // ponytail: one synchronous scan of the cwd's headers per
+            // owner and process when SQLite is unavailable; move it off the
+            // async worker if a project ever holds thousands of Sessions.
+            let headers = kernel.catalog.scan_children(&owner_id, &self.cwd)?;
+            self.roster.seed(&owner_id, headers)?;
+        }
         let mut children = self.roster.children.lock()?;
-        let roster = match &mut *children {
-            Some(roster) => roster,
-            None => {
-                let owner_id = self.transcript.session_id()?;
-                // ponytail: one synchronous scan of the cwd's headers per
-                // owner and process; move it off the async worker if a
-                // project ever holds thousands of Sessions.
-                let loaded = kernel
-                    .store_factory
-                    .headers(Some(&self.cwd))?
-                    .into_iter()
-                    .filter_map(|header| {
-                        let edge = header.ownership?;
-                        (edge.session_id == owner_id).then_some((
-                            edge.name,
-                            ChildEntry {
-                                session_id: header.id,
-                                nickname: edge.nickname,
-                                status: ChildStatus::Completed(None),
-                            },
-                        ))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                // Runs carry the Session in their span, so the line omits it.
-                tracing::info!("loaded {} children from headers", loaded.len());
-                children.insert(loaded)
-            }
-        };
-        Ok(f(roster))
+        Ok(f(children.get_or_insert_default()))
     }
 
     /// States the owner's children before a model request when they differ

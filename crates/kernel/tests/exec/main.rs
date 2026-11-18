@@ -166,7 +166,7 @@ async fn interrupt_keeps_background_process() {
     ));
     let session = test.create("exec-interrupt").await;
     let prompt = test.start(&session, "run");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.sinks.payloads(&session).iter().any(|payload| {
             matches!(payload, AgentEventPayload::ToolExecutionStart { .. })
         })
@@ -217,7 +217,7 @@ async fn close_session_terminates_processes() {
 
     test.kernel.close_session(&session).await.expect("close");
 
-    test.wait_until(|| !alive(pid)).await;
+    test.wait_until(async || !alive(pid)).await;
 }
 
 /// Background exits are announced; exits returned by the first call are not.
@@ -241,7 +241,7 @@ async fn background_exit_emits_exec_exited_event() {
     let session = test.create("exec-events").await;
 
     test.run_text(&session, "run").await.expect("run");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.sinks.payloads(&session).iter().any(|payload| {
             matches!(payload, AgentEventPayload::ExecExited { exit } if exit.tool_call_id.as_str() == "call-bg")
         })
@@ -529,7 +529,7 @@ async fn exec_exit_is_persisted_and_replayed() {
     ));
     let session = test.create("exec-persist").await;
     test.run_text(&session, "run").await.expect("run");
-    test.wait_until(|| !replayed_exits(&test, &session).is_empty())
+    test.wait_until(async || !replayed_exits(&test, &session).is_empty())
         .await;
 
     let exits = replayed_exits(&test, &session);
@@ -606,7 +606,7 @@ async fn exec_exit_entries_stay_out_of_model_context() {
     ));
     let session = test.create("exec-context").await;
     test.run_text(&session, "run").await.expect("run");
-    test.wait_until(|| !replayed_exits(&test, &session).is_empty())
+    test.wait_until(async || !replayed_exits(&test, &session).is_empty())
         .await;
 
     test.run_text(&session, "again").await.expect("again");
@@ -747,7 +747,7 @@ async fn note_shows_exited_then_none() {
     let test = TestKernel::new(sleeper("sleep 0.3"));
     let session = test.create("notes-exited").await;
     prompt(&test, &session, "start").await;
-    test.wait_until(|| !replayed_exits(&test, &session).is_empty())
+    test.wait_until(async || !replayed_exits(&test, &session).is_empty())
         .await;
 
     prompt(&test, &session, "check").await;

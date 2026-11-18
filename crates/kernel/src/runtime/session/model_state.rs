@@ -311,11 +311,12 @@ mod tests {
         let session = protocol::SessionId::try_from("a").expect("id");
         let kernel = kernel_with_models(temporary.path(), &["audit"]);
         kernel
-            .create_session(store::SessionCreateOptions {
-                session_id: session.clone(),
-                cwd: temporary.path().into(),
-                parent_session_id: None,
-            })
+            .create_session(
+                store::SessionCreateOptions::builder()
+                    .session_id(session.clone())
+                    .cwd(temporary.path().into())
+                    .build(),
+            )
             .await
             .expect("create");
         assert_eq!(
@@ -334,11 +335,12 @@ mod tests {
         let session = protocol::SessionId::try_from("a").expect("id");
         let before = kernel_with_models(temporary.path(), &["audit", "other"]);
         before
-            .create_session(store::SessionCreateOptions {
-                session_id: session.clone(),
-                cwd: temporary.path().into(),
-                parent_session_id: None,
-            })
+            .create_session(
+                store::SessionCreateOptions::builder()
+                    .session_id(session.clone())
+                    .cwd(temporary.path().into())
+                    .build(),
+            )
             .await
             .expect("create");
         before
@@ -412,11 +414,12 @@ max_output_tokens=128
         let b = protocol::SessionId::try_from("b").unwrap();
         for id in [&a, &b] {
             kernel
-                .create_session(store::SessionCreateOptions {
-                    session_id: id.clone(),
-                    cwd: temporary.path().into(),
-                    parent_session_id: None,
-                })
+                .create_session(
+                    store::SessionCreateOptions::builder()
+                        .session_id(id.clone())
+                        .cwd(temporary.path().into())
+                        .build(),
+                )
                 .await
                 .unwrap();
         }

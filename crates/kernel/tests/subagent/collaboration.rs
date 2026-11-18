@@ -27,15 +27,16 @@ async fn spawn_named(
         serde_json::json!([[format!("spawn-{name}"), {"task_name": name, "message": message, "fork_turns": "none"}]]),
     )
     .await;
-    child(test, owner, name).session_id
+    child(test, owner, name).await.session_id
 }
 
 /// Waits until a Session has no active Run.
 async fn idle(test: &TestKernel, session: &protocol::SessionId) {
-    test.wait_until(|| {
+    test.wait_until(async || {
         !test
             .kernel
             .session_runtime(session)
+            .await
             .expect("runtime")
             .running
     })
@@ -69,7 +70,8 @@ async fn send_message_reaches_sibling_and_root() {
         ["m3", protocol::LIST_AGENTS_TOOL, {}]
     ]);
     let a = spawn_named(&test, &owner, "a", &format!("call:{script}")).await;
-    test.wait_until(|| test.agent_mails(&b).len() == 2).await;
+    test.wait_until(async || test.agent_mails(&b).len() == 2)
+        .await;
     idle(&test, &a).await;
     assert_eq!(tool_result(&test, &a, "m1").0, "Message sent to /root/b.");
     assert_eq!(tool_result(&test, &a, "m2").0, "Message sent to /root.");
@@ -91,7 +93,14 @@ async fn send_message_reaches_sibling_and_root() {
             .iter()
             .any(|m| m.ends_with("Payload:\nhi root"))
     );
-    assert!(!test.kernel.session_runtime(&b).expect("runtime").running);
+    assert!(
+        !test
+            .kernel
+            .session_runtime(&b)
+            .await
+            .expect("runtime")
+            .running
+    );
 }
 
 /// A child's follow-up wakes an idle sibling like Codex: the sibling's answer
@@ -123,7 +132,7 @@ async fn child_followup_wakes_sibling_and_result_reaches_root() {
             })
             .count()
     };
-    test.wait_until(|| results_from_b() == 2).await;
+    test.wait_until(async || results_from_b() == 2).await;
     idle(&test, &b).await;
     assert!(test.agent_mails(&b).iter().any(|m| m
         == "Message Type: new_task\nTask name: /root/b\nSender: /root/a\nPayload:\nagain"));
@@ -143,8 +152,12 @@ async fn child_interrupts_sibling_but_not_itself() {
     let test = agents(KernelPolicy::default(), scripted(Arc::clone(&gate)));
     let owner = test.create("owner").await;
     let b = spawn_named(&test, &owner, "b", "hold").await;
-    test.wait_until(|| {
-        test.kernel.session_runtime(&b).expect("runtime").running
+    test.wait_until(async || {
+        test.kernel
+            .session_runtime(&b)
+            .await
+            .expect("runtime")
+            .running
     })
     .await;
     let a = spawn_named(&test, &owner, "a", "go").await;
@@ -185,9 +198,10 @@ async fn followup_task_wakes_idle_child_and_extends_busy_child() {
     idle(&test, &reader).await;
     let sent = call(&test, &owner, serde_json::json!([["f1", protocol::FOLLOWUP_TASK_TOOL, {"target": "reader", "message": "hold"}]])).await;
     assert_eq!(sent, vec!["Task sent to /root/reader."]);
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     })
@@ -195,7 +209,7 @@ async fn followup_task_wakes_idle_child_and_extends_busy_child() {
     let busy = call(&test, &owner, serde_json::json!([["f2", protocol::FOLLOWUP_TASK_TOOL, {"target": "reader", "message": "more"}]])).await;
     assert_eq!(busy, vec!["Task sent to /root/reader."]);
     gate.notify_one();
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.model
             .last_texts()
             .iter()
@@ -204,9 +218,10 @@ async fn followup_task_wakes_idle_child_and_extends_busy_child() {
     .await;
     idle(&test, &reader).await;
     let other = spawn_named(&test, &owner, "other", "hold").await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&other)
+            .await
             .expect("runtime")
             .running
     })
@@ -228,16 +243,17 @@ async fn wait_agent_returns_on_mail_input_and_timeout() {
     let test = agents(KernelPolicy::default(), scripted(Arc::clone(&gate)));
     let owner = test.create("owner").await;
     let reader = spawn_named(&test, &owner, "reader", "hold").await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     })
     .await;
     let wait = serde_json::json!([["w1", protocol::WAIT_AGENT_TOOL, {"timeout_ms": 600000}]]);
     let run = test.start(&owner, &format!("call:{wait}"));
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.model
             .last_texts()
             .iter()
@@ -252,9 +268,10 @@ async fn wait_agent_returns_on_mail_input_and_timeout() {
 
     let wait = serde_json::json!([["w2", protocol::WAIT_AGENT_TOOL, {"timeout_ms": 600000}]]);
     let run = test.start(&owner, &format!("call:{wait}"));
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&owner)
+            .await
             .expect("runtime")
             .running
     })
@@ -314,7 +331,8 @@ async fn wait_agent_returns_at_once_for_pending_mail() {
     });
     let owner = test.create("owner").await;
     let run = test.start(&owner, "go");
-    test.wait_until(|| test.model.request_count() == 1).await;
+    test.wait_until(async || test.model.request_count() == 1)
+        .await;
     test.mail(&owner, "/root/x", MailKind::Message, "early")
         .await;
     gate.notify_one();
@@ -333,9 +351,10 @@ async fn interrupt_agent_cancels_child_and_rejects_root() {
     let test = agents(KernelPolicy::default(), scripted(Arc::clone(&gate)));
     let owner = test.create("owner").await;
     let reader = spawn_named(&test, &owner, "reader", "hold").await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     })
@@ -345,6 +364,7 @@ async fn interrupt_agent_cancels_child_and_rejects_root() {
     idle(&test, &reader).await;
     let listed = call(&test, &owner, serde_json::json!([["l", protocol::LIST_AGENTS_TOOL, {"path_prefix": "/root/reader"}]])).await;
     let nickname = child(&test, &owner, "reader")
+        .await
         .ownership
         .expect("edge")
         .nickname;
@@ -480,6 +500,7 @@ async fn mail_to_unloaded_child_resumes_without_running() {
         !test
             .kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     );
@@ -492,9 +513,10 @@ async fn crossing_deliveries_do_not_deadlock() {
     let test = agents(KernelPolicy::default(), scripted(Arc::clone(&gate)));
     let owner = test.create("owner").await;
     let reader = spawn_named(&test, &owner, "reader", "hold").await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     })
@@ -513,7 +535,7 @@ async fn crossing_deliveries_do_not_deadlock() {
     tokio::time::timeout(Duration::from_secs(10), idle(&test, &reader))
         .await
         .expect("child settled");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.agent_mails(&owner)
             .iter()
             .any(|m| m.contains("Sender: /root/reader"))

@@ -162,6 +162,12 @@ impl OwnedSessionSpawn<'_> {
         if let Some(level) = self.thinking_level {
             snapshot.thinking_level = level;
         }
+        // Probe before reserving the id, so a slow git never holds the reservation.
+        let provenance = super::provenance::ProvenanceProbe {
+            cwd: &self.owner.cwd,
+        }
+        .collect()
+        .await;
         let child =
             SessionId::try_from(self.kernel.id_generator.next(IdKind::Session))
                 .map_err(|e| KernelError::Protocol(e.to_string()))?;
@@ -174,14 +180,16 @@ impl OwnedSessionSpawn<'_> {
         let result: Result<(), KernelError> = async {
             let store = self.kernel.store_factory.create_owned(
                 OwnedSessionCreateOptions {
-                    create: SessionCreateOptions {
-                        session_id: child.clone(),
-                        cwd: self.owner.cwd.clone(),
-                        parent_session_id: None,
-                    },
+                    create: SessionCreateOptions::builder()
+                        .session_id(child.clone())
+                        .cwd(self.owner.cwd.clone())
+                        .provenance(provenance)
+                        .build(),
                     ownership: self.ownership.clone(),
                 },
             )?;
+            // The owner's roster and close cascade find the child through the catalog.
+            self.kernel.catalog.refresh(&child, store.path()).await;
             let runtime = self
                 .kernel
                 .build_session(
@@ -265,12 +273,11 @@ impl Kernel {
         if let Ok(runtime) = self.session(owner) {
             return Ok(Some(runtime));
         }
-        let sessions = self.store_factory.headers(Some(cwd))?;
         // A corrupt owner cycle must fail before waiting on this call's own reservation.
-        let mut seen = HashSet::from([child]);
-        let mut cursor = Some(owner);
+        let mut seen = HashSet::from([child.clone()]);
+        let mut cursor = Some(owner.clone());
         while let Some(id) = cursor {
-            if !seen.insert(id) {
+            if !seen.insert(id.clone()) {
                 tracing::error!(
                     "cyclic ownership while resuming session {} at owner {}",
                     child,
@@ -280,11 +287,12 @@ impl Kernel {
                     "cyclic session ownership at {id}"
                 )));
             }
-            cursor = sessions
-                .iter()
-                .find(|session| &session.id == id)
-                .and_then(|session| session.ownership.as_ref())
-                .map(|edge| &edge.session_id);
+            cursor = self
+                .catalog
+                .header(&id)
+                .await?
+                .and_then(|header| header.ownership)
+                .map(|edge| edge.session_id);
         }
         loop {
             match self.session(owner) {
@@ -318,7 +326,12 @@ impl Kernel {
                     return Err(error);
                 }
             }
-            if !sessions.iter().any(|session| &session.id == owner) {
+            let owner_in_workspace = self
+                .catalog
+                .header(owner)
+                .await?
+                .is_some_and(|header| header.cwd == cwd);
+            if !owner_in_workspace {
                 tracing::warn!(
                     "owner {} of session {} is unavailable; connecting its own MCP",
                     owner,

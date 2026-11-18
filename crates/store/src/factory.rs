@@ -4,21 +4,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use protocol::{Sequence, SessionId, SessionOwnership, TimestampMs};
+use protocol::{
+    Sequence, SessionGitInfo, SessionId, SessionOwnership, TimestampMs,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::session::JsonlSessionStore;
 use crate::state::{NameFactMutation, SessionState};
 use crate::{
-    Clock, NewEntry, OwnedSessionCreateOptions, SessionCreateOptions,
-    SessionForkOptions, SessionHeader, SessionMetadata, SessionStore,
-    StoreError, StoreFactory,
+    Clock, LogHeader, NewEntry, OwnedSessionCreateOptions,
+    SessionCreateOptions, SessionForkOptions, SessionHeader, SessionMetadata,
+    SessionStore, StoreError, StoreFactory, SyncObserver,
 };
 
 /// Filesystem-backed store factory using pi's cwd-encoded directory layout.
 pub struct JsonlStoreFactory {
     sessions_root: PathBuf,
     clock: Arc<dyn Clock>,
+    sync_observer: Option<Arc<dyn SyncObserver>>,
 }
 
 impl JsonlStoreFactory {
@@ -28,7 +31,23 @@ impl JsonlStoreFactory {
         Self {
             sessions_root: root.into(),
             clock,
+            sync_observer: None,
         }
+    }
+
+    /// Reports every durable sync of a store this factory builds to `observer`.
+    #[must_use]
+    pub fn with_sync_observer(
+        mut self,
+        observer: Arc<dyn SyncObserver>,
+    ) -> Self {
+        self.sync_observer = Some(observer);
+        self
+    }
+
+    /// Shares the configured observer with one store being built.
+    fn observer(&self) -> Option<Arc<dyn SyncObserver>> {
+        self.sync_observer.as_ref().map(Arc::clone)
     }
     /// Writes a new v4 header with an optional owner edge and no global index.
     fn create_with(
@@ -51,6 +70,8 @@ impl JsonlStoreFactory {
             .cwd(options.cwd)
             .parent_session_id(options.parent_session_id)
             .ownership(ownership)
+            .git(options.provenance.as_ref().and_then(|p| p.git.clone()))
+            .app_version(options.provenance.map(|p| p.app_version))
             .build();
         let file = OpenOptions::new()
             .write(true)
@@ -70,6 +91,7 @@ impl JsonlStoreFactory {
                 .clock(Arc::clone(&self.clock))
                 .file(writer)
                 .state(SessionState::new()?)
+                .sync_observer(self.observer())
                 .build(),
         ))
     }
@@ -100,6 +122,14 @@ impl StoreFactory for JsonlStoreFactory {
         line.push(b'\n');
         file.write_all(&line)?;
         file.sync_data()?;
+        if let Some(observer) = &self.sync_observer {
+            // The append path never opened the log, so the header supplies the identity.
+            let mut header = Vec::new();
+            BufReader::new(fs::File::open(path)?)
+                .read_until(b'\n', &mut header)?;
+            let header = LogHeader::try_from(header.trim_ascii_end())?;
+            observer.synced(&header.id, path);
+        }
         Ok(())
     }
 
@@ -210,6 +240,7 @@ impl StoreFactory for JsonlStoreFactory {
                     .clock(Arc::clone(&self.clock))
                     .file(writer)
                     .state(state)
+                    .sync_observer(self.observer())
                     .build(),
             ));
         }
@@ -224,6 +255,7 @@ impl StoreFactory for JsonlStoreFactory {
                 .clock(Arc::clone(&self.clock))
                 .file(writer)
                 .state(state)
+                .sync_observer(self.observer())
                 .build(),
         ))
     }
@@ -273,84 +305,57 @@ impl StoreFactory for JsonlStoreFactory {
         &self,
         cwd: Option<&Path>,
     ) -> Result<Vec<SessionMetadata>, StoreError> {
-        let mut directories = Vec::new();
-        if let Some(cwd) = cwd {
-            let directory = self
-                .sessions_root
-                .join(CwdSessionDirectory::from(cwd).as_str());
-            if directory.exists() {
-                directories.push(directory);
-            }
-        } else if self.sessions_root.exists() {
-            for entry in fs::read_dir(&self.sessions_root)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    directories.push(entry.path());
-                }
-            }
-        }
-
         let mut sessions = Vec::new();
-        for directory in directories {
-            for entry in fs::read_dir(directory)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !entry.file_type()?.is_file()
-                    || path.extension().and_then(|value| value.to_str())
-                        != Some("jsonl")
-                {
-                    continue;
-                }
-                let content = fs::read_to_string(&path)?;
-                let Some(header_line) = content.lines().next() else {
-                    continue;
-                };
-                let Ok(header) = serde_json::from_str::<V4Header>(header_line)
+        for entry in self.session_files(cwd)? {
+            let path = entry.path();
+            let content = fs::read_to_string(&path)?;
+            let Some(header_line) = content.lines().next() else {
+                continue;
+            };
+            let Ok(header) = serde_json::from_str::<V4Header>(header_line)
+            else {
+                continue;
+            };
+            if header.kind != HeaderKind::Header || header.version != 4 {
+                continue;
+            }
+            // Name is a global fact, so the last valid mutation determines list display.
+            let mut name = None;
+            for line in content.lines().skip(1) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
                 else {
                     continue;
                 };
-                if header.kind != HeaderKind::Header || header.version != 4 {
-                    continue;
+                if value.get("kind").and_then(serde_json::Value::as_str)
+                    == Some("fact")
+                    && value.get("fact").and_then(serde_json::Value::as_str)
+                        == Some("name")
+                {
+                    name = value
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned);
                 }
-                // Name is a global fact, so the last valid mutation determines list display.
-                let mut name = None;
-                for line in content.lines().skip(1) {
-                    let Ok(value) =
-                        serde_json::from_str::<serde_json::Value>(line)
-                    else {
-                        continue;
-                    };
-                    if value.get("kind").and_then(serde_json::Value::as_str)
-                        == Some("fact")
-                        && value.get("fact").and_then(serde_json::Value::as_str)
-                            == Some("name")
-                    {
-                        name = value
-                            .get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned);
-                    }
-                }
-                let modified = entry
-                    .metadata()?
-                    .modified()?
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0_u128, |duration| duration.as_millis());
-                sessions.push(
-                    SessionMetadata::builder()
-                        .id(header.id)
-                        .created_at_ms(header.created_at)
-                        .cwd(header.cwd)
-                        .parent_session_id(header.parent_session_id)
-                        .ownership(header.ownership)
-                        .path(path)
-                        .modified_at_ms(TimestampMs::from(
-                            u64::try_from(modified).unwrap_or(u64::MAX),
-                        ))
-                        .name(name)
-                        .build(),
-                );
             }
+            let modified = entry
+                .metadata()?
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .map_or(0_u128, |duration| duration.as_millis());
+            sessions.push(
+                SessionMetadata::builder()
+                    .id(header.id)
+                    .created_at_ms(header.created_at)
+                    .cwd(header.cwd)
+                    .parent_session_id(header.parent_session_id)
+                    .ownership(header.ownership)
+                    .path(path)
+                    .modified_at_ms(TimestampMs::from(
+                        u64::try_from(modified).unwrap_or(u64::MAX),
+                    ))
+                    .name(name)
+                    .build(),
+            );
         }
         sessions.sort_by(|left, right| {
             right.modified_at_ms.cmp(&left.modified_at_ms)
@@ -377,6 +382,62 @@ impl StoreFactory for JsonlStoreFactory {
 }
 
 impl JsonlStoreFactory {
+    /// Returns the directory holding every cwd-encoded session directory.
+    #[must_use]
+    pub fn sessions_root(&self) -> &Path {
+        &self.sessions_root
+    }
+
+    /// Lists every session log under the sessions root in path order.
+    pub fn session_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
+        let mut paths = self
+            .session_files(None)?
+            .iter()
+            .map(fs::DirEntry::path)
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
+    }
+
+    /// Walks one cwd directory, or every cwd directory, for regular `.jsonl` files.
+    fn session_files(
+        &self,
+        cwd: Option<&Path>,
+    ) -> Result<Vec<fs::DirEntry>, StoreError> {
+        let mut directories = Vec::new();
+        if let Some(cwd) = cwd {
+            let directory = self
+                .sessions_root
+                .join(CwdSessionDirectory::from(cwd).as_str());
+            if directory.exists() {
+                directories.push(directory);
+            }
+        } else if self.sessions_root.exists() {
+            for entry in fs::read_dir(&self.sessions_root)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    directories.push(entry.path());
+                }
+            }
+        }
+        let mut files = Vec::new();
+        for directory in directories {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        == Some("jsonl")
+                {
+                    files.push(entry);
+                }
+            }
+        }
+        Ok(files)
+    }
+
     /// Reads the sequence of the log's final line by scanning back from the end.
     ///
     /// Returns `None` unless the log ends with a complete mutation line, so the
@@ -418,69 +479,44 @@ impl JsonlStoreFactory {
         cwd: Option<&Path>,
         session_id: Option<&SessionId>,
     ) -> Result<Vec<SessionHeader>, StoreError> {
-        let mut directories = Vec::new();
-        if let Some(cwd) = cwd {
-            let directory = self
-                .sessions_root
-                .join(CwdSessionDirectory::from(cwd).as_str());
-            if directory.exists() {
-                directories.push(directory);
-            }
-        } else if self.sessions_root.exists() {
-            for entry in fs::read_dir(&self.sessions_root)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    directories.push(entry.path());
-                }
-            }
-        }
         let suffix = session_id.map(|id| format!("_{id}.jsonl"));
         let mut headers = Vec::new();
-        for directory in directories {
-            for entry in fs::read_dir(directory)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|extension| extension.to_str())
-                    != Some("jsonl")
-                    || suffix.as_ref().is_some_and(|suffix| {
-                        !entry
-                            .file_name()
-                            .to_str()
-                            .is_some_and(|name| name.ends_with(suffix))
-                    })
-                    || !entry.file_type()?.is_file()
-                {
-                    continue;
-                }
-                let file = match fs::File::open(&path) {
-                    Ok(file) => file,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                let mut line = String::new();
-                BufReader::new(file).read_line(&mut line)?;
-                let Ok(header) = serde_json::from_str::<V4Header>(&line) else {
-                    continue;
-                };
-                if header.kind != HeaderKind::Header
-                    || header.version != 4
-                    || session_id.is_some_and(|id| id != &header.id)
-                {
-                    continue;
-                }
-                headers.push(
-                    SessionHeader::builder()
-                        .id(header.id)
-                        .cwd(header.cwd)
-                        .ownership(header.ownership)
-                        .path(path)
-                        .build(),
-                );
+        for entry in self.session_files(cwd)? {
+            let path = entry.path();
+            if suffix.as_ref().is_some_and(|suffix| {
+                !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(suffix))
+            }) {
+                continue;
             }
+            let file = match fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut line = String::new();
+            BufReader::new(file).read_line(&mut line)?;
+            let Ok(header) = serde_json::from_str::<V4Header>(&line) else {
+                continue;
+            };
+            if header.kind != HeaderKind::Header
+                || header.version != 4
+                || session_id.is_some_and(|id| id != &header.id)
+            {
+                continue;
+            }
+            headers.push(
+                SessionHeader::builder()
+                    .id(header.id)
+                    .cwd(header.cwd)
+                    .ownership(header.ownership)
+                    .path(path)
+                    .build(),
+            );
         }
         Ok(headers)
     }
@@ -528,22 +564,28 @@ impl From<&Path> for CwdSessionDirectory {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum HeaderKind {
+pub(crate) enum HeaderKind {
     Header,
 }
 
 #[derive(Debug, Serialize, Deserialize, typed_builder::TypedBuilder)]
 #[serde(rename_all = "camelCase")]
-struct V4Header {
-    kind: HeaderKind,
-    version: u8,
-    id: SessionId,
-    created_at: TimestampMs,
-    cwd: PathBuf,
+pub(crate) struct V4Header {
+    pub(crate) kind: HeaderKind,
+    pub(crate) version: u8,
+    pub(crate) id: SessionId,
+    pub(crate) created_at: TimestampMs,
+    pub(crate) cwd: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
-    parent_session_id: Option<SessionId>,
+    pub(crate) parent_session_id: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
-    ownership: Option<SessionOwnership>,
+    pub(crate) ownership: Option<SessionOwnership>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub(crate) git: Option<SessionGitInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub(crate) app_version: Option<String>,
 }

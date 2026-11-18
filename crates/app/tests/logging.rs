@@ -82,16 +82,23 @@ fn logging_factory_emits_ansi_when_color_is_enabled() {
 }
 
 /// Writes a config for the production binary with the given `[logging]` table.
+///
+/// Session data lives inside `directory`, so the spawned binary never opens the
+/// user's real sessions, credentials, or state databases.
 fn logging_config(
     directory: &std::path::Path,
     logging: &str,
 ) -> std::path::PathBuf {
     let config_path = directory.join("claw.toml");
+    let data_home = directory.join("data");
     std::fs::write(
         &config_path,
         format!(
             r#"
 active_model = "fixture/model"
+
+[session_persistence]
+data_home = {data_home:?}
 
 [logging]
 {logging}

@@ -184,6 +184,7 @@ async fn prompt_run_survives_client_disconnect() {
     assert!(
         kernel
             .session_runtime(&session_id)
+            .await
             .expect("runtime after disconnect")
             .running
     );
@@ -405,6 +406,7 @@ async fn prompt_run_survives_client_disconnect() {
         loop {
             if !kernel
                 .session_runtime(&session_id)
+                .await
                 .expect("runtime after release")
                 .running
             {

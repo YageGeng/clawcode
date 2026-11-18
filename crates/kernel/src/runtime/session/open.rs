@@ -18,11 +18,12 @@ impl Kernel {
         let session_id =
             SessionId::try_from(self.id_generator.next(IdKind::Session))
                 .map_err(|error| KernelError::Protocol(error.to_string()))?;
-        self.create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        self.create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await?;
         Ok(session_id)
     }
@@ -30,8 +31,16 @@ impl Kernel {
     /// Creates a persisted session with a root `main` lane and registers it.
     pub async fn create_session(
         &self,
-        options: SessionCreateOptions,
+        mut options: SessionCreateOptions,
     ) -> Result<PathBuf, KernelError> {
+        // Probe before reserving the id, so a slow git never holds the reservation.
+        if options.provenance.is_none() {
+            options.provenance = Some(
+                super::provenance::ProvenanceProbe { cwd: &options.cwd }
+                    .collect()
+                    .await,
+            );
+        }
         let session_id = options.session_id.clone();
         let cwd = options.cwd.clone();
         tracing::info!("started Session creation {}", session_id);
@@ -39,6 +48,8 @@ impl Kernel {
             let _reservation = self.reserve_session_build(&session_id)?;
             let store = self.store_factory.create(options)?;
             let path = store.path().to_path_buf();
+            // Listing the new Session right after creation must see it.
+            self.catalog.refresh(&session_id, &path).await;
             let runtime = self
                 .build_session(store, cwd, mcp::SessionMcpSource::Connect, None)
                 .await?;
@@ -179,11 +190,12 @@ impl Kernel {
             return Ok(path);
         }
         let _reservation = self.reserve_session_build(&session_id)?;
+        // Resume stays scoped to the workspace the Session was created in.
         let metadata = self
-            .store_factory
-            .headers(Some(&cwd))?
-            .into_iter()
-            .find(|metadata| metadata.id == session_id)
+            .catalog
+            .header(&session_id)
+            .await?
+            .filter(|metadata| metadata.cwd == cwd)
             .ok_or_else(|| KernelError::SessionNotFound(session_id.clone()))?;
         let store = self.store_factory.open(&metadata.path)?;
         let path = store.path().to_path_buf();

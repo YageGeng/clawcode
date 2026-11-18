@@ -3,6 +3,7 @@
 mod factory;
 mod file_secret;
 mod model;
+mod reader;
 mod secret;
 mod session;
 mod state;
@@ -10,4 +11,5 @@ mod state;
 pub use factory::JsonlStoreFactory;
 pub use file_secret::FileSecretStore;
 pub use model::*;
+pub use reader::{LogHeader, LogMutation, LoggedMutation, MutationReader};
 pub use secret::{SecretKey, SecretStore, SecretStoreError, SecretValue};

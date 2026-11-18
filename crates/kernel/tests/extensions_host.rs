@@ -759,11 +759,12 @@ async fn shutdown_reentrant_operations_are_rejected() {
     let session_id =
         SessionId::try_from("shutdown-session").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -828,11 +829,12 @@ async fn dynamically_registered_tool_is_active_in_its_session() {
         (disabled_session.clone(), disabled_cwd),
     ] {
         kernel
-            .create_session(SessionCreateOptions {
-                session_id,
-                cwd,
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id)
+                    .cwd(cwd)
+                    .build(),
+            )
             .await
             .expect("create session");
     }
@@ -894,11 +896,12 @@ async fn dynamic_tool_selection_survives_temporary_unavailability() {
     let session_id =
         SessionId::try_from("dynamic-tool-restore").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel
@@ -975,11 +978,12 @@ async fn dynamic_command_changes_publish_available_command_events() {
     let session_id =
         SessionId::try_from("dynamic-command-session").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -1057,11 +1061,12 @@ async fn command_context_uses_complete_kernel_host() {
         .expect("build kernel");
     let session_id = SessionId::try_from("host-session").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -1086,7 +1091,14 @@ async fn command_context_uses_complete_kernel_host() {
             && entry.payload["content"]["type"] == "extension"
             && entry.payload["turn_id"] == "system-host-session"
     }));
-    assert_eq!(kernel.list_sessions(None).expect("list sessions").len(), 2);
+    assert_eq!(
+        kernel
+            .list_sessions(None)
+            .await
+            .expect("list sessions")
+            .len(),
+        2
+    );
     tokio::time::timeout(
         std::time::Duration::from_millis(50),
         kernel.wait_for_shutdown(),
@@ -1126,11 +1138,12 @@ async fn navigation_uses_extension_branch_summary() {
         .expect("build kernel");
     let session_id = SessionId::try_from("tree-session").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
     for input in ["first", "second"] {
@@ -1210,11 +1223,12 @@ async fn extension_handler_failure_is_persisted_for_replay() {
     let session_id =
         SessionId::try_from("diagnostic-session").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -1300,11 +1314,12 @@ async fn user_bash_uses_hooks_and_preserves_context_exclusion() {
     let session_id =
         SessionId::try_from("user-bash-session").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 

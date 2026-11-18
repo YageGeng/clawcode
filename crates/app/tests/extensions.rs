@@ -18,8 +18,8 @@ fn production_catalog_contains_command_guard() {
 }
 
 /// The production composition root rejects runtime code absent from the binary.
-#[test]
-fn application_rejects_an_extension_not_compiled_at_build_time() {
+#[tokio::test]
+async fn application_rejects_an_extension_not_compiled_at_build_time() {
     let missing = ExtensionId::try_from("hook-examples")
         .expect("hook example extension id");
     let config = AppConfig {
@@ -31,6 +31,7 @@ fn application_rejects_an_extension_not_compiled_at_build_time() {
 
     let error = match ApplicationFactory::new(ConfigHandle::from_config(config))
         .build()
+        .await
     {
         Ok(_application) => panic!("uncompiled extension must fail startup"),
         Err(error) => error,

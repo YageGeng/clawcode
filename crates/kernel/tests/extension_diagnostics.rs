@@ -388,11 +388,12 @@ async fn diagnostic_infrastructure_failures_are_logged() {
     let session_id =
         SessionId::try_from("diagnostic-observability").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("create session");
 

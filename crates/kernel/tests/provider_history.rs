@@ -27,11 +27,12 @@ async fn native_and_legacy_history_survives_reopen_fork_and_provider_replay() {
     let session = SessionId::try_from("history").unwrap();
     let lane = LaneId::try_from("main").unwrap();
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: session.clone(),
-            cwd: directory.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session.clone())
+                .cwd(directory.path().into())
+                .build(),
+        )
         .unwrap();
     // Decode a complete provider reply so native grouping and provenance match upstream.
     let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
@@ -132,11 +133,11 @@ async fn native_and_legacy_history_survives_reopen_fork_and_provider_replay() {
         .fork(
             &path,
             SessionForkOptions {
-                create: SessionCreateOptions {
-                    session_id: SessionId::try_from("fork").unwrap(),
-                    cwd: directory.path().into(),
-                    parent_session_id: Some(session),
-                },
+                create: SessionCreateOptions::builder()
+                    .session_id(SessionId::try_from("fork").unwrap())
+                    .cwd(directory.path().into())
+                    .parent_session_id(Some(session))
+                    .build(),
                 source_leaf: leaf.clone(),
                 lane,
             },
@@ -185,11 +186,12 @@ async fn unknown_usage_version_is_located_during_session_resume() {
     let session = SessionId::try_from("future").unwrap();
     let lane = LaneId::try_from("main").unwrap();
     let mut store = factory
-        .create(SessionCreateOptions {
-            session_id: session.clone(),
-            cwd: directory.path().into(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session.clone())
+                .cwd(directory.path().into())
+                .build(),
+        )
         .unwrap();
     let mut message = Server::request("seed").messages.remove(0);
     message.content = MessageContent::Assistant {
@@ -245,11 +247,12 @@ async fn kernel_settles_and_reopens_native_provider_messages() {
         server.kernel(directory.path(), Default::default(), Default::default());
     let session = SessionId::try_from("settlement").expect("session ID");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session.clone(),
-            cwd: directory.path().into(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session.clone())
+                .cwd(directory.path().into())
+                .build(),
+        )
         .await
         .expect("create session");
     let (sender, _receiver) = tokio::sync::mpsc::channel(1024);
@@ -312,11 +315,12 @@ async fn configured_prompt_cache_routes_turns_by_session_id() {
     );
     let session = SessionId::try_from("cached").expect("session ID");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session.clone(),
-            cwd: directory.path().into(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session.clone())
+                .cwd(directory.path().into())
+                .build(),
+        )
         .await
         .expect("create session");
     let (sender, _receiver) = tokio::sync::mpsc::channel(1024);
@@ -488,11 +492,12 @@ async fn anthropic_refusal_preserves_reported_usage() {
         .unwrap();
     let session = SessionId::try_from("anthropic").unwrap();
     kernel
-        .create_session(store::SessionCreateOptions {
-            session_id: session.clone(),
-            cwd: directory.path().into(),
-            parent_session_id: None,
-        })
+        .create_session(
+            store::SessionCreateOptions::builder()
+                .session_id(session.clone())
+                .cwd(directory.path().into())
+                .build(),
+        )
         .await
         .unwrap();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1024);

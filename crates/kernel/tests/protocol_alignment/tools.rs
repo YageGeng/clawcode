@@ -59,7 +59,7 @@ async fn cancel_running_tool(test: &TestKernel) -> SessionId {
             )
             .await
     });
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.sinks.saw(&session, |event| {
             matches!(event, AgentEventPayload::ToolExecutionStart { .. })
         })

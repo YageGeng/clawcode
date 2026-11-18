@@ -503,7 +503,7 @@ async fn message_end_rewrite_leaves_queue_usable() {
                 )
                 .await
         });
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         test.kernel
             .queue_message(&session, QueueKind::FollowUp, "queued")

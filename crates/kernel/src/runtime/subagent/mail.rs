@@ -58,7 +58,7 @@ impl Kernel {
             Err(KernelError::SessionNotFound(_)) => {
                 // A persisted child receives mail after a restart: load it first.
                 let header =
-                    self.store_factory.header(&recipient)?.ok_or_else(
+                    self.catalog.header(&recipient).await?.ok_or_else(
                         || KernelError::SessionNotFound(recipient.clone()),
                     )?;
                 Box::pin(self.resume_session(recipient.clone(), header.cwd))

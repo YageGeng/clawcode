@@ -211,6 +211,9 @@ pub struct KernelFactory {
     model_factory: Arc<dyn ModelFactory>,
     tool_factory: Arc<dyn ToolFactory>,
     store_factory: Arc<dyn StoreFactory>,
+    /// SQLite mirror of the store; lookups scan the store while it is absent.
+    #[builder(default)]
+    state: Option<Arc<state::StateRuntime>>,
     extension_factory: Arc<dyn ExtensionFactory>,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
@@ -325,12 +328,17 @@ impl KernelFactory {
         let catalog = self.model_factory.create_catalog(&static_extensions)?;
         self.validate_compaction(&catalog)?;
         let tools = Arc::new(self.tool_factory.create()?);
+        let session_catalog = session::catalog::SessionCatalog::new(
+            Arc::clone(&self.store_factory),
+            self.state,
+        );
         Ok(Kernel::builder()
             .model_factory(self.model_factory)
             .login_catalog(Arc::new(catalog))
             .static_extensions(static_extensions)
             .tools(tools)
             .store_factory(self.store_factory)
+            .catalog(session_catalog)
             .extension_factory(self.extension_factory)
             .clock(self.clock)
             .id_generator(self.id_generator)
@@ -365,6 +373,8 @@ pub struct Kernel {
     static_extensions: Arc<protocol::StaticExtensionRegistration>,
     tools: Arc<ToolRegistry>,
     store_factory: Arc<dyn StoreFactory>,
+    /// Metadata lookups served by SQLite when ready, else by store scans.
+    catalog: session::catalog::SessionCatalog,
     extension_factory: Arc<dyn ExtensionFactory>,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,

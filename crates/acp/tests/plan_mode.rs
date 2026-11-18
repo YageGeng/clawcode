@@ -868,7 +868,7 @@ async fn subagent_todos_stay_in_the_child() {
         let child = tokio::time::timeout(WAIT, async {
             loop {
                 let child = kernel
-                    .list_sessions(Some(&listing))
+                    .list_sessions(Some(&listing)).await
                     .expect("list")
                     .into_iter()
                     .find(|summary| summary.ownership.is_some())

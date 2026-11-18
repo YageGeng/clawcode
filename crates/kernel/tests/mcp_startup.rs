@@ -348,11 +348,12 @@ async fn startup_catalog_change_reaches_first_request() {
         .expect("Kernel");
     let id = SessionId::try_from("startup-race").expect("id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: id.clone(),
-            cwd: root.path().into(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(id.clone())
+                .cwd(root.path().into())
+                .build(),
+        )
         .await
         .expect("session");
     let catalog: Vec<_> = kernel

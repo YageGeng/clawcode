@@ -454,11 +454,12 @@ async fn bounds_hook_expanded_result() {
         .expect("kernel");
     let session_id = SessionId::try_from("output-budget").expect("session");
     let path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().into(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().into())
+                .build(),
+        )
         .await
         .expect("session");
     let sink = Arc::new(RecordingSink::default());
@@ -661,11 +662,12 @@ async fn deferred_search_loads_only_the_next_request() {
         .expect("kernel");
     let session_id = SessionId::try_from("deferred-search").expect("session");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().into(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().into())
+                .build(),
+        )
         .await
         .expect("session");
     let sink = Arc::new(RecordingSink::default());
@@ -1082,11 +1084,12 @@ async fn preflight_failure_emits_and_persists_terminal_run_state() {
     let session_id =
         SessionId::try_from("session-preflight-failure").expect("session id");
     let path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -1163,12 +1166,10 @@ async fn streamed_response_produces_one_timed_turn() {
         .expect("build kernel");
     let session_id = SessionId::try_from("session-1").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            // Project-context discovery requires a real working directory.
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder().session_id(session_id.clone()).// Project-context discovery requires a real working directory.
+            cwd(temporary.path().to_path_buf()).build(),
+        )
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -1281,11 +1282,12 @@ async fn default_turn_limit_is_unlimited() {
     let session_id =
         SessionId::try_from("session-unlimited-turns").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create Session");
 
@@ -1367,11 +1369,12 @@ async fn limited_turn_limit_stops_at_configured_bound() {
     let session_id =
         SessionId::try_from("session-limited-turns").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create Session");
 
@@ -1422,11 +1425,12 @@ async fn text_only_model_receives_placeholder_without_rewriting_history() {
     let session_id =
         SessionId::try_from("session-text-only-image").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     let image = ContentBlock::Image {
@@ -1516,11 +1520,12 @@ async fn traced_run_propagates_trace_to_tools() {
     let session_id =
         SessionId::try_from("session-traced-run").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     let logs = CapturedLogs::default();
@@ -1642,11 +1647,12 @@ async fn system_prompt_override_is_scoped_to_the_complete_run() {
     let session_id =
         SessionId::try_from("session-prompt-override").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create Session");
 
@@ -1746,11 +1752,12 @@ async fn stream_failures_persist_complete_error_assistants() {
         })
         .expect("session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: temporary.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(temporary.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create session");
 
@@ -1864,12 +1871,10 @@ async fn tool_batch_emits_completion_order_and_persists_source_order() {
         .expect("build kernel");
     let session_id = SessionId::try_from("session-tools").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            // Project-context discovery requires a real working directory.
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder().session_id(session_id.clone()).// Project-context discovery requires a real working directory.
+            cwd(temporary.path().to_path_buf()).build(),
+        )
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -1978,11 +1983,12 @@ async fn blocked_tool_result_preserves_policy_outcome() {
     let session_id =
         SessionId::try_from("session-blocked-tool").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
 
@@ -2066,11 +2072,12 @@ async fn tool_partial_update_precedes_final_result() {
     let session_id =
         SessionId::try_from("session-streaming-tool").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -2167,11 +2174,12 @@ async fn tool_updates_coalesce_to_the_latest_snapshot() {
     let session_id =
         SessionId::try_from("session-burst-tool").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -2246,12 +2254,10 @@ async fn cancellation_settles_pending_turn_as_cancelled() {
     );
     let session_id = SessionId::try_from("session-cancel").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            // Project-context discovery requires a real working directory.
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder().session_id(session_id.clone()).// Project-context discovery requires a real working directory.
+            cwd(temporary.path().to_path_buf()).build(),
+        )
         .await
         .expect("create session");
     let running_kernel = Arc::clone(&kernel);
@@ -2338,16 +2344,18 @@ async fn persisted_session_can_be_listed_closed_and_resumed() {
     let cwd = temporary.path().join("workspace/resume");
     std::fs::create_dir_all(&cwd).expect("create project cwd");
     let session_path = kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create session");
 
     let sessions = kernel
         .list_sessions(Some(&cwd))
+        .await
         .expect("list persisted sessions");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, session_id);
@@ -2451,11 +2459,12 @@ async fn resume_rejects_assistant_without_metadata_as_invalid_session() {
     let session_id =
         SessionId::try_from("session-corrupt").expect("session id");
     let mut session = store_factory
-        .create(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .expect("create persisted session");
     session
         .append_entry(
@@ -2539,11 +2548,12 @@ async fn turn_requests_carry_session_thinking_level() {
     let session_id =
         SessionId::try_from("session-thinking-level").expect("session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create session");
     kernel

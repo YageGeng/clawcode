@@ -226,6 +226,12 @@ impl Kernel {
                             KernelError::SessionNotFound(_)
                             | KernelError::SessionClosing,
                         ) => continue,
+                        Ok(()) => {
+                            // The next listing must already show the new title.
+                            let path = session.transcript.path()?;
+                            self.catalog.refresh(session_id, &path).await;
+                            return Ok(());
+                        }
                         result => return result,
                     }
                 }
@@ -250,7 +256,7 @@ impl Kernel {
                     // finished first as SessionNotFound, not a raw I/O error.
                     // Nothing observes an unloaded Session, so no event.
                     let header =
-                        self.store_factory.header(session_id)?.ok_or_else(
+                        self.catalog.header(session_id).await?.ok_or_else(
                             || KernelError::SessionNotFound(session_id.clone()),
                         )?;
                     // One appended fact, not a replay, keeps the reservation short.
@@ -258,6 +264,7 @@ impl Kernel {
                         &header.path,
                         Some(title.as_str().to_string()),
                     )?;
+                    self.catalog.refresh(session_id, &header.path).await;
                     tracing::info!(
                         "renamed persisted Session {} without loading it",
                         session_id

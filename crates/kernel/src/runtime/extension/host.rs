@@ -686,10 +686,9 @@ impl ExtensionHost for SessionExtensionHost {
                 |error| ExtensionHostError::Operation(error.to_string()),
             )?;
         self.kernel
-            .list_sessions(None)
+            .session_summary(&session_id)
+            .await
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))?
-            .into_iter()
-            .find(|summary| summary.session_id == session_id)
             .ok_or_else(|| {
                 ExtensionHostError::Operation(
                     "created session metadata is unavailable".to_string(),
@@ -705,10 +704,9 @@ impl ExtensionHost for SessionExtensionHost {
     ) -> Result<SessionSummary, ExtensionHostError> {
         let summary = self
             .kernel
-            .list_sessions(None)
+            .session_summary(&session_id)
+            .await
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))?
-            .into_iter()
-            .find(|summary| summary.session_id == session_id)
             .ok_or_else(|| {
                 ExtensionHostError::Operation(format!(
                     "session not found: {session_id}"
@@ -742,10 +740,9 @@ impl ExtensionHost for SessionExtensionHost {
                 ExtensionHostError::Operation(error.to_string())
             })?;
         self.kernel
-            .list_sessions(None)
+            .session_summary(&session_id)
+            .await
             .map_err(|error| ExtensionHostError::Operation(error.to_string()))?
-            .into_iter()
-            .find(|summary| summary.session_id == session_id)
             .ok_or_else(|| {
                 ExtensionHostError::Operation(
                     "forked session metadata is unavailable".to_string(),

@@ -84,7 +84,8 @@ async fn hold_gate_with_compaction(
 ) -> JoinHandle<Result<RunResult, KernelError>> {
     let compact = start_compaction(test, session).await;
     let summaries = summary_requests(test);
-    test.wait_until(|| summary_requests(test) > summaries).await;
+    test.wait_until(async || summary_requests(test) > summaries)
+        .await;
     compact
 }
 
@@ -514,11 +515,12 @@ async fn user_bash_executor_error_finishes_without_result() {
     std::fs::create_dir_all(&cwd).expect("create cwd");
     let session = SessionId::try_from("owner").expect("id");
     test.kernel
-        .create_session(store::SessionCreateOptions {
-            session_id: session.clone(),
-            cwd: cwd.clone(),
-            parent_session_id: None,
-        })
+        .create_session(
+            store::SessionCreateOptions::builder()
+                .session_id(session.clone())
+                .cwd(cwd.clone())
+                .build(),
+        )
         .await
         .expect("create");
     std::fs::remove_dir(&cwd).expect("remove cwd");
@@ -900,7 +902,7 @@ async fn cancel_does_not_reject_waiting_mail_run() {
     tokio::time::sleep(SETTLE).await;
     test.kernel.cancel_session(&session).expect("cancel");
     compact.await.expect("join").expect("compact");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.agent_mails(&session)
             .iter()
             .any(|mail| mail.ends_with("Payload:\nreport"))
@@ -917,10 +919,11 @@ async fn mail_run_cancelled_before_insertion_is_persisted() {
     let session = test.create("owner").await;
     test.mail(&session, "/root/x", protocol::MailKind::NewTask, "report")
         .await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         !test
             .kernel
             .session_runtime(&session)
+            .await
             .expect("runtime")
             .running
             && test.agent_mails(&session).len() == 1

@@ -26,7 +26,7 @@ async fn spawn_reader(
         serde_json::json!([["s1", {"task_name": "reader", "message": "Read.", "fork_turns": "none"}]]),
     )
     .await;
-    child(test, owner, "reader").session_id
+    child(test, owner, "reader").await.session_id
 }
 
 /// Lists agents from `session` and parses the JSON reply.
@@ -65,8 +65,10 @@ async fn child_answer_is_mailed_to_idle_owner_without_waking() {
     let owner = test.create("owner").await;
     spawn_reader(&test, &owner).await;
     let result = "Message Type: result\nTask name: /root\nSender: /root/reader\nPayload:\nA whale.";
-    test.wait_until(|| test.agent_mails(&owner).iter().any(|m| m == result))
-        .await;
+    test.wait_until(async || {
+        test.agent_mails(&owner).iter().any(|m| m == result)
+    })
+    .await;
     let requests = test.model.request_count();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(test.model.request_count(), requests);
@@ -74,6 +76,7 @@ async fn child_answer_is_mailed_to_idle_owner_without_waking() {
         !test
             .kernel
             .session_runtime(&owner)
+            .await
             .expect("runtime")
             .running
     );
@@ -105,16 +108,17 @@ async fn child_answer_to_busy_owner_does_not_extend_its_run() {
     );
     let owner = test.create("owner").await;
     let run = test.start(&owner, "call:spawn");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.agent_mails(&owner).is_empty()
-            && test.owned_children(&owner).len() == 1
+            && test.owned_children(&owner).await.len() == 1
     })
     .await;
-    let reader = child(&test, &owner, "reader").session_id;
-    test.wait_until(|| {
+    let reader = child(&test, &owner, "reader").await.session_id;
+    test.wait_until(async || {
         !test
             .kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
             && !test.agent_mails(&reader).is_empty()
@@ -145,7 +149,7 @@ async fn failed_and_interrupted_children() {
     });
     let owner = test.create("owner").await;
     spawn(&test, &owner, serde_json::json!([["s1", {"task_name": "broken", "message": "fail", "fork_turns": "none"}]])).await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.agent_mails(&owner)
             .iter()
             .any(|m| m.contains("Payload:\nAgent errored: "))
@@ -153,20 +157,22 @@ async fn failed_and_interrupted_children() {
     .await;
     let stuck = {
         spawn(&test, &owner, serde_json::json!([["s2", {"task_name": "stuck", "message": "wait", "fork_turns": "none"}]])).await;
-        child(&test, &owner, "stuck").session_id
+        child(&test, &owner, "stuck").await.session_id
     };
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&stuck)
+            .await
             .expect("runtime")
             .running
     })
     .await;
     test.kernel.cancel_session(&stuck).expect("cancel");
-    test.wait_until(|| {
+    test.wait_until(async || {
         !test
             .kernel
             .session_runtime(&stuck)
+            .await
             .expect("runtime")
             .running
     })
@@ -185,6 +191,7 @@ async fn failed_and_interrupted_children() {
     )
     .await;
     let nickname = child(&test, &owner, "stuck")
+        .await
         .ownership
         .expect("edge")
         .nickname;
@@ -210,10 +217,10 @@ async fn user_chat_in_child_also_notifies_owner() {
     let test = agents(KernelPolicy::default(), |_| Route::answer("first"));
     let owner = test.create("owner").await;
     let reader = spawn_reader(&test, &owner).await;
-    test.wait_until(|| test.agent_mails(&owner).len() == 1)
+    test.wait_until(async || test.agent_mails(&owner).len() == 1)
         .await;
     prompt(&test, &reader, "hello").await;
-    test.wait_until(|| test.agent_mails(&owner).len() == 2)
+    test.wait_until(async || test.agent_mails(&owner).len() == 2)
         .await;
     assert!(test.agent_mails(&owner)[1].ends_with("Payload:\nowner answer"));
 }
@@ -242,7 +249,7 @@ async fn long_answers_are_truncated_with_hint() {
         ["s2", {"task_name": "empty", "message": "empty", "fork_turns": "none"}],
         ["s3", {"task_name": "lines", "message": "lines", "fork_turns": "none"}]
     ])).await;
-    test.wait_until(|| test.agent_mails(&owner).len() == 3)
+    test.wait_until(async || test.agent_mails(&owner).len() == 3)
         .await;
     let mails = test.agent_mails(&owner);
     let long = mails
@@ -277,15 +284,17 @@ async fn list_agents_reports_codex_statuses() {
     });
     let owner = test.create("owner").await;
     let reader = spawn_reader(&test, &owner).await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     })
     .await;
     // Only spawned agents carry the nickname the user sees; `/root` has none.
     let nickname = child(&test, &owner, "reader")
+        .await
         .ownership
         .expect("edge")
         .nickname;
@@ -297,7 +306,7 @@ async fn list_agents_reports_codex_statuses() {
         ]})
     );
     gate.notify_one();
-    test.wait_until(|| !test.agent_mails(&owner).is_empty())
+    test.wait_until(async || !test.agent_mails(&owner).is_empty())
         .await;
     assert_eq!(
         list(
@@ -318,7 +327,7 @@ async fn roster_note_is_stated_only_on_change() {
     let test = agents(KernelPolicy::default(), |_| Route::answer("done"));
     let owner = test.create("owner").await;
     let reader = spawn_reader(&test, &owner).await;
-    test.wait_until(|| !test.agent_mails(&owner).is_empty())
+    test.wait_until(async || !test.agent_mails(&owner).is_empty())
         .await;
     prompt(&test, &owner, "again").await;
     prompt(&test, &owner, "and again").await;
@@ -387,7 +396,7 @@ async fn registry_rebuilds_from_headers_after_restart() {
     let test = agents(KernelPolicy::default(), |_| Route::answer("done"));
     let owner = test.create("owner").await;
     spawn_reader(&test, &owner).await;
-    test.wait_until(|| !test.agent_mails(&owner).is_empty())
+    test.wait_until(async || !test.agent_mails(&owner).is_empty())
         .await;
     test.kernel.close_session(&owner).await.expect("close");
     test.kernel
@@ -396,6 +405,7 @@ async fn registry_rebuilds_from_headers_after_restart() {
         .expect("resume");
     // The nickname survives a restart because the roster reloads it from the child header.
     let nickname = child(&test, &owner, "reader")
+        .await
         .ownership
         .expect("edge")
         .nickname;
@@ -416,7 +426,7 @@ async fn forked_child_is_standalone() {
     let test = agents(KernelPolicy::default(), |_| Route::answer("done"));
     let owner = test.create("owner").await;
     let reader = spawn_reader(&test, &owner).await;
-    test.wait_until(|| !test.agent_mails(&owner).is_empty())
+    test.wait_until(async || !test.agent_mails(&owner).is_empty())
         .await;
     let leaf = test
         .kernel
@@ -432,6 +442,7 @@ async fn forked_child_is_standalone() {
     let summary = test
         .kernel
         .list_sessions(Some(test.root.path()))
+        .await
         .expect("list")
         .into_iter()
         .find(|s| s.session_id == fork)
@@ -451,9 +462,10 @@ async fn closing_owner_with_pending_notification_does_not_hang() {
     let test = agents(KernelPolicy::default(), |_| Route::Hang);
     let owner = test.create("owner").await;
     let reader = spawn_reader(&test, &owner).await;
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.kernel
             .session_runtime(&reader)
+            .await
             .expect("runtime")
             .running
     })

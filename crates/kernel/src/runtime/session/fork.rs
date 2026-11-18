@@ -34,21 +34,27 @@ impl Kernel {
                 "session fork cancelled".to_string(),
             ));
         }
+        // Probe before reserving the id, so a slow git never holds the reservation.
+        let provenance = super::provenance::ProvenanceProbe { cwd: &cwd }
+            .collect()
+            .await;
         let _reservation = self.reserve_session_build(&new_session_id)?;
         let source_path = source.transcript.path()?;
         let store = self.store_factory.fork(
             &source_path,
             SessionForkOptions {
-                create: SessionCreateOptions {
-                    session_id: new_session_id.clone(),
-                    cwd: cwd.clone(),
-                    parent_session_id: Some(source_session_id.clone()),
-                },
+                create: SessionCreateOptions::builder()
+                    .session_id(new_session_id.clone())
+                    .cwd(cwd.clone())
+                    .parent_session_id(Some(source_session_id.clone()))
+                    .provenance(provenance)
+                    .build(),
                 source_leaf,
                 lane: source.transcript.lane(),
             },
         )?;
         let path = store.path().to_path_buf();
+        self.catalog.refresh(&new_session_id, &path).await;
         let runtime = self
             .build_session(store, cwd, mcp::SessionMcpSource::Connect, None)
             .await?;

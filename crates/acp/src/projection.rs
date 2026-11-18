@@ -1475,11 +1475,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-projection").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));
@@ -1517,11 +1518,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-navigated").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));
@@ -1576,11 +1578,12 @@ mod tests {
         let kernel = projection_kernel(state.path());
         let session = SessionId::try_from("internal-submit").expect("id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session.clone(),
-                cwd: workspace.path().into(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session.clone())
+                    .cwd(workspace.path().into())
+                    .build(),
+            )
             .await
             .expect("session");
         let registry = Arc::new(ProjectionRegistry::new(Arc::clone(&kernel)));
@@ -1624,7 +1627,12 @@ mod tests {
             .await
             .expect("RunStart");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while kernel.session_runtime(&session).expect("runtime").running {
+            while kernel
+                .session_runtime(&session)
+                .await
+                .expect("runtime")
+                .running
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
@@ -1667,11 +1675,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-shell").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));
@@ -1870,11 +1879,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-compaction").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));
@@ -1952,11 +1962,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-action").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));
@@ -1998,11 +2009,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-user-bash").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));
@@ -2079,11 +2091,12 @@ mod tests {
         let session_id =
             SessionId::try_from("session-durable-race").expect("Session id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: session_id.clone(),
-                cwd: workspace.path().to_path_buf(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(session_id.clone())
+                    .cwd(workspace.path().to_path_buf())
+                    .build(),
+            )
             .await
             .expect("create Session");
         let registry = Arc::new(ProjectionRegistry::new(kernel));

@@ -76,7 +76,7 @@ async fn admission_order_and_stop_preserve_each_input_outcome() {
             )
             .await
     });
-    test.wait_until(|| !test.model.last_texts().is_empty())
+    test.wait_until(async || !test.model.last_texts().is_empty())
         .await;
     let a = test.kernel.admission_ticket(&session).unwrap();
     let b = test.kernel.admission_ticket(&session).unwrap();
@@ -150,7 +150,7 @@ async fn promotion_is_one_durable_move() {
             )
             .await
     });
-    test.wait_until(|| !test.model.last_texts().is_empty())
+    test.wait_until(async || !test.model.last_texts().is_empty())
         .await;
     let a = test
         .kernel
@@ -177,7 +177,7 @@ async fn promotion_is_one_durable_move() {
     assert_eq!(pending.follow_up[0].queue_id, a.queue_id);
     test.kernel.cancel_session(&session).unwrap();
     run.await.unwrap().unwrap();
-    test.wait_until(|| test.sinks.saw(&session, |event| matches!(event, protocol::AgentEventPayload::QueueChanged { pending } if pending.steering.len() == 1 && pending.follow_up.len() == 1))).await;
+    test.wait_until(async || test.sinks.saw(&session, |event| matches!(event, protocol::AgentEventPayload::QueueChanged { pending } if pending.steering.len() == 1 && pending.follow_up.len() == 1))).await;
     test.kernel.close_session(&session).await.unwrap();
 }
 
@@ -281,7 +281,7 @@ async fn unconsumed_claim_returns_after_turn_limit_or_preflight_failure() {
         );
         let session = test.create("queue-claim-exit").await;
         let run = test.start_run(&session, "hold");
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         let item = test
             .kernel
@@ -346,7 +346,7 @@ async fn claimed_input_cancellation_and_mutation_respect_ownership() {
         );
         let session = test.create("queue-claimed").await;
         let run = test.start_run(&session, "hold");
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         let (request, receiver) = test.client_prompt(&session, "q", None);
         test.kernel.prompt(request).await.unwrap();
@@ -454,7 +454,7 @@ async fn transformed_input_is_processed_once_and_never_dispatches_commands() {
         let session = test.create("queue-transform").await;
         let run = busy.then(|| test.start_run(&session, "hold"));
         if busy {
-            test.wait_until(|| !test.model.last_texts().is_empty())
+            test.wait_until(async || !test.model.last_texts().is_empty())
                 .await;
         }
         let mut receivers = Vec::new();
@@ -503,7 +503,7 @@ async fn configured_and_explicit_placement_determine_insertion_order() {
         );
         let session = test.create("queue-placement").await;
         let run = test.start_run(&session, "hold");
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         let (request, default_rx) =
             test.client_prompt(&session, "default", None);
@@ -562,7 +562,7 @@ async fn queue_write_failures_preserve_uncertain_outcomes_and_recover_without_du
         );
         let session = test.create("queue-uncertain").await;
         let run = test.start_run(&session, "hold");
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         if !consumed {
             fail_sync.store(true, Ordering::SeqCst);
@@ -678,7 +678,7 @@ async fn stop_during_input_hook_rejects_idle_and_busy_prompts() {
         let session = test.create("queue-hook-cancel").await;
         let run = busy.then(|| test.start_run(&session, "hold"));
         if busy {
-            test.wait_until(|| !test.model.last_texts().is_empty())
+            test.wait_until(async || !test.model.last_texts().is_empty())
                 .await;
         }
         let (request, receiver) = test.client_prompt(&session, "pause", None);
@@ -720,7 +720,7 @@ async fn direct_commands_hold_admission_and_cancelled_tickets_do_not_stall() {
         let test = TestKernel::new(move |request| hold_route(&wait, request));
         let session = test.create("queue-command-order").await;
         let run = test.start_run(&session, "hold");
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         let (request, command_rx) = test.client_prompt(&session, command, None);
         let kernel = test.kernel.clone();
@@ -816,7 +816,7 @@ async fn close_waits_for_final_queue_delivery() {
             )
             .await
     });
-    test.wait_until(|| !test.model.last_texts().is_empty())
+    test.wait_until(async || !test.model.last_texts().is_empty())
         .await;
     let (prompt, rx) = test.client_prompt(&session, "q", None);
     test.kernel.prompt(prompt).await.unwrap();
@@ -907,7 +907,7 @@ async fn failed_message_start_returns_the_claim() {
             )
             .await
     });
-    test.wait_until(|| !test.model.last_texts().is_empty())
+    test.wait_until(async || !test.model.last_texts().is_empty())
         .await;
     let item = test
         .kernel
@@ -970,7 +970,7 @@ async fn extension_input_from_shell_hook_does_not_deadlock_or_strand() {
     .expect("no deadlock")
     .expect("join")
     .expect("shell");
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.user_texts(&session).contains(&"from extension".into())
     })
     .await;
@@ -996,7 +996,7 @@ async fn remove_clear_and_repeated_stop_settle_each_waiter_once() {
     let test = TestKernel::new(|_| Route::Hang);
     let session = test.create("queue-remove-clear").await;
     let run = test.start_run(&session, "hold");
-    test.wait_until(|| !test.model.last_texts().is_empty())
+    test.wait_until(async || !test.model.last_texts().is_empty())
         .await;
     let mut receivers = Vec::new();
     for input in ["a", "b", "c"] {
@@ -1046,7 +1046,7 @@ async fn successful_direct_command_precedes_later_input() {
         let test = TestKernel::new(move |request| hold_route(&wait, request));
         let session = test.create("queue-command-success").await;
         let run = test.start_run(&session, "hold");
-        test.wait_until(|| !test.model.last_texts().is_empty())
+        test.wait_until(async || !test.model.last_texts().is_empty())
             .await;
         let (first, first_rx) = test.client_prompt(&session, command, None);
         let (second, second_rx) = test.client_prompt(&session, "after", None);
@@ -1227,7 +1227,7 @@ async fn compact_only_runs_before_a_queued_follow_up() {
             )
             .await
     });
-    test.wait_until(|| !test.model.last_texts().is_empty())
+    test.wait_until(async || !test.model.last_texts().is_empty())
         .await;
     let ticket = test.kernel.admission_ticket(&session).unwrap();
     let (notice, _receiver) = InsertionNotice::new();

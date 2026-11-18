@@ -79,7 +79,7 @@ pub(super) struct RecordMutation {
 }
 
 /// Stable global fact discriminants.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum FactKind {
     Name,
@@ -87,7 +87,7 @@ pub(super) enum FactKind {
 }
 
 /// Persisted global session-name fact.
-#[derive(Serialize, typed_builder::TypedBuilder)]
+#[derive(Serialize, Deserialize, typed_builder::TypedBuilder)]
 pub(super) struct NameFactMutation {
     pub(super) kind: MutationKind,
     #[serde(rename = "seq")]
@@ -111,7 +111,7 @@ impl NameFactMutation {
 }
 
 /// Persisted optional label for one transcript entry.
-#[derive(Serialize, typed_builder::TypedBuilder)]
+#[derive(Serialize, Deserialize, typed_builder::TypedBuilder)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LabelFactMutation {
     pub(super) kind: MutationKind,

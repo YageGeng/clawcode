@@ -178,8 +178,9 @@ impl Kernel {
                 let (cwd, ownership) = match self.session(session_id) {
                     Ok(session) => (Some(session.cwd.clone()), session.ownership.clone()),
                     Err(KernelError::SessionNotFound(_)) => self
-                        .store_factory
-                        .header(session_id)?
+                        .catalog
+                        .header(session_id)
+                        .await?
                         .map_or((None, None), |header| (Some(header.cwd), header.ownership)),
                     Err(error) => return Err(error),
                 };
@@ -188,13 +189,14 @@ impl Kernel {
                     Err(error) => return Err(error),
                 }
                 if let Some(cwd) = cwd {
-                    for child in self.store_factory.headers(Some(&cwd))?.into_iter().filter(|item| item.ownership.as_ref().is_some_and(|edge| &edge.session_id == session_id)) {
+                    for child in self.catalog.children(session_id, &cwd).await? {
                         tracing::info!("started cascading deletion of session {} owned by {}", child.id, session_id);
                         self.perform_delete(&child.id).await?;
                         tracing::info!("completed cascading deletion of session {} owned by {}", child.id, session_id);
                     }
                 }
                 self.store_factory.delete(session_id)?;
+                self.catalog.record_deleted(session_id).await;
                 // A deleted child leaves its live owner's roster at once.
                 if let Some(edge) = ownership
                     && let Ok(owner) = self.session(&edge.session_id)

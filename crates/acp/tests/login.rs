@@ -491,7 +491,13 @@ async fn prompt_requires_sign_in() {
                 .is_empty()
         );
         tokio::time::sleep(SETTLE).await;
-        assert!(!kernel.session_runtime(&session).expect("runtime").running);
+        assert!(
+            !kernel
+                .session_runtime(&session)
+                .await
+                .expect("runtime")
+                .running
+        );
         Ok(())
     })
     .await;

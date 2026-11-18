@@ -54,19 +54,34 @@ pub fn agents(
     policy: KernelPolicy,
     child: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
 ) -> TestKernel {
-    TestKernel::with_policy(
-        move |request| {
-            let input = last(request);
-            if let Some(route) = scripted_calls(&input) {
-                route
-            } else if input.starts_with("Message Type: new_task") {
-                child(request)
-            } else {
-                Route::answer("owner answer")
-            }
-        },
-        policy,
-    )
+    TestKernel::with_policy(agent_route(child), policy)
+}
+
+/// Like [`agents`], with the Kernel sharing a ready SQLite state runtime.
+pub async fn agents_with_state(
+    child: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
+    store: impl FnOnce(
+        &std::path::Path,
+        Arc<dyn store::Clock>,
+    ) -> Arc<dyn store::StoreFactory>,
+) -> TestKernel {
+    TestKernel::with_state(agent_route(child), store, true).await
+}
+
+/// Routes scripted tool calls, child tasks to `child`, and other owner input to a fixed answer.
+fn agent_route(
+    child: impl Fn(&ModelRequest) -> Route + Send + Sync + 'static,
+) -> impl Fn(&ModelRequest) -> Route + Send + Sync + 'static {
+    move |request| {
+        let input = last(request);
+        if let Some(route) = scripted_calls(&input) {
+            route
+        } else if input.starts_with("Message Type: new_task") {
+            child(request)
+        } else {
+            Route::answer("owner answer")
+        }
+    }
 }
 
 /// Runs one prompt to completion and returns its Run.
@@ -117,12 +132,13 @@ pub async fn spawn(
 }
 
 /// The spawned child of `owner` named `name`.
-pub fn child(
+pub async fn child(
     test: &TestKernel,
     owner: &SessionId,
     name: &str,
 ) -> SessionSummary {
     test.owned_children(owner)
+        .await
         .into_iter()
         .find(|summary| {
             summary

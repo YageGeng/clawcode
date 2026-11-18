@@ -25,12 +25,15 @@ fn extension_entries_persist_replay_and_fork_as_pi_v4_custom_entries() {
     let factory = JsonlStoreFactory::new(root.path(), Arc::new(FixedClock));
     let lane = LaneId::try_from("main").expect("lane id");
     let mut session = factory
-        .create(SessionCreateOptions {
-            session_id: SessionId::try_from("session-extension")
-                .expect("session id"),
-            cwd: root.path().join("workspace"),
-            parent_session_id: None,
-        })
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(
+                    SessionId::try_from("session-extension")
+                        .expect("session id"),
+                )
+                .cwd(root.path().join("workspace"))
+                .build(),
+        )
         .expect("create session");
     let entry = session
         .append_extension_entry(
@@ -61,12 +64,13 @@ fn extension_entries_persist_replay_and_fork_as_pi_v4_custom_entries() {
         .fork(
             &session_path,
             SessionForkOptions {
-                create: SessionCreateOptions {
-                    session_id: SessionId::try_from("session-fork")
-                        .expect("fork session id"),
-                    cwd: root.path().join("workspace"),
-                    parent_session_id: None,
-                },
+                create: SessionCreateOptions::builder()
+                    .session_id(
+                        SessionId::try_from("session-fork")
+                            .expect("fork session id"),
+                    )
+                    .cwd(root.path().join("workspace"))
+                    .build(),
                 source_leaf: entry.id.clone(),
                 lane,
             },

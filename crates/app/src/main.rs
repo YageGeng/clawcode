@@ -55,7 +55,7 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
     // Capture the immutable ACP replay batching policy before the config handle
     // moves into the composition factory.
     let max_batch_size = config.current().app.recovery.max_batch_size;
-    let application = ApplicationFactory::new(config).build()?;
+    let application = ApplicationFactory::new(config).build().await?;
     match cli.command {
         Command::Stdio => {
             tracing::info!(
@@ -105,5 +105,7 @@ async fn run(config: config::ConfigHandle) -> anyhow::Result<()> {
     }
     // Background commands must not outlive the server that started them.
     application.kernel.terminate_exec_processes().await;
+    // Queued Session syncs reach SQLite before the process exits.
+    application.flush_state().await;
     Ok(())
 }

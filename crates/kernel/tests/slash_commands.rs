@@ -418,11 +418,12 @@ async fn fixture() -> (tempfile::TempDir, Fixture) {
     let session_id =
         SessionId::try_from("session-slash-command").expect("SessionId");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd,
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(cwd)
+                .build(),
+        )
         .await
         .expect("Session");
     (

@@ -807,11 +807,12 @@ mod tests {
             JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
         let session_id = SessionId::try_from("session-1").expect("session id");
         let store = factory
-            .create(SessionCreateOptions {
-                session_id,
-                cwd: PathBuf::from("/workspace"),
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(session_id)
+                    .cwd(PathBuf::from("/workspace"))
+                    .build(),
+            )
             .expect("create store");
         let transcript = SessionTranscript::restored(
             store,
@@ -840,12 +841,14 @@ mod tests {
         let factory =
             JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
         let store = factory
-            .create(SessionCreateOptions {
-                session_id: SessionId::try_from("session-1")
-                    .expect("session id"),
-                cwd: PathBuf::from("/workspace"),
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(
+                        SessionId::try_from("session-1").expect("session id"),
+                    )
+                    .cwd(PathBuf::from("/workspace"))
+                    .build(),
+            )
             .expect("create store");
         let transcript = SessionTranscript::restored(
             store,
@@ -874,11 +877,12 @@ mod tests {
             JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
         let session_id = SessionId::try_from("session-1").expect("session id");
         let mut store = factory
-            .create(SessionCreateOptions {
-                session_id,
-                cwd: PathBuf::from("/workspace"),
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(session_id)
+                    .cwd(PathBuf::from("/workspace"))
+                    .build(),
+            )
             .expect("create store");
         let lane = protocol::LaneId::try_from("main").expect("lane id");
         let first = message("message-1", "turn-1", "first");
@@ -1076,12 +1080,15 @@ mod tests {
         let factory =
             JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
         let mut store = factory
-            .create(SessionCreateOptions {
-                session_id: SessionId::try_from("session-summary-failure")
-                    .expect("session id"),
-                cwd: PathBuf::from("/workspace"),
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(
+                        SessionId::try_from("session-summary-failure")
+                            .expect("session id"),
+                    )
+                    .cwd(PathBuf::from("/workspace"))
+                    .build(),
+            )
             .expect("create store");
         let lane = protocol::LaneId::try_from("main").expect("lane id");
         let first = message("message-1", "turn-1", "first");
@@ -1158,12 +1165,15 @@ mod tests {
         let factory =
             JsonlStoreFactory::new(root.path(), Arc::new(SystemClock));
         let mut store = factory
-            .create(SessionCreateOptions {
-                session_id: SessionId::try_from("session-clear-failure")
-                    .expect("session id"),
-                cwd: PathBuf::from("/workspace"),
-                parent_session_id: None,
-            })
+            .create(
+                SessionCreateOptions::builder()
+                    .session_id(
+                        SessionId::try_from("session-clear-failure")
+                            .expect("session id"),
+                    )
+                    .cwd(PathBuf::from("/workspace"))
+                    .build(),
+            )
             .expect("create store");
         let lane = protocol::LaneId::try_from("main").expect("lane id");
         let first = message("message-1", "turn-1", "first");
@@ -1219,12 +1229,13 @@ mod tests {
         );
         let store = store::StoreFactory::create(
             &factory,
-            store::SessionCreateOptions {
-                session_id: protocol::SessionId::try_from("selection-sync")
-                    .expect("id"),
-                cwd: root.path().into(),
-                parent_session_id: None,
-            },
+            store::SessionCreateOptions::builder()
+                .session_id(
+                    protocol::SessionId::try_from("selection-sync")
+                        .expect("id"),
+                )
+                .cwd(root.path().into())
+                .build(),
         )
         .expect("store");
         let transcript = super::SessionTranscript::restored(

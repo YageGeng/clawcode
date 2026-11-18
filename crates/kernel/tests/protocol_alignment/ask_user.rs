@@ -155,7 +155,8 @@ impl Asked {
     ) -> (Self, JoinHandle<Result<RunResult, KernelError>>) {
         let session = test.create(name).await;
         let run = test.start(&session, "ask");
-        test.wait_until(|| test.model.request_count() == 2).await;
+        test.wait_until(async || test.model.request_count() == 2)
+            .await;
         (Self::of(test, session), run)
     }
 

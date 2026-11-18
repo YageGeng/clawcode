@@ -61,11 +61,12 @@ async fn disabled_mcp_preserves_public_semantics() {
     let session_id =
         SessionId::try_from("session-disabled-mcp").expect("Session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create Session");
 
@@ -281,11 +282,12 @@ impl OwnedMcpFixture {
             .expect("kernel");
         let owner = SessionId::try_from("owner").expect("id");
         kernel
-            .create_session(SessionCreateOptions {
-                session_id: owner.clone(),
-                cwd: root.path().into(),
-                parent_session_id: None,
-            })
+            .create_session(
+                SessionCreateOptions::builder()
+                    .session_id(owner.clone())
+                    .cwd(root.path().into())
+                    .build(),
+            )
             .await
             .expect("owner");
         Self::builder()
@@ -578,6 +580,7 @@ async fn deleting_owner_deletes_child_store() {
     assert!(
         test.kernel
             .list_sessions(Some(test.root.path()))
+            .await
             .expect("list")
             .is_empty()
     );
@@ -853,11 +856,12 @@ async fn mcp_sampling_runs_through_current_session_model() {
     let session_id =
         SessionId::try_from("session-sampling").expect("Session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: PathBuf::from(temporary.path()),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(PathBuf::from(temporary.path()))
+                .build(),
+        )
         .await
         .expect("create Session");
 
@@ -980,11 +984,12 @@ async fn pending_mcp_elicitations_have_session_snapshots() {
     );
     let session_id = SessionId::try_from("session-elicit").expect("Session id");
     kernel
-        .create_session(SessionCreateOptions {
-            session_id: session_id.clone(),
-            cwd: temporary.path().to_path_buf(),
-            parent_session_id: None,
-        })
+        .create_session(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(temporary.path().to_path_buf())
+                .build(),
+        )
         .await
         .expect("create Session");
     let run_kernel = Arc::clone(&kernel);

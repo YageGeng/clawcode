@@ -112,7 +112,7 @@ async fn cancelled_run_preserves_known_usage() {
     let test = TestKernel::new(tool_then_answer("sleep 5"));
     let session = test.create("owner").await;
     let run = start_tool_run(&test, &session);
-    test.wait_until(|| {
+    test.wait_until(async || {
         test.sinks.saw(&session, |event| {
             matches!(event, AgentEventPayload::ToolExecutionStart { .. })
         })

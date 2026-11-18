@@ -337,6 +337,23 @@ impl Kernel {
                 error
             );
         }
+        // A seeded roster keeps `with_children` from scanning headers for this owner.
+        if let Ok(session) = &result
+            && self.catalog.is_ready()
+        {
+            let seeded =
+                match self.catalog.children(&session_id, &session.cwd).await {
+                    Ok(children) => session.roster.seed(&session_id, children),
+                    Err(error) => Err(error),
+                };
+            if let Err(error) = seeded {
+                tracing::warn!(
+                    "roster of session {} will load from headers: {}",
+                    session_id,
+                    error
+                );
+            }
+        }
         if result.is_err()
             && let Some(mcp) = cleanup_mcp
             && let Err(error) = mcp.shutdown().await
