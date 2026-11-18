@@ -127,7 +127,7 @@ tempfile = "3"
 toml = "=0.8"
 
 # database
-libsqlite3-sys = { version = "0.39.1", default-features = false }
+libsqlite3-sys = { version = "0.40", default-features = false }
 sqlx = { version = "0.9", default-features = false, features = ["json", "macros", "migrate", "runtime-tokio", "sqlite-bundled"] }
 
 # protocol
@@ -152,9 +152,3 @@ shlex = "2"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 similar = "3"
 unicode-normalization = "0.1"
-
-[patch.crates-io]
-# SQLx 0.9.0 excludes libsqlite3-sys 0.39; keep driver and core on the revision Codex reviewed
-# until a release includes transact-rs/sqlx#4502.
-sqlx-core = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
-sqlx-sqlite = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
