@@ -1,13 +1,13 @@
 use agent_client_protocol::v2::schema as wire;
-use protocol::{ToolCall, ToolLocation};
+use protocol::ToolLocation;
 
-/// Borrows a Kernel tool call for its ACP tool kind.
-pub(crate) struct ToolKindOf<'a>(pub(crate) &'a ToolCall);
+/// Borrows a tool name for its ACP tool kind, shared by live start events and replay.
+pub(crate) struct ToolKindOf<'a>(pub(crate) &'a str);
 
 impl From<ToolKindOf<'_>> for wire::ToolKind {
     /// Classifies built-in tools; everything else, including MCP tools, is `other`.
-    fn from(call: ToolKindOf<'_>) -> Self {
-        match call.0.name.as_str() {
+    fn from(name: ToolKindOf<'_>) -> Self {
+        match name.0 {
             "read" => Self::Read,
             "write" | "edit" => Self::Edit,
             protocol::EXEC_COMMAND_TOOL | protocol::WRITE_STDIN_TOOL => {

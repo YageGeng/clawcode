@@ -1835,3 +1835,137 @@ async fn root_navigation_with_summary_is_invalid_params() {
 
     assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 }
+
+/// Resume with replay ends the replayed history with `replay_complete`; resume without replay sends none.
+#[tokio::test]
+async fn resume_with_replay_ends_history_with_replay_complete() {
+    let workspace = tempfile::tempdir().expect("workspace directory");
+    let state = tempfile::tempdir().expect("store directory");
+    let kernel = integration_kernel(state.path());
+    let server = AcpServerFactory::new(
+        Arc::clone(&kernel),
+        NonZeroUsize::new(128).expect("positive batch size"),
+    )
+    .component(AcpTransportKind::Stdio);
+    let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Client.v2().on_receive_notification(
+        async move |notification: wire::UpdateSessionNotification,
+                    _connection| {
+            updates_tx.send(notification).map_err(|_error| {
+                agent_client_protocol::Error::into_internal_error(
+                    std::io::Error::other("notification receiver closed"),
+                )
+            })?;
+            Ok(())
+        },
+        agent_client_protocol::on_receive_notification!(),
+    );
+
+    client
+        .connect_with(server, async move |connection| {
+            connection
+                .send_request(wire::InitializeRequest::new(
+                    ProtocolVersion::V2,
+                    wire::Implementation::new("replay-complete-test", "0.1.0"),
+                ))
+                .block_task()
+                .await?;
+            let created = connection
+                .send_request(wire::NewSessionRequest::new(
+                    workspace.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            let session_id = created.session_id.clone();
+            connection
+                .send_request(IntegrationRequest::new(
+                    AcpExtensionMethod::UserBash.as_str(),
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "command": "printf 'replayed history'",
+                        "excludeFromContext": true
+                    }),
+                ))
+                .block_task()
+                .await?;
+            connection
+                .send_request(wire::CloseSessionRequest::new(
+                    session_id.clone(),
+                ))
+                .block_task()
+                .await?;
+            while updates_rx.try_recv().is_ok() {}
+
+            // Notifications sent before the resume response arrive before it.
+            connection
+                .send_request(
+                    wire::ResumeSessionRequest::new(
+                        session_id.clone(),
+                        workspace.path().to_path_buf(),
+                    )
+                    .replay_from(wire::ReplayFrom::from(
+                        wire::ReplayFromStart::new(),
+                    )),
+                )
+                .block_task()
+                .await?;
+            let mut replayed = Vec::new();
+            while let Ok(notification) = updates_rx.try_recv() {
+                replayed.push(notification.update);
+            }
+            let history = replayed
+                .iter()
+                .position(|update| {
+                    serde_json::to_string(update)
+                        .is_ok_and(|text| text.contains("replayed history"))
+                })
+                .expect("replayed user bash history");
+            let complete = replayed
+                .iter()
+                .position(|update| {
+                    matches!(update, wire::SessionUpdate::ReplayComplete(_))
+                })
+                .expect("replay_complete after resume with replay");
+            assert!(
+                history < complete,
+                "replay_complete must follow the history"
+            );
+            assert_eq!(
+                replayed
+                    .iter()
+                    .filter(|update| matches!(
+                        update,
+                        wire::SessionUpdate::ReplayComplete(_)
+                    ))
+                    .count(),
+                1
+            );
+
+            connection
+                .send_request(wire::CloseSessionRequest::new(
+                    session_id.clone(),
+                ))
+                .block_task()
+                .await?;
+            while updates_rx.try_recv().is_ok() {}
+            connection
+                .send_request(wire::ResumeSessionRequest::new(
+                    session_id.clone(),
+                    workspace.path().to_path_buf(),
+                ))
+                .block_task()
+                .await?;
+            while let Ok(notification) = updates_rx.try_recv() {
+                assert!(
+                    !matches!(
+                        notification.update,
+                        wire::SessionUpdate::ReplayComplete(_)
+                    ),
+                    "resume without replay must not send replay_complete"
+                );
+            }
+            Ok(())
+        })
+        .await
+        .expect("ACP connection");
+}

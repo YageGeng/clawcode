@@ -1,0 +1,68 @@
+[package]
+name = "desktop"
+edition.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# workspace crates
+acp = { workspace = true }
+app = { workspace = true }
+config = { workspace = true }
+protocol = { workspace = true }
+
+# error
+thiserror = { workspace = true }
+
+# tracing & log
+tracing = { workspace = true }
+
+# async
+futures = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# builder
+typed-builder = { workspace = true }
+
+# protocol
+agent-client-protocol = { workspace = true, features = ["unstable_protocol_v2", "unstable_session_set_title"] }
+
+# gui
+gpui-kit = { workspace = true }
+rust-i18n = { workspace = true }
+sys-locale = { workspace = true }
+
+# misc
+base64 = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+# workspace crates
+extension = { workspace = true }
+kernel = { workspace = true }
+prompt = { workspace = true }
+store = { workspace = true }
+tools = { workspace = true }
+
+# async
+async-trait = { workspace = true }
+tokio-util = { workspace = true }
+
+# serde
+serde_yaml_ng = { workspace = true }
+
+# fs
+tempfile = { workspace = true }
+
+# gui
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[[bin]]
+name = "clawcode-desktop"
+path = "src/main.rs"

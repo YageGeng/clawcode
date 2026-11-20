@@ -65,6 +65,9 @@ pub(crate) struct ProjectionWatch {
     /// Whether the watcher reports `state` as a snapshot after the backlog (resume only).
     #[builder(default)]
     report_state: bool,
+    /// Whether the client asked for replay, so the backlog ends with `replay_complete`.
+    #[builder(default)]
+    replay_complete: bool,
 }
 
 impl From<ProjectionFeed> for ProjectionWatch {
@@ -154,6 +157,12 @@ impl ProjectionWatch {
     /// Marks a resume watcher, which reports the current state after replaying history.
     fn resumed(mut self) -> Self {
         self.report_state = true;
+        self
+    }
+
+    /// Marks a resume that replays history, which ends with `replay_complete`.
+    fn replaying(mut self, replay_requested: bool) -> Self {
+        self.replay_complete = replay_requested;
         self
     }
 
@@ -543,6 +552,18 @@ impl AcpServer {
                 }
             }
             watch.record_sent(&group);
+        }
+        if watch.replay_complete {
+            // Every replayed item was sent above (durable items before the watcher), so
+            // the client can tell history from the live updates that follow.
+            connection.send_notification(
+                wire::UpdateSessionNotification::new(
+                    session_id.to_string(),
+                    wire::SessionUpdate::ReplayComplete(
+                        wire::ReplayComplete::new(),
+                    ),
+                ),
+            )?;
         }
         if watch.report_state {
             // The current title precedes the state snapshot after replay.
@@ -1118,6 +1139,8 @@ impl AcpServerFactory {
                         );
                         let durable_replay_from_start =
                             matches!(&replay, AcpReplayRequest::Start);
+                        let replay_requested =
+                            !matches!(&replay, AcpReplayRequest::None);
                         let (watch, recovery_metadata) = match replay {
                             AcpReplayRequest::Event(cursor) => {
                                 kernel
@@ -1290,7 +1313,7 @@ impl AcpServerFactory {
                             &session_id,
                             &connection,
                             session_watchers,
-                            watch.resumed(),
+                            watch.resumed().replaying(replay_requested),
                         )?;
                         // Pending requests follow replay and the state snapshot.
                         server.reestablish_elicitations(&session_id, &connection)?;

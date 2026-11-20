@@ -140,6 +140,10 @@ impl<'a> AcpEventMapper<'a> {
                                     tool_call_id.to_string(),
                                 )
                                 .title(name.clone())
+                                // Same name and kind as the live start event, so replayed
+                                // rows keep their icon and verb.
+                                .name(name.clone())
+                                .kind(wire::ToolKind::from(ToolKindOf(name)))
                                 .status(wire::ToolCallStatus::InProgress)
                                 .raw_input(arguments.clone())
                                 .meta(metadata.clone()),
@@ -329,7 +333,7 @@ impl<'a> AcpEventMapper<'a> {
                     wire::ToolCallUpdate::new(call.tool_call_id.to_string())
                         .title(call.name.clone())
                         .name(call.name.clone())
-                        .kind(wire::ToolKind::from(ToolKindOf(call)))
+                        .kind(wire::ToolKind::from(ToolKindOf(&call.name)))
                         .status(wire::ToolCallStatus::InProgress)
                         .raw_input(call.arguments.clone())
                         .meta(metadata.clone());

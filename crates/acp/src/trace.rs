@@ -27,6 +27,8 @@ pub enum AcpTransportKind {
     Stdio,
     /// ACP HTTP, SSE, or WebSocket traffic served by the official HTTP transport.
     Http,
+    /// ACP connection inside the same process, such as the desktop client.
+    InProcess,
 }
 
 impl fmt::Display for AcpTransportKind {
@@ -35,6 +37,7 @@ impl fmt::Display for AcpTransportKind {
         match self {
             Self::Stdio => formatter.write_str("stdio"),
             Self::Http => formatter.write_str("http"),
+            Self::InProcess => formatter.write_str("in-process"),
         }
     }
 }

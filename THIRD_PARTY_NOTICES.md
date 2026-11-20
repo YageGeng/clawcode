@@ -39,6 +39,16 @@ names, addressing rules, and inter-agent message text follow its
 - License: Apache-2.0
 - Copyright: Copyright 2025 OpenAI
 
+## GPUI Kit themes
+
+`crates/desktop/themes/*.json` (21 files) are copied unmodified from the
+`themes/` directory of `longbridge/gpui-kit` at tag `v0.10.0`, matching the
+`gpui-kit` crate version the desktop client depends on.
+
+- Source: https://github.com/longbridge/gpui-kit/tree/v0.10.0/themes
+- License: Apache-2.0
+- Copyright: Copyright Longbridge and GPUI Kit contributors
+
 ## Agent WebUI direct dependencies
 
 The browser application directly depends on the following packages. Versions

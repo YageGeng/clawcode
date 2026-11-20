@@ -377,6 +377,9 @@ fn assistant_replay_maps_reasoning_and_tool_calls_without_loss() {
         value["sessionUpdate"] == "tool_call_update"
             && value["toolCallId"] == "tool-replay"
             && value["title"] == "read"
+            // Replay classifies the call like the live start event does.
+            && value["name"] == "read"
+            && value["kind"] == "read"
     }));
 }
 
