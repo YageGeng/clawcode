@@ -21,14 +21,16 @@ use gpui_kit::component::{
     StyledExt as _,
 };
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement,
-    Keystroke, ParentElement as _, SharedString, StyleRefinement, Styled as _,
-    Window, div, prelude::FluentBuilder as _, rems,
+    AnyElement, App, ClickEvent, Context, ExternalPaths,
+    InteractiveElement as _, IntoElement, Keystroke, ParentElement as _,
+    SharedString, StyleRefinement, Styled as _, TestSupportExt as _, Window,
+    div, prelude::FluentBuilder as _, rems,
 };
 
 use super::{AppView, StatusIcon, TabEntry};
 use crate::actions::{
-    CloseSearch, FocusSearch, NewSession, SEARCH_CONTEXT, WORKSPACE_CONTEXT,
+    CloseSearch, FocusSearch, NewSession, OpenSettings, SEARCH_CONTEXT,
+    WORKSPACE_CONTEXT,
 };
 use crate::backend::SessionId;
 use crate::catalog::{RelativeAge, SessionSort, SessionSummary};
@@ -54,6 +56,9 @@ pub struct SidebarState {
     /// Lists only running or waiting sessions.
     #[builder(default)]
     pub(super) running_only: bool,
+    /// The workspace row clicked last: the tools' workspace when no tab names one.
+    #[builder(default)]
+    pub(super) selected_workspace: Option<PathBuf>,
 }
 
 /// Everything the sidebar lists, decided before rendering.
@@ -100,6 +105,10 @@ pub struct WorkspaceRow {
     pub expanded: bool,
     /// The directory no longer exists.
     pub missing: bool,
+    /// It is the first workspace, so it cannot move up.
+    pub first: bool,
+    /// It is the last workspace, so it cannot move down.
+    pub last: bool,
     /// Session rows and an optional "Show all" row.
     pub children: Vec<SidebarRow>,
 }
@@ -111,7 +120,7 @@ pub struct SessionRow {
     pub id: SessionId,
     /// Title, with the untitled placeholder applied.
     pub title: SharedString,
-    /// Trailing text: relative age, or the workspace name in flat lists.
+    /// Trailing text: relative age, or the workspace name in search results.
     pub trailing: SharedString,
     /// Run status.
     pub status: SessionStatus,
@@ -140,7 +149,7 @@ pub enum SidebarRow {
 enum Trailing {
     /// The relative age when idle.
     Age,
-    /// The workspace the session belongs to, for cross-workspace lists.
+    /// The workspace the session belongs to, for search results.
     Workspace,
 }
 
@@ -268,8 +277,11 @@ impl AppView {
     /// Decides what the sidebar lists from the workspaces, the catalog, and the search query.
     pub fn sidebar_model(&self, cx: &App) -> SidebarModel {
         let now_ms = crate::now_ms();
+        // An open subagent has no row; its nearest listed ancestor stands for it.
         let active = match self.active_entry() {
-            Some(TabEntry::Session(id)) => Some(id),
+            Some(TabEntry::Session(id)) => {
+                Some(self.host.catalog.listed_ancestor(&id).unwrap_or(id))
+            }
             _ => None,
         };
         let row = |summary: &SessionSummary,
@@ -314,12 +326,11 @@ impl AppView {
             })
             .filter(|(_, status)| self.passes_filter(*status))
             .collect();
-        let workspaces = self
-            .state
-            .workspaces
-            .entries()
+        let entries = self.state.workspaces.entries();
+        let workspaces = entries
             .iter()
-            .map(|entry| {
+            .enumerate()
+            .map(|(index, entry)| {
                 // Registry paths and session directories are both normalized on the way in.
                 let sessions: Vec<&(&SessionSummary, SessionStatus)> = listed
                     .iter()
@@ -351,6 +362,8 @@ impl AppView {
                         )
                         .expanded(entry.expanded)
                         .missing(self.missing.contains(&entry.path))
+                        .first(index == 0)
+                        .last(index + 1 == entries.len())
                         .children(children)
                         .build(),
                 )
@@ -359,7 +372,8 @@ impl AppView {
         let recent: Vec<SidebarRow> = listed
             .iter()
             .take(RECENT_SESSIONS)
-            .map(|(summary, status)| row(summary, *status, Trailing::Workspace))
+            // Recent rows show their age like workspace rows (M3b spec §4).
+            .map(|(summary, status)| row(summary, *status, Trailing::Age))
             .collect();
         let mut groups = vec![SidebarGroupModel {
             kind: GroupKind::Workspaces,
@@ -480,6 +494,8 @@ impl AppView {
             name,
             expanded,
             missing,
+            first,
+            last,
             children,
         } = row;
         // Sub-rows indent to the workspace name, past the folder icon (mockup `.row.sub`).
@@ -495,6 +511,7 @@ impl AppView {
         let view = cx.entity().downgrade();
         let menu_path = path.clone();
         let muted = cx.theme().muted_foreground;
+        let branch = self.branch(&path);
         let row = SidebarMenuItem::new(name)
             .icon(Icon::new(if expanded {
                 IconName::FolderOpen
@@ -520,6 +537,16 @@ impl AppView {
                             .text_xs(),
                         )
                     })
+                    .when_some(branch.clone(), |this, branch| {
+                        // Long branch names are cut by layout so the row keeps its name readable.
+                        this.child(Icon::new(LucideIcon::GitBranch).xsmall())
+                            .child(
+                                div()
+                                    .max_w(rems(6.))
+                                    .truncate()
+                                    .child(Label::new(branch).text_xs()),
+                            )
+                    })
                     .child(
                         Icon::new(if expanded {
                             IconName::ChevronDown
@@ -533,10 +560,14 @@ impl AppView {
                 let draft = (view.clone(), menu_path.clone());
                 let reveal = (view.clone(), menu_path.clone());
                 let remove = (view.clone(), menu_path.clone());
+                let up = (view.clone(), menu_path.clone());
+                let down = (view.clone(), menu_path.clone());
                 let menu = menu.item(
                     PopupMenuItem::new(
                         rust_i18n::t!("Sidebar.new_session").into_owned(),
                     )
+                    // A session cannot start in a folder that is gone.
+                    .disabled(missing)
                     .on_click(move |_, _, cx| {
                         let _ = draft.0.update(cx, |this, cx| {
                             this.open_draft(Some(draft.1.clone()), cx)
@@ -558,6 +589,31 @@ impl AppView {
                         }),
                     )
                 };
+                // Reordering by menu: gpui-kit sidebar rows have no drag-and-drop hooks.
+                let menu = menu
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(
+                            rust_i18n::t!("Workspace.move_up").into_owned(),
+                        )
+                        .disabled(first)
+                        .on_click(move |_, _, cx| {
+                            let _ = up.0.update(cx, |this, cx| {
+                                this.move_workspace(&up.1, -1, cx)
+                            });
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new(
+                            rust_i18n::t!("Workspace.move_down").into_owned(),
+                        )
+                        .disabled(last)
+                        .on_click(move |_, _, cx| {
+                            let _ = down.0.update(cx, |this, cx| {
+                                this.move_workspace(&down.1, 1, cx)
+                            });
+                        }),
+                    );
                 menu.separator().item(
                     PopupMenuItem::new(
                         rust_i18n::t!("Workspace.remove").into_owned(),
@@ -580,6 +636,7 @@ impl AppView {
                     .iter()
                     .any(|entry| entry.path == path && entry.expanded);
                 this.state.workspaces.set_expanded(&path, !open);
+                this.sidebar.selected_workspace = Some(path.clone());
                 this.persist(cx);
                 cx.notify();
             }));
@@ -718,8 +775,62 @@ impl AppView {
             .child(action)
     }
 
-    /// Renders the sidebar on the chrome surface.
-    pub(super) fn render_sidebar(
+    /// The session card: an inset card holding the session sidebar, with
+    /// settings at its foot; folders dropped on it become workspaces (spec §4).
+    pub(in crate::ui) fn render_session_card(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let sidebar = self.render_sidebar(window, cx).into_any_element();
+        let theme = cx.theme();
+        // The panel's padding sets the card's `sm` gaps to the window's left and bottom edges.
+        div()
+            .size_full()
+            .pl_2()
+            .pb_2()
+            .child(
+                div()
+                    .id("session-card")
+                    .test_support()
+                    .size_full()
+                    .overflow_hidden()
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius_lg)
+                    .when(!theme.is_dark(), |this| this.shadow_sm())
+                    .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                        style.bg(cx.theme().accent.opacity(0.3))
+                    })
+                    .on_drop(cx.listener(
+                        |this, paths: &ExternalPaths, _, cx| {
+                            this.add_dropped_paths(paths.paths().to_vec(), cx);
+                        },
+                    ))
+                    .child(sidebar),
+            )
+            .into_any_element()
+    }
+
+    /// The settings button at the session card's foot.
+    fn settings_button(&self, cx: &mut Context<'_, Self>) -> Button {
+        Button::new("open-settings")
+            .ghost()
+            .icon(IconName::Settings2)
+            .selected(self.settings.open)
+            .tooltip_with_action(
+                rust_i18n::t!("Settings.title").to_string(),
+                &OpenSettings,
+                Some(WORKSPACE_CONTEXT),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.open_settings(window, cx)
+            }))
+    }
+
+    /// Renders the session sidebar: header, workspace and recent groups, and the settings foot.
+    fn render_sidebar(
         &self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -768,11 +879,12 @@ impl AppView {
         Sidebar::new("sessions-sidebar")
             .w_full()
             .h_full()
-            // The chrome surface: one tone for title bar and sidebar (spec §6.1).
-            .bg(cx.theme().title_bar)
+            // The card's surface (M3b spec §3), not the chrome's.
+            .bg(cx.theme().background)
             .border_r_0()
             .collapsible(SidebarCollapsible::None)
             .header(header)
+            .footer(self.settings_button(cx))
             .children(groups)
     }
 }

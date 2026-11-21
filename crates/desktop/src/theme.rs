@@ -1,7 +1,9 @@
 //! Built-in gpui-kit themes and how the appearance preference selects one.
 
+use std::sync::Arc;
+
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
-use gpui_kit::{App, WindowAppearance, px};
+use gpui_kit::{App, FontWeight, Global, SharedString, WindowAppearance, px};
 
 use crate::state::{AppearancePreference, ThemeModePreference};
 
@@ -35,8 +37,52 @@ pub const DEFAULT_LIGHT_THEME: &str = "Default Light";
 /// Theme used in dark mode when the preferred one is unavailable.
 pub const DEFAULT_DARK_THEME: &str = "Default Dark";
 
-/// Smallest and largest base font sizes the appearance setting accepts.
-const FONT_SIZE_RANGE: (f32, f32) = (12.0, 20.0);
+/// The interface and code font weights the settings chose; read with [`FontWeights::get`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontWeights {
+    /// Weight of interface text, set on the window's root element.
+    pub ui: FontWeight,
+    /// Weight of monospace text, set on code containers.
+    pub code: FontWeight,
+}
+
+impl Global for FontWeights {}
+
+impl Default for FontWeights {
+    /// Normal weight for both.
+    fn default() -> Self {
+        Self {
+            ui: FontWeight::NORMAL,
+            code: FontWeight::NORMAL,
+        }
+    }
+}
+
+impl FontWeights {
+    /// The weights last applied, or normal weight before any appearance was applied.
+    pub fn get(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or_default()
+    }
+}
+
+/// The installed font families, listed once per run; read with [`InstalledFonts::get`].
+#[derive(Debug, Clone)]
+pub struct InstalledFonts(Arc<[String]>);
+
+impl Global for InstalledFonts {}
+
+impl InstalledFonts {
+    /// The installed families, asking the text system only the first time.
+    // ponytail: fonts installed while the app runs show up after a restart.
+    pub fn get(cx: &mut App) -> Arc<[String]> {
+        if let Some(fonts) = cx.try_global::<Self>() {
+            return Arc::clone(&fonts.0);
+        }
+        let fonts: Arc<[String]> = cx.text_system().all_font_names().into();
+        cx.set_global(Self(Arc::clone(&fonts)));
+        fonts
+    }
+}
 
 /// Registers every vendored theme; a file that fails to parse is logged and skipped.
 pub fn register_builtin_themes(cx: &mut App) {
@@ -67,11 +113,23 @@ impl ThemeModePreference {
 }
 
 impl AppearancePreference {
-    /// Installs the preferred light and dark themes and the font size, then shows the resolved mode.
+    /// Installs the preferred light and dark themes, shows the resolved mode,
+    /// then applies the font settings on top of the theme's fonts.
     ///
     /// A theme name that is not registered, or that belongs to the other mode,
     /// falls back to that mode's default theme.
     pub fn apply(&self, appearance: WindowAppearance, cx: &mut App) {
+        let installed = InstalledFonts::get(cx);
+        self.apply_with_fonts(appearance, &installed, cx);
+    }
+
+    /// [`Self::apply`] against an explicit list of installed font families.
+    pub fn apply_with_fonts(
+        &self,
+        appearance: WindowAppearance,
+        installed: &[String],
+        cx: &mut App,
+    ) {
         let registry = ThemeRegistry::global(cx);
         let pick = |name: &str, mode: ThemeMode, fallback: &str| {
             let themes = registry.themes();
@@ -84,12 +142,14 @@ impl AppearancePreference {
         let light =
             pick(&self.light_theme, ThemeMode::Light, DEFAULT_LIGHT_THEME);
         let dark = pick(&self.dark_theme, ThemeMode::Dark, DEFAULT_DARK_THEME);
-        // A NaN font size compares false everywhere, so give it the default before clamping.
-        let font_size = if self.font_size.is_nan() {
-            AppearancePreference::default().font_size
-        } else {
-            self.font_size.clamp(FONT_SIZE_RANGE.0, FONT_SIZE_RANGE.1)
+        let clamped = self.clamped();
+        // Saved fonts that are not installed keep the theme's own fonts.
+        let font = |name: &Option<String>| {
+            name.as_ref()
+                .filter(|name| installed.contains(name))
+                .map(|name| SharedString::from(name.clone()))
         };
+        let (ui_font, code_font) = (font(&self.ui_font), font(&self.code_font));
         Theme::update(cx, |theme| {
             if let Some(light) = light {
                 theme.light_theme = light;
@@ -99,7 +159,20 @@ impl AppearancePreference {
             }
         });
         Theme::change(self.mode.resolve(appearance), None, cx);
-        // Changing the mode reloads the theme file, so the font size goes in afterwards.
-        Theme::update(cx, |theme| theme.font_size = px(font_size));
+        // Changing the mode reloads the theme file, so fonts go in afterwards.
+        Theme::update(cx, |theme| {
+            theme.font_size = px(clamped.font_size);
+            theme.mono_font_size = px(clamped.code_font_size);
+            if let Some(family) = ui_font {
+                theme.font_family = family;
+            }
+            if let Some(family) = code_font {
+                theme.mono_font_family = family;
+            }
+        });
+        cx.set_global(FontWeights {
+            ui: FontWeight(f32::from(clamped.ui_font_weight)),
+            code: FontWeight(f32::from(clamped.code_font_weight)),
+        });
     }
 }

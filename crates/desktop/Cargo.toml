@@ -34,7 +34,7 @@ typed-builder = { workspace = true }
 agent-client-protocol = { workspace = true, features = ["unstable_end_turn_token_usage", "unstable_plan_operations", "unstable_protocol_v2", "unstable_session_set_title"] }
 
 # gui
-gpui-kit = { workspace = true }
+gpui-kit = { workspace = true, features = ["syntect"] }
 rust-i18n = { workspace = true }
 sys-locale = { workspace = true }
 

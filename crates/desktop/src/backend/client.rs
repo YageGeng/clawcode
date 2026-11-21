@@ -12,6 +12,10 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use protocol::{
     AcpExtensionMethod, PendingMessages, QueueId, SessionRuntimeSnapshot,
+    WorkspaceDiff, WorkspaceDiffParameters, WorkspaceDiffScope,
+    WorkspaceDirListing, WorkspaceFileContent, WorkspaceGitStatus,
+    WorkspaceListDirParameters, WorkspacePathParameters,
+    WorkspaceRootParameters,
 };
 
 use super::requests::{PendingRequests, Waiting};
@@ -364,6 +368,81 @@ impl AcpClient {
             params,
         })
         .await
+    }
+
+    /// Sends one workspace tool request and decodes its typed answer.
+    async fn workspace<P: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        method: AcpExtensionMethod,
+        params: &P,
+    ) -> Result<R, BackendError> {
+        let params = serde_json::to_value(params).map_err(|error| {
+            BackendError::Request(format!(
+                "invalid {method} parameters: {error}"
+            ))
+        })?;
+        let value = self.extension(method, params).await?;
+        serde_json::from_value(value).map_err(|error| {
+            BackendError::Request(format!("invalid {method} answer: {error}"))
+        })
+    }
+
+    /// Lists one workspace directory; `path` is root-relative, empty for the root.
+    pub async fn list_dir(
+        &self,
+        root: &Path,
+        path: &str,
+        show_hidden: bool,
+    ) -> Result<WorkspaceDirListing, BackendError> {
+        let params = WorkspaceListDirParameters {
+            root: root.to_path_buf(),
+            path: path.to_owned(),
+            show_hidden,
+        };
+        self.workspace(AcpExtensionMethod::WorkspaceListDir, &params)
+            .await
+    }
+
+    /// Reads one workspace file for preview.
+    pub async fn read_file(
+        &self,
+        root: &Path,
+        path: &str,
+    ) -> Result<WorkspaceFileContent, BackendError> {
+        let params = WorkspacePathParameters {
+            root: root.to_path_buf(),
+            path: path.to_owned(),
+        };
+        self.workspace(AcpExtensionMethod::WorkspaceReadFile, &params)
+            .await
+    }
+
+    /// Reads a workspace's Git branch and changed files.
+    pub async fn git_status(
+        &self,
+        root: &Path,
+    ) -> Result<WorkspaceGitStatus, BackendError> {
+        let params = WorkspaceRootParameters {
+            root: root.to_path_buf(),
+        };
+        self.workspace(AcpExtensionMethod::WorkspaceGitStatus, &params)
+            .await
+    }
+
+    /// Reads a diff of one workspace file, or of every changed file when `path` is `None`.
+    pub async fn git_diff(
+        &self,
+        root: &Path,
+        path: Option<&str>,
+        scope: WorkspaceDiffScope,
+    ) -> Result<WorkspaceDiff, BackendError> {
+        let params = WorkspaceDiffParameters {
+            root: root.to_path_buf(),
+            path: path.map(str::to_owned),
+            scope,
+        };
+        self.workspace(AcpExtensionMethod::WorkspaceGitDiff, &params)
+            .await
     }
 
     /// Reads the session's queued steering and follow-up messages.

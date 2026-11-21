@@ -133,7 +133,7 @@ impl Tabs {
             .enumerate()
             .filter_map(|(index, tab)| match tab {
                 TabEntry::Session(id) => Some((index, id.to_string())),
-                TabEntry::Draft { .. } | TabEntry::Settings => None,
+                TabEntry::Draft { .. } => None,
             })
             .collect();
         let active = self.active.and_then(|active| {

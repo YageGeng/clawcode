@@ -20,6 +20,16 @@ gpui_kit::actions!(
         NextTab,
         /// Shows or hides the sidebar.
         ToggleSidebar,
+        /// Shows or hides the active tab's right panel.
+        TogglePanel,
+        /// Closes the right panel sheet.
+        ClosePanel,
+        /// Shows the current workspace's files in the sidebar.
+        ShowFiles,
+        /// Shows the current workspace's Git changes in the sidebar.
+        ShowChanges,
+        /// Asks for a folder to add as a workspace.
+        AddWorkspace,
         /// Opens and focuses the sidebar search field.
         FocusSearch,
         /// Closes the sidebar search field and clears its query.
@@ -83,6 +93,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(primary!("w"), CloseTab, context),
         KeyBinding::new("ctrl-tab", NextTab, context),
         KeyBinding::new(primary!("b"), ToggleSidebar, context),
+        KeyBinding::new(primary!("j"), TogglePanel, context),
+        KeyBinding::new("escape", ClosePanel, Some("PanelSheet")),
+        KeyBinding::new(primary!("shift-e"), ShowFiles, context),
+        KeyBinding::new(primary!("shift-g"), ShowChanges, context),
+        KeyBinding::new(primary!("o"), AddWorkspace, context),
         KeyBinding::new(primary!("k"), FocusSearch, context),
         KeyBinding::new(primary!("l"), FocusComposer, context),
         // The input handles Escape first and passes it on only when it has nothing to dismiss.

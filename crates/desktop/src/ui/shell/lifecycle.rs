@@ -68,10 +68,18 @@ impl AppView {
         let resize = cx.subscribe(
             &self.sidebar_split,
             |this, split, _: &ResizablePanelEvent, cx| {
-                if let Some(width) = split.read(cx).sizes().first() {
+                let sizes = split.read(cx).sizes();
+                if let Some(width) = sizes.first() {
                     this.state.layout.sidebar_width = f32::from(*width);
-                    this.persist(cx);
                 }
+                // The third column is the panel while it shows beside the main card.
+                let panel_beside = this
+                    .panel()
+                    .is_some_and(|panel| panel.open && !panel.maximized);
+                if panel_beside && let Some(width) = sizes.get(2) {
+                    this.state.layout.panel_width = f32::from(*width);
+                }
+                this.persist(cx);
             },
         );
         self._subscriptions.extend([appearance, bounds, resize]);

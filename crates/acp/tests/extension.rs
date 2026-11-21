@@ -156,6 +156,8 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::PendingMessageRemove.as_str()
             || method == AcpExtensionMethod::UserBash.as_str()
             || method == AcpExtensionMethod::Navigate.as_str()
+            || method == AcpExtensionMethod::WorkspaceListDir.as_str()
+            || method == AcpExtensionMethod::WorkspaceReadFile.as_str()
     }
 
     /// Returns the static ACP method associated with this request.
@@ -1968,4 +1970,47 @@ async fn resume_with_replay_ends_history_with_replay_complete() {
         })
         .await
         .expect("ACP connection");
+}
+
+/// Workspace tools answer through the public connection and refuse paths outside the root.
+#[tokio::test]
+async fn workspace_methods_answer_and_reject_escapes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("a.txt"), "hi").expect("file");
+    let root = workspace.path().to_string_lossy().into_owned();
+    let data = tempfile::tempdir().expect("kernel data");
+
+    let listing = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::WorkspaceListDir.as_str(),
+            serde_json::json!({ "root": root, "path": "" }),
+        ),
+    )
+    .await
+    .expect("list");
+    assert_eq!(listing["entries"][0]["name"], "a.txt");
+
+    let error = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::WorkspaceReadFile.as_str(),
+            serde_json::json!({ "root": root, "path": "../x" }),
+        ),
+    )
+    .await
+    .expect_err("escape");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
+
+    // A whole-workspace diff takes a scope and no path; outside Git it fails as internal.
+    let error = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::WorkspaceGitDiff.as_str(),
+            serde_json::json!({ "root": root, "scope": "unstaged" }),
+        ),
+    )
+    .await
+    .expect_err("not a repository");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INTERNAL_ERROR);
 }

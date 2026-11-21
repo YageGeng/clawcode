@@ -85,6 +85,26 @@ impl WorkspaceRegistry {
         }
     }
 
+    /// Moves a workspace by `offset` places; returns `false` when it is not
+    /// listed or the move would leave the list.
+    pub fn move_entry(&mut self, path: &Path, offset: isize) -> bool {
+        let path = normalize(path);
+        let Some(from) =
+            self.entries.iter().position(|entry| entry.path == path)
+        else {
+            return false;
+        };
+        let Some(to) = from
+            .checked_add_signed(offset)
+            .filter(|to| *to < self.entries.len())
+        else {
+            return false;
+        };
+        let entry = self.entries.remove(from);
+        self.entries.insert(to, entry);
+        true
+    }
+
     /// Whether the path, after normalization, is a listed workspace.
     pub fn contains(&self, path: &Path) -> bool {
         let path = normalize(path);

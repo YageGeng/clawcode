@@ -1,8 +1,11 @@
 //! The workspace shell: chrome (title bar, sidebar) holding two inset cards, the rail and the content card.
 
 mod composer;
+mod details;
+mod file_icon;
 mod format;
 mod interactions;
+mod panel;
 mod session;
 mod settings;
 mod shell;
@@ -30,11 +33,13 @@ pub use composer::attachments::{
 };
 pub use composer::command_palette::filter_commands;
 pub use composer::{Composer, ComposerEvent};
+pub use details::{DetailsDensity, EditorCatalog};
 pub use format::{Elapsed, TokenCount, single_line};
 pub use interactions::elicitation_form::{
     ElicitationForm, FieldError, FieldKind, FieldValue, FormField, Unrenderable,
 };
 pub use interactions::questions::QuestionAnswer;
+pub use panel::{FileView, PanelOwner, PanelPresentation};
 pub use session::{
     MarkdownCache, MarkdownPart, SessionTarget, SessionView, SessionViewEvent,
 };
@@ -64,16 +69,13 @@ pub enum TabEntry {
         /// Workspace the session will run in.
         workspace: Option<PathBuf>,
     },
-    /// The singleton settings page; it has no session view and is never persisted.
-    Settings,
 }
 
 impl TabEntry {
-    /// Stable identity of the tab, independent of its position in the strip.
+    /// Stable identity used for element ids: `session:{id}` or `draft:{workspace}`.
     pub fn key(&self) -> SharedString {
         match self {
             TabEntry::Session(id) => format!("session:{id}").into(),
-            TabEntry::Settings => SharedString::new_static("settings"),
             TabEntry::Draft { workspace } => format!(
                 "draft:{}",
                 workspace
@@ -141,6 +143,20 @@ pub struct AppView {
     /// Content views of the tabs shown so far, created on first render.
     #[builder(default)]
     views: HashMap<TabEntry, Entity<SessionView>>,
+    /// The right panels' views and what showed on the last frame.
+    panels: panel::PanelHost,
+    /// The details card's editors and fold state.
+    #[builder(default)]
+    details: details::DetailsHost,
+    /// The settings dialog's state.
+    #[builder(default)]
+    settings: settings::SettingsHost,
+    /// Catppuccin icons already decoded, by name and flavor.
+    #[builder(default)]
+    file_icon_cache: file_icon::FileIconCache,
+    /// The last Git status read per workspace: the Changes list, rail count, and row branch.
+    #[builder(default)]
+    git: HashMap<PathBuf, panel::GitSnapshot>,
     search: Entity<InputState>,
     /// Search, filter, and expansion state of the session sidebar.
     #[builder(default)]
@@ -213,6 +229,7 @@ impl AppView {
             .sidebar_split(cx.new(|_| ResizableState::default()))
             .menu_bar(AppMenuBar::new(cx))
             .focus_handle(focus_handle)
+            .panels(panel::PanelHost::new(cx.focus_handle()))
             ._subscriptions(subscriptions)
             .build();
         view.refresh_missing();
@@ -316,8 +333,10 @@ impl AppView {
                                 cx.notify();
                             }
                             // Agent-set titles and fresh modification times live in the catalog.
-                            RegistryEvent::SessionChanged(_) => {
-                                this.refresh_catalog(cx)
+                            // A settled run may also have changed files in its workspace.
+                            RegistryEvent::SessionChanged(id) => {
+                                this.refresh_catalog(cx);
+                                this.refresh_session_git(id, cx);
                             }
                             RegistryEvent::Notice { title, description } => {
                                 this.show_notice(
@@ -337,6 +356,9 @@ impl AppView {
                 self.host.client = Some(client);
                 self.host.registry = Some(registry);
                 self.host._pump = Some(pump);
+                // Panel views built before the backend was ready are rebuilt with it.
+                self.reset_panel_views();
+                self.refresh_all_git(cx);
                 self.refresh_catalog(cx);
             }
             Err(error) => {
@@ -382,17 +404,20 @@ impl AppView {
         }
         let before = self.state.workspaces.entries().len();
         self.state.workspaces.merge_discovered(catalog.cwds());
+        // A folder deleted while the app runs turns its row "missing" on the next refresh.
+        self.refresh_missing();
         if self.state.workspaces.entries().len() != before {
-            self.refresh_missing();
             self.push_workspaces(cx);
         }
         self.tabs.retain(|tab| match tab {
             TabEntry::Session(id) => catalog.get(id).is_some(),
-            TabEntry::Draft { .. } | TabEntry::Settings => true,
+            TabEntry::Draft { .. } => true,
         });
         let tabs = &self.tabs;
         self.views.retain(|tab, _| tabs.position(tab).is_some());
         self.host.catalog = catalog;
+        // Deleted sessions take their panels along (M3b spec §6.1).
+        self.prune_panels(cx);
         self.attach_active(cx);
         self.persist(cx);
         cx.notify();
@@ -415,24 +440,55 @@ impl AppView {
         }
     }
 
-    /// The workspace new sessions start in: the active tab's, else the first listed one.
-    fn current_workspace(&self) -> Option<PathBuf> {
-        match self.active_entry() {
-            Some(TabEntry::Session(id)) => {
-                if let Some(summary) = self.host.catalog.get(&id) {
-                    return Some(summary.cwd.clone());
-                }
-            }
-            Some(TabEntry::Draft {
-                workspace: Some(workspace),
-            }) => return Some(workspace),
-            _ => {}
+    /// Paints file icons in the theme the settings chose for the current light or dark mode.
+    pub(in crate::ui) fn file_icon_painter(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> file_icon::FileIconPainter {
+        use gpui_kit::component::ActiveTheme as _;
+        let appearance = &self.state.appearance;
+        let theme = if cx.theme().is_dark() {
+            appearance.dark_file_icons
+        } else {
+            appearance.light_file_icons
+        };
+        file_icon::FileIconPainter::new(
+            theme,
+            std::rc::Rc::clone(&self.file_icon_cache),
+        )
+    }
+
+    /// The active tab's workspace: a draft's own, or the session's working
+    /// directory once the catalog lists it. A restored session waits for the
+    /// catalog rather than borrowing another workspace.
+    pub(in crate::ui) fn active_workspace(&self) -> Option<PathBuf> {
+        match self.active_entry()? {
+            TabEntry::Session(id) => self
+                .host
+                .catalog
+                .get(&id)
+                .map(|summary| summary.cwd.clone()),
+            TabEntry::Draft { workspace } => workspace,
         }
-        self.state
-            .workspaces
-            .entries()
-            .first()
-            .map(|entry| entry.path.clone())
+    }
+
+    /// The current workspace (spec §5.4): the active tab's, else the
+    /// sidebar's last clicked one, else the first listed one.
+    pub(in crate::ui) fn current_workspace(&self) -> Option<PathBuf> {
+        if let Some(workspace) = self.active_workspace() {
+            return Some(workspace);
+        }
+        self.sidebar
+            .selected_workspace
+            .clone()
+            .filter(|path| self.state.workspaces.contains(path))
+            .or_else(|| {
+                self.state
+                    .workspaces
+                    .entries()
+                    .first()
+                    .map(|entry| entry.path.clone())
+            })
     }
 
     /// Mirrors open tabs into the saved state and schedules saving it.
@@ -502,6 +558,9 @@ impl Render for AppView {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         self.ensure_active_view(window, cx);
+        self.ensure_panel_view(window, cx);
+        self.sync_panel_focus(window, cx);
+        self.sync_details_inset(window, cx);
         // Notices arrive without a window; the frame that has one shows them.
         for (title, description) in std::mem::take(&mut self.notices) {
             let notification = match description {
@@ -517,12 +576,18 @@ impl Render for AppView {
         div()
             .id("workspace")
             .key_context(WORKSPACE_CONTEXT)
+            // Interface text inherits the chosen weight from the root.
+            .font_weight(crate::theme::FontWeights::get(cx).ui)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_new_session))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_select_tab))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_panel))
+            .on_action(cx.listener(Self::on_show_files))
+            .on_action(cx.listener(Self::on_show_changes))
+            .on_action(cx.listener(Self::on_add_workspace))
             .on_action(cx.listener(Self::on_focus_search))
             .on_action(cx.listener(Self::on_close_search))
             .on_action(cx.listener(Self::on_focus_composer))
@@ -533,13 +598,14 @@ impl Render for AppView {
             .flex_col()
             .bg(chrome)
             .text_color(foreground)
+            // The panel sheet positions itself over the whole window.
+            .relative()
             .child(self.render_title_bar(cx))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_rail(cx))
                     // `min_w_0`: the panes must fit the window, not their content's width.
                     .child(
                         div()
@@ -549,5 +615,6 @@ impl Render for AppView {
                             .child(self.render_body(window, cx)),
                     ),
             )
+            .children(self.render_panel_sheet(window, cx))
     }
 }

@@ -11,7 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, AppContext as _, ClickEvent, Context, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _,
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px, rems,
 };
@@ -86,9 +86,6 @@ impl AppView {
             TabEntry::Draft { .. } => {
                 rust_i18n::t!("Sidebar.new_session").into_owned().into()
             }
-            TabEntry::Settings => {
-                rust_i18n::t!("Settings.title").into_owned().into()
-            }
         }
     }
 
@@ -96,19 +93,23 @@ impl AppView {
     fn tab_status(&self, tab: &TabEntry, cx: &gpui_kit::App) -> SessionStatus {
         match tab {
             TabEntry::Session(id) => self.session_status(id, cx),
-            TabEntry::Draft { .. } | TabEntry::Settings => SessionStatus::Idle,
+            TabEntry::Draft { .. } => SessionStatus::Idle,
         }
     }
 
-    /// Renders the sidebar and the card side by side, the sidebar resizable.
+    /// Renders the session card, the main card, and the right panel side by
+    /// side; the session card and the panel are resizable.
     pub(in crate::ui) fn render_body(
         &self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let layout = &self.state.layout;
+        let panel = self.render_inline_panel(window, cx);
+        let maximized = panel.is_some()
+            && self.panel().is_some_and(|panel| panel.maximized);
         // Pane widths are persisted pixels, the one place the shell sizes in `px`.
-        h_resizable("sidebar-split")
+        let mut split = h_resizable("shell-split")
             .with_state(&self.sidebar_split)
             .with_handle_appearance(quiet_resize_handle())
             .child(
@@ -119,10 +120,10 @@ impl AppView {
                             ..px(LayoutState::MAX_SIDEBAR_WIDTH),
                     )
                     .visible(layout.sidebar_open)
-                    .child(self.render_sidebar(window, cx)),
+                    .child(self.render_session_card(window, cx)),
             )
             .child(
-                resizable_panel().child(
+                resizable_panel().visible(!maximized).child(
                     div()
                         .size_full()
                         .pl_2()
@@ -130,7 +131,19 @@ impl AppView {
                         .pb_2()
                         .child(self.render_card(window, cx)),
                 ),
-            )
+            );
+        if let Some(panel) = panel {
+            // A maximized panel takes the main card's room; otherwise it keeps its width.
+            let column = if maximized {
+                resizable_panel()
+            } else {
+                resizable_panel()
+                    .size(px(self.panel_width(window)))
+                    .size_range(px(LayoutState::MIN_PANEL_WIDTH)..Pixels::MAX)
+            };
+            split = split.child(column.child(panel));
+        }
+        split
     }
 
     /// Renders the card: header strip and body.
@@ -155,7 +168,7 @@ impl AppView {
             .when(!dark, |this| this.shadow_sm())
             // No tabs, no strip: the card shows only its empty state.
             .when(!self.tabs.is_empty(), |this| {
-                this.child(self.render_card_header(cx))
+                this.child(self.render_card_header(window, cx))
             })
             .when(self.backend_stopped(), |this| {
                 this.child(self.render_stopped_banner(cx))
@@ -166,13 +179,17 @@ impl AppView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .child(self.render_card_body(window, cx)),
+                    // The details card floats over the body's top right corner.
+                    .relative()
+                    .child(self.render_card_body(window, cx))
+                    .children(self.render_inline_details(window, cx)),
             )
     }
 
     /// Tabs on the leading side; status and session actions on the trailing side.
     fn render_card_header(
         &self,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
@@ -320,6 +337,7 @@ impl AppView {
                 .child(div().w_px().h_4().bg(border))
                 .child(self.render_session_menu(cx))
             })
+            .children(self.render_header_tools(window, cx))
     }
 
     /// Status word for the card header; a running session also shows how long the run has lasted.
@@ -422,7 +440,6 @@ impl AppView {
                 .into_any_element(),
             // The view exists once `ensure_active_view` found something to show;
             // until then the session is still attaching.
-            Some(TabEntry::Settings) => self.render_settings(cx),
             Some(entry) => match self.views.get(&entry) {
                 // Cached: shell-only redraws (sidebar, search, tab strip)
                 // reuse the transcript; the view redraws when it is notified.
@@ -498,6 +515,9 @@ impl AppView {
                         Label::new(message.to_string())
                             .text_sm()
                             .font_family(theme.mono_font_family.clone())
+                            .font_weight(
+                                crate::theme::FontWeights::get(cx).code,
+                            )
                             .text_color(theme.muted_foreground),
                     )
                     .child(

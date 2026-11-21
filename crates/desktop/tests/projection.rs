@@ -953,3 +953,63 @@ fn replayed_handler_error_keeps_its_message() {
     assert_eq!(row.source, "audit");
     assert_eq!(row.message, "boom");
 }
+
+#[test]
+fn agent_mail_becomes_a_mail_row() {
+    let mut projection = SessionProjection::default();
+
+    // A spawned agent's task arrives as a visible `agent_message` extension message.
+    apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "_clawcode/event",
+            "payload": { "event": "message_end", "message": {
+                "message_id": "m1", "turn_id": "t1",
+                "timestamp_ms": "1", "started_at_ms": "1", "ended_at_ms": "1",
+                "content": { "type": "extension", "extension": {
+                    "extension_id": "clawcode", "custom_type": "agent_message",
+                    "blocks": [{ "type": "text", "text":
+                        "Message Type: new_task\nTask name: /root/task_1\nSender: /root\nPayload:\nreply with pong\nplease" }],
+                    "display": true, "include_in_context": true,
+                    "details": { "kind": "new_task", "author": "/root", "recipient": "/root/task_1" }
+                } }
+            } },
+            "_meta": { "clawcode": { "turnId": "t1", "timestampMs": "1", "sequence": 1 } }
+        }),
+    );
+
+    let key = RowKey::Mail("m1".to_string());
+    let Some(TranscriptRow::Mail(row)) = projection
+        .index_of(&key)
+        .and_then(|index| projection.row(index))
+    else {
+        panic!("mail row");
+    };
+    assert_eq!(row.author, "/root");
+    assert_eq!(row.kind, "new_task");
+    assert_eq!(row.payload, "reply with pong\nplease");
+    assert_eq!(key.to_string(), "mail:m1");
+}
+
+#[test]
+fn hidden_extension_messages_stay_out_of_the_transcript() {
+    let mut projection = SessionProjection::default();
+    apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "_clawcode/event",
+            "payload": { "event": "message_end", "message": {
+                "message_id": "m2", "turn_id": "t1",
+                "timestamp_ms": "1", "started_at_ms": "1", "ended_at_ms": "1",
+                "content": { "type": "extension", "extension": {
+                    "extension_id": "clawcode", "custom_type": "agent_message",
+                    "blocks": [{ "type": "text", "text": "Payload:\nsecret" }],
+                    "display": false, "include_in_context": true,
+                    "details": { "kind": "message", "author": "/root", "recipient": "/root/a" }
+                } }
+            } },
+            "_meta": { "clawcode": { "turnId": "t1", "timestampMs": "1", "sequence": 1 } }
+        }),
+    );
+    assert_eq!(projection.len(), 0);
+}

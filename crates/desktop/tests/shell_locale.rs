@@ -29,7 +29,10 @@ fn language_switch_relabels_the_shell(cx: &mut TestAppContext) {
 fn language_setting_switches_the_ui(cx: &mut TestAppContext) {
     let _locale = LOCALE.lock().unwrap_or_else(|poison| poison.into_inner());
     let (handle, view, _dir) = open(cx, with_workspaces(&["/w/a"]));
-    view.update(cx, |view, cx| view.open_settings(cx));
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |view, cx| view.open_settings(window, cx))
+    })
+    .expect("window");
 
     view.update(cx, |view, cx| {
         view.set_language(LanguagePreference::ZhCn, cx)

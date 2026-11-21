@@ -431,9 +431,20 @@ impl SessionView {
                     )),
             )
             .child(self.render_controls_left(cx))
-            .child(div().flex_1())
-            .children(self.render_controls_right(cx))
-            .child(button)
+            // The right controls take the room left and clip in a narrow
+            // composer (a session in the right panel); the send button stays.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .overflow_hidden()
+                    .children(self.render_controls_right(cx)),
+            )
+            .child(div().flex_none().child(button))
     }
 
     /// Chips of the queued messages, follow-ups first; `None` when nothing is queued.

@@ -673,24 +673,49 @@ fn clicking_a_workspace_row_toggles_its_sessions(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn rail_is_an_inset_card_aligned_with_the_content_card(
-    cx: &mut TestAppContext,
-) {
-    let (handle, _view, _dir) = open(cx, with_workspaces(&["/w/a"]));
+fn recent_rows_show_age_not_workspace(cx: &mut TestAppContext) {
+    let (_handle, view, _dir) = open(cx, with_workspaces(&["/w/alpha"]));
+    view.update(cx, |view, cx| {
+        view.replace_catalog(
+            [session("a1", "/w/alpha", Some("task"), 100)]
+                .into_iter()
+                .collect(),
+            cx,
+        )
+    });
 
-    cx.update_window(handle, |_, window, cx| {
-        window.render_frame(cx);
-        let rail = window.find("rail").bounds();
-        let card = window.find("content-card").bounds();
-        let gap = gpui_kit::px(8.);
-        assert_eq!(rail.left(), gap, "spacing sm from the window's left edge");
-        assert_eq!(
-            window.viewport_size().height - rail.bottom(),
-            gap,
-            "spacing sm from the window's bottom edge"
+    let model = model(cx, &view);
+    let recent = &model.groups[1];
+    assert_eq!(recent.kind, GroupKind::Recent);
+    assert!(recent.rows.iter().all(|row| matches!(
+        row,
+        SidebarRow::Session(SessionRow { trailing, .. }) if trailing.as_ref() != "alpha"
+    )));
+}
+
+#[gpui_kit::test]
+fn an_open_subagent_highlights_its_parent(cx: &mut TestAppContext) {
+    let (_handle, view, _dir) = open(cx, with_workspaces(&["/w/a"]));
+    let mut child = session("c1", "/w/a", Some("child agent"), 200);
+    child.parent_session_id = Some(id("p1"));
+    view.update(cx, |view, cx| {
+        view.replace_catalog(
+            [session("p1", "/w/a", Some("parent"), 100), child]
+                .into_iter()
+                .collect(),
+            cx,
         );
-        assert_eq!(rail.top(), card.top(), "tops line up");
-        assert_eq!(rail.bottom(), card.bottom(), "bottoms line up");
-    })
-    .expect("window");
+        view.open_session(&id("c1"), cx);
+    });
+
+    let model = model(cx, &view);
+    let SidebarRow::Workspace(WorkspaceRow { children, .. }) =
+        &model.groups[0].rows[0]
+    else {
+        panic!("workspace row");
+    };
+    assert!(children.iter().any(|row| matches!(
+        row,
+        SidebarRow::Session(SessionRow { id: row_id, active: true, .. }) if *row_id == id("p1")
+    )));
 }

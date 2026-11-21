@@ -82,6 +82,26 @@ pub fn painted(
         .collect()
 }
 
+/// Visible text painted inside the element with id `id`, left to right.
+pub fn row_texts(window: &Window, id: &str) -> Vec<String> {
+    let mut texts: Vec<_> = painted(window)
+        .into_iter()
+        .filter(|text| {
+            text.path().iter().any(|element| {
+                matches!(element, gpui_kit::ElementId::Name(name) if name.as_ref() == id)
+            })
+        })
+        .collect();
+    texts.sort_by(|a, b| {
+        f32::from(a.bounds().origin.x)
+            .total_cmp(&f32::from(b.bounds().origin.x))
+    });
+    texts
+        .into_iter()
+        .map(|text| text.text().to_owned())
+        .collect()
+}
+
 /// Whether some visible text reads exactly `text`.
 pub fn shows(window: &Window, text: &str) -> bool {
     painted(window).iter().any(|painted| painted.text() == text)
@@ -158,7 +178,46 @@ pub fn live(cx: &mut TestAppContext, state: DesktopState) -> Live {
         .build()
 }
 
+/// Runs one git command in `dir` with a fixed identity, failing the test if it fails.
+pub fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A live shell whose fixture workspace is a Git repository on `main` with
+/// one commit holding `a.rs` (`x`) and `notes.txt` (`alpha`).
+pub fn live_in_git_repo(cx: &mut TestAppContext) -> Live {
+    let live = live(cx, DesktopState::default());
+    let dir = live.backend.workspace.path();
+    std::fs::write(dir.join("a.rs"), "x\n").expect("a.rs");
+    std::fs::write(dir.join("notes.txt"), "alpha\n").expect("notes.txt");
+    git(dir, &["init", "-q"]);
+    git(dir, &["add", "a.rs", "notes.txt"]);
+    git(dir, &["commit", "-q", "-m", "first"]);
+    live
+}
+
 impl Live {
+    /// Registers `path` as a workspace and makes it the sidebar's current one.
+    pub fn add_workspace(&self, cx: &mut TestAppContext, path: &Path) {
+        self.view
+            .update(cx, |view, cx| view.register_workspace(path, cx));
+    }
+
     /// Creates a session in the fixture workspace, opens its tab, and waits until it is attached.
     pub fn open_new_session(&self, cx: &mut TestAppContext) -> SessionId {
         let id = self.backend.new_session();

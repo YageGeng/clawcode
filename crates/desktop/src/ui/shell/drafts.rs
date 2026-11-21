@@ -177,6 +177,12 @@ impl AppView {
         }
         if let Some(old) = &old {
             self.views.remove(old);
+            // The draft's panel stays with the session it became (M3b spec §6.1).
+            if let (Some(from), Some(to)) =
+                (old.panel_owner(), entry.panel_owner())
+            {
+                self.move_panel(&from, &to);
+            }
         }
         self.views.insert(entry, view.clone());
         view.update(cx, |view, cx| {

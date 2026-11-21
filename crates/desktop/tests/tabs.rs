@@ -83,10 +83,7 @@ fn replace_rekeys_a_draft_in_place() {
 #[test]
 fn persisted_lists_only_session_tabs() {
     let draft = TabEntry::Draft { workspace: None };
-    let tabs = tabs(
-        &[draft, session("a"), TabEntry::Settings, session("b")],
-        Some(3),
-    );
+    let tabs = tabs(&[draft, session("a"), session("b")], Some(2));
 
     let persisted: TabsState = tabs.persisted();
 

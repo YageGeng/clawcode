@@ -28,8 +28,9 @@ pub use meta::{
     AssistantMeta, CommandKind, CommandMeta, CommandStatus, ProductMeta,
 };
 pub use rows::{
-    CompactionReason, CompactionRow, ErrorRow, ImageBlock, MessageOrigin,
-    MessageRow, Role, RowKey, ToolCategory, ToolRow, ToolStatus, TranscriptRow,
+    CompactionReason, CompactionRow, ErrorRow, ImageBlock, MailRow,
+    MessageOrigin, MessageRow, Role, RowKey, ToolCategory, ToolRow, ToolStatus,
+    TranscriptRow,
 };
 
 /// Whether the session's foreground work is active.
@@ -462,6 +463,20 @@ impl SessionProjection {
                 else {
                     return;
                 };
+                // Mail between agents shows as its own row (spec §7.2).
+                if extension.custom_type == protocol::AGENT_MESSAGE_TYPE {
+                    if extension.display {
+                        self.insert_mail(
+                            MailRow::from_extension(
+                                message.identity.message_id.to_string(),
+                                extension,
+                            ),
+                            &event.meta,
+                            change,
+                        );
+                    }
+                    return;
+                }
                 let kind = extension
                     .details
                     .as_ref()
@@ -494,6 +509,18 @@ impl SessionProjection {
                 );
             }
             _ => {}
+        }
+    }
+
+    /// Adds a mail row once; a replayed duplicate is ignored.
+    fn insert_mail(
+        &mut self,
+        row: MailRow,
+        meta: &ProductMeta,
+        change: &mut ProjectionChange,
+    ) {
+        if !self.index.contains_key(&RowKey::Mail(row.id.clone())) {
+            self.insert(TranscriptRow::Mail(row), meta, change);
         }
     }
 

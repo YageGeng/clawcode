@@ -27,17 +27,22 @@ impl AppView {
         self.activate(index, cx);
     }
 
-    /// Closes a tab; a session tab releases its session, which closes it once idle.
+    /// Closes a tab; a session tab releases its session, which closes it
+    /// once idle, unless a panel still shows it. The tab's panel views go
+    /// too (their saved state stays), releasing the subagents they showed.
     pub fn close_tab(&mut self, index: usize, cx: &mut Context<'_, Self>) {
         let Some(closed) = self.tabs.close(index) else {
             return;
         };
         self.views.remove(&closed);
-        if let (TabEntry::Session(id), Some(registry)) =
-            (&closed, &self.host.registry)
-        {
-            registry.update(cx, |registry, cx| registry.release(id, cx));
+        let mut released = closed
+            .panel_owner()
+            .map(|owner| self.drop_panel_views(&owner))
+            .unwrap_or_default();
+        if let TabEntry::Session(id) = &closed {
+            released.push(id.clone());
         }
+        self.release_unshown(released, cx);
         if let Some(active) = self.tabs.active() {
             self.tab_scroll.scroll_to_item(active);
         }
@@ -95,7 +100,7 @@ impl AppView {
     }
 
     /// The active tab entry.
-    pub(in crate::ui) fn active_entry(&self) -> Option<TabEntry> {
+    pub fn active_entry(&self) -> Option<TabEntry> {
         self.tabs.active_entry().cloned()
     }
 
@@ -127,8 +132,6 @@ impl AppView {
             TabEntry::Draft { workspace } => SessionTarget::Draft {
                 workspace: workspace.clone(),
             },
-            // The settings page renders straight from the shell state.
-            TabEntry::Settings => return,
             TabEntry::Session(id) => match self.session_handle(id, cx) {
                 Some(handle) => SessionTarget::Session(handle),
                 // Not attached yet: the card shows its loading state.

@@ -14,7 +14,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, ClickEvent, Context, Hsla, IntoElement, ParentElement as _,
-    Styled as _, Window, prelude::FluentBuilder as _, rems,
+    Styled as _, Window, div, prelude::FluentBuilder as _, rems,
 };
 
 use crate::backend::BackendError;
@@ -273,7 +273,16 @@ impl SessionView {
             .ghost()
             .small()
             .h(rems(CHIP_HEIGHT))
-            .child(Label::new(label).text_xs().text_color(tone))
+            // In a narrow composer (a session in the right panel) the chip
+            // shrinks and cuts its label instead of spilling out of the card.
+            .min_w_0()
+            .flex_shrink(1.)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(Label::new(label).text_xs().text_color(tone)),
+            )
             .child(Icon::new(IconName::ChevronDown).xsmall().text_color(tone))
             .disabled(disabled)
             .dropdown_menu(move |menu, _, _| {

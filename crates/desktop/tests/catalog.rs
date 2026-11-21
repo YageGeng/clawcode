@@ -51,7 +51,11 @@ fn summary_reads_product_meta() {
         "s1",
         "/w/a/",
         Some("Refactor"),
-        serde_json::json!({ "createdAtMs": "10", "modifiedAtMs": "20", "parentSessionId": "p" }),
+        serde_json::json!({
+            "createdAtMs": "10",
+            "modifiedAtMs": "20",
+            "ownership": { "sessionId": "p", "name": "task_1", "nickname": "Chandrasekhar" }
+        }),
     );
 
     let summary = SessionSummary::from(&listed);
@@ -61,10 +65,26 @@ fn summary_reads_product_meta() {
     assert_eq!(summary.title.as_deref(), Some("Refactor"));
     assert_eq!(summary.created_at_ms, Some(10));
     assert_eq!(summary.modified_at_ms, Some(20));
+    // A spawned agent is owned by the session that spawned it.
     assert_eq!(
         summary.parent_session_id.map(|id| id.to_string()),
         Some("p".to_string())
     );
+}
+
+#[test]
+fn forks_are_user_sessions_not_subagents() {
+    // `parentSessionId` records where a fork came from; the fork itself is the user's session.
+    let fork = info(
+        "f1",
+        "/w/a",
+        Some("Fork"),
+        serde_json::json!({ "parentSessionId": "p" }),
+    );
+    let summary = SessionSummary::from(&fork);
+    assert_eq!(summary.parent_session_id, None);
+    let catalog: SessionCatalog = [summary].into_iter().collect();
+    assert_eq!(ids(catalog.recent(10, SessionSort::Modified)), ["f1"]);
 }
 
 #[test]
@@ -228,4 +248,49 @@ fn now_ms_reads_the_wall_clock() {
         .as_millis();
     let now = u128::from(desktop::now_ms());
     assert!(now.abs_diff(expected) < 60_000, "{now} vs {expected}");
+}
+
+#[test]
+fn children_and_listed_ancestor() {
+    let session_id = |id: &str| wire::SessionId::from(id.to_string());
+    let child = |id: &str, parent: &str, modified: u64| {
+        let mut summary = summary(id, "/w", id, Some(modified));
+        summary.parent_session_id = Some(session_id(parent));
+        summary
+    };
+    let mut catalog: SessionCatalog = [
+        summary("a", "/w", "a", Some(1)),
+        child("b", "a", 5),
+        child("b2", "a", 9),
+        child("c", "b", 2),
+        child("orphan", "gone", 3),
+        child("x", "y", 4),
+        child("y", "x", 4),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(ids(catalog.children(&session_id("a"))), ["b2", "b"]);
+    assert_eq!(
+        catalog.listed_ancestor(&session_id("c")),
+        Some(session_id("a"))
+    );
+    assert_eq!(
+        catalog.listed_ancestor(&session_id("a")),
+        Some(session_id("a"))
+    );
+    assert_eq!(catalog.listed_ancestor(&session_id("orphan")), None);
+    // A cycle ends without an ancestor instead of looping forever.
+    assert_eq!(catalog.listed_ancestor(&session_id("x")), None);
+    catalog.remove(&session_id("a"));
+    assert_eq!(catalog.listed_ancestor(&session_id("c")), None);
+}
+
+#[test]
+fn a_session_changed_since_a_run_started() {
+    let session = summary("c", "/w", "c", Some(500));
+    assert!(session.changed_since(Some(400)));
+    assert!(session.changed_since(Some(500)));
+    assert!(!session.changed_since(Some(600)));
+    assert!(!session.changed_since(None));
+    assert!(!summary("d", "/w", "d", None).changed_since(Some(1)));
 }

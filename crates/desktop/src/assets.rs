@@ -23,7 +23,23 @@ gpui_kit::assets::icon_assets!(
         SquareSlash,
         ClipboardList,
         Paperclip,
-        Circle
+        Circle,
+        GitCompare,
+        Eye,
+        EyeOff,
+        RefreshCw,
+        FolderTree,
+        PanelRight,
+        PanelRightClose,
+        Maximize2,
+        Minimize2,
+        Info,
+        Gauge,
+        ChartColumn,
+        SquareArrowOutUpRight,
+        CornerLeftUp,
+        FileDiff,
+        Bot
     ]
 );
 

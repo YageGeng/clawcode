@@ -8,6 +8,7 @@ pub mod app;
 pub mod assets;
 pub mod backend;
 pub mod catalog;
+pub mod file;
 pub mod i18n;
 pub mod projection;
 pub mod session;

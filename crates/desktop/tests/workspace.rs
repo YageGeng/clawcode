@@ -88,3 +88,29 @@ fn display_name_is_the_folder_or_the_whole_root() {
     );
     assert_eq!(desktop::workspace::display_name(Path::new("/")), "/");
 }
+
+#[test]
+fn workspaces_move_up_and_down_within_bounds() {
+    let mut registry = WorkspaceRegistry::default();
+    for path in ["/a", "/b", "/c"] {
+        registry.add(Path::new(path));
+    }
+
+    assert!(registry.move_entry(Path::new("/c"), -1));
+    assert!(!registry.move_entry(Path::new("/a"), -1));
+    assert!(!registry.move_entry(Path::new("/b"), 1));
+    assert!(!registry.move_entry(Path::new("/missing"), 1));
+    let order: Vec<PathBuf> = registry
+        .entries()
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    assert_eq!(
+        order,
+        [
+            PathBuf::from("/a"),
+            PathBuf::from("/c"),
+            PathBuf::from("/b")
+        ]
+    );
+}

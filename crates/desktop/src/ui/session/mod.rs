@@ -180,11 +180,38 @@ pub struct SessionView {
     /// Redraws when a diff finishes its background highlighting, one per entry of `diffs`.
     #[builder(default)]
     _diff_changes: HashMap<wire::ToolCallId, Subscription>,
+    /// Space kept free at the right edge for the details card.
+    #[builder(default)]
+    right_inset: gpui_kit::Pixels,
 }
 
 impl EventEmitter<SessionViewEvent> for SessionView {}
 
 impl SessionView {
+    /// Keeps `inset` free at the right edge, so the centered transcript leaves room for the details card.
+    pub fn set_right_inset(
+        &mut self,
+        inset: gpui_kit::Pixels,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.right_inset != inset {
+            self.right_inset = inset;
+            cx.notify();
+        }
+    }
+
+    /// The usage of the last finished run shown in this transcript.
+    pub fn last_run_usage(&self) -> Option<crate::transcript::RunUsage> {
+        (0..self.layout.len())
+            .rev()
+            .find_map(|ix| match self.layout.row(ix) {
+                Some(crate::transcript::LayoutRow::Usage { usage, .. }) => {
+                    Some(usage.clone())
+                }
+                _ => None,
+            })
+    }
+
     /// Creates the view and shows `target`; `client` sends its messages.
     pub fn new(
         target: SessionTarget,
@@ -528,7 +555,9 @@ impl SessionView {
                     }
                     // Compaction summaries and error rows render plain text in M2 Task 5.
                     Some(
-                        TranscriptRow::Compaction(_) | TranscriptRow::Error(_),
+                        TranscriptRow::Compaction(_)
+                        | TranscriptRow::Error(_)
+                        | TranscriptRow::Mail(_),
                     )
                     | None => {}
                 }
@@ -622,6 +651,8 @@ impl Render for SessionView {
             .size_full()
             .flex()
             .flex_col()
+            // Room for the details card floating at the card's right (M3b spec §5.1).
+            .pr(self.right_inset)
             .child(body)
             .child(self.render_composer(cx))
     }

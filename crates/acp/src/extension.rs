@@ -11,12 +11,15 @@ use protocol::{
     AcpExtensionMethod, AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
     AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
-    McpSessionRevisionNotification, ProductIdentity,
+    McpSessionRevisionNotification, ProductIdentity, WorkspaceDiffParameters,
+    WorkspaceListDirParameters, WorkspacePathParameters,
+    WorkspaceRootParameters,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::projection::ProjectionRegistry;
 use crate::server::{AcpServer, ProjectionWatch};
+use crate::workspace::WorkspaceRoot;
 
 /// Converts any parameter decoding failure into the ACP invalid-parameters category.
 fn invalid_parameters(
@@ -525,6 +528,57 @@ impl AcpExtensionDispatcher {
                     .await
                     .map_err(crate::server::KernelFailure)?;
                 serde_json::json!({ "terminated": terminated })
+            }
+            AcpExtensionMethod::WorkspaceListDir => {
+                let input: WorkspaceListDirParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                // Directory walks block, so they run off the async workers.
+                let listing = tokio::task::spawn_blocking(move || {
+                    WorkspaceRoot::try_from(input.root.as_path())?
+                        .list_dir(&input.path, input.show_hidden)
+                })
+                .await
+                .map_err(agent_client_protocol::Error::into_internal_error)??;
+                serde_json::to_value(listing).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::WorkspaceReadFile => {
+                let input: WorkspacePathParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let content = tokio::task::spawn_blocking(move || {
+                    WorkspaceRoot::try_from(input.root.as_path())?
+                        .read_file(&input.path)
+                })
+                .await
+                .map_err(agent_client_protocol::Error::into_internal_error)??;
+                serde_json::to_value(content).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::WorkspaceGitStatus => {
+                let input: WorkspaceRootParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let status = WorkspaceRoot::try_from(input.root.as_path())?
+                    .git_status()
+                    .await;
+                serde_json::to_value(status).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::WorkspaceGitDiff => {
+                let input: WorkspaceDiffParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let diff = WorkspaceRoot::try_from(input.root.as_path())?
+                    .git_diff(input.path.as_deref(), input.scope)
+                    .await?;
+                serde_json::to_value(diff).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
             }
         };
         Ok(AcpExtensionResponse(result))

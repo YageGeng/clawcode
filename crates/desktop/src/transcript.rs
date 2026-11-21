@@ -148,6 +148,8 @@ impl<'a> LayoutBuilder<'a> {
                     message.role == Role::User
                         && message.origin == MessageOrigin::Prompt
                 }
+                // A task sent to a spawned agent starts its run like a prompt.
+                TranscriptRow::Mail(mail) => mail.kind == "new_task",
                 TranscriptRow::Tool(_)
                 | TranscriptRow::Compaction(_)
                 | TranscriptRow::Error(_) => false,
@@ -167,7 +169,9 @@ impl<'a> LayoutBuilder<'a> {
         match segment.first()?.1 {
             TranscriptRow::Message(message) => message.timestamp_ms,
             TranscriptRow::Tool(tool) => tool.timestamp_ms,
-            TranscriptRow::Compaction(_) | TranscriptRow::Error(_) => None,
+            TranscriptRow::Compaction(_)
+            | TranscriptRow::Error(_)
+            | TranscriptRow::Mail(_) => None,
         }
     }
 
@@ -181,7 +185,9 @@ impl<'a> LayoutBuilder<'a> {
                     .timestamp_ms
                     .map(|ts| ts + message.duration_ms.unwrap_or(0)),
                 TranscriptRow::Tool(tool) => tool.timestamp_ms,
-                TranscriptRow::Compaction(_) | TranscriptRow::Error(_) => None,
+                TranscriptRow::Compaction(_)
+                | TranscriptRow::Error(_)
+                | TranscriptRow::Mail(_) => None,
             })
             .max()?;
         Some(end.saturating_sub(start))

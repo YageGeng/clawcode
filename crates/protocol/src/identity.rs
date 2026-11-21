@@ -176,6 +176,14 @@ pub enum AcpExtensionMethod {
     ExecTerminate,
     /// Terminates every background terminal of a Session.
     ExecClean,
+    /// Lists one directory of a workspace.
+    WorkspaceListDir,
+    /// Reads one workspace file for preview.
+    WorkspaceReadFile,
+    /// Reads a workspace's Git branch and changed files.
+    WorkspaceGitStatus,
+    /// Reads one workspace file's diff against the last commit.
+    WorkspaceGitDiff,
 }
 
 impl fmt::Display for AcpExtensionMethod {
@@ -218,6 +226,10 @@ impl AcpExtensionMethod {
             Self::ExecList => "_clawcode/session/exec/list",
             Self::ExecTerminate => "_clawcode/session/exec/terminate",
             Self::ExecClean => "_clawcode/session/exec/clean",
+            Self::WorkspaceListDir => "_clawcode/workspace/list_dir",
+            Self::WorkspaceReadFile => "_clawcode/workspace/read_file",
+            Self::WorkspaceGitStatus => "_clawcode/workspace/git_status",
+            Self::WorkspaceGitDiff => "_clawcode/workspace/git_diff",
         }
     }
 
@@ -235,7 +247,11 @@ impl AcpExtensionMethod {
             | Self::McpPromptGet
             | Self::McpResourceRead
             | Self::McpComplete
-            | Self::ExecList => true,
+            | Self::ExecList
+            | Self::WorkspaceListDir
+            | Self::WorkspaceReadFile
+            | Self::WorkspaceGitStatus
+            | Self::WorkspaceGitDiff => true,
             Self::Navigate
             | Self::Branch
             | Self::Fork
@@ -281,6 +297,10 @@ impl AcpExtensionMethod {
             Self::ExecList,
             Self::ExecTerminate,
             Self::ExecClean,
+            Self::WorkspaceListDir,
+            Self::WorkspaceReadFile,
+            Self::WorkspaceGitStatus,
+            Self::WorkspaceGitDiff,
         ]
         .into_iter()
         .find(|candidate| candidate.as_str() == method)

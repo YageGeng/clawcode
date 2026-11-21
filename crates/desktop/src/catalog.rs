@@ -26,7 +26,7 @@ pub struct SessionSummary {
     /// Last change in Unix milliseconds; drives every ordering.
     #[builder(default)]
     pub modified_at_ms: Option<u64>,
-    /// Parent session for child agents; children are hidden from the lists.
+    /// The session that spawned this agent; spawned agents are hidden from the lists.
     #[builder(default)]
     pub parent_session_id: Option<SessionId>,
 }
@@ -57,9 +57,12 @@ impl From<&wire::SessionInfo> for SessionSummary {
             )
             .created_at_ms(millis("createdAtMs"))
             .modified_at_ms(millis("modifiedAtMs"))
+            // A spawned agent names its owner in `ownership`; `parentSessionId`
+            // only records where a fork came from, and forks are the user's own sessions.
             .parent_session_id(
                 product
-                    .and_then(|product| product.get("parentSessionId"))
+                    .and_then(|product| product.get("ownership"))
+                    .and_then(|ownership| ownership.get("sessionId"))
                     .and_then(serde_json::Value::as_str)
                     .map(|id| SessionId::from(id.to_string())),
             )
@@ -68,6 +71,15 @@ impl From<&wire::SessionInfo> for SessionSummary {
 }
 
 impl SessionSummary {
+    /// Whether the session changed at or after `started_ms`, the start of
+    /// its parent's current run; `false` when either time is unknown.
+    pub fn changed_since(&self, started_ms: Option<u64>) -> bool {
+        matches!(
+            (self.modified_at_ms, started_ms),
+            (Some(modified), Some(started)) if modified >= started
+        )
+    }
+
     /// Whether this is a user-facing session rather than a child agent.
     fn is_top_level(&self) -> bool {
         self.parent_session_id.is_none()
@@ -182,6 +194,35 @@ impl SessionCatalog {
             }
         }
         cwds
+    }
+
+    /// Child agents of `parent`, newest first.
+    pub fn children(&self, parent: &SessionId) -> Vec<&SessionSummary> {
+        let mut children: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.parent_session_id.as_ref() == Some(parent)
+            })
+            .collect();
+        children.sort_by(|left, right| {
+            left.ordered_by(right, SessionSort::Modified)
+        });
+        children
+    }
+
+    /// The nearest top-level session up `id`'s parent chain (itself when it
+    /// is top-level); `None` when a parent is missing or the chain loops.
+    pub fn listed_ancestor(&self, id: &SessionId) -> Option<SessionId> {
+        let mut current = self.get(id)?;
+        // A chain longer than the catalog must revisit a session: a cycle.
+        for _ in 0..=self.sessions.len() {
+            match &current.parent_session_id {
+                None => return Some(current.session_id.clone()),
+                Some(parent) => current = self.get(parent)?,
+            }
+        }
+        None
     }
 
     /// Looks one session up by id.

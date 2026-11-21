@@ -25,8 +25,8 @@ use gpui_kit::{
 use super::{MarkdownPart, SessionView};
 use crate::projection::{
     CommandKind, CommandMeta, CommandStatus, CompactionReason, CompactionRow,
-    ErrorRow, MessageOrigin, MessageRow, Role, RowKey, ToolCategory, ToolRow,
-    ToolStatus, TranscriptRow,
+    ErrorRow, MailRow, MessageOrigin, MessageRow, Role, RowKey, ToolCategory,
+    ToolRow, ToolStatus, TranscriptRow,
 };
 use crate::transcript::{GroupPosition, LayoutRow, RunSummary, RunUsage};
 use crate::ui::format::{Elapsed, TokenCount, single_line};
@@ -110,6 +110,9 @@ impl SessionView {
                     }
                     Some(TranscriptRow::Error(row)) => {
                         (Self::render_error(row, cx), false)
+                    }
+                    Some(TranscriptRow::Mail(row)) => {
+                        (Self::render_mail(row, cx), false)
                     }
                     None => return div().into_any_element(),
                 }
@@ -272,6 +275,9 @@ impl SessionView {
                             .flex_1()
                             .truncate()
                             .font_family(theme.mono_font_family.clone())
+                            .font_weight(
+                                crate::theme::FontWeights::get(cx).code,
+                            )
                             .text_xs(),
                     )
                     .on_click(cx.listener(
@@ -288,6 +294,7 @@ impl SessionView {
                         .px_3()
                         .py_2()
                         .font_family(theme.mono_font_family.clone())
+                        .font_weight(crate::theme::FontWeights::get(cx).code)
                         .text_xs(),
                 )
             })
@@ -439,6 +446,7 @@ impl SessionView {
                     .flex_1()
                     .truncate()
                     .font_family(theme.mono_font_family.clone())
+                    .font_weight(crate::theme::FontWeights::get(cx).code)
                     .text_xs(),
             )
             .child(self.render_tool_status(tool, cx))
@@ -563,6 +571,7 @@ impl SessionView {
                 .px_3()
                 .py_2()
                 .font_family(theme.mono_font_family.clone())
+                .font_weight(crate::theme::FontWeights::get(cx).code)
                 .text_xs()
         };
         // One element per line, so long output never shapes as one huge text run.
@@ -894,8 +903,9 @@ impl SessionView {
                             .child(
                                 Label::new(prefix.clone())
                                     .text_sm()
-                                    .font_family(
-                                        theme.mono_font_family.clone(),
+                                    .font_family(theme.mono_font_family.clone())
+                                    .font_weight(
+                                        crate::theme::FontWeights::get(cx).code,
                                     ),
                             )
                             .child(
@@ -950,6 +960,37 @@ impl SessionView {
         Label::new(usage.label(name.as_deref()))
             .text_xs()
             .text_color(muted)
+            .into_any_element()
+    }
+
+    /// A message between agents: a compact card with the sender and what it sent.
+    fn render_mail(row: &MailRow, cx: &Context<'_, Self>) -> AnyElement {
+        let theme = cx.theme();
+        let kind = match row.kind.as_str() {
+            "new_task" => rust_i18n::t!("Transcript.mail_task"),
+            "result" => rust_i18n::t!("Transcript.mail_result"),
+            _ => rust_i18n::t!("Transcript.mail_message"),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::Bot).small())
+                    .child(Label::new(row.author.clone()).text_xs())
+                    .child(Label::new(kind.into_owned()).text_xs()),
+            )
+            .child(Label::new(row.payload.clone()).text_sm())
             .into_any_element()
     }
 

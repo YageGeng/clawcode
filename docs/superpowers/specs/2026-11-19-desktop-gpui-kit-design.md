@@ -114,6 +114,8 @@ GPUI 主线程（全部 UI 实体）
 
 ### 5.1 区域
 
+> 已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代。
+
 ```
 ┌ 标题栏：[◧] 文件 编辑 视图 帮助            clawcode              – ▢ ✕ ┐
 │┌──┐ 侧栏（chrome）  ┌ 主卡片 ───────────────────────┐ ┌ inspector ─┐│
@@ -146,6 +148,8 @@ GPUI 主线程（全部 UI 实体）
 
 ### 5.3 轨道
 
+> 已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代。
+
 从上到下依次是：**会话**（`messages-square`）· **文件**（`folder`）· **变更**（`git-branch`，有变更时右上角显示数量徽标）· 分隔线 · **Skills**（`sparkles`）· **MCP**（`plug`）· 弹性空白 · **账户与登录**（`circle-user`）· **设置**（`settings-2`）。
 
 轨道是一张单独的窄卡片，表面规则和主卡片相同（见 6.1 第 2 层）：距窗口左边和下边各 8px（spacing `sm`），上边和下边与主卡片对齐；侧栏仍在 chrome 底面上，夹在轨道卡片和主卡片之间。轨道按钮用 `Button::ghost()`（medium），设置固定在卡片底部。
@@ -153,6 +157,8 @@ GPUI 主线程（全部 UI 实体）
 轨道决定侧栏显示什么内容；当前选中的那一项用选中底色标出。设置会打开单例的「设置」Tab，不切换侧栏。还没交付的里程碑对应的轨道项不显示：文件和变更从 M3 起出现，Skills、MCP、账户与登录从 M4 起出现。不放点了没反应的入口。
 
 ### 5.4 侧栏的各种模式
+
+> 已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代。
 
 - **会话**：
   - 标题行是「会话」加两个按钮（筛选、搜索 Ctrl+K），下面是「新会话」行（Ctrl+N）。
@@ -169,12 +175,16 @@ GPUI 主线程（全部 UI 实体）
 
 ### 5.5 主卡片和 Tab
 
+> 部分已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代（见该文档第 12 节）。
+
 - 卡片顶栏（42px）左侧是 Tab 条，可以横向滚动和拖拽排序。Tab 有三类：**会话**、**diff**、**文件预览**，外加单例的**设置**。
 - 顶栏右侧依次是：运行状态（转圈图标加「运行中 · 1 分 12 秒」，或「等待回答」，或「空闲」）、竖分隔线、`⋯` 会话菜单（重命名… / 关闭 / 删除…）、inspector 开关。
 - 关闭一个正在运行的会话 Tab 不会取消运行，只是从 Tab 条移除；侧栏里的状态图标继续显示（attach 规则见 4.5）。退出应用前如果还有运行中的会话，弹 `AlertDialog`：「有 2 个会话正在运行，退出会停止它们」，按钮为「取消」和「退出」。
 - 新会话 Tab 的空状态：卡片中间是「在 **clawcode** 里要做什么？」；composer 上方是工作区选择条（文件夹 chip、路径、分支），可以改成其他工作区。发出第一条消息时才真正创建后端会话。
 
 ### 5.6 Inspector 卡片
+
+> 已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代。
 
 顶部是分段控件「会话树 · Agents · 上下文」，跟随当前会话 Tab。
 
@@ -186,6 +196,8 @@ GPUI 主线程（全部 UI 实体）
 
 ### 6.1 三层表面
 
+> 已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代。
+
 1. **chrome 底面**：标题栏、侧栏，统一用 `title_bar` / `sidebar` token，内部不画分隔线。
 2. **内容卡片**：轨道卡片、主卡片和 inspector。`background` 加 1px `border`、`radius_lg`。浅色主题加一层极淡的阴影，深色主题只靠描边。卡片之间、卡片到窗口右边和下边都留 8px（spacing `sm`）。卡片的左边缘和侧栏之间也是同一个间距。轨道卡片到窗口左边同样留 8px，上下边和主卡片对齐。
 3. **弹出层**：菜单、`Select`、命令面板、`Popover`、`Dialog`，统一用 `popover` token，阴影最强。
@@ -193,6 +205,8 @@ GPUI 主线程（全部 UI 实体）
 卡片内部的嵌套表面（composer、工具分组框）按 `inner radius ≈ outer radius − gap` 选取最接近的主题圆角档。
 
 ### 6.2 Icon button
+
+> 部分已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代（见该文档第 12 节）。
 
 - 只有两档，都直接用 gpui-kit 的组件尺寸，不自定义框高：**轨道**用 `Button::ghost()`（medium，默认字号下是 32px 框）；**工具栏和行内**用 `Button::ghost().small()`（24px 框）。图标大小、内边距、圆角跟着组件尺寸走，不允许出现第三种尺寸。视觉稿里的 34 / 26px 只是近似。
 - 图标统一用 Lucide（gpui-kit `IconName`），描边粗细一致。缺少的图标作为 SVG 资源补进来，必须使用同一套图标集。
@@ -253,6 +267,8 @@ GPUI 主线程（全部 UI 实体）
 
 ## 8. 工作区工具
 
+> 部分已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代（见该文档第 12 节）。
+
 - **注册表**：可以添加工作区（文件夹选择对话框，Linux 上依赖 xdg-desktop-portal；也可以拖入文件夹）、从列表移除、拖拽排序、记住展开状态。路径先规范化（canonicalize）；目录已不存在的工作区显示 muted 样式和「找不到文件夹」，并提供「移除」。
 - **数据来源**：文件树和变更都由后端通过新增的 ACP 扩展方法提供（`_clawcode/workspace/list_dir`、`_clawcode/workspace/git_status`、`_clawcode/workspace/git_diff`），读文件、跑 `git` 都在后端那台机器上进行。这样本机和远程工作区走同一套 UI（见 4.6）。这几个扩展是新增方法，不改变已有方法的语义。
 - **文件树**：后端用 `ignore::WalkBuilder` 按目录懒加载，遵守 `.gitignore`；隐藏文件默认不显示，可以在侧栏标题的按钮里切换。目录变化不做实时监听，切到文件模式和点刷新时重新读取。
@@ -298,6 +314,8 @@ WebUI 已经在用的中文词，以 WebUI 为准，保证两个客户端说同�
 
 ## 10. 主题与设置
 
+> 部分已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代（见该文档第 12 节）。
+
 - **主题来源**：从 gpui-kit 的 `v0.10.0` tag（和依赖的 crate 版本一致，避免主题 JSON 的 schema 不匹配）把 `themes/` 下的 21 个文件（adventure、alduin、asciinema、aurora、ayu、catppuccin、everforest、fahrenheit、flexoki、gruvbox、harper、hybrid、jellybeans、kibble、macos-classic、mellifluous、molokai、solarized、spaceduck、tokyonight、twilight）vendor 到 `crates/desktop/themes/`，用 `include_str!` 编进二进制；启动时调用 `ThemeRegistry::global_mut(cx).load_themes_from_str(..)` 逐个注册，再加上 crate 自带的 Default Light / Dark。`THIRD_PARTY_NOTICES.md` 补上 gpui-kit 主题的 Apache-2.0 声明。
 - 升级 gpui-kit 版本时，主题文件也要从对应的 tag 一起重新 vendor。
 - **外观设置**：模式为「跟随系统」/ 浅色 / 深色。浅色主题从所有 `mode = light` 的变体里选（默认 Default Light），深色主题从所有 `mode = dark` 的变体里选（默认 Default Dark）。跟随系统时用 `observe_window_appearance` 实时切换。选择后立即生效并写入 `desktop.json`。
@@ -307,6 +325,8 @@ WebUI 已经在用的中文词，以 WebUI 为准，保证两个客户端说同�
 - 设置页里只放 desktop 自己的偏好，后端配置仍以 `claw.toml` 为准，只提供「打开配置文件」按钮。
 
 ## 11. 键位
+
+> 部分已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代（见该文档第 12 节）。
 
 | 操作 | Linux | macOS |
 | --- | --- | --- |
@@ -349,6 +369,8 @@ WebUI 已经在用的中文词，以 WebUI 为准，保证两个客户端说同�
 - 规则 10：测试代码只能放在 crate 级 `tests/` 目录或 `#[cfg(test)] mod tests` 里。
 
 ## 15. 里程碑
+
+> 部分已被 [M3b 外壳重构设计](./2026-11-21-desktop-shell-redesign-design.md) 取代（见该文档第 12 节）。
 
 每个里程碑都能独立使用，单独写实现计划。M1 的量最大，写计划时预计拆成 M1a（Backend、投影、外壳、主题、i18n）和 M1b（transcript 渲染、composer、设置页）两份。
 

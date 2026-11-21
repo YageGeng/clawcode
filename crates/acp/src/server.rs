@@ -912,6 +912,10 @@ impl AcpServerFactory {
                         AcpExtensionMethod::ExecList,
                         AcpExtensionMethod::ExecTerminate,
                         AcpExtensionMethod::ExecClean,
+                        AcpExtensionMethod::WorkspaceListDir,
+                        AcpExtensionMethod::WorkspaceReadFile,
+                        AcpExtensionMethod::WorkspaceGitStatus,
+                        AcpExtensionMethod::WorkspaceGitDiff,
                     ]
                     .into_iter()
                     .map(|method| serde_json::Value::String(method.to_string()))

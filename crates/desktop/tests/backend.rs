@@ -9,7 +9,7 @@ use config::{
     AppConfig, ConfigHandle, ExtensionsConfig, SessionPersistenceConfig,
 };
 use desktop::backend::{AgentRequest, Backend, BackendError, QuestionKey};
-use protocol::ExtensionId;
+use protocol::{ExtensionId, WorkspaceFileContent, WorkspaceGitStatus};
 use support::ScriptedBackend;
 
 /// Serializes updates so assertions can search their text.
@@ -424,4 +424,36 @@ impl PointerFind for serde_json::Value {
             _ => None,
         }
     }
+}
+
+#[test]
+fn workspace_tools_round_trip_through_the_client() {
+    let backend = ScriptedBackend::start();
+    std::fs::write(backend.workspace.path().join("notes.md"), "# hi")
+        .expect("file");
+    let root = backend.workspace.path();
+
+    let listing = backend
+        .block_on(backend.client.list_dir(root, "", false))
+        .expect("list");
+    assert!(listing.entries.iter().any(|entry| entry.name == "notes.md"));
+    assert_eq!(
+        backend
+            .block_on(backend.client.read_file(root, "notes.md"))
+            .expect("read"),
+        WorkspaceFileContent::Text {
+            text: "# hi".into()
+        }
+    );
+    assert!(matches!(
+        backend
+            .block_on(backend.client.git_status(root))
+            .expect("status"),
+        WorkspaceGitStatus::NotRepository
+            | WorkspaceGitStatus::Repository { .. }
+    ));
+    assert!(matches!(
+        backend.block_on(backend.client.read_file(root, "../x")),
+        Err(BackendError::Request(_))
+    ));
 }

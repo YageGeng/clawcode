@@ -19,6 +19,7 @@ mod terminal;
 mod tool_call;
 mod trace;
 mod transport;
+pub mod workspace;
 
 pub use mapping::{AcpEventMapper, AcpMappingError};
 pub use server::AcpServerFactory;

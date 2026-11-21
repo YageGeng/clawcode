@@ -23,6 +23,7 @@ mod slash_command;
 mod tool;
 mod trace;
 mod turn;
+mod workspace;
 
 pub use acp::{
     AcpCommandParameters, AcpCompactParameters, AcpExecTerminateParameters,
@@ -158,6 +159,14 @@ pub use tool::{
 pub use turn::{
     StopReason, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,
     TurnTimingError,
+};
+pub use workspace::{
+    WORKSPACE_CHANGE_LIMIT, WORKSPACE_DIFF_LIMIT, WORKSPACE_ENTRY_LIMIT,
+    WORKSPACE_FILE_LIMIT, WorkspaceChange, WorkspaceChangeKind, WorkspaceDiff,
+    WorkspaceDiffParameters, WorkspaceDiffScope, WorkspaceDirEntry,
+    WorkspaceDirListing, WorkspaceEntryKind, WorkspaceFileContent,
+    WorkspaceGitStatus, WorkspaceListDirParameters, WorkspacePathParameters,
+    WorkspaceRootParameters,
 };
 
 pub use login::{DeviceCode, DeviceCodeSink, LoginMethod};

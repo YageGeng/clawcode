@@ -253,3 +253,64 @@ fn failed_rename_pushes_a_notification(cx: &mut TestAppContext) {
     assert_eq!(count, 1, "Enter commits the rename exactly once");
     assert!(!dialog, "the dialog closed on Enter");
 }
+
+#[gpui_kit::test]
+fn ctrl_o_is_bound_to_add_workspace(cx: &mut TestAppContext) {
+    let (_handle, _view, _dir) = open(cx, with_workspaces(&[]));
+    cx.update(|cx| {
+        // The keymap itself, not the focus path: nothing is focused in a test window.
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let binding = keymap
+            .bindings_for_action(&desktop::actions::AddWorkspace)
+            .next()
+            .expect("bound");
+        let keystroke = &binding.keystrokes()[0];
+        assert_eq!(keystroke.key(), "o");
+        let modifiers = keystroke.modifiers();
+        if cfg!(target_os = "macos") {
+            assert!(modifiers.platform && !modifiers.control);
+        } else {
+            assert!(modifiers.control && !modifiers.platform);
+        }
+        assert!(!modifiers.shift && !modifiers.alt);
+    });
+}
+
+#[gpui_kit::test]
+fn dropped_folders_become_workspaces(cx: &mut TestAppContext) {
+    let (handle, view, _dir) = open(cx, with_workspaces(&[]));
+    let folder = tempfile::tempdir().expect("folder");
+    let file = folder.path().join("note.txt");
+    std::fs::write(&file, "x").expect("file");
+
+    // Only directories are added; files dropped alongside are ignored.
+    let added = cx
+        .update_window(handle, |_, _, cx| {
+            view.update(cx, |view, cx| {
+                view.add_dropped_paths(
+                    vec![folder.path().to_path_buf(), file.clone()],
+                    cx,
+                )
+            })
+        })
+        .expect("window");
+    assert_eq!(added, 1);
+    cx.update(|cx| {
+        assert!(view.read(cx).state().workspaces.contains(folder.path()))
+    });
+}
+
+#[gpui_kit::test]
+fn deleted_workspace_row_turns_missing(cx: &mut TestAppContext) {
+    let live = live(cx, with_workspaces(&[]));
+    let gone = tempfile::tempdir().expect("workspace");
+    let path = gone.path().to_path_buf();
+    live.add_workspace(cx, &path);
+    live.until(cx, "row", |window| !shows(window, "Folder not found"));
+
+    drop(gone);
+    // The next catalog refresh notices the folder is gone.
+    live.view.update(cx, |view, cx| view.refresh_catalog(cx));
+    live.until(cx, "missing", |window| shows(window, "Folder not found"));
+}

@@ -66,7 +66,9 @@ pub(in crate::ui) fn install_menus(
 ) {
     use gpui_kit::{Menu, MenuItem};
 
-    use crate::actions::{CloseTab, NewSession, OpenSettings, Quit};
+    use crate::actions::{
+        AddWorkspace, CloseTab, NewSession, OpenSettings, Quit,
+    };
 
     let build = || {
         vec![
@@ -74,6 +76,10 @@ pub(in crate::ui) fn install_menus(
                 MenuItem::action(
                     rust_i18n::t!("Sidebar.new_session").into_owned(),
                     NewSession,
+                ),
+                MenuItem::action(
+                    rust_i18n::t!("Sidebar.add_workspace").into_owned(),
+                    AddWorkspace,
                 ),
                 MenuItem::action(
                     rust_i18n::t!("Menu.close_tab").into_owned(),

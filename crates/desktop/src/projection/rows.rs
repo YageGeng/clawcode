@@ -47,6 +47,57 @@ pub struct ErrorRow {
     pub message: String,
 }
 
+/// A message between agents: a task sent to a spawned agent, or its answer.
+#[derive(Debug, Clone, PartialEq, Eq, typed_builder::TypedBuilder)]
+pub struct MailRow {
+    /// The persisted message id.
+    pub id: String,
+    /// `new_task`, `message`, or `result`.
+    pub kind: String,
+    /// The sending agent's path, e.g. `/root`.
+    pub author: String,
+    /// What was sent.
+    pub payload: String,
+}
+
+impl MailRow {
+    /// The row of a persisted `agent_message`: the payload is the text after
+    /// the `Payload:` line of the model-facing rendering.
+    pub fn from_extension(
+        id: String,
+        extension: &protocol::ExtensionMessage,
+    ) -> Self {
+        let text: String = extension
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                protocol::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let payload = text
+            .split_once("Payload:\n")
+            .map_or(text.as_str(), |(_, payload)| payload)
+            .to_owned();
+        let detail = |key: &str| {
+            extension
+                .details
+                .as_ref()
+                .and_then(|details| details.get(key))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        Self::builder()
+            .id(id)
+            .kind(detail("kind"))
+            .author(detail("author"))
+            .payload(payload)
+            .build()
+    }
+}
+
 /// Who wrote a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -311,6 +362,8 @@ pub enum TranscriptRow {
     Compaction(CompactionRow),
     /// A failed extension handler.
     Error(ErrorRow),
+    /// A message between agents.
+    Mail(MailRow),
 }
 
 impl TranscriptRow {
@@ -325,6 +378,7 @@ impl TranscriptRow {
                 RowKey::Compaction(row.entry_id.clone())
             }
             TranscriptRow::Error(row) => RowKey::Error(row.id.clone()),
+            TranscriptRow::Mail(row) => RowKey::Mail(row.id.clone()),
         }
     }
 }
@@ -340,16 +394,19 @@ pub enum RowKey {
     Compaction(String),
     /// An error row.
     Error(String),
+    /// A mail row, by its message id.
+    Mail(String),
 }
 
 impl fmt::Display for RowKey {
-    /// Renders `message:{id}`, `tool:{id}`, `compaction:{id}`, or `error:{id}`, the element id used by views.
+    /// Renders `message:{id}`, `tool:{id}`, `compaction:{id}`, `error:{id}`, or `mail:{id}`, the element id used by views.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RowKey::Message(id) => write!(formatter, "message:{id}"),
             RowKey::Tool(id) => write!(formatter, "tool:{id}"),
             RowKey::Compaction(id) => write!(formatter, "compaction:{id}"),
             RowKey::Error(id) => write!(formatter, "error:{id}"),
+            RowKey::Mail(id) => write!(formatter, "mail:{id}"),
         }
     }
 }

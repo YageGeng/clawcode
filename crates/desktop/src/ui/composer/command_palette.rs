@@ -208,6 +208,10 @@ impl Composer {
                                         .font_family(
                                             theme.mono_font_family.clone(),
                                         )
+                                        .font_weight(
+                                            crate::theme::FontWeights::get(cx)
+                                                .code,
+                                        )
                                         .text_color(theme.muted_foreground),
                                 )
                             })

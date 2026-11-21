@@ -7,6 +7,63 @@ Rail:
   sessions:
     en: Sessions
     zh-CN: 会话
+Viewer:
+  retry:
+    en: Retry
+    zh-CN: 重试
+  no_backend:
+    en: The agent is not connected yet.
+    zh-CN: Agent 尚未连接。
+  binary:
+    en: Binary file — no preview
+    zh-CN: 二进制文件，无法预览
+  too_large:
+    en: "File too large to preview (%{size} MiB)"
+    zh-CN: "文件过大，无法预览（%{size} MiB）"
+  diff_truncated:
+    en: The diff is too large; only its first 2 MiB are shown.
+    zh-CN: 差异过大，只显示前 2 MiB。
+Files:
+  loading:
+    en: Loading…
+    zh-CN: 加载中…
+  empty_dir:
+    en: (empty)
+    zh-CN: （空）
+  truncated:
+    en: Only the first 2000 entries are shown
+    zh-CN: 仅显示前 2000 项
+  show_hidden:
+    en: Show hidden files
+    zh-CN: 显示隐藏文件
+  hide_hidden:
+    en: Hide hidden files
+    zh-CN: 隐藏隐藏文件
+  refresh:
+    en: Refresh
+    zh-CN: 刷新
+  retry:
+    en: Retry
+    zh-CN: 重试
+Changes:
+  refresh:
+    en: Refresh
+    zh-CN: 刷新
+  clean:
+    en: No changes
+    zh-CN: 没有改动
+  against:
+    en: "Against %{base}"
+    zh-CN: "对比 %{base}"
+  unstaged:
+    en: "Unstaged"
+    zh-CN: "未暂存"
+  not_repository:
+    en: This workspace is not a Git repository
+    zh-CN: 此工作区不是 Git 仓库
+  git_missing:
+    en: git was not found
+    zh-CN: 未找到 git
 Sidebar:
   toggle:
     en: Toggle sidebar
@@ -135,6 +192,12 @@ Workspace:
   remove:
     en: Remove from list
     zh-CN: 从列表移除
+  move_up:
+    en: Move up
+    zh-CN: 上移
+  move_down:
+    en: Move down
+    zh-CN: 下移
 Session:
   rename:
     en: Rename…
@@ -221,6 +284,15 @@ Elapsed:
     en: "%{h}h %{m}m"
     zh-CN: "%{h} 小时 %{m} 分"
 Transcript:
+  mail_task:
+    en: "Task"
+    zh-CN: "任务"
+  mail_result:
+    en: "Result"
+    zh-CN: "结果"
+  mail_message:
+    en: "Message"
+    zh-CN: "消息"
   worked:
     en: "Worked %{elapsed}"
     zh-CN: "已工作 %{elapsed}"
@@ -365,6 +437,36 @@ Composer:
     en: Choose a workspace
     zh-CN: 选择工作区
 Settings:
+  fonts:
+    en: "Fonts"
+    zh-CN: "字体"
+  font_default:
+    en: "Default"
+    zh-CN: "默认"
+  ui_font:
+    en: "Interface font"
+    zh-CN: "界面字体"
+  ui_font_weight:
+    en: "Interface font weight"
+    zh-CN: "界面字重"
+  code_font:
+    en: "Code font"
+    zh-CN: "代码字体"
+  code_font_size:
+    en: "Code font size"
+    zh-CN: "代码字号"
+  code_font_weight:
+    en: "Code font weight"
+    zh-CN: "代码字重"
+  subagents:
+    en: "Open subagents in"
+    zh-CN: "子智能体默认打开位置"
+  subagents_panel:
+    en: "Right panel"
+    zh-CN: "右侧面板"
+  subagents_main:
+    en: "Main area"
+    zh-CN: "主区域"
   title:
     en: "Settings"
     zh-CN: "设置"
@@ -398,6 +500,15 @@ Settings:
   font_size:
     en: "Font size"
     zh-CN: "界面字号"
+  light_file_icons:
+    en: "Light file icons"
+    zh-CN: "浅色文件图标"
+  dark_file_icons:
+    en: "Dark file icons"
+    zh-CN: "深色文件图标"
+  file_icons_default:
+    en: "Default"
+    zh-CN: "默认"
 Command:
   no_match:
     en: No matching commands
@@ -560,3 +671,71 @@ Attachment:
   read_failed:
     en: Could not read the file
     zh-CN: 无法读取文件
+Panel:
+  changes:
+    en: "Changes"
+    zh-CN: "变更"
+  files:
+    en: "Files"
+    zh-CN: "文件"
+  maximize:
+    en: "Maximize panel"
+    zh-CN: "最大化面板"
+  close:
+    en: "Close panel"
+    zh-CN: "关闭面板"
+  toggle:
+    en: "Toggle panel"
+    zh-CN: "显示或隐藏面板"
+  not_repository:
+    en: "Not a Git repository"
+    zh-CN: "不是 Git 仓库"
+Details:
+  toggle:
+    en: "Session details"
+    zh-CN: "会话详情"
+  no_workspace:
+    en: "Add a workspace to see its details."
+    zh-CN: "添加一个工作区后可查看"
+  add_workspace:
+    en: "Add workspace…"
+    zh-CN: "添加工作区…"
+  open_in_file_manager:
+    en: "Open in file manager"
+    zh-CN: "在文件管理器中打开"
+  open_in_editor:
+    en: "Open in %{name}"
+    zh-CN: "在 %{name} 中打开"
+  file_manager:
+    en: "File manager"
+    zh-CN: "文件管理器"
+  open_failed:
+    en: "Could not open %{name}"
+    zh-CN: "无法打开 %{name}"
+  changes:
+    en: "Changes"
+    zh-CN: "改动"
+  previous:
+    en: "Previous agents · %{count}"
+    zh-CN: "之前的智能体 · %{count}"
+  context:
+    en: "Context %{value}"
+    zh-CN: "上下文 %{value}"
+  item_open_in:
+    en: "Open in"
+    zh-CN: "在…中打开"
+  item_branch:
+    en: "Branch"
+    zh-CN: "分支"
+  item_changes:
+    en: "Changes"
+    zh-CN: "改动"
+  item_relations:
+    en: "Related sessions"
+    zh-CN: "会话关系"
+  item_context:
+    en: "Context window"
+    zh-CN: "上下文"
+  item_usage:
+    en: "Usage"
+    zh-CN: "用量"

@@ -1,6 +1,6 @@
 //! Workspace and session commands: add, remove, reveal, rename, delete.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::ButtonVariant;
@@ -38,6 +38,16 @@ impl AppView {
         cx.notify();
     }
 
+    /// `AddWorkspace` (Ctrl+O): asks for a folder to register.
+    pub(in crate::ui) fn on_add_workspace(
+        &mut self,
+        _: &crate::actions::AddWorkspace,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.add_workspace(window, cx);
+    }
+
     /// Asks for a folder and registers it as a workspace.
     pub fn add_workspace(
         &mut self,
@@ -69,13 +79,64 @@ impl AppView {
                 }
             };
             if let Some(path) = path {
-                let _ = this.update(cx, |this, cx| {
-                    this.state.workspaces.add(&path);
-                    this.workspaces_changed(cx);
-                });
+                let _ = this
+                    .update(cx, |this, cx| this.register_workspace(&path, cx));
             }
         })
         .detach();
+    }
+
+    /// Adds a workspace and makes it the sidebar's current one.
+    pub fn register_workspace(
+        &mut self,
+        path: &Path,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.state.workspaces.add(path);
+        let path = crate::workspace::normalize(path);
+        self.sidebar.selected_workspace = Some(path.clone());
+        self.workspaces_changed(cx);
+        self.refresh_git(path, cx);
+    }
+
+    /// Registers the folders among dropped paths (spec §8); files are ignored.
+    ///
+    /// Returns how many were newly added; the last folder becomes the current one.
+    pub fn add_dropped_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<'_, Self>,
+    ) -> usize {
+        let folders: Vec<PathBuf> =
+            paths.into_iter().filter(|path| path.is_dir()).collect();
+        let Some(last) = folders.last() else {
+            return 0;
+        };
+        let mut added = 0;
+        for folder in &folders {
+            if self.state.workspaces.add(folder) {
+                added += 1;
+            }
+        }
+        self.sidebar.selected_workspace =
+            Some(crate::workspace::normalize(last));
+        self.workspaces_changed(cx);
+        for folder in &folders {
+            self.refresh_git(crate::workspace::normalize(folder), cx);
+        }
+        added
+    }
+
+    /// Moves a workspace one place up or down in the sidebar.
+    pub fn move_workspace(
+        &mut self,
+        path: &Path,
+        offset: isize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.state.workspaces.move_entry(path, offset) {
+            self.workspaces_changed(cx);
+        }
     }
 
     /// Takes a workspace off the list; reversible, so it asks no confirmation.
