@@ -11,7 +11,8 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::{
     AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement,
@@ -21,14 +22,30 @@ use gpui_kit::{
     relative, rems,
 };
 
-use super::session_view::{MarkdownPart, SessionView};
+use super::{MarkdownPart, SessionView};
 use crate::projection::{
-    MessageOrigin, MessageRow, Role, RowKey, ToolCategory, ToolRow, ToolStatus,
-    TranscriptRow,
+    CommandKind, CommandMeta, CommandStatus, CompactionReason, CompactionRow,
+    ErrorRow, MessageOrigin, MessageRow, Role, RowKey, ToolCategory, ToolRow,
+    ToolStatus, TranscriptRow,
 };
-use crate::transcript::{
-    Elapsed, GroupPosition, LayoutRow, RunSummary, single_line,
-};
+use crate::transcript::{GroupPosition, LayoutRow, RunSummary, RunUsage};
+use crate::ui::format::{Elapsed, TokenCount, single_line};
+
+/// What a summary card shows: its pill and the Markdown it expands to.
+#[derive(typed_builder::TypedBuilder)]
+struct Card<'a> {
+    /// Row whose card this is; also keys its open state.
+    key: RowKey,
+    /// Pill icon.
+    icon: IconName,
+    /// Pill text.
+    title: String,
+    /// A muted line above the Markdown when expanded.
+    #[builder(default)]
+    detail: Option<String>,
+    /// The expanded body.
+    markdown: &'a str,
+}
 
 /// Execute output lines shown before "Full output" is chosen.
 const OUTPUT_TAIL_LINES: usize = 20;
@@ -53,7 +70,7 @@ impl ToolCategory {
 
 impl SessionView {
     /// Renders layout row `ix`, reading its projection index from the current layout.
-    pub(super) fn render_row(
+    pub(in crate::ui) fn render_row(
         &self,
         ix: usize,
         _window: &mut Window,
@@ -88,8 +105,17 @@ impl SessionView {
                             Some(GroupPosition::First | GroupPosition::Middle)
                         ),
                     ),
+                    Some(TranscriptRow::Compaction(row)) => {
+                        (self.render_compaction(row, cx), false)
+                    }
+                    Some(TranscriptRow::Error(row)) => {
+                        (Self::render_error(row, cx), false)
+                    }
                     None => return div().into_any_element(),
                 }
+            }
+            LayoutRow::Usage { usage, .. } => {
+                (self.render_usage(usage, cx), false)
             }
         };
         div()
@@ -110,7 +136,21 @@ impl SessionView {
         message: &MessageRow,
         cx: &Context<'_, Self>,
     ) -> AnyElement {
+        if let Some(command) = &message.command {
+            return self.render_command_card(message, command, cx);
+        }
         match (message.role, message.origin) {
+            (_, MessageOrigin::BranchSummary) => self.render_card(
+                Card::builder()
+                    .key(RowKey::Message(message.message_id.clone()))
+                    .icon(IconName::GitBranch)
+                    .title(
+                        rust_i18n::t!("Transcript.branch_summary").into_owned(),
+                    )
+                    .markdown(&message.text)
+                    .build(),
+                cx,
+            ),
             (_, MessageOrigin::UserBash) => self.render_command(message, cx),
             (Role::User, _) => self.render_user(message, cx),
             (Role::Assistant, _) => self.render_assistant(message, cx),
@@ -331,6 +371,37 @@ impl SessionView {
             .when(message.streaming, |this| {
                 this.child(Label::new("▍").text_color(theme.muted_foreground))
             })
+            .when_some(
+                message
+                    .assistant
+                    .as_ref()
+                    .and_then(|assistant| assistant.error.as_deref()),
+                |this, error| {
+                    this.child(
+                        v_flex()
+                            .gap_1()
+                            .px_3()
+                            .py_2()
+                            .rounded(theme.radius)
+                            .bg(theme.danger.opacity(0.08))
+                            .text_color(theme.danger)
+                            .child(
+                                Label::new(
+                                    rust_i18n::t!("Transcript.model_failed")
+                                        .into_owned(),
+                                )
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(theme.danger),
+                            )
+                            .child(
+                                Label::new(error.to_owned())
+                                    .text_sm()
+                                    .text_color(theme.danger),
+                            ),
+                    )
+                },
+            )
             .into_any_element()
     }
 
@@ -638,6 +709,267 @@ impl SessionView {
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.toggle_run(anchor.clone(), cx)
             }))
+            .into_any_element()
+    }
+
+    /// A centered pill that expands to Markdown: compaction and branch summaries.
+    fn render_card(
+        &self,
+        card: Card<'_>,
+        cx: &Context<'_, Self>,
+    ) -> AnyElement {
+        let Card {
+            key,
+            icon,
+            title,
+            detail,
+            markdown,
+        } = card;
+        let theme = cx.theme();
+        let open = self.open_cards.contains(&key);
+        let toggle = key.clone();
+        v_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("card:{key}")))
+                    .gap_1p5()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .cursor_pointer()
+                    .child(Icon::new(icon).small())
+                    .child(
+                        Label::new(title)
+                            .text_sm()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .small(),
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.toggle_card(toggle.clone(), cx)
+                        },
+                    )),
+            )
+            .when(open, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .px_4()
+                        .py_3()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .when_some(detail, |this, detail| {
+                            this.child(
+                                Label::new(detail)
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground),
+                            )
+                        })
+                        .child(TextView::markdown(
+                            SharedString::from(format!("card-body:{key}")),
+                            SharedString::from(markdown.to_owned()),
+                        )),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// A completed compaction: `Context compacted · 182k`, expanding to its summary.
+    fn render_compaction(
+        &self,
+        row: &CompactionRow,
+        cx: &Context<'_, Self>,
+    ) -> AnyElement {
+        let title = match row.tokens_before {
+            Some(tokens) => rust_i18n::t!(
+                "Transcript.compacted",
+                tokens = TokenCount(tokens).label().as_ref()
+            ),
+            None => rust_i18n::t!("Transcript.compacted_plain"),
+        }
+        .into_owned();
+        let reason = match row.reason {
+            CompactionReason::Manual => {
+                rust_i18n::t!("Transcript.compaction_reason_manual")
+            }
+            CompactionReason::Threshold => {
+                rust_i18n::t!("Transcript.compaction_reason_threshold")
+            }
+            CompactionReason::Overflow => {
+                rust_i18n::t!("Transcript.compaction_reason_overflow")
+            }
+        }
+        .into_owned();
+        let detail = match row.elapsed_ms {
+            Some(ms) => format!("{reason} · {}", Elapsed(ms).label()),
+            None => reason,
+        };
+        self.render_card(
+            Card::builder()
+                .key(RowKey::Compaction(row.entry_id.clone()))
+                .icon(IconName::GitCommitHorizontal)
+                .title(title)
+                .detail(Some(detail))
+                .markdown(&row.summary)
+                .build(),
+            cx,
+        )
+    }
+
+    /// A slash command message: `/name`, its source, kind, status, and body.
+    fn render_command_card(
+        &self,
+        message: &MessageRow,
+        command: &CommandMeta,
+        cx: &Context<'_, Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let source = command.source.label().into_owned();
+        let kind = match command.kind {
+            CommandKind::Invocation => rust_i18n::t!("Command.kind_invocation"),
+            CommandKind::Output => rust_i18n::t!("Command.kind_output"),
+            CommandKind::Expansion => rust_i18n::t!("Command.kind_expansion"),
+        }
+        .into_owned();
+        let status = command.status.map(|status| match status {
+            CommandStatus::Succeeded => {
+                (rust_i18n::t!("Command.status_succeeded"), theme.success)
+            }
+            CommandStatus::Failed => {
+                (rust_i18n::t!("Command.status_failed"), theme.danger)
+            }
+            CommandStatus::Cancelled => (
+                rust_i18n::t!("Command.status_cancelled"),
+                theme.muted_foreground,
+            ),
+        });
+        // An invocation's text repeats `/name`; only its arguments are new.
+        let prefix = format!("/{}", command.name);
+        let body = match command.kind {
+            CommandKind::Output => message.text.as_str(),
+            _ => message
+                .text
+                .strip_prefix(prefix.as_str())
+                .unwrap_or(&message.text)
+                .trim(),
+        };
+        let align_end = message.role == Role::User;
+        v_flex()
+            .w_full()
+            .when(align_end, |this| this.items_end())
+            .child(
+                v_flex()
+                    .max_w(relative(0.78))
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .text_sm()
+                            .child(
+                                Icon::new(IconName::SquareSlash)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Label::new(prefix.clone())
+                                    .text_sm()
+                                    .font_family(
+                                        theme.mono_font_family.clone(),
+                                    ),
+                            )
+                            .child(
+                                Tag::secondary()
+                                    .small()
+                                    .child(Label::new(source).text_xs()),
+                            )
+                            .child(
+                                Label::new(kind)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .when_some(status, |this, (status, color)| {
+                                this.child(
+                                    Label::new(status.into_owned())
+                                        .text_xs()
+                                        .text_color(color),
+                                )
+                            }),
+                    )
+                    .when(!body.is_empty(), |this| {
+                        this.child(TextView::markdown(
+                            SharedString::from(format!(
+                                "command-body:{}",
+                                message.message_id
+                            )),
+                            SharedString::from(body.to_owned()),
+                        ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The muted usage line under a finished run's last reply.
+    fn render_usage(
+        &self,
+        usage: &RunUsage,
+        cx: &Context<'_, Self>,
+    ) -> AnyElement {
+        // The model option names models `provider/model`; its choice carries the display name.
+        let name = usage.model.as_ref().and_then(|(provider, model)| {
+            let handle = self.handle()?.read(cx);
+            let option = handle.projection().controls().config("model")?;
+            let value = format!("{provider}/{model}");
+            option
+                .choices
+                .iter()
+                .find(|choice| choice.value == value)
+                .map(|choice| choice.name.clone())
+        });
+        let muted = cx.theme().muted_foreground;
+        Label::new(usage.label(name.as_deref()))
+            .text_xs()
+            .text_color(muted)
+            .into_any_element()
+    }
+
+    /// An inline danger note for a failed extension handler.
+    fn render_error(row: &ErrorRow, cx: &Context<'_, Self>) -> AnyElement {
+        let danger = cx.theme().danger;
+        h_flex()
+            .gap_1p5()
+            .text_sm()
+            .text_color(danger)
+            .child(Icon::new(IconName::CircleAlert).small())
+            .when(!row.source.is_empty(), |this| {
+                this.child(
+                    Label::new(row.source.clone())
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(danger),
+                )
+            })
+            .child(Label::new(row.message.clone()).text_sm().text_color(danger))
             .into_any_element()
     }
 }

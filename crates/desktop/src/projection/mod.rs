@@ -5,361 +5,32 @@
 //! Rows are ordered by kernel sequence; arrival order breaks ties.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::Arc;
 
 use agent_client_protocol::v2::schema as wire;
 use base64::Engine as _;
-use protocol::ProductIdentity;
-use serde::Deserialize as _;
+use protocol::{AgentEventPayload, ProductIdentity};
 use typed_builder::TypedBuilder;
 
-/// Product metadata the kernel attaches to each projected event.
-#[derive(Debug, Clone, Default, PartialEq, Eq, TypedBuilder)]
-pub struct ProductMeta {
-    /// Model turn that produced the event.
-    #[builder(default)]
-    pub turn_id: Option<String>,
-    /// Event time in Unix milliseconds.
-    #[builder(default)]
-    pub timestamp_ms: Option<u64>,
-    /// Kernel sequence number; the authoritative row order.
-    #[builder(default)]
-    pub sequence: Option<u64>,
-    /// Where a message came from, such as a user-run command.
-    #[builder(default)]
-    pub origin: Option<MessageOrigin>,
-    /// Whether a policy blocked the tool call.
-    #[builder(default)]
-    pub blocked: bool,
-    /// `(started_at_ms, ended_at_ms)` of a completed message, in Unix milliseconds.
-    #[builder(default)]
-    pub message_timing: Option<(u64, u64)>,
-}
+use events::ProductEvent;
 
-impl From<&wire::Meta> for ProductMeta {
-    /// Reads the `clawcode` namespace; absent or malformed fields stay empty.
-    fn from(meta: &wire::Meta) -> Self {
-        let Some(product) = meta.get(ProductIdentity::ACP_NAMESPACE) else {
-            return ProductMeta::default();
-        };
-        // Borrow every string in place; only the turn id is kept as an owned copy.
-        let text =
-            |key: &str| product.get(key).and_then(serde_json::Value::as_str);
-        // The server serializes `protocol::MessageTiming`; a value that does
-        // not decode as one is ignored rather than guessed at.
-        let message_timing = product
-            .get("messageTiming")
-            .and_then(|timing| {
-                protocol::MessageTiming::deserialize(timing).ok()
-            })
-            .map(|timing| {
-                (timing.started_at_ms.get(), timing.ended_at_ms.get())
-            });
-        ProductMeta::builder()
-            .message_timing(message_timing)
-            .turn_id(text("turnId").map(str::to_owned))
-            // Timestamps travel as decimal strings to keep full precision in JavaScript.
-            .timestamp_ms(
-                text("timestampMs").and_then(|value| value.parse().ok()),
-            )
-            .sequence(
-                product.get("sequence").and_then(serde_json::Value::as_u64),
-            )
-            .origin(
-                text("origin").map(|origin| MessageOrigin::from(Some(origin))),
-            )
-            .blocked(
-                product
-                    .pointer("/disposition/type")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("blocked"),
-            )
-            .build()
-    }
-}
+mod controls;
+mod events;
+mod meta;
+mod rows;
 
-/// Who wrote a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    /// The person using the app.
-    User,
-    /// The agent.
-    Assistant,
-}
-
-/// How a message entered the transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageOrigin {
-    /// A normal prompt or reply.
-    Prompt,
-    /// A shell command the user ran directly.
-    UserBash,
-    /// The summary written when leaving a branch.
-    BranchSummary,
-}
-
-impl From<Option<&str>> for MessageOrigin {
-    /// Maps the product `origin` field; anything unknown is a normal prompt.
-    fn from(origin: Option<&str>) -> Self {
-        match origin {
-            Some("user_bash") => MessageOrigin::UserBash,
-            Some("branch_summary") => MessageOrigin::BranchSummary,
-            _ => MessageOrigin::Prompt,
-        }
-    }
-}
-
-/// One image attached to a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageBlock {
-    /// Base64 image bytes.
-    pub data: String,
-    /// Media type such as `image/png`.
-    pub mime_type: String,
-}
-
-/// A user or assistant message, including the assistant's thinking.
-#[derive(Debug, Clone, PartialEq, TypedBuilder)]
-pub struct MessageRow {
-    /// Message identifier.
-    pub message_id: wire::MessageId,
-    /// Author.
-    pub role: Role,
-    /// Model turn, when known.
-    #[builder(default)]
-    pub turn_id: Option<String>,
-    /// Visible text.
-    #[builder(default)]
-    pub text: String,
-    /// Thinking text shown above the answer.
-    #[builder(default)]
-    pub reasoning: String,
-    /// Attached images.
-    #[builder(default)]
-    pub images: Vec<ImageBlock>,
-    /// Whether chunks are still arriving.
-    #[builder(default)]
-    pub streaming: bool,
-    /// Message time in Unix milliseconds.
-    #[builder(default)]
-    pub timestamp_ms: Option<u64>,
-    /// Where the message came from.
-    #[builder(default = MessageOrigin::Prompt)]
-    pub origin: MessageOrigin,
-    /// How long the message took, from first to last output.
-    ///
-    /// ponytail: the backend reports only whole-message timing, so thinking
-    /// time is approximated by it; add a reasoning timing when one exists.
-    #[builder(default)]
-    pub duration_ms: Option<u64>,
-}
-
-/// Lifecycle of one tool call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolStatus {
-    /// Waiting to start, or paused.
-    Pending,
-    /// Executing.
-    Running,
-    /// Finished successfully.
-    Completed,
-    /// Finished with an error.
-    Failed,
-    /// Stopped by the user.
-    Cancelled,
-    /// Refused by a policy.
-    Blocked,
-}
-
-/// One tool call and its output so far.
-#[derive(Debug, Clone, PartialEq, TypedBuilder)]
-pub struct ToolRow {
-    /// Tool call identifier.
-    pub tool_call_id: wire::ToolCallId,
-    /// Model turn, when known.
-    #[builder(default)]
-    pub turn_id: Option<String>,
-    /// Tool name.
-    #[builder(default)]
-    pub name: Option<String>,
-    /// Human-readable title.
-    pub title: String,
-    /// Tool category used to pick an icon.
-    #[builder(default)]
-    pub kind: Option<wire::ToolKind>,
-    /// Current status.
-    pub status: ToolStatus,
-    /// Arguments as sent to the tool.
-    #[builder(default)]
-    pub raw_input: Option<serde_json::Value>,
-    /// Text output collected so far.
-    #[builder(default)]
-    pub output: String,
-    /// First event time in Unix milliseconds.
-    #[builder(default)]
-    pub timestamp_ms: Option<u64>,
-    /// Unified diff of an edit, from the tool's diff content.
-    #[builder(default)]
-    pub patch: Option<String>,
-    /// Text shown under a terminal's output, such as where the full output was saved.
-    #[builder(default)]
-    pub footer: Option<String>,
-}
-
-/// The kind of work a tool does; picks the icon, verb, and target field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ToolCategory {
-    /// Reads a file.
-    Read,
-    /// Changes a file.
-    Edit,
-    /// Deletes a file.
-    Delete,
-    /// Moves a file.
-    Move,
-    /// Searches files.
-    Search,
-    /// Runs a command.
-    Execute,
-    /// Fetches a URL.
-    Fetch,
-    /// Reasons without side effects.
-    Think,
-    /// Anything else.
-    Other,
-}
-
-impl From<Option<&wire::ToolKind>> for ToolCategory {
-    /// Maps the ACP tool kind; a missing or newer kind is `Other`.
-    fn from(kind: Option<&wire::ToolKind>) -> Self {
-        match kind {
-            Some(wire::ToolKind::Read) => ToolCategory::Read,
-            Some(wire::ToolKind::Edit) => ToolCategory::Edit,
-            Some(wire::ToolKind::Delete) => ToolCategory::Delete,
-            Some(wire::ToolKind::Move) => ToolCategory::Move,
-            Some(wire::ToolKind::Search) => ToolCategory::Search,
-            Some(wire::ToolKind::Execute) => ToolCategory::Execute,
-            Some(wire::ToolKind::Fetch) => ToolCategory::Fetch,
-            Some(wire::ToolKind::Think) => ToolCategory::Think,
-            _ => ToolCategory::Other,
-        }
-    }
-}
-
-impl MessageRow {
-    /// Whether the message has anything to show: text, reasoning, images, or live streaming.
-    pub fn is_visible(&self) -> bool {
-        !self.text.is_empty()
-            || !self.reasoning.is_empty()
-            || !self.images.is_empty()
-            || self.streaming
-    }
-}
-
-impl ToolCategory {
-    /// Every category in declaration order.
-    pub const ALL: [ToolCategory; 9] = [
-        ToolCategory::Read,
-        ToolCategory::Edit,
-        ToolCategory::Delete,
-        ToolCategory::Move,
-        ToolCategory::Search,
-        ToolCategory::Execute,
-        ToolCategory::Fetch,
-        ToolCategory::Think,
-        ToolCategory::Other,
-    ];
-}
-
-impl ToolRow {
-    /// The tool's category.
-    pub fn category(&self) -> ToolCategory {
-        ToolCategory::from(self.kind.as_ref())
-    }
-
-    /// The first string argument worth showing next to the tool name.
-    ///
-    /// Search tools prefer the pattern; the rest prefer a path, command, or URL.
-    /// `None` means the UI should fall back to the title.
-    pub fn target(&self) -> Option<&str> {
-        let keys: &[&str] = if self.category() == ToolCategory::Search {
-            &["pattern", "path"]
-        } else {
-            &[
-                "path",
-                "file_path",
-                "cmd",
-                "command",
-                "url",
-                "query",
-                "pattern",
-            ]
-        };
-        let input = self.raw_input.as_ref()?;
-        keys.iter()
-            .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
-    }
-
-    /// Added and removed line counts of the patch, without the file headers.
-    pub fn diff_stats(&self) -> Option<(usize, usize)> {
-        let patch = self.patch.as_deref()?;
-        let count = |sign: &str, header: &str| {
-            patch
-                .lines()
-                .filter(|line| {
-                    line.starts_with(sign) && !line.starts_with(header)
-                })
-                .count()
-        };
-        Some((count("+", "+++"), count("-", "---")))
-    }
-
-    /// Number of output lines.
-    pub fn line_count(&self) -> usize {
-        self.output.lines().count()
-    }
-}
-
-/// One row of the transcript.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TranscriptRow {
-    /// A message.
-    Message(MessageRow),
-    /// A tool call.
-    Tool(ToolRow),
-}
-
-impl TranscriptRow {
-    /// Stable identity of the row, independent of its position.
-    pub fn key(&self) -> RowKey {
-        match self {
-            TranscriptRow::Message(row) => {
-                RowKey::Message(row.message_id.clone())
-            }
-            TranscriptRow::Tool(row) => RowKey::Tool(row.tool_call_id.clone()),
-        }
-    }
-}
-
-/// Stable identity of a transcript row.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RowKey {
-    /// A message row.
-    Message(wire::MessageId),
-    /// A tool row.
-    Tool(wire::ToolCallId),
-}
-
-impl fmt::Display for RowKey {
-    /// Renders `message:{id}` or `tool:{id}`, the element id used by views.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RowKey::Message(id) => write!(formatter, "message:{id}"),
-            RowKey::Tool(id) => write!(formatter, "tool:{id}"),
-        }
-    }
-}
+pub use controls::{
+    AskedQuestion, CommandSource, CompactionStatus, ConfigChoice, ConfigOption,
+    ContextUsage, ModelUsage, RetryState, SessionControls, SlashCommand, Todo,
+    TodoStatus,
+};
+pub use meta::{
+    AssistantMeta, CommandKind, CommandMeta, CommandStatus, ProductMeta,
+};
+pub use rows::{
+    CompactionReason, CompactionRow, ErrorRow, ImageBlock, MessageOrigin,
+    MessageRow, Role, RowKey, ToolCategory, ToolRow, ToolStatus, TranscriptRow,
+};
 
 /// Whether the session's foreground work is active.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -395,6 +66,9 @@ pub struct ProjectionChange {
     /// Whether the pending queue changed.
     #[builder(default)]
     pub queue: bool,
+    /// Whether the session controls changed (options, usage, plan, questions, requests).
+    #[builder(default)]
+    pub controls: bool,
     /// Whether the transcript layout may have changed: a row appeared, a
     /// message's visibility, a tool's fields, or the run state changed.
     ///
@@ -412,6 +86,7 @@ impl ProjectionChange {
             && !self.run_state
             && !self.title
             && !self.queue
+            && !self.controls
             && !self.structural
     }
 
@@ -426,6 +101,7 @@ impl ProjectionChange {
         self.run_state |= other.run_state;
         self.title |= other.title;
         self.queue |= other.queue;
+        self.controls |= other.controls;
         self.structural |= other.structural;
     }
 
@@ -495,6 +171,9 @@ pub struct SessionProjection {
     /// When the current run started, in Unix milliseconds.
     #[builder(default)]
     run_started_ms: Option<u64>,
+    /// Options, commands, usage, plan, questions, and pending requests.
+    #[builder(default)]
+    controls: SessionControls,
 }
 
 impl Default for SessionProjection {
@@ -505,6 +184,21 @@ impl Default for SessionProjection {
 }
 
 impl SessionProjection {
+    /// Session-wide control state.
+    pub fn controls(&self) -> &SessionControls {
+        &self.controls
+    }
+
+    /// Mutable control state, for configuration lists, requests, and question settling.
+    pub fn controls_mut(&mut self) -> &mut SessionControls {
+        &mut self.controls
+    }
+
+    /// Questions still waiting for the user, excluding ones a queued message already answers.
+    pub fn open_questions(&self) -> Vec<&AskedQuestion> {
+        self.controls.open_questions()
+    }
+
     /// Number of rows.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -543,6 +237,9 @@ impl SessionProjection {
     /// Replaces the pending queue; returns whether it changed.
     pub fn set_pending(&mut self, pending: protocol::PendingMessages) -> bool {
         let changed = self.pending != pending;
+        if changed {
+            self.controls.set_queued(&pending);
+        }
         self.pending = pending;
         changed
     }
@@ -595,7 +292,16 @@ impl SessionProjection {
     /// Folds one update into the transcript and reports what changed.
     pub fn apply(&mut self, update: &wire::SessionUpdate) -> ProjectionChange {
         self.arrivals += 1;
-        let mut change = ProjectionChange::default();
+        let event = match update {
+            wire::SessionUpdate::Other(other) => ProductEvent::decode(other),
+            _ => None,
+        };
+        let mut change = ProjectionChange::builder()
+            .controls(self.controls.apply(update, event.as_ref()))
+            .build();
+        if let Some(event) = &event {
+            self.apply_event(event, &mut change);
+        }
         match update {
             wire::SessionUpdate::UserMessageChunk(chunk) => {
                 self.append_chunk(
@@ -672,11 +378,8 @@ impl SessionProjection {
             wire::SessionUpdate::TerminalUpdate(terminal) => {
                 self.apply_terminal(terminal, &mut change)
             }
-            wire::SessionUpdate::Other(other)
-                if other.session_update
-                    == ProductIdentity::ACP_EVENT_UPDATE =>
-            {
-                self.apply_event(other, &mut change)
+            wire::SessionUpdate::CompactionUpdate(update) => {
+                self.apply_compaction(update, &mut change)
             }
             wire::SessionUpdate::SessionInfoUpdate(info) => {
                 if let Some(title) = info.title.as_opt_ref() {
@@ -722,27 +425,146 @@ impl SessionProjection {
         }
     }
 
-    /// Reads kernel events carried as extension updates; only queue snapshots matter here.
+    /// Applies a kernel event: queue snapshots and extension handler errors.
     fn apply_event(
         &mut self,
-        update: &wire::OtherSessionUpdate,
+        event: &ProductEvent,
         change: &mut ProjectionChange,
     ) {
-        let Some(payload) = update.fields.get("payload") else {
+        match &event.payload {
+            AgentEventPayload::QueueChanged { pending } => {
+                change.queue |= self.set_pending(pending.clone());
+            }
+            AgentEventPayload::ExtensionHandlerFailed {
+                extension_id,
+                message,
+                ..
+            } => {
+                let id = format!(
+                    "{}:{}",
+                    event.meta.turn_id.as_deref().unwrap_or_default(),
+                    event.meta.sequence.unwrap_or_default()
+                );
+                self.insert_error(
+                    ErrorRow {
+                        id,
+                        source: extension_id.as_ref().to_owned(),
+                        message: message.clone(),
+                    },
+                    &event.meta,
+                    change,
+                );
+            }
+            // Persisted handler errors are extension messages marked `handler_error`.
+            AgentEventPayload::MessageEnd { message } => {
+                let protocol::MessageContent::Extension { extension } =
+                    &message.content
+                else {
+                    return;
+                };
+                let kind = extension
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("kind"))
+                    .and_then(serde_json::Value::as_str);
+                if kind != Some("handler_error") {
+                    return;
+                }
+                // The error text is the message's text blocks; the details
+                // carry only the kind and the hook point.
+                let text = extension
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        protocol::ContentBlock::Text { text } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.insert_error(
+                    ErrorRow {
+                        id: message.identity.message_id.to_string(),
+                        source: extension.extension_id.as_ref().to_owned(),
+                        message: text,
+                    },
+                    &event.meta,
+                    change,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Adds an error row once; a replayed duplicate is ignored.
+    fn insert_error(
+        &mut self,
+        row: ErrorRow,
+        meta: &ProductMeta,
+        change: &mut ProjectionChange,
+    ) {
+        if !self.index.contains_key(&RowKey::Error(row.id.clone())) {
+            self.insert(TranscriptRow::Error(row), meta, change);
+        }
+    }
+
+    /// Adds the row of a completed compaction; other statuses live in the controls.
+    fn apply_compaction(
+        &mut self,
+        update: &wire::CompactionUpdate,
+        change: &mut ProjectionChange,
+    ) {
+        if update.status != wire::CompactionStatus::Completed {
+            return;
+        }
+        let meta = Self::product(update.meta.value());
+        let details = update
+            .meta
+            .value()
+            .and_then(|meta| meta.get(ProductIdentity::ACP_NAMESPACE))
+            .and_then(|product| product.get("compaction"));
+        let text = |pointer: &str| {
+            details
+                .and_then(|details| details.pointer(pointer))
+                .and_then(serde_json::Value::as_str)
+        };
+        let number = |pointer: &str| {
+            text(pointer).and_then(|value| value.parse::<u64>().ok())
+        };
+        let Some(entry_id) = text("/result/entryId") else {
             return;
         };
-        if payload.get("event").and_then(serde_json::Value::as_str)
-            != Some("queue_changed")
-        {
+        let reason = match text("/reason") {
+            Some("threshold") => CompactionReason::Threshold,
+            Some("overflow") => CompactionReason::Overflow,
+            _ => CompactionReason::Manual,
+        };
+        let key = RowKey::Compaction(entry_id.to_owned());
+        if self.index.contains_key(&key) {
             return;
         }
-        let pending = payload.get("pending").cloned().unwrap_or_default();
-        match serde_json::from_value::<protocol::PendingMessages>(pending) {
-            Ok(pending) => change.queue |= self.set_pending(pending),
-            Err(error) => {
-                tracing::warn!("ignored malformed queue snapshot: {}", error)
-            }
-        }
+        let summary = update
+            .summary
+            .value()
+            .map(|blocks| Self::text_of(blocks))
+            .unwrap_or_default();
+        let elapsed_ms = number("/result/endedAtMs")
+            .zip(number("/result/startedAtMs"))
+            .map(|(ended, started)| ended.saturating_sub(started));
+        self.insert(
+            TranscriptRow::Compaction(
+                CompactionRow::builder()
+                    .entry_id(entry_id.to_owned())
+                    .reason(reason)
+                    .summary(summary)
+                    .tokens_before(number("/result/tokensBefore"))
+                    .elapsed_ms(elapsed_ms)
+                    .build(),
+            ),
+            &meta,
+            change,
+        );
     }
 
     /// Reads product metadata from an optional `_meta`.
@@ -944,6 +766,12 @@ impl SessionProjection {
         }
         if let Some(origin) = meta.origin {
             row.origin = origin;
+        }
+        if meta.command.is_some() {
+            row.command = meta.command.clone();
+        }
+        if meta.assistant.is_some() {
+            row.assistant = meta.assistant.clone();
         }
     }
 

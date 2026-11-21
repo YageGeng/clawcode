@@ -4,15 +4,14 @@ mod support;
 
 use std::path::Path;
 
-use desktop::ui::SidebarRow;
-use futures::channel::mpsc::unbounded;
+use desktop::ui::{SidebarRow, WorkspaceRow};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::{ClickOptions, TestWindowExt as _};
 use gpui_kit::{AppContext as _, TestAppContext};
 use support::ScriptedBackend;
 use support::shell::{
-    Live, click_label, eventually, live, model, open, session, shows, titles,
-    with_workspaces,
+    Live, click_label, connect, eventually, fixture_state, live, model, open,
+    session, shows, titles, with_workspaces,
 };
 
 #[gpui_kit::test]
@@ -52,7 +51,7 @@ fn removing_a_workspace_survives_rediscovery(cx: &mut TestAppContext) {
         assert!(!view.read(cx).state().workspaces.contains(Path::new("/w/a")))
     });
     let model = model(cx, &view);
-    assert!(model.groups[0].rows.iter().all(|row| !matches!(row, SidebarRow::Workspace { path, .. } if path == Path::new("/w/a"))));
+    assert!(model.groups[0].rows.iter().all(|row| !matches!(row, SidebarRow::Workspace(WorkspaceRow { path, .. }) if path == Path::new("/w/a"))));
 }
 
 #[gpui_kit::test]
@@ -70,7 +69,9 @@ fn missing_workspace_folder_is_marked(cx: &mut TestAppContext) {
         .rows
         .iter()
         .filter_map(|row| match row {
-            SidebarRow::Workspace { missing, .. } => Some(*missing),
+            SidebarRow::Workspace(WorkspaceRow { missing, .. }) => {
+                Some(*missing)
+            }
             _ => None,
         })
         .collect();
@@ -86,13 +87,8 @@ fn connected(
     gpui_kit::Entity<desktop::ui::AppView>,
     tempfile::TempDir,
 ) {
-    cx.executor().allow_parking();
-    let workspace =
-        backend.workspace.path().to_str().expect("utf8").to_string();
-    let (handle, view, dir) = open(cx, with_workspaces(&[&workspace]));
-    let events = std::mem::replace(&mut backend.events, unbounded().1);
-    let client = backend.client.clone();
-    view.update(cx, |view, cx| view.set_backend(Ok((client, events)), cx));
+    let (handle, view, dir) = open(cx, fixture_state(backend));
+    connect(cx, &view, backend);
     (handle, view, dir)
 }
 

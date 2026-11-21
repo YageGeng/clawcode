@@ -7,7 +7,7 @@ use protocol::{
     DeviceCodeSink, LoginMethod, ModelInputModalities, ModelInputModality,
     ModelProfile,
 };
-use rig_core::providers::chatgpt::auth::{AuthContext, AuthError};
+use rig_core::providers::auth::{AuthContext, AuthError};
 use rig_core::{
     DynModel,
     catalog::{Catalog, ModelSpec, ReasoningSupport},
@@ -82,6 +82,17 @@ impl std::fmt::Display for ProviderConnectError {
                 Some(status) => write!(formatter, "HTTP {}", status.as_u16()),
                 None => formatter.write_str("HTTP transport or protocol error"),
             },
+            // The reply message may quote the sign-in server, so only its status is shown.
+            AuthError::Reply { source, .. } => {
+                match source.non_success_status() {
+                    Some(status) => write!(
+                        formatter,
+                        "sign-in server rejected the request (HTTP {})",
+                        status.as_u16()
+                    ),
+                    None => formatter.write_str("sign-in server failure"),
+                }
+            }
             AuthError::Store(_) => formatter.write_str("token store failure"),
             AuthError::Message(_) => {
                 formatter.write_str("authentication flow failure")

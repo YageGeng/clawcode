@@ -13,12 +13,12 @@ use gpui_kit::{
     Window,
 };
 
-use super::{AppView, TabEntry};
 use crate::backend::SessionId;
+use crate::ui::{AppView, TabEntry};
 
 impl AppView {
     /// Recomputes which registered workspace directories are gone; filesystem reads stay out of render.
-    pub(super) fn refresh_missing(&mut self) {
+    pub(in crate::ui) fn refresh_missing(&mut self) {
         // Local host only: remote workspaces will be checked by their backend (spec §4.6).
         self.missing = self
             .state

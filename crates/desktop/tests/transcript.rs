@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use agent_client_protocol::v2::schema as wire;
 use desktop::projection::{RowKey, RunState, SessionProjection, ToolCategory};
 use desktop::transcript::{
-    Elapsed, GroupPosition, LayoutDiff, LayoutRow, RunSummary,
-    TranscriptLayout, single_line,
+    GroupPosition, LayoutDiff, LayoutRow, RunSummary, TranscriptLayout,
 };
+use desktop::ui::{Elapsed, single_line};
 use serde_json::{Value, json};
 
 /// Product metadata with a sequence and timestamp.
@@ -78,7 +78,7 @@ fn groups(layout: &TranscriptLayout) -> Vec<Option<GroupPosition>> {
     (0..layout.len())
         .filter_map(|ix| match layout.row(ix)? {
             LayoutRow::Row { group, .. } => Some(*group),
-            LayoutRow::RunSummary { .. } => None,
+            LayoutRow::RunSummary { .. } | LayoutRow::Usage { .. } => None,
         })
         .collect()
 }
@@ -134,7 +134,7 @@ fn finished_run_folds_its_tools_into_one_summary() {
         })
     );
     assert_eq!(
-        l.row(1).expect("row").element_id().as_ref(),
+        l.row(1).expect("row").element_id().as_str(),
         "run:message:u1"
     );
 }
@@ -157,7 +157,7 @@ fn expanded_anchor_unfolds_a_finished_run() {
         Some(LayoutRow::RunSummary { expanded: true, .. })
     ));
     assert_eq!(
-        l.row(1).expect("row").element_id().as_ref(),
+        l.row(1).expect("row").element_id().as_str(),
         "run:message:u1"
     );
     // Summaries are left out of `groups`: u1, then the three tools as one box.
@@ -383,4 +383,72 @@ fn user_bash_message_is_hidden_behind_its_tool_row() {
     let l = layout(&p);
     assert_eq!(l.position_of(&msg("b1")), None);
     assert_eq!(l.len(), 1);
+}
+
+/// Adds an assistant message that reports its model and usage.
+fn assistant_with_usage(
+    projection: &mut SessionProjection,
+    id: &str,
+    seq: u64,
+    ts: u64,
+    input: u64,
+) {
+    apply(
+        projection,
+        json!({ "sessionUpdate": "agent_message", "messageId": id,
+            "content": [{ "type": "text", "text": "done" }],
+            "_meta": { "clawcode": {
+                "sequence": seq, "timestampMs": ts.to_string(),
+                "assistant": { "provider_id": "p", "model_id": "m",
+                    "stop_reason": "end_turn",
+                    "usage": { "input_tokens": input.to_string(), "output_tokens": "2" } }
+            } } }),
+    );
+}
+
+/// Usage rows of a layout, as (anchor, input tokens).
+fn usage_rows(layout: &TranscriptLayout) -> Vec<(RowKey, Option<u64>)> {
+    (0..layout.len())
+        .filter_map(|ix| match layout.row(ix)? {
+            LayoutRow::Usage { anchor, usage } => {
+                Some((anchor.clone(), usage.usage.input))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn finished_run_gets_one_usage_row() {
+    let mut p = SessionProjection::default();
+    user(&mut p, "u1", 1, 0);
+    assistant_with_usage(&mut p, "a1", 2, 1_000, 10);
+    assistant_with_usage(&mut p, "a2", 3, 3_000, 5);
+    state(&mut p, "idle");
+
+    let l = layout(&p);
+
+    assert_eq!(usage_rows(&l), [(msg("a2"), Some(15))]);
+    let last = l.row(l.len() - 1).expect("last row");
+    assert_eq!(last.element_id(), "usage:message:a2");
+    let LayoutRow::Usage { usage, .. } = last else {
+        panic!("usage row last");
+    };
+    assert_eq!(usage.model, Some(("p".to_string(), "m".to_string())));
+    assert_eq!(usage.usage.output, Some(4));
+}
+
+#[test]
+fn running_or_usage_less_runs_have_no_usage_row() {
+    let mut running = SessionProjection::default();
+    user(&mut running, "u1", 1, 0);
+    assistant_with_usage(&mut running, "a1", 2, 1_000, 10);
+    state(&mut running, "running");
+    let mut silent = SessionProjection::default();
+    user(&mut silent, "u1", 1, 0);
+    assistant(&mut silent, "a1", 2, 1_000);
+    state(&mut silent, "idle");
+
+    assert!(usage_rows(&layout(&running)).is_empty());
+    assert!(usage_rows(&layout(&silent)).is_empty());
 }

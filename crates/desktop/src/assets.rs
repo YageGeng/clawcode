@@ -18,7 +18,12 @@ gpui_kit::assets::icon_assets!(
         Trash,
         ArrowRightLeft,
         Wrench,
-        Settings2
+        Settings2,
+        GitCommitHorizontal,
+        SquareSlash,
+        ClipboardList,
+        Paperclip,
+        Circle
     ]
 );
 

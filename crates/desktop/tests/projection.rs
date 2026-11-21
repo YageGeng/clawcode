@@ -6,8 +6,9 @@ use std::collections::HashSet;
 
 use agent_client_protocol::v2::schema as wire;
 use desktop::projection::{
-    MessageRow, ProjectionChange, Role, RowKey, RunState, SessionProjection,
-    ToolCategory, ToolRow, ToolStatus, TranscriptRow,
+    CommandKind, CommandStatus, CompactionReason, MessageRow, ProjectionChange,
+    Role, RowKey, RunState, SessionProjection, ToolCategory, ToolRow,
+    ToolStatus, TranscriptRow,
 };
 use serde_json::{Value, json};
 use support::ScriptedBackend;
@@ -33,7 +34,7 @@ fn message(projection: &SessionProjection, index: usize) -> &MessageRow {
         .row(index)
         .and_then(|row| match row {
             TranscriptRow::Message(row) => Some(row),
-            TranscriptRow::Tool(_) => None,
+            _ => None,
         })
         .expect("message row")
 }
@@ -44,7 +45,7 @@ fn tool(projection: &SessionProjection, index: usize) -> &ToolRow {
         .row(index)
         .and_then(|row| match row {
             TranscriptRow::Tool(row) => Some(row),
-            TranscriptRow::Message(_) => None,
+            _ => None,
         })
         .expect("tool row")
 }
@@ -405,9 +406,7 @@ fn unrelated_updates_change_nothing() {
 
     let change = apply(
         &mut projection,
-        json!({
-            "sessionUpdate": "available_commands_update", "availableCommands": []
-        }),
+        json!({ "sessionUpdate": "replay_complete" }),
     );
 
     assert!(change.is_empty());
@@ -757,4 +756,200 @@ fn exec_footer_keeps_the_terminal_output() {
     let row = tool_by_id(&projection, "t1");
     assert_eq!(row.output, "hi there");
     assert_eq!(row.footer.as_deref(), Some("Full output: /tmp/out.log"));
+}
+
+/// Sends one text prompt.
+fn say(backend: &ScriptedBackend, id: &wire::SessionId, text: &str) {
+    backend
+        .block_on(backend.client.prompt(
+            id,
+            vec![wire::ContentBlock::Text(wire::TextContent::new(text))],
+        ))
+        .expect("prompt");
+}
+
+/// Applies every update to a fresh projection.
+fn project(updates: &[wire::SessionUpdate]) -> SessionProjection {
+    let mut projection = SessionProjection::default();
+    for update in updates {
+        projection.apply(update);
+    }
+    projection
+}
+
+/// Every row of a projection.
+fn rows(projection: &SessionProjection) -> Vec<&TranscriptRow> {
+    (0..projection.len())
+        .filter_map(|index| projection.row(index))
+        .collect()
+}
+
+#[test]
+fn compact_inserts_a_compaction_row() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    say(&backend, &id, "hello");
+    let mut updates = backend.wait_idle(&id);
+    backend
+        .block_on(backend.client.compact(&id))
+        .expect("compact");
+    updates.extend(backend.wait_for(&id, |update| {
+        matches!(update, wire::SessionUpdate::CompactionUpdate(_))
+            && serde_json::to_string(update)
+                .is_ok_and(|text| text.contains("\"completed\""))
+    }));
+
+    let projection = project(&updates);
+
+    let compaction = rows(&projection)
+        .into_iter()
+        .find_map(|row| match row {
+            TranscriptRow::Compaction(row) => Some(row.clone()),
+            _ => None,
+        })
+        .expect("compaction row");
+    assert!(compaction.tokens_before.is_some());
+    assert_eq!(compaction.reason, CompactionReason::Manual);
+    assert!(
+        projection
+            .index_of(&RowKey::Compaction(compaction.entry_id.clone()))
+            .is_some()
+    );
+}
+
+#[test]
+fn slash_invocation_and_output_carry_command_meta() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    say(&backend, &id, "hello");
+    let mut updates = backend.wait_idle(&id);
+    say(&backend, &id, "/name");
+    updates.extend(backend.wait_idle(&id));
+
+    let projection = project(&updates);
+
+    let commands: Vec<(Role, CommandKind, Option<CommandStatus>)> =
+        rows(&projection)
+            .into_iter()
+            .filter_map(|row| match row {
+                TranscriptRow::Message(row) => {
+                    row.command.as_ref().map(|command| {
+                        assert_eq!(command.name, "name");
+                        (row.role, command.kind, command.status)
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+    assert!(commands.contains(&(Role::User, CommandKind::Invocation, None)));
+    assert!(
+        commands
+            .iter()
+            .any(|(role, kind, status)| *role == Role::Assistant
+                && *kind == CommandKind::Output
+                && *status == Some(CommandStatus::Succeeded))
+    );
+}
+
+#[test]
+fn assistant_meta_and_error_are_kept() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    say(&backend, &id, "hello");
+    let mut projection = project(&backend.wait_idle(&id));
+    let reply = rows(&projection)
+        .into_iter()
+        .find_map(|row| match row {
+            TranscriptRow::Message(row) if row.role == Role::Assistant => {
+                Some(row.clone())
+            }
+            _ => None,
+        })
+        .expect("reply");
+    let assistant = reply.assistant.expect("assistant meta");
+    assert!(assistant.usage.is_some());
+    assert_eq!(assistant.model_id, "scripted");
+
+    apply(
+        &mut projection,
+        json!({ "sessionUpdate": "agent_message", "messageId": "failed",
+            "content": [],
+            "_meta": { "clawcode": { "sequence": 999, "timestampMs": "5",
+                "assistant": { "provider_id": "p", "model_id": "m",
+                    "stop_reason": "error", "error": "overloaded" } } } }),
+    );
+
+    let failed = projection
+        .index_of(&message_key("failed"))
+        .and_then(|index| projection.row(index));
+    let Some(TranscriptRow::Message(failed)) = failed else {
+        panic!("failed message row");
+    };
+    assert!(failed.is_visible());
+    assert_eq!(
+        failed.assistant.as_ref().and_then(|a| a.error.as_deref()),
+        Some("overloaded")
+    );
+}
+
+#[test]
+fn handler_failure_becomes_an_error_row() {
+    let mut projection = SessionProjection::default();
+
+    let change = apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "_clawcode/event",
+            "payload": { "event": "extension_handler_failed",
+                "extension_id": "audit", "point": "before_tool", "message": "boom" },
+            "_meta": { "clawcode": { "turnId": "t9", "timestampMs": "1", "sequence": 4 } }
+        }),
+    );
+
+    let key = RowKey::Error("t9:4".to_string());
+    assert!(change.inserted.contains(&key));
+    let Some(TranscriptRow::Error(row)) = projection
+        .index_of(&key)
+        .and_then(|index| projection.row(index))
+    else {
+        panic!("error row");
+    };
+    assert_eq!(row.source, "audit");
+    assert_eq!(row.message, "boom");
+    assert_eq!(key.to_string(), "error:t9:4");
+}
+
+#[test]
+fn replayed_handler_error_keeps_its_message() {
+    let mut projection = SessionProjection::default();
+
+    // The kernel persists the error text as the extension message's text
+    // block; its details hold only the kind and the hook point.
+    apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "_clawcode/event",
+            "payload": { "event": "message_end", "message": {
+                "message_id": "m7", "turn_id": "t9",
+                "timestamp_ms": "1", "started_at_ms": "1", "ended_at_ms": "1",
+                "content": { "type": "extension", "extension": {
+                    "extension_id": "audit", "custom_type": "before_tool",
+                    "blocks": [{ "type": "text", "text": "boom" }],
+                    "display": true, "include_in_context": false,
+                    "details": { "kind": "handler_error", "point": "before_tool" }
+                } }
+            } },
+            "_meta": { "clawcode": { "turnId": "t9", "timestampMs": "1", "sequence": 5 } }
+        }),
+    );
+
+    let key = RowKey::Error("m7".to_string());
+    let Some(TranscriptRow::Error(row)) = projection
+        .index_of(&key)
+        .and_then(|index| projection.row(index))
+    else {
+        panic!("error row");
+    };
+    assert_eq!(row.source, "audit");
+    assert_eq!(row.message, "boom");
 }

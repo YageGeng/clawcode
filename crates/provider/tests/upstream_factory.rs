@@ -588,7 +588,7 @@ fn prompt_cache_keeps_only_catalog_supported_tiers() {
     for (preset, model, tier, configured, expected) in [
         ("deepseek", "deepseek-flash", "short", Short, Some(Short)),
         ("deepseek", "deepseek-flash", "long", Long, None),
-        ("chatgpt", "gpt-5.3-codex", "short", Short, None),
+        ("chatgpt", "gpt-5.6-sol", "short", Short, None),
         ("anthropic", "claude-fable-5", "long", Long, Some(Long)),
         // The catalog does not know this model, so nothing is refused.
         ("deepseek", "unlisted-audit", "long", Long, Some(Long)),

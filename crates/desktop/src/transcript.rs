@@ -5,11 +5,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use agent_client_protocol::v2::schema as wire;
-use gpui_kit::SharedString;
 
 use crate::projection::{
-    MessageOrigin, Role, RowKey, RunState, SessionProjection, ToolCategory,
-    TranscriptRow,
+    MessageOrigin, ModelUsage, Role, RowKey, RunState, SessionProjection,
+    ToolCategory, TranscriptRow,
 };
 
 /// Where a tool row sits inside its group of consecutive tool rows.
@@ -34,6 +33,17 @@ pub struct RunSummary {
     pub counts: Vec<(ToolCategory, usize)>,
 }
 
+/// What a finished run used: summed tokens, the model, and its duration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunUsage {
+    /// `(provider_id, model_id)` of the run's last reporting reply.
+    pub model: Option<(String, String)>,
+    /// Token counts summed over the run's replies.
+    pub usage: ModelUsage,
+    /// Time from the prompt to the last row's end, when known.
+    pub elapsed_ms: Option<u64>,
+}
+
 /// One displayed row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayoutRow {
@@ -55,6 +65,13 @@ pub enum LayoutRow {
         /// Whether the run's tools are shown below the summary.
         expanded: bool,
     },
+    /// A finished run's token usage, below its last reply.
+    Usage {
+        /// Key of the reply it follows.
+        anchor: RowKey,
+        /// What the run used.
+        usage: RunUsage,
+    },
 }
 
 impl LayoutRow {
@@ -72,13 +89,12 @@ impl LayoutRow {
         }
     }
 
-    /// Stable element id: the row key, or `run:{anchor}` for a summary.
-    pub fn element_id(&self) -> SharedString {
+    /// Stable element id: the row key, `run:{anchor}` for a summary, or `usage:{anchor}`.
+    pub fn element_id(&self) -> String {
         match self {
-            LayoutRow::Row { key, .. } => key.to_string().into(),
-            LayoutRow::RunSummary { anchor, .. } => {
-                format!("run:{anchor}").into()
-            }
+            LayoutRow::Row { key, .. } => key.to_string(),
+            LayoutRow::RunSummary { anchor, .. } => format!("run:{anchor}"),
+            LayoutRow::Usage { anchor, .. } => format!("usage:{anchor}"),
         }
     }
 }
@@ -132,7 +148,9 @@ impl<'a> LayoutBuilder<'a> {
                     message.role == Role::User
                         && message.origin == MessageOrigin::Prompt
                 }
-                TranscriptRow::Tool(_) => false,
+                TranscriptRow::Tool(_)
+                | TranscriptRow::Compaction(_)
+                | TranscriptRow::Error(_) => false,
             };
             if starts_run || segments.is_empty() {
                 segments.push(Vec::new());
@@ -149,6 +167,7 @@ impl<'a> LayoutBuilder<'a> {
         match segment.first()?.1 {
             TranscriptRow::Message(message) => message.timestamp_ms,
             TranscriptRow::Tool(tool) => tool.timestamp_ms,
+            TranscriptRow::Compaction(_) | TranscriptRow::Error(_) => None,
         }
     }
 
@@ -162,6 +181,7 @@ impl<'a> LayoutBuilder<'a> {
                     .timestamp_ms
                     .map(|ts| ts + message.duration_ms.unwrap_or(0)),
                 TranscriptRow::Tool(tool) => tool.timestamp_ms,
+                TranscriptRow::Compaction(_) | TranscriptRow::Error(_) => None,
             })
             .max()?;
         Some(end.saturating_sub(start))
@@ -183,6 +203,8 @@ impl<'a> LayoutBuilder<'a> {
         let expanded = self.expanded_runs.contains(&anchor);
         let fold = summarize && !expanded;
         let mut summary_placed = false;
+        // Position in `self.rows` of the segment's last reply, where usage goes.
+        let mut last_reply: Option<(usize, RowKey)> = None;
         // Index in `self.rows` where the open run of consecutive tool rows began.
         let mut group_start: Option<usize> = None;
         for (index, row) in segment {
@@ -227,6 +249,11 @@ impl<'a> LayoutBuilder<'a> {
             } else {
                 self.close_group(&mut group_start);
             }
+            if let TranscriptRow::Message(message) = row
+                && message.role == Role::Assistant
+            {
+                last_reply = Some((self.rows.len(), row.key()));
+            }
             self.rows.push(LayoutRow::Row {
                 key: row.key(),
                 index: *index,
@@ -234,6 +261,42 @@ impl<'a> LayoutBuilder<'a> {
             });
         }
         self.close_group(&mut group_start);
+        if finished
+            && let Some((position, anchor)) = last_reply
+            && let Some(usage) = Self::run_usage(segment)
+        {
+            self.rows
+                .insert(position + 1, LayoutRow::Usage { anchor, usage });
+        }
+    }
+
+    /// Sums the usage the segment's replies report; `None` when none reports any.
+    fn run_usage(segment: &[(usize, &TranscriptRow)]) -> Option<RunUsage> {
+        let mut total: Option<ModelUsage> = None;
+        let mut model = None;
+        for (_, row) in segment {
+            let TranscriptRow::Message(message) = row else {
+                continue;
+            };
+            let Some(assistant) = &message.assistant else {
+                continue;
+            };
+            model = Some((
+                assistant.provider_id.clone(),
+                assistant.model_id.clone(),
+            ));
+            if let Some(usage) = &assistant.usage {
+                total = Some(match total {
+                    Some(sum) => sum.sum(usage),
+                    None => usage.clone(),
+                });
+            }
+        }
+        Some(RunUsage {
+            model,
+            usage: total?,
+            elapsed_ms: Self::elapsed_ms(segment),
+        })
     }
 
     /// Labels the open tool group (rows from its start to the end) once, then closes it.
@@ -250,25 +313,6 @@ impl<'a> LayoutBuilder<'a> {
                 });
             }
         }
-    }
-}
-
-impl ToolCategory {
-    /// Localized action verb such as `Read` or `读取`.
-    pub fn verb(self) -> SharedString {
-        match self {
-            ToolCategory::Read => rust_i18n::t!("Tool.read"),
-            ToolCategory::Edit => rust_i18n::t!("Tool.edit"),
-            ToolCategory::Delete => rust_i18n::t!("Tool.delete"),
-            ToolCategory::Move => rust_i18n::t!("Tool.move"),
-            ToolCategory::Search => rust_i18n::t!("Tool.search"),
-            ToolCategory::Execute => rust_i18n::t!("Tool.execute"),
-            ToolCategory::Fetch => rust_i18n::t!("Tool.fetch"),
-            ToolCategory::Think => rust_i18n::t!("Tool.think"),
-            ToolCategory::Other => rust_i18n::t!("Tool.other"),
-        }
-        .into_owned()
-        .into()
     }
 }
 
@@ -373,65 +417,5 @@ impl TranscriptLayout {
             .map(|(ix, _)| ix)
             .collect();
         LayoutDiff { splice, remeasure }
-    }
-}
-
-/// A duration in milliseconds, shown as `14s`, `1m 28s`, or `1h 2m`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Elapsed(pub u64);
-
-impl Elapsed {
-    /// Localized label with the two most significant units.
-    pub fn label(self) -> SharedString {
-        let seconds = self.0 / 1000;
-        match seconds {
-            0..60 => rust_i18n::t!("Elapsed.seconds", s = seconds),
-            60..3600 => rust_i18n::t!(
-                "Elapsed.minutes",
-                m = seconds / 60,
-                s = seconds % 60
-            ),
-            _ => rust_i18n::t!(
-                "Elapsed.hours",
-                h = seconds / 3600,
-                m = seconds % 3600 / 60
-            ),
-        }
-        .into_owned()
-        .into()
-    }
-}
-
-impl RunSummary {
-    /// `Worked 1m 28s · Read 3 · Edit 2`; the time is omitted when unknown.
-    pub fn label(&self) -> SharedString {
-        let mut label = match self.elapsed_ms {
-            Some(ms) => rust_i18n::t!(
-                "Transcript.worked",
-                elapsed = Elapsed(ms).label().as_ref()
-            )
-            .into_owned(),
-            None => rust_i18n::t!("Transcript.worked_plain").into_owned(),
-        };
-        for (category, count) in &self.counts {
-            label.push_str(&format!(" · {} {count}", category.verb()));
-        }
-        label.into()
-    }
-}
-
-/// One display line of text that may span several: the first non-empty line,
-/// trimmed, followed by ` …` when more non-empty text comes after it.
-///
-/// Rows of fixed height (tool targets, user-run commands, titles) would
-/// otherwise lay out the extra lines and clip them.
-pub fn single_line(text: &str) -> std::borrow::Cow<'_, str> {
-    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    match (lines.next(), lines.next()) {
-        (None, _) => std::borrow::Cow::Borrowed(""),
-        (Some(first), None) => std::borrow::Cow::Borrowed(first),
-        (Some(first), Some(_)) => {
-            std::borrow::Cow::Owned(format!("{first} \u{2026}"))
-        }
     }
 }

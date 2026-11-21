@@ -99,8 +99,8 @@ impl HttpMiddleware for Probe {
             assert_eq!(exchange.method, http::Method::POST);
             assert_eq!(exchange.uri.path(), "/audit");
             if matches!(self.mode, Mode::RejectHeaders) {
-                return Err(http_client::Error::Instance(
-                    std::io::Error::other("header rejected").into(),
+                return Err(http_client::Error::permanent(
+                    std::io::Error::other("header rejected"),
                 ));
             }
             headers.append(
@@ -158,8 +158,8 @@ impl HttpMiddleware for Probe {
         Box::pin(async move {
             self.record("response");
             if matches!(self.mode, Mode::RejectResponse) {
-                return Err(http_client::Error::Instance(
-                    std::io::Error::other("response rejected").into(),
+                return Err(http_client::Error::permanent(
+                    std::io::Error::other("response rejected"),
                 ));
             }
             Ok(())
@@ -236,12 +236,10 @@ async fn native_middleware_preserves_order_and_isolates_sessions() {
         .apply(base.clone());
     assert!(first.ptr_eq(&base) && second.ptr_eq(&base));
     let request = http::Request::post("https://provider.invalid/audit")
-        .body(vec![0xff, 0])
+        .body(Bytes::from_static(&[0xff, 0]))
         .expect("valid synthetic test state");
-    let (a, b) = tokio::join!(
-        first.send::<_, Bytes>(request.clone()),
-        second.send::<_, Bytes>(request)
-    );
+    let (a, b) =
+        tokio::join!(first.send(request.clone()), second.send(request));
     assert!(a.is_ok() && b.is_ok());
     let requests = capture.requests();
     assert_eq!(requests.len(), 2);
@@ -304,9 +302,9 @@ async fn middleware_rejection_preserves_transport_error_priority() {
             .provider_middleware(context("first"))
             .apply(DynHttpClient::new(capture.clone()));
         let error = http
-            .send::<_, Bytes>(
+            .send(
                 http::Request::post("https://provider.invalid/audit")
-                    .body(Vec::<u8>::new())
+                    .body(Bytes::new())
                     .expect("valid synthetic test state"),
             )
             .await
@@ -351,7 +349,7 @@ async fn failed_registration_rolls_back_and_multipart_skips_body_hooks() {
         .apply(DynHttpClient::new(RecordingHttpClient::new("ok")));
     let form =
         http_client::multipart::MultipartForm::new().text("model", "audit");
-    http.send_multipart::<Bytes>(
+    http.send_multipart(
         http::Request::post("https://provider.invalid/audit")
             .body(form)
             .expect("valid synthetic test state"),

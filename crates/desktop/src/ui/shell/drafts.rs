@@ -7,10 +7,13 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Context, Entity, Window};
 
-use super::{AppView, SessionTarget, SessionView, SessionViewEvent, TabEntry};
 use crate::actions::FocusComposer;
-use crate::backend::SessionId;
+use crate::backend::SessionStart;
 use crate::catalog::SessionSummary;
+use crate::ui::composer::attachments::Outgoing;
+use crate::ui::{
+    AppView, SessionTarget, SessionView, SessionViewEvent, TabEntry,
+};
 
 impl AppView {
     /// The active tab's view, once it has been shown.
@@ -19,7 +22,7 @@ impl AppView {
     }
 
     /// Creates and registers the view of a tab; a new draft's composer takes focus.
-    pub(super) fn create_view(
+    pub(in crate::ui) fn create_view(
         &mut self,
         entry: TabEntry,
         target: SessionTarget,
@@ -49,8 +52,8 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         match event {
-            SessionViewEvent::CreateSession { text } => {
-                self.create_session(view, text.clone(), window, cx)
+            SessionViewEvent::CreateSession { message } => {
+                self.create_session(view, message.clone(), window, cx)
             }
             SessionViewEvent::SelectWorkspace(workspace) => {
                 self.select_draft_workspace(view, workspace.clone(), window, cx)
@@ -72,7 +75,7 @@ impl AppView {
     pub fn create_session(
         &mut self,
         view: &Entity<SessionView>,
-        text: String,
+        message: Outgoing,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
@@ -83,18 +86,20 @@ impl AppView {
             _ => None,
         };
         let (Some(cwd), Some(client)) = (cwd, self.host.client.clone()) else {
-            Self::creation_failed(view, &text, window, cx);
+            Self::creation_failed(view, message, window, cx);
             return;
         };
         let view = view.clone();
         cx.spawn_in(window, async move |this, cx| {
             let created = client.new_session(&cwd).await;
             let _ = this.update_in(cx, |this, window, cx| match created {
-                Ok(id) => {
-                    if this.adopt_draft(&view, &cwd, id, window, cx) {
-                        view.update(cx, |view, cx| view.send(text, window, cx));
+                Ok(start) => {
+                    if this.adopt_draft(&view, &cwd, start, window, cx) {
+                        view.update(cx, |view, cx| {
+                            view.send(message, window, cx)
+                        });
                     } else {
-                        Self::creation_failed(&view, &text, window, cx);
+                        Self::creation_failed(&view, message, window, cx);
                     }
                 }
                 Err(error) => {
@@ -103,7 +108,7 @@ impl AppView {
                         cwd.display(),
                         error
                     );
-                    Self::creation_failed(&view, &text, window, cx);
+                    Self::creation_failed(&view, message, window, cx);
                 }
             });
         })
@@ -113,7 +118,7 @@ impl AppView {
     /// Gives the text back to the draft's composer and reports the failure.
     fn creation_failed(
         view: &Entity<SessionView>,
-        text: &str,
+        message: Outgoing,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
@@ -123,7 +128,8 @@ impl AppView {
             cx.notify();
             view.composer().clone()
         });
-        composer.update(cx, |composer, cx| composer.restore(text, window, cx));
+        composer
+            .update(cx, |composer, cx| composer.restore(message, window, cx));
         window.push_notification(
             Notification::error(
                 rust_i18n::t!("Composer.create_failed").into_owned(),
@@ -132,22 +138,23 @@ impl AppView {
         );
     }
 
-    /// Turns the draft shown by `view` into the just-created session `id`;
+    /// Turns the draft shown by `view` into the just-created session;
     /// returns `false` when there is no registry to adopt it into.
     fn adopt_draft(
         &mut self,
         view: &Entity<SessionView>,
         cwd: &Path,
-        id: SessionId,
+        start: SessionStart,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         let Some(registry) = self.host.registry.clone() else {
             return false;
         };
+        let id = start.id.clone();
         tracing::info!("created session {} in {}", id, cwd.display());
         let handle =
-            registry.update(cx, |registry, cx| registry.adopt(&id, cwd, cx));
+            registry.update(cx, |registry, cx| registry.adopt(start, cwd, cx));
         let now = crate::now_ms();
         self.host.catalog.upsert(
             SessionSummary::builder()
@@ -161,13 +168,12 @@ impl AppView {
         // Resolve the tab through the view itself: its draft may have moved to
         // another workspace meanwhile, or closed and been replaced by a new draft.
         let old = self.view_entry(view);
-        let tab = old
+        let replaced = old
             .as_ref()
-            .and_then(|old| self.tabs.iter_mut().find(|tab| *tab == old));
-        match tab {
-            Some(tab) => *tab = entry.clone(),
-            // The draft closed while the session was being created; keep the message visible.
-            None => self.tabs.push(entry.clone()),
+            .is_some_and(|old| self.tabs.replace(old, entry.clone()));
+        // The draft closed while the session was being created; keep the message visible.
+        if !replaced {
+            self.tabs.open(entry.clone());
         }
         if let Some(old) = &old {
             self.views.remove(old);
@@ -200,14 +206,13 @@ impl AppView {
             return;
         }
         // Tab entries key the views, so two drafts cannot share a workspace.
-        if let Some(existing) = self.tabs.iter().position(|tab| *tab == entry) {
+        if let Some(existing) = self.tabs.position(&entry) {
             self.activate(existing, cx);
             return;
         }
-        let Some(tab) = self.tabs.iter_mut().find(|tab| **tab == old) else {
+        if !self.tabs.replace(&old, entry.clone()) {
             return;
-        };
-        *tab = entry.clone();
+        }
         self.views.remove(&old);
         self.views.insert(entry, view.clone());
         view.update(cx, |view, cx| {
@@ -223,7 +228,7 @@ impl AppView {
     }
 
     /// `FocusComposer`: focuses the active tab's message input.
-    pub(super) fn on_focus_composer(
+    pub(in crate::ui) fn on_focus_composer(
         &mut self,
         _: &FocusComposer,
         window: &mut Window,

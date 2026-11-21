@@ -29,14 +29,7 @@ impl AppView {
 
     /// Activates the settings tab, appending it when it is not open yet.
     pub fn open_settings(&mut self, cx: &mut Context<'_, Self>) {
-        let index =
-            match self.tabs.iter().position(|tab| tab == &TabEntry::Settings) {
-                Some(index) => index,
-                None => {
-                    self.tabs.push(TabEntry::Settings);
-                    self.tabs.len() - 1
-                }
-            };
+        let index = self.tabs.open(TabEntry::Settings);
         self.activate(index, cx);
     }
 

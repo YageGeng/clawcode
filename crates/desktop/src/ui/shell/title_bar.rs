@@ -7,12 +7,12 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
 };
 
-use super::AppView;
 use crate::actions::ToggleSidebar;
+use crate::ui::AppView;
 
 impl AppView {
     /// Renders the title bar on the chrome surface, without its own border.
-    pub(super) fn render_title_bar(
+    pub(in crate::ui) fn render_title_bar(
         &self,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
@@ -60,7 +60,7 @@ impl AppView {
 }
 
 /// Publishes the application menus to the platform and the in-window menu bar, in the current language.
-pub(super) fn install_menus(
+pub(in crate::ui) fn install_menus(
     menu_bar: &gpui_kit::Entity<gpui_kit::component::menu::AppMenuBar>,
     cx: &mut gpui_kit::App,
 ) {

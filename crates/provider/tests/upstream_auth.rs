@@ -66,10 +66,10 @@ fn auth_dir_must_be_an_absolute_directory() {
 /// A nonexpired credential uses the upstream file format without network or Codex files.
 #[tokio::test]
 async fn upstream_file_token_store_supplies_a_cached_credential() {
-    use rig_core::providers::chatgpt::auth::{
-        AuthSource, Authenticator, DeviceCodeHandler, FileTokenStore,
-        TokenStore,
+    use rig_core::providers::auth::{
+        DeviceCodeHandler, FileTokenStore, TokenStore,
     };
+    use rig_core::providers::chatgpt::auth::{AuthSource, Authenticator};
     let directory = tempfile::tempdir().expect("temporary store");
     let legacy = directory.path().join("auth.json");
     std::fs::write(&legacy, "untouched codex sentinel").expect("sentinel");
@@ -100,7 +100,7 @@ async fn upstream_file_token_store_supplies_a_cached_credential() {
 #[test]
 fn authentication_diagnostics_redact_untrusted_details() {
     use provider::ProviderConnectError;
-    use rig_core::providers::chatgpt::auth::AuthError;
+    use rig_core::providers::auth::AuthError;
     let sentinel = "PRIVATE_AUTH_SENTINEL";
     let cases = [
         (AuthError::Message(sentinel.into()), "authentication flow"),
@@ -129,6 +129,17 @@ fn authentication_diagnostics_redact_untrusted_details() {
             "HTTP 401",
         ),
         (
+            AuthError::Reply {
+                message: sentinel.into(),
+                source: rig_core::http_client::Error::non_success_with_details(
+                    http::StatusCode::FORBIDDEN,
+                    http::HeaderMap::new(),
+                    sentinel.into(),
+                ),
+            },
+            "HTTP 403",
+        ),
+        (
             AuthError::Store(Box::new(std::io::Error::other(sentinel))),
             "token store",
         ),
@@ -148,7 +159,7 @@ fn authentication_diagnostics_redact_untrusted_details() {
 /// Models of one provider share one authenticator, so a resolved credential is not re-read per model.
 #[tokio::test]
 async fn provider_models_share_one_authenticator() {
-    use rig_core::providers::chatgpt::auth::{FileTokenStore, TokenStore};
+    use rig_core::providers::auth::{FileTokenStore, TokenStore};
     let directory = tempfile::tempdir().expect("temporary store");
     let store = FileTokenStore::new(directory.path());
     let seed = |token: &str| {
@@ -205,7 +216,7 @@ max_output_tokens=128
 /// ChatGPT without a protocol keeps the Responses route and its stored credential.
 #[tokio::test]
 async fn chatgpt_without_provider_type_uses_responses() {
-    use rig_core::providers::chatgpt::auth::{FileTokenStore, TokenStore};
+    use rig_core::providers::auth::{FileTokenStore, TokenStore};
     let directory = tempfile::tempdir().expect("temporary store");
     FileTokenStore::new(directory.path())
         .save(
@@ -262,7 +273,7 @@ mod sign_in {
         self, Bytes, DynHttpClient, HttpClientExt, LazyBody, MultipartForm,
         Request, Response, StreamingResponse,
     };
-    use rig_core::providers::chatgpt::auth::{FileTokenStore, TokenStore};
+    use rig_core::providers::auth::{FileTokenStore, TokenStore};
     use rig_core::test_utils::{
         MockHttpResponse, RecordingHttpClient, SequencedHttpClient,
     };
@@ -302,24 +313,20 @@ mod sign_in {
 
     impl HttpClientExt for GatedHttpClient {
         /// Takes the scripted reply now, then holds it until the gate opens.
-        fn send<T, U>(
+        fn send(
             &self,
-            req: Request<T>,
-        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+            req: Request<Bytes>,
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody>>>
         + WasmCompatSend
-        + 'static
-        where
-            T: Into<Bytes> + WasmCompatSend,
-            U: From<Bytes> + WasmCompatSend + 'static,
-        {
+        + 'static {
             let gate =
                 (!self.takes_a_free_pass()).then(|| Arc::clone(&self.gate));
-            let response = self.inner.send::<T, U>(req);
+            let response = self.inner.send(req);
             async move {
                 if let Some(gate) = gate {
                     // A closed gate stands for a network that never answers.
                     let _permit = gate.acquire().await.map_err(|_closed| {
-                        http_client::Error::Instance("offline".into())
+                        http_client::Error::transient("offline")
                     })?;
                 }
                 response.await
@@ -327,28 +334,22 @@ mod sign_in {
         }
 
         /// Delegates, because sign-in traffic is never multipart.
-        fn send_multipart<U>(
+        fn send_multipart(
             &self,
             req: Request<MultipartForm>,
-        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody>>>
         + WasmCompatSend
-        + 'static
-        where
-            U: From<Bytes> + WasmCompatSend + 'static,
-        {
-            self.inner.send_multipart::<U>(req)
+        + 'static {
+            self.inner.send_multipart(req)
         }
 
         /// Delegates, because sign-in traffic is never streamed.
-        fn send_streaming<T>(
+        fn send_streaming(
             &self,
-            req: Request<T>,
+            req: Request<Bytes>,
         ) -> impl Future<Output = http_client::Result<StreamingResponse>>
-        + WasmCompatSend
-        where
-            T: Into<Bytes> + WasmCompatSend,
-        {
-            self.inner.send_streaming::<T>(req)
+        + WasmCompatSend {
+            self.inner.send_streaming(req)
         }
     }
 

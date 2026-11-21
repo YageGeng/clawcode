@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use desktop::backend::BackendError;
 use desktop::catalog::SessionCatalog;
 use desktop::state::DesktopState;
-use desktop::ui::{GroupKind, SidebarRow, TabEntry};
+use desktop::ui::{GroupKind, SessionRow, SidebarRow, TabEntry, WorkspaceRow};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, TestAppContext};
 use support::shell::{
@@ -39,7 +39,8 @@ fn sidebar_groups_sessions_by_workspace(cx: &mut TestAppContext) {
 
     let workspaces = &model.groups[0];
     assert_eq!(workspaces.kind, GroupKind::Workspaces);
-    let SidebarRow::Workspace { path, children, .. } = &workspaces.rows[0]
+    let SidebarRow::Workspace(WorkspaceRow { path, children, .. }) =
+        &workspaces.rows[0]
     else {
         panic!("first row is a workspace");
     };
@@ -52,9 +53,9 @@ fn sidebar_groups_sessions_by_workspace(cx: &mut TestAppContext) {
         path: PathBuf::from("/w/a"),
         count: 7
     }));
-    let SidebarRow::Workspace {
+    let SidebarRow::Workspace(WorkspaceRow {
         children: other, ..
-    } = &workspaces.rows[1]
+    }) = &workspaces.rows[1]
     else {
         panic!("second row is a workspace");
     };
@@ -90,7 +91,8 @@ fn show_all_lists_every_session_of_the_workspace(cx: &mut TestAppContext) {
     .expect("window");
 
     let model = model(cx, &view);
-    let SidebarRow::Workspace { children, .. } = &model.groups[0].rows[0]
+    let SidebarRow::Workspace(WorkspaceRow { children, .. }) =
+        &model.groups[0].rows[0]
     else {
         panic!("first row is a workspace");
     };
@@ -283,16 +285,17 @@ fn running_only_hides_idle_sessions(cx: &mut TestAppContext) {
 
     let model = model(cx, &live.view);
 
-    let SidebarRow::Workspace { children, .. } = &model.groups[0].rows[0]
+    let SidebarRow::Workspace(WorkspaceRow { children, .. }) =
+        &model.groups[0].rows[0]
     else {
         panic!("a workspace row");
     };
     assert_eq!(children.len(), 1, "only the running session remains");
     assert!(
-        matches!(&children[0], SidebarRow::Session { id, .. } if *id == running)
+        matches!(&children[0], SidebarRow::Session(SessionRow { id, .. }) if *id == running)
     );
     assert!(model.groups[1].rows.iter().all(
-        |row| !matches!(row, SidebarRow::Session { id, .. } if *id == idle)
+        |row| !matches!(row, SidebarRow::Session(SessionRow { id, .. }) if *id == idle)
     ));
     drop(prompt);
 }

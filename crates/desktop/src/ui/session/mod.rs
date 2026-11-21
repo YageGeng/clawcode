@@ -1,5 +1,7 @@
 //! One tab's session view: the transcript in a `MessageScroller`, its render caches, and the composer slot.
 
+pub(in crate::ui) mod rows;
+
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -9,6 +11,7 @@ use agent_client_protocol::v2::schema as wire;
 use base64::Engine as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::diff::{DiffFile, DiffState};
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::message_scroller::{
     MessageScroller, MessageScrollerState,
@@ -22,13 +25,13 @@ use gpui_kit::{
 };
 use typed_builder::TypedBuilder;
 
-use super::composer::Composer;
 use crate::backend::AcpClient;
 use crate::projection::{
     MessageOrigin, ProjectionChange, RowKey, ToolCategory, TranscriptRow,
 };
 use crate::session::{AttachPhase, SessionHandle};
 use crate::transcript::{LayoutRow, TranscriptLayout};
+use crate::ui::composer::Composer;
 
 /// What a tab shows: a draft that has no backend session yet, or an attached session.
 pub enum SessionTarget {
@@ -94,10 +97,10 @@ impl MarkdownCache {
 /// What a session view asks the shell to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionViewEvent {
-    /// A draft's first message: create the session, then send `text`.
+    /// A draft's first message: create the session, then send `message`.
     CreateSession {
         /// The message to send once the session exists.
-        text: String,
+        message: crate::ui::composer::attachments::Outgoing,
     },
     /// The draft should run in another registered workspace.
     SelectWorkspace(PathBuf),
@@ -139,6 +142,25 @@ pub struct SessionView {
     /// User-run commands shown with their full text.
     #[builder(default)]
     pub(super) open_commands: HashSet<wire::MessageId>,
+    /// Compaction and branch-summary cards shown expanded.
+    #[builder(default)]
+    pub(super) open_cards: HashSet<RowKey>,
+    /// Set while a configuration change waits for the agent; the bar's controls are disabled.
+    #[builder(default)]
+    pub(super) config_busy: bool,
+    /// Choices made in the question panel, per question.
+    #[builder(default = crate::ui::interactions::questions::QuestionDraft::builder().build())]
+    pub(super) question: crate::ui::interactions::questions::QuestionDraft,
+    /// The question panel's free-text "Other" input.
+    pub(super) question_input: Entity<TextareaState>,
+    /// Keeps the Send button in step with the typed answer.
+    _question_input_changes: Subscription,
+    /// The plan panel's open state chosen by the user, with the automatic state it overrode.
+    #[builder(default)]
+    pub(super) plan_override: Option<(bool, bool)>,
+    /// The elicitation whose form dialog is open.
+    #[builder(default)]
+    pub(super) form_request: Option<crate::backend::RequestId>,
     pub(super) composer: Entity<Composer>,
     /// The agent connection; `None` until the backend is ready.
     #[builder(default)]
@@ -174,6 +196,10 @@ impl SessionView {
         let composer_events =
             cx.subscribe_in(&composer, window, Self::on_composer_event);
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        let question_input =
+            cx.new(|cx| TextareaState::new(window, cx).rows(2));
+        let question_input_changes = cx
+            .subscribe(&question_input, |_, _, _: &InputEvent, cx| cx.notify());
         // The shell renders this view cached, so entities it draws that are
         // not child views must notify it themselves.
         let scroller_changes = cx.observe(&scroller, |_, _, cx| cx.notify());
@@ -181,6 +207,8 @@ impl SessionView {
             .target(SessionTarget::Draft { workspace: None })
             .scroller(scroller)
             .composer(composer)
+            .question_input(question_input)
+            ._question_input_changes(question_input_changes)
             .client(client)
             ._composer_events(composer_events)
             ._scroller_changes(scroller_changes)
@@ -242,26 +270,46 @@ impl SessionView {
         self.open_tools.clear();
         self.full_output.clear();
         self.open_commands.clear();
+        self.open_cards.clear();
         self._subscriptions.clear();
         self.scroller
             .update(cx, |scroller, cx| scroller.reset(0, cx));
         if let SessionTarget::Session(handle) = &self.target {
             let handle = handle.clone();
             self._subscriptions = vec![
-                cx.subscribe(
+                cx.subscribe_in(
                     &handle,
-                    |this, _, change: &ProjectionChange, cx| {
+                    window,
+                    |this, _, change: &ProjectionChange, window, cx| {
                         // Inserted rows always land in the splice, so only
                         // updated rows can need a re-measure in place.
                         this.sync(&change.updated, change.structural, cx);
+                        // A withdrawn elicitation takes its open form with it.
+                        if change.controls {
+                            this.close_withdrawn_form(window, cx);
+                            this.push_commands(cx);
+                        }
                     },
                 ),
                 // The attach phase changes without a projection event.
                 cx.observe(&handle, |_, _, cx| cx.notify()),
             ];
             self.sync(&HashSet::new(), true, cx);
+            self.push_commands(cx);
         }
         cx.notify();
+    }
+
+    /// Hands the session's slash commands to the composer's list.
+    fn push_commands(&mut self, cx: &mut Context<'_, Self>) {
+        let commands = self
+            .handle()
+            .map(|handle| {
+                handle.read(cx).projection().controls().commands().to_vec()
+            })
+            .unwrap_or_default();
+        self.composer
+            .update(cx, |composer, cx| composer.set_commands(commands, cx));
     }
 
     /// Splices the scroller by the layout difference and refreshes the caches of changed rows.
@@ -337,6 +385,14 @@ impl SessionView {
             self.open_thinking.insert(id.clone());
         }
         self.sync(&HashSet::from([RowKey::Message(id)]), false, cx);
+    }
+
+    /// Expands or collapses a compaction or branch-summary card.
+    pub fn toggle_card(&mut self, key: RowKey, cx: &mut Context<'_, Self>) {
+        if !self.open_cards.remove(&key) {
+            self.open_cards.insert(key.clone());
+        }
+        self.sync(&HashSet::from([key]), false, cx);
     }
 
     /// Shows or hides a user-run command's full text.
@@ -470,7 +526,11 @@ impl SessionView {
                             }
                         }
                     }
-                    None => {}
+                    // Compaction summaries and error rows render plain text in M2 Task 5.
+                    Some(
+                        TranscriptRow::Compaction(_) | TranscriptRow::Error(_),
+                    )
+                    | None => {}
                 }
             }
         });
@@ -511,9 +571,10 @@ impl Render for SessionView {
     /// Shows the attach state, or the transcript followed by the composer.
     fn render(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
+        self.sync_question_input(window, cx);
         let body = match &self.target {
             SessionTarget::Draft { workspace } => {
                 self.render_draft(workspace.as_ref())

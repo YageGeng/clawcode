@@ -18,6 +18,10 @@ members = [
 ]
 resolver = "3"
 
+[profile.dev]
+# Keep file and line numbers in backtraces while reducing build and test artifact size.
+debug = "line-tables-only"
+
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
@@ -80,8 +84,8 @@ tools = { path = "crates/tools" }
 
 # model providers
 # Both crates share rig-http types, so they must move together.
-rig-core = { version = "0.46", default-features = false }
-rig-reqwest = { version = "0.46", default-features = false }
+rig-core = { version = "0.47", default-features = false }
+rig-reqwest = { version = "0.47", default-features = false }
 
 # error
 anyhow = "1"

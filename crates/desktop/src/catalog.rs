@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use agent_client_protocol::v2::schema as wire;
-use gpui_kit::SharedString;
 use protocol::ProductIdentity;
 use typed_builder::TypedBuilder;
 
@@ -240,26 +239,5 @@ impl RelativeAge {
             _ if elapsed < WEEK => RelativeAge::Days(elapsed / DAY),
             _ => RelativeAge::Weeks(elapsed / WEEK),
         }
-    }
-
-    /// Short localized label such as `3d` or `3 天`.
-    pub fn label(self) -> SharedString {
-        match self {
-            RelativeAge::Now => rust_i18n::t!("Age.now"),
-            RelativeAge::Minutes(count) => {
-                rust_i18n::t!("Age.minutes", count = count)
-            }
-            RelativeAge::Hours(count) => {
-                rust_i18n::t!("Age.hours", count = count)
-            }
-            RelativeAge::Days(count) => {
-                rust_i18n::t!("Age.days", count = count)
-            }
-            RelativeAge::Weeks(count) => {
-                rust_i18n::t!("Age.weeks", count = count)
-            }
-        }
-        .into_owned()
-        .into()
     }
 }

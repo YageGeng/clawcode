@@ -261,3 +261,100 @@ fn active_tab_uses_the_muted_fill(cx: &mut TestAppContext) {
     assert!(muted, "the active tab is filled with `muted`");
     assert!(!primary, "the active tab is not a `primary` pill");
 }
+
+/// Key of the first transcript row matching `pick`, as its element id.
+fn row_id(
+    live: &support::shell::Live,
+    cx: &mut TestAppContext,
+    id: &wire::SessionId,
+    pick: impl Fn(&desktop::projection::TranscriptRow) -> bool,
+) -> Option<String> {
+    cx.update(|cx| {
+        let handle = live.session(id, cx)?;
+        let projection = handle.read(cx).projection();
+        (0..projection.len())
+            .filter_map(|index| projection.row(index))
+            .find(|row| pick(row))
+            .map(|row| row.key().to_string())
+    })
+}
+
+#[gpui_kit::test]
+fn compaction_pill_renders_and_expands(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    let id = live.open_new_session(cx);
+    live.run(cx, &id, vec!["hello".into()]);
+    live.until(cx, "reply", |window| shows(window, "Hi there"));
+
+    live.backend
+        .block_on(live.backend.client.compact(&id))
+        .expect("compact");
+    live.until(cx, "compaction pill", |window| {
+        painted(window)
+            .iter()
+            .any(|text| text.text().starts_with("Context compacted"))
+    });
+    let pill = row_id(&live, cx, &id, |row| {
+        matches!(row, desktop::projection::TranscriptRow::Compaction(_))
+    })
+    .expect("compaction row");
+    live.window(cx, |window, cx| window.click(SharedString::from(pill), cx));
+    live.until(cx, "expanded summary", |window| {
+        painted(window)
+            .iter()
+            .any(|text| text.text().contains("Manual"))
+    });
+}
+
+#[gpui_kit::test]
+fn slash_command_card_renders(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    let id = live.open_new_session(cx);
+
+    live.run(cx, &id, vec!["/name".into()]);
+
+    live.until(cx, "command card", |window| {
+        shows(window, "/name") && shows(window, "Builtin")
+    });
+}
+
+#[gpui_kit::test]
+fn finished_run_shows_the_usage_row(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    let id = live.open_new_session(cx);
+    live.run(cx, &id, vec!["hello".into()]);
+    live.until(cx, "reply", |window| shows(window, "Hi there"));
+
+    let reply = row_id(&live, cx, &id, |row| {
+        matches!(row, desktop::projection::TranscriptRow::Message(message)
+            if message.role == desktop::projection::Role::Assistant)
+    })
+    .expect("reply");
+
+    live.until(cx, "usage row", |window| {
+        window
+            .find(SharedString::from(format!("usage:{reply}")))
+            .visible()
+    });
+}
+
+#[gpui_kit::test]
+fn notice_becomes_a_toast(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+
+    live.view.update(cx, |view, cx| {
+        view.show_notice(
+            "Extension handler failed".to_string(),
+            Some("audit (before_tool): boom".to_string()),
+            cx,
+        )
+    });
+
+    cx.run_until_parked();
+    let toasts = live.window(cx, |window, cx| {
+        window.render_frame(cx);
+        gpui_kit::component::WindowExt::notifications(window, cx).len()
+    });
+
+    assert_eq!(toasts, 1);
+}

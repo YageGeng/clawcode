@@ -12,9 +12,9 @@ use gpui_kit::component::{ResizablePanelEvent, WindowExt as _};
 use gpui_kit::{App, AppContext as _, Context, Window};
 use protocol::ProductIdentity;
 
-use super::{AppView, BackendPhase};
 use crate::actions::Quit;
 use crate::backend::{Backend, BackendError, BackendEvent};
+use crate::ui::{AppView, BackendPhase};
 
 /// Quiet period before a state change is written to `desktop.json`.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -43,7 +43,7 @@ fn config_location() -> PathBuf {
 
 impl AppView {
     /// Wires window-level observers: appearance, size, sidebar width, and the close button.
-    pub(super) fn observe_window(
+    pub(in crate::ui) fn observe_window(
         &mut self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -140,18 +140,18 @@ impl AppView {
     }
 
     /// Opens the backend configuration in the system's default application.
-    pub(super) fn open_config(&self, cx: &mut Context<'_, Self>) {
+    pub(in crate::ui) fn open_config(&self, cx: &mut Context<'_, Self>) {
         cx.open_with_system(&config_location());
     }
 
     /// Launches a fresh copy of the app and quits this one.
-    pub(super) fn restart_app(&mut self, cx: &mut Context<'_, Self>) {
+    pub(in crate::ui) fn restart_app(&mut self, cx: &mut Context<'_, Self>) {
         // The new process starts only after this one stopped its backend (spec §4.2).
         self.quit_now(true, cx);
     }
 
     /// Schedules a debounced save of the desktop state; a newer change replaces a pending save.
-    pub(super) fn schedule_save(&mut self, cx: &mut Context<'_, Self>) {
+    pub(in crate::ui) fn schedule_save(&mut self, cx: &mut Context<'_, Self>) {
         let state = self.state.clone();
         let path = self.state_path.clone();
         self._save_task = Some(cx.spawn(async move |_, cx| {
@@ -173,7 +173,7 @@ impl AppView {
     }
 
     /// `Quit`: asks first when sessions are running.
-    pub(super) fn on_quit(
+    pub(in crate::ui) fn on_quit(
         &mut self,
         _: &Quit,
         window: &mut Window,

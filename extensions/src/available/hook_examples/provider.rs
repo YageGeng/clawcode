@@ -23,7 +23,7 @@ impl HttpMiddleware for ProviderPolicy {
             let value = http::HeaderValue::try_from(
                 self.context.invocation.extension_id.as_str(),
             )
-            .map_err(|error| http_client::Error::Instance(error.into()))?;
+            .map_err(http_client::Error::permanent)?;
             headers.insert("x-extension-example", value);
             Ok(())
         })

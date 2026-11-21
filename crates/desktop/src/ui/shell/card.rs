@@ -16,11 +16,11 @@ use gpui_kit::{
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px, rems,
 };
 
-use super::session_view::loading_skeleton;
-use super::{AppView, BackendPhase, StatusIcon, TabEntry};
 use crate::session::SessionStatus;
 use crate::state::LayoutState;
-use crate::transcript::Elapsed;
+use crate::ui::format::Elapsed;
+use crate::ui::session::loading_skeleton;
+use crate::ui::{AppView, BackendPhase, StatusIcon, TabEntry};
 
 /// A resize handle that draws nothing at rest, so the chrome stays one undivided surface;
 /// it shows gpui-kit's indicator while hovered or dragged.
@@ -101,7 +101,7 @@ impl AppView {
     }
 
     /// Renders the sidebar and the card side by side, the sidebar resizable.
-    pub(super) fn render_body(
+    pub(in crate::ui) fn render_body(
         &self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -188,13 +188,14 @@ impl AppView {
         // the selection with `primary`, so the strip is drawn here.
         let tabs: Vec<AnyElement> = self
             .tabs
+            .entries()
             .iter()
             .enumerate()
             .map(|(index, tab)| {
                 // Identity comes from the entry, not the slot: tabs reorder,
                 // and listeners resolve their tab's position when they run.
                 let key = tab.key();
-                let selected = self.active_tab == Some(index);
+                let selected = self.tabs.active() == Some(index);
                 let title = self.tab_title(tab);
                 let dragged = DraggedTab {
                     entry: tab.clone(),

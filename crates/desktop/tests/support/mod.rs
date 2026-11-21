@@ -11,7 +11,9 @@ use std::time::Duration;
 use acp::{AcpServerFactory, AcpTransportKind};
 use agent_client_protocol::v2::schema as wire;
 use async_trait::async_trait;
-use desktop::backend::{AcpClient, AcpConnection, BackendEvent, SessionId};
+use desktop::backend::{
+    AcpClient, AcpConnection, AgentRequest, BackendEvent, RequestId, SessionId,
+};
 use extension::StaticExtensionFactory;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -35,17 +37,37 @@ use typed_builder::TypedBuilder;
 /// Bounds every wait so a regression fails instead of hanging.
 pub const WAIT: Duration = Duration::from_secs(5);
 
+/// Runs the app until `check` holds; fails after [`WAIT`].
+pub fn eventually(
+    cx: &mut gpui_kit::TestAppContext,
+    what: &str,
+    check: impl Fn(&mut gpui_kit::App) -> bool,
+) {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        cx.run_until_parked();
+        if cx.update(|cx| check(cx)) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Model whose reply is chosen by the newest user text.
 struct ScriptedModel {
     profile: ModelProfile,
 }
 
 impl ScriptedModel {
-    /// Builds the terminal event of one reply.
-    fn finished() -> ModelStreamEvent {
+    /// Builds the terminal event of one reply, with a fixed one-token usage.
+    fn finished(stop: StopReason) -> ModelStreamEvent {
         ModelStreamEvent::Finished(
             ModelFinal::builder()
-                .stop_reason(StopReason::EndTurn)
+                .stop_reason(stop)
                 .raw_stop_reason(None)
                 .usage(protocol::ModelUsage::from(
                     protocol::Usage::new()
@@ -70,30 +92,26 @@ impl ScriptedModel {
             .name(name.to_string())
             .arguments(arguments)
             .build();
-        let finished = ModelStreamEvent::Finished(
-            ModelFinal::builder()
-                .stop_reason(StopReason::ToolUse)
-                .raw_stop_reason(None)
-                .usage(protocol::ModelUsage::from(
-                    protocol::Usage::new()
-                        .input_tokens(1)
-                        .output_tokens(1)
-                        .cached_input_tokens(0)
-                        .cache_creation_input_tokens(0)
-                        .total_tokens(2),
-                ))
-                .build(),
-        );
+        let finished = Self::finished(StopReason::ToolUse);
         Box::pin(stream::iter(vec![
             Ok(ModelStreamEvent::ToolCall(call)),
             Ok(finished),
         ]))
     }
 
+    /// Whether the newest message is the result of tool call `id`.
+    fn answers_call(request: &ModelRequest, id: &str) -> bool {
+        matches!(
+            request.messages.last().map(|message| &message.content),
+            Some(MessageContent::ToolResult { tool_call_id, .. })
+                if tool_call_id.as_str() == id
+        )
+    }
+
     /// Wraps reply events and the terminal event into one stream.
     fn reply(events: Vec<ModelStreamEvent>) -> ModelStream {
         let mut events: Vec<_> = events.into_iter().map(Ok).collect();
-        events.push(Ok(Self::finished()));
+        events.push(Ok(Self::finished(StopReason::EndTurn)));
         Box::pin(stream::iter(events))
     }
 }
@@ -140,7 +158,14 @@ impl Model for ScriptedModel {
                 }
             }
         };
-        Ok(match last_user_text(&request).as_str() {
+        let text = last_user_text(&request);
+        let script = if Self::answers_call(&request, "askwork-1") {
+            // The run that asked keeps working, so an answer waits in the queue.
+            "working"
+        } else {
+            text.as_str()
+        };
+        Ok(match script {
             "hello" => Self::reply(vec![
                 ModelStreamEvent::TextDelta("Hi ".to_string()),
                 ModelStreamEvent::TextDelta("there".to_string()),
@@ -180,6 +205,54 @@ impl Model for ScriptedModel {
                     "cmd": "echo first\necho second\necho third",
                     "login": false
                 }),
+            ),
+            // Submits a plan; only accepted while the session is in plan mode.
+            "plan" => Self::tool_reply(
+                "plan-1",
+                "exit_plan_mode",
+                serde_json::json!({ "plan": "1. step one" }),
+            ),
+            // A plan far taller than the panel above the composer may grow.
+            "longplan" => Self::tool_reply(
+                "plan-long",
+                "exit_plan_mode",
+                serde_json::json!({ "plan": (1..=60)
+                    .map(|step| format!("{step}. step {step}"))
+                    .collect::<Vec<_>>()
+                    .join("\n") }),
+            ),
+            // Asks two questions without waiting for the answers.
+            "ask" => Self::tool_reply(
+                "ask-1",
+                "request_user_input_async",
+                serde_json::json!({ "questions": [
+                    { "title": "Pick one", "options": ["a", "b"] },
+                    { "title": "Anything else?" }
+                ] }),
+            ),
+            // Asks the same two questions, then keeps the run working.
+            "askwork" => Self::tool_reply(
+                "askwork-1",
+                "request_user_input_async",
+                serde_json::json!({ "questions": [
+                    { "title": "Pick one", "options": ["a", "b"] },
+                    { "title": "Anything else?" }
+                ] }),
+            ),
+            "working" => {
+                wait(5000).await?;
+                Self::reply(vec![ModelStreamEvent::TextDelta(
+                    "worked".to_string(),
+                )])
+            }
+            // Publishes a two-item todo list.
+            "todo" => Self::tool_reply(
+                "todo-1",
+                "todo_write",
+                serde_json::json!({ "todos": [
+                    { "content": "Write code", "status": "in_progress", "activeForm": "Writing code" },
+                    { "content": "Test it", "status": "pending", "activeForm": "Testing it" }
+                ] }),
             ),
             // Long enough that a test can read the queue before the run settles.
             "slower" => {
@@ -246,6 +319,14 @@ fn scripted_kernel(root: &Path) -> Arc<Kernel> {
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
             .id_generator(Arc::new(NanoidIdGenerator))
+            // Keeps nothing back, so even a one-turn session can be compacted.
+            .compaction_policy(
+                protocol::CompactionPolicy::builder()
+                    .enabled(true)
+                    .reserve_tokens(16_384)
+                    .keep_recent_tokens(0)
+                    .build(),
+            )
             // Enables `exec_command`; shell snapshots would only slow the fixture.
             .exec(Some(Arc::new(tools::exec::ExecSettings {
                 config: config::ExecConfig::builder()
@@ -262,10 +343,10 @@ fn scripted_kernel(root: &Path) -> Arc<Kernel> {
 /// A connected desktop client in front of a scripted Kernel.
 #[derive(TypedBuilder)]
 pub struct ScriptedBackend {
-    pub kernel: Arc<Kernel>,
     pub client: AcpClient,
     pub connection: AcpConnection,
-    pub server: Arc<AcpServerFactory>,
+    /// Owns the projection registry the Kernel's sinks publish into.
+    _server: Arc<AcpServerFactory>,
     pub events: UnboundedReceiver<BackendEvent>,
     pub workspace: TempDir,
     pub root: TempDir,
@@ -296,10 +377,9 @@ impl ScriptedBackend {
             ))
             .expect("in-process ACP connection");
         ScriptedBackend::builder()
-            .kernel(kernel)
             .client(client)
             .connection(connection)
-            .server(server)
+            ._server(server)
             .events(events)
             .workspace(workspace)
             .root(root)
@@ -334,6 +414,7 @@ impl ScriptedBackend {
     pub fn new_session(&self) -> SessionId {
         self.block_on(self.client.new_session(self.workspace.path()))
             .expect("new session")
+            .id
     }
 
     /// Collects this session's updates until `done` matches one; fails after `WAIT`.
@@ -381,6 +462,43 @@ impl ScriptedBackend {
             )
         }));
         seen
+    }
+
+    /// Waits for the next agent→client request; fails after `WAIT`.
+    pub fn wait_request(&mut self) -> AgentRequest {
+        self.wait_event(|event| match event {
+            BackendEvent::Request(request) => Some(*request),
+            _ => None,
+        })
+    }
+
+    /// Waits until the backend reports that this request was withdrawn; fails after `WAIT`.
+    pub fn wait_request_cancelled(&mut self, id: RequestId) {
+        self.wait_event(|event| match event {
+            BackendEvent::RequestCancelled(cancelled) if cancelled == id => {
+                Some(())
+            }
+            _ => None,
+        })
+    }
+
+    /// Consumes backend events until `pick` accepts one; fails after `WAIT`.
+    fn wait_event<T>(&mut self, pick: impl Fn(BackendEvent) -> Option<T>) -> T {
+        let events = &mut self.events;
+        self.runtime
+            .block_on(async {
+                tokio::time::timeout(WAIT, async {
+                    while let Some(event) = events.next().await {
+                        if let Some(found) = pick(event) {
+                            return Some(found);
+                        }
+                    }
+                    None
+                })
+                .await
+                .expect("expected backend event in time")
+            })
+            .expect("event stream ended before the expected event")
     }
 
     /// Collects the replayed history up to the server's `replay_complete` marker.

@@ -7,7 +7,7 @@ use std::time::Duration;
 use desktop::backend::SessionId;
 use desktop::session::SessionStatus;
 use desktop::state::DesktopState;
-use desktop::ui::{Composer, SidebarRow, TabEntry};
+use desktop::ui::{Composer, SessionRow, SidebarRow, TabEntry};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::{TestInput, TestWindowExt as _};
 use gpui_kit::{
@@ -426,7 +426,7 @@ fn draft_first_message_creates_the_session(cx: &mut TestAppContext) {
     });
     let listed = model(cx, &live.view).groups.iter().any(|group| {
         group.rows.iter().any(|row| {
-            matches!(row, SidebarRow::Session { id: listed, .. } if listed == &id)
+            matches!(row, SidebarRow::Session(SessionRow { id: listed, .. }) if listed == &id)
         })
     });
     assert!(listed, "the new session is in the catalog");
@@ -518,5 +518,150 @@ fn draft_first_run_folds_once_it_settles(cx: &mut TestAppContext) {
     let run = SharedString::from(format!("run:message:{prompt}"));
     live.until(cx, "folded first run", |window| {
         window.try_find(run.clone()).is_some()
+    });
+}
+
+/// A 1×1 transparent PNG's bytes.
+fn pixel_png() -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+        .expect("png")
+}
+
+/// Attaches bytes to the active composer as if a file were picked.
+fn attach(live: &Live, cx: &mut TestAppContext, name: &str, bytes: Vec<u8>) {
+    live.window(cx, |window, cx| {
+        let composer = composer(&live.view, cx);
+        composer.update(cx, |composer, cx| {
+            composer.add_attachment(name.to_string(), bytes, window, cx)
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn attached_image_is_sent_with_the_text(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    let id = live.open_new_session(cx);
+    attach(&live, cx, "pixel.png", pixel_png());
+    focus(&live, cx);
+
+    live.window(cx, |window, cx| {
+        window.input("look", cx);
+        window.press("enter", cx);
+    });
+
+    eventually(cx, "image sent", |cx| {
+        live.session(&id, cx).is_some_and(|handle| {
+            let projection = handle.read(cx).projection();
+            (0..projection.len()).any(|index| {
+                matches!(projection.row(index),
+                    Some(desktop::projection::TranscriptRow::Message(message))
+                        if message.images.len() == 1)
+            })
+        })
+    });
+    live.window(cx, |window, _| {
+        assert!(window.try_find("attachment-0").is_none())
+    });
+}
+
+#[gpui_kit::test]
+fn pasted_image_becomes_an_attachment(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    live.open_new_session(cx);
+    focus(&live, cx);
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+            &gpui_kit::Image::from_bytes(
+                gpui_kit::ImageFormat::Png,
+                pixel_png(),
+            ),
+        ))
+    });
+
+    live.window(cx, |window, cx| window.press("ctrl-v", cx));
+
+    live.until(cx, "attachment chip", |window| {
+        window.try_find("attachment-0").is_some()
+    });
+}
+
+#[gpui_kit::test]
+fn removing_an_attachment(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    live.open_new_session(cx);
+    attach(&live, cx, "pixel.png", pixel_png());
+    live.until(cx, "attachment chip", |window| {
+        window.try_find("attachment-0").is_some()
+    });
+
+    live.window(cx, |window, cx| {
+        // The remove control shows on hover, under the attachment's own id.
+        use gpui_kit::test::TestEventExt as _;
+        let center = window.find("attachment-0").bounds().center();
+        window.pointer_move(center, None, cx);
+        window.render_frame(cx);
+        window.click(
+            gpui_kit::ElementId::NamedChild(
+                std::sync::Arc::new(
+                    SharedString::from("attachment-remove-0").into(),
+                ),
+                "remove".into(),
+            ),
+            cx,
+        )
+    });
+
+    live.until(cx, "no chip", |window| {
+        window.try_find("attachment-0").is_none()
+    });
+}
+
+#[gpui_kit::test]
+fn rejected_file_notifies_and_sends_nothing(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    live.open_new_session(cx);
+
+    attach(&live, cx, "pixel.bmp", b"BM\0\0\0\0\0\0\0\0".to_vec());
+
+    live.window(cx, |window, cx| {
+        assert_eq!(window.notifications(cx).len(), 1);
+        assert!(window.try_find("attachment-0").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn restore_reports_images_that_no_longer_fit(cx: &mut TestAppContext) {
+    let live = live(cx, DesktopState::default());
+    live.open_new_session(cx);
+    for n in 0..3 {
+        attach(&live, cx, &format!("new-{n}.png"), pixel_png());
+    }
+    let mut unsent = desktop::ui::AttachmentSet::default();
+    for n in 0..3 {
+        unsent
+            .add(format!("old-{n}.png"), pixel_png())
+            .expect("png");
+    }
+
+    live.window(cx, |window, cx| {
+        let composer = composer(&live.view, cx);
+        composer.update(cx, |composer, cx| {
+            composer.restore(
+                desktop::ui::Outgoing {
+                    text: String::new(),
+                    images: unsent,
+                },
+                window,
+                cx,
+            )
+        });
+    });
+
+    live.window(cx, |window, cx| {
+        assert_eq!(window.notifications(cx).len(), 1);
+        assert!(window.try_find("attachment-4").is_some());
+        assert!(window.try_find("attachment-5").is_none());
     });
 }

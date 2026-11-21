@@ -12,7 +12,9 @@ use gpui_kit::{
 };
 use typed_builder::TypedBuilder;
 
-use crate::backend::{AcpClient, BackendEvent, SessionId};
+use crate::backend::{
+    AcpClient, AgentRequest, BackendEvent, SessionId, SessionStart,
+};
 use crate::catalog::SessionSummary;
 use crate::projection::{ProjectionChange, RunState, SessionProjection};
 
@@ -82,6 +84,12 @@ impl SessionHandle {
         if matches!(self.phase, AttachPhase::Failed(_)) {
             return SessionStatus::Failed;
         }
+        // An unanswered request or question waits for the user, even while the run goes on.
+        if !self.projection.controls().requests().is_empty()
+            || !self.projection.open_questions().is_empty()
+        {
+            return SessionStatus::Waiting;
+        }
         match self.projection.run_state() {
             RunState::Running => SessionStatus::Running,
             RunState::RequiresAction => SessionStatus::Waiting,
@@ -89,12 +97,18 @@ impl SessionHandle {
         }
     }
 
-    /// Whether a run is active, so the session must stay attached.
+    /// Mutable control state, for answering requests and questions from the UI.
+    pub fn controls_mut(&mut self) -> &mut crate::projection::SessionControls {
+        self.projection.controls_mut()
+    }
+
+    /// Whether a run is active or blocked on a request, so the session must stay attached.
+    ///
+    /// Open async questions alone do not count: their run has already
+    /// settled, and the questions come back on the next attach.
     fn is_busy(&self) -> bool {
-        matches!(
-            self.status(),
-            SessionStatus::Running | SessionStatus::Waiting
-        )
+        self.projection.run_state() != RunState::Idle
+            || !self.projection.controls().requests().is_empty()
     }
 }
 
@@ -107,6 +121,13 @@ pub enum RegistryEvent {
     Released(SessionId),
     /// A session's title or run state settled, so the session catalog is stale.
     SessionChanged(SessionId),
+    /// A live notice for the user, such as a failed extension handler.
+    Notice {
+        /// Short headline.
+        title: String,
+        /// Optional detail.
+        description: Option<String>,
+    },
 }
 
 /// Every attached session, fed by one backend event stream.
@@ -134,7 +155,7 @@ impl SessionRegistry {
         self.handles.get(id).cloned()
     }
 
-    /// Number of attached sessions with an active run.
+    /// Number of attached sessions with an active run, the ones quitting would stop.
     pub fn running_count(&self, cx: &App) -> usize {
         self.handles
             .values()
@@ -146,18 +167,24 @@ impl SessionRegistry {
     /// streams its events to this connection, so there is nothing to replay.
     pub fn adopt(
         &mut self,
-        id: &SessionId,
+        start: SessionStart,
         cwd: &Path,
         cx: &mut Context<'_, Self>,
     ) -> Entity<SessionHandle> {
+        let id = start.id;
         let handle = cx.new(|_| {
-            SessionHandle::builder()
+            let mut handle = SessionHandle::builder()
                 .id(id.clone())
                 .cwd(cwd.to_path_buf())
                 .phase(AttachPhase::Attached)
-                .build()
+                .build();
+            handle
+                .projection
+                .controls_mut()
+                .set_config(start.config_options);
+            handle
         });
-        self.handles.insert(id.clone(), handle.clone());
+        self.handles.insert(id, handle.clone());
         handle
     }
 
@@ -195,7 +222,7 @@ impl SessionRegistry {
             if let Some(pending_close) = pending_close {
                 pending_close.await;
             }
-            let outcome = async {
+            let outcome: Result<(), crate::backend::BackendError> = async {
                 let running = client.session_running(&id).await?;
                 let alive = target
                     .update(cx, |handle, cx| {
@@ -233,7 +260,16 @@ impl SessionRegistry {
                         error
                     ),
                 }
-                client.resume_with_replay(&id, &cwd).await
+                let start = client.resume_with_replay(&id, &cwd).await?;
+                let _ = target.update(cx, |handle, cx| {
+                    handle
+                        .projection
+                        .controls_mut()
+                        .set_config(start.config_options);
+                    cx.emit(ProjectionChange::builder().controls(true).build());
+                    cx.notify();
+                });
+                Ok(())
             }
             .await;
             let phase = match outcome {
@@ -269,6 +305,16 @@ impl SessionRegistry {
         for event in events {
             match event {
                 BackendEvent::Update(notification) => {
+                    // Notices are live-only and global: they become toasts, not rows.
+                    if let wire::SessionUpdate::Notice(notice) =
+                        &notification.update
+                    {
+                        cx.emit(RegistryEvent::Notice {
+                            title: notice.title.clone(),
+                            description: notice.description.clone(),
+                        });
+                        continue;
+                    }
                     // Updates for sessions nobody attached are not projected.
                     let Some(handle) =
                         self.handles.get(&notification.session_id)
@@ -294,6 +340,41 @@ impl SessionRegistry {
                 }
                 BackendEvent::Stopped(reason) => {
                     cx.emit(RegistryEvent::BackendStopped(reason))
+                }
+                BackendEvent::Request(request) => {
+                    let handle = request.session_id().and_then(|id| {
+                        self.handles.get(id).map(|h| (id.clone(), h.clone()))
+                    });
+                    match handle {
+                        // A released tab waiting to close shows nothing either.
+                        Some((id, handle))
+                            if !handle.read(cx).close_when_idle =>
+                        {
+                            handle.update(cx, |handle, _| {
+                                handle
+                                    .projection
+                                    .controls_mut()
+                                    .push_request(*request)
+                            });
+                            changes.entry(id).or_default().controls = true;
+                        }
+                        // Nobody shows this session, so nobody can answer: decline it.
+                        _ => self.decline(&request),
+                    }
+                }
+                BackendEvent::RequestCancelled(request_id) => {
+                    for (id, handle) in &self.handles {
+                        let removed = handle.update(cx, |handle, _| {
+                            handle
+                                .projection
+                                .controls_mut()
+                                .remove_request(request_id)
+                        });
+                        if removed {
+                            changes.entry(id.clone()).or_default().controls =
+                                true;
+                        }
+                    }
                 }
             }
         }
@@ -329,11 +410,48 @@ impl SessionRegistry {
         }
     }
 
+    /// Declines a request no attached session can show: permissions are
+    /// cancelled and elicitations answered with `cancel`.
+    fn decline(&self, request: &AgentRequest) {
+        let result = match request {
+            AgentRequest::Permission { id, .. } => {
+                self.client.answer_permission(*id, None)
+            }
+            AgentRequest::Elicitation { id, .. } => {
+                self.client.answer_elicitation(
+                    *id,
+                    agent_client_protocol::v2::schema::CreateElicitationResponse::new(
+                        agent_client_protocol::v2::schema::ElicitationAction::Cancel,
+                    ),
+                )
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                "failed to decline request {}: {}",
+                request.id().0,
+                error
+            );
+        }
+    }
+
     /// A tab stopped showing the session: close it now, or once its run ends.
     pub fn release(&mut self, id: &SessionId, cx: &mut Context<'_, Self>) {
-        let Some(handle) = self.handles.get(id) else {
+        let Some(handle) = self.handles.get(id).cloned() else {
             return;
         };
+        // No view can answer the session's requests any more; declining them
+        // unblocks the run so it can end and the session close.
+        let pending = handle.update(cx, |handle, cx| {
+            let pending = handle.controls_mut().take_requests();
+            if !pending.is_empty() {
+                cx.notify();
+            }
+            pending
+        });
+        for request in &pending {
+            self.decline(request);
+        }
         if handle.read(cx).is_busy() {
             handle.update(cx, |handle, _| handle.close_when_idle = true);
             return;

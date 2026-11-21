@@ -57,6 +57,24 @@ Sidebar:
     en: Folder not found
     zh-CN: 找不到文件夹
 Status:
+  retry_waiting:
+    en: "Retry %{attempt}/%{max} · %{seconds}s"
+    zh-CN: "重试 %{attempt}/%{max} · %{seconds} 秒"
+  retry_running:
+    en: "Retry %{attempt}/%{max}"
+    zh-CN: "重试 %{attempt}/%{max}"
+  retry_failed:
+    en: Retry failed
+    zh-CN: 重试失败
+  compacting:
+    en: Compacting context…
+    zh-CN: 正在压缩上下文…
+  compaction_failed:
+    en: "Context compaction failed: %{error}"
+    zh-CN: "上下文压缩失败：%{error}"
+  compaction_cancelled:
+    en: Context compaction cancelled
+    zh-CN: 已取消上下文压缩
   running:
     en: Running
     zh-CN: 运行中
@@ -224,6 +242,36 @@ Transcript:
   jump_latest:
     en: Jump to latest
     zh-CN: 回到最新
+  usage_in:
+    en: "in %{count}"
+    zh-CN: "输入 %{count}"
+  usage_out:
+    en: "out %{count}"
+    zh-CN: "输出 %{count}"
+  usage_cache:
+    en: "cache %{percent}%"
+    zh-CN: "缓存命中 %{percent}%"
+  compacted:
+    en: "Context compacted · %{tokens}"
+    zh-CN: "上下文已压缩 · %{tokens}"
+  compacted_plain:
+    en: Context compacted
+    zh-CN: 上下文已压缩
+  compaction_reason_manual:
+    en: Manual
+    zh-CN: 手动
+  compaction_reason_threshold:
+    en: Context threshold reached
+    zh-CN: 达到上下文阈值
+  compaction_reason_overflow:
+    en: Context overflow recovery
+    zh-CN: 上下文溢出恢复
+  branch_summary:
+    en: Branch summary
+    zh-CN: 分支摘要
+  model_failed:
+    en: Model call failed
+    zh-CN: 模型调用失败
 Tool:
   read:
     en: Read
@@ -350,3 +398,165 @@ Settings:
   font_size:
     en: "Font size"
     zh-CN: "界面字号"
+Command:
+  no_match:
+    en: No matching commands
+    zh-CN: 没有匹配的命令
+  full_name:
+    en: "Full name /%{name}"
+    zh-CN: "完整名称 /%{name}"
+  source_builtin:
+    en: Builtin
+    zh-CN: 内置
+  source_extension:
+    en: Extension
+    zh-CN: 扩展
+  source_skill:
+    en: Skill
+    zh-CN: Skill
+  source_template:
+    en: Template
+    zh-CN: 模板
+  kind_invocation:
+    en: Invocation
+    zh-CN: 调用
+  kind_output:
+    en: Result
+    zh-CN: 结果
+  kind_expansion:
+    en: Expanded
+    zh-CN: 展开调用
+  status_succeeded:
+    en: Succeeded
+    zh-CN: 成功
+  status_failed:
+    en: Failed
+    zh-CN: 失败
+  status_cancelled:
+    en: Cancelled
+    zh-CN: 已取消
+Controls:
+  plan_mode:
+    en: Plan mode
+    zh-CN: 计划模式
+  context:
+    en: Context
+    zh-CN: 上下文
+  usage:
+    en: Usage
+    zh-CN: 使用率
+  unknown:
+    en: Unknown
+    zh-CN: 未知
+  models:
+    en: Models
+    zh-CN: 模型
+  thinking:
+    en: Thinking
+    zh-CN: 思考级别
+  needs_login:
+    en: Sign in to this model's provider first
+    zh-CN: 需要先登录该模型的 Provider
+  switch_failed:
+    en: Could not switch
+    zh-CN: 切换失败
+Question:
+  header:
+    en: "Question · %{i} of %{n}"
+    zh-CN: "问题 · 第 %{i} 题 / 共 %{n} 题"
+  multi:
+    en: Pick any
+    zh-CN: 可多选
+  other:
+    en: Other
+    zh-CN: 其他
+  send:
+    en: Send
+    zh-CN: 发送
+  skip:
+    en: Skip
+    zh-CN: 跳过
+  closed:
+    en: This question was already answered or skipped elsewhere
+    zh-CN: 该问题已在其他地方回答或跳过
+  skip_failed:
+    en: Could not skip the question; try again
+    zh-CN: 未能跳过待回答的问题，请重试
+  send_failed:
+    en: Could not send the answer
+    zh-CN: 无法发送回答
+Plan:
+  title:
+    en: Plan
+    zh-CN: 计划
+  approved:
+    en: Approved plan
+    zh-CN: 已批准的计划
+Request:
+  plan_title:
+    en: Execute this plan?
+    zh-CN: 执行这个计划？
+  approve:
+    en: Approve
+    zh-CN: 批准
+  keep_planning:
+    en: Keep planning
+    zh-CN: 继续规划
+  needs_input:
+    en: "%{server} needs your input"
+    zh-CN: "%{server} 需要你填写信息"
+  fill:
+    en: Fill in…
+    zh-CN: 填写…
+  open_continue:
+    en: Open and continue
+    zh-CN: 打开并继续
+  will_open:
+    en: "Opens %{host}"
+    zh-CN: "将打开 %{host}"
+  decline:
+    en: Decline
+    zh-CN: 拒绝
+  cancel:
+    en: Cancel
+    zh-CN: 取消
+  submit:
+    en: Submit
+    zh-CN: 提交
+  required:
+    en: Required
+    zh-CN: 必填
+  too_short:
+    en: "At least %{min} characters"
+    zh-CN: "至少 %{min} 个字符"
+  too_long:
+    en: "At most %{max} characters"
+    zh-CN: "最多 %{max} 个字符"
+  bad_number:
+    en: Enter a valid number
+    zh-CN: 请输入有效的数字
+  bad_count:
+    en: Pick a different number of options
+    zh-CN: 选择的数量不符合要求
+  form_unsupported:
+    en: This form cannot be shown here, so it was cancelled
+    zh-CN: 无法显示这个表单，已取消
+Attachment:
+  add:
+    en: Attach images
+    zh-CN: 添加图片
+  unsupported:
+    en: Unsupported image format
+    zh-CN: 不支持的图片格式
+  too_large:
+    en: Images must be 10 MB or smaller
+    zh-CN: 图片超过 10 MB
+  too_many:
+    en: At most 5 images per message
+    zh-CN: 最多 5 张图片
+  total_too_large:
+    en: Images together must be 20 MB or smaller
+    zh-CN: 图片总大小超过 20 MB
+  read_failed:
+    en: Could not read the file
+    zh-CN: 无法读取文件

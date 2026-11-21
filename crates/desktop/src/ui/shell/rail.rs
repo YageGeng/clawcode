@@ -10,12 +10,12 @@ use gpui_kit::{
     Styled as _, TestSupportExt as _, div, prelude::FluentBuilder as _, rems,
 };
 
-use super::{AppView, TabEntry};
 use crate::actions::{OpenSettings, WORKSPACE_CONTEXT};
+use crate::ui::{AppView, TabEntry};
 
 impl AppView {
     /// Renders the rail as an inset card floating on the chrome surface.
-    pub(super) fn render_rail(
+    pub(in crate::ui) fn render_rail(
         &self,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {

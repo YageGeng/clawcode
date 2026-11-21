@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use protocol::{DeviceCode, DeviceCodeSink, LoginMethod};
 use rig_core::http_client::DynHttpClient;
-use rig_core::providers::chatgpt::auth::{
-    AuthContext, AuthError, AuthSource, Authenticator, DeviceCodeHandler,
-    FileTokenStore,
+use rig_core::providers::auth::{
+    AuthContext, AuthError, DeviceCodeHandler, FileTokenStore,
 };
+use rig_core::providers::chatgpt::auth::{AuthSource, Authenticator};
 use tokio::sync::Notify;
 
 use crate::factory::ProviderConnectError;

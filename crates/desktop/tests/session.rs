@@ -4,10 +4,10 @@ mod support;
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agent_client_protocol::v2::schema as wire;
-use desktop::backend::{BackendEvent, SessionId};
+use desktop::backend::{BackendEvent, SessionId, SessionStart};
 use desktop::catalog::SessionSummary;
 use desktop::projection::{Role, TranscriptRow};
 use desktop::session::{
@@ -15,24 +15,7 @@ use desktop::session::{
 };
 use futures::channel::mpsc::unbounded;
 use gpui_kit::{App, AppContext as _, Entity, TestAppContext};
-use support::ScriptedBackend;
-
-/// Polls GPUI and real time until `check` holds; the backend runs on its own threads.
-fn eventually(
-    cx: &mut TestAppContext,
-    what: &str,
-    check: impl Fn(&mut App) -> bool,
-) {
-    let deadline = Instant::now() + support::WAIT;
-    loop {
-        cx.run_until_parked();
-        if cx.update(|cx| check(cx)) {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
+use support::{ScriptedBackend, eventually};
 
 /// Starts a registry whose pump consumes the fixture's events.
 fn registry(
@@ -219,6 +202,35 @@ fn releasing_a_running_session_waits_for_idle(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn open_questions_alone_do_not_count_as_running(cx: &mut TestAppContext) {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    let registry = registry(cx, &mut backend);
+    let handle = registry.update(cx, |registry, cx| {
+        registry.attach(&summary(&backend, &id), cx)
+    });
+    eventually(cx, "attach", |cx| {
+        handle.read(cx).phase() == &AttachPhase::Attached
+    });
+    backend
+        .block_on(backend.client.prompt(&id, vec!["ask".into()]))
+        .expect("prompt");
+    eventually(cx, "questions open and run settled", |cx| {
+        let handle = handle.read(cx);
+        !handle.projection().open_questions().is_empty()
+            && handle.projection().run_state()
+                == desktop::projection::RunState::Idle
+    });
+
+    // The session waits for the user, but quitting would stop no run.
+    assert_eq!(
+        handle.read_with(cx, |handle, _| handle.status()),
+        SessionStatus::Waiting
+    );
+    assert_eq!(cx.update(|cx| registry.read(cx).running_count(cx)), 0);
+}
+
+#[gpui_kit::test]
 fn backend_stop_is_reported(cx: &mut TestAppContext) {
     let mut backend = ScriptedBackend::start();
     let registry = registry(cx, &mut backend);
@@ -385,7 +397,14 @@ fn adopted_session_streams_without_replay(cx: &mut TestAppContext) {
     let registry = registry(cx, &mut backend);
 
     let handle = registry.update(cx, |registry, cx| {
-        registry.adopt(&id, backend.workspace.path(), cx)
+        registry.adopt(
+            SessionStart {
+                id: id.clone(),
+                config_options: Vec::new(),
+            },
+            backend.workspace.path(),
+            cx,
+        )
     });
     assert_eq!(
         handle.read_with(cx, |h, _| h.phase().clone()),
@@ -432,7 +451,14 @@ fn title_and_settle_emit_session_changed(cx: &mut TestAppContext) {
     let id = backend.new_session();
     let registry = registry(cx, &mut backend);
     let handle = registry.update(cx, |registry, cx| {
-        registry.adopt(&id, backend.workspace.path(), cx)
+        registry.adopt(
+            SessionStart {
+                id: id.clone(),
+                config_options: Vec::new(),
+            },
+            backend.workspace.path(),
+            cx,
+        )
     });
     let seen = record(cx, &registry);
 
@@ -452,5 +478,105 @@ fn title_and_settle_emit_session_changed(cx: &mut TestAppContext) {
         .iter()
         .filter(|event| **event == RegistryEvent::SessionChanged(id.clone()))
         .count();
-    assert_eq!(changed, 1, "{:?}", seen.borrow());
+    // The new title and the settled run each mark the catalog stale; they
+    // share one event when they land in one batch and take two otherwise.
+    assert!((1..=2).contains(&changed), "{:?}", seen.borrow());
+}
+
+#[gpui_kit::test]
+fn pending_request_marks_the_session_waiting(cx: &mut TestAppContext) {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    backend
+        .block_on(backend.client.set_config_option(&id, "mode", "plan"))
+        .expect("plan mode");
+    let registry = registry(cx, &mut backend);
+    let handle = registry.update(cx, |registry, cx| {
+        registry.attach(&summary(&backend, &id), cx)
+    });
+    eventually(cx, "attach", |cx| {
+        handle.read(cx).phase() == &AttachPhase::Attached
+    });
+
+    backend
+        .block_on(backend.client.prompt(
+            &id,
+            vec![wire::ContentBlock::Text(wire::TextContent::new("plan"))],
+        ))
+        .expect("prompt");
+
+    eventually(cx, "approval request", |cx| {
+        handle.read(cx).projection().controls().requests().len() == 1
+            && handle.read(cx).status() == SessionStatus::Waiting
+    });
+    backend.client.cancel(&id).expect("cancel");
+    eventually(cx, "request withdrawn", |cx| {
+        handle
+            .read(cx)
+            .projection()
+            .controls()
+            .requests()
+            .is_empty()
+            && handle.read(cx).status() != SessionStatus::Waiting
+    });
+}
+
+#[gpui_kit::test]
+fn releasing_a_session_with_only_open_questions_closes_it(
+    cx: &mut TestAppContext,
+) {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    let registry = registry(cx, &mut backend);
+    let handle = registry.update(cx, |registry, cx| {
+        registry.attach(&summary(&backend, &id), cx)
+    });
+    eventually(cx, "attach", |cx| {
+        handle.read(cx).phase() == &AttachPhase::Attached
+    });
+    backend
+        .block_on(backend.client.prompt(&id, vec!["ask".into()]))
+        .expect("prompt");
+    eventually(cx, "questions open and run settled", |cx| {
+        let handle = handle.read(cx);
+        !handle.projection().open_questions().is_empty()
+            && handle.projection().run_state()
+                == desktop::projection::RunState::Idle
+    });
+
+    // The questions come back on the next attach, so nothing keeps it open.
+    registry.update(cx, |registry, cx| registry.release(&id, cx));
+    assert!(cx.update(|cx| registry.read(cx).handle(&id).is_none()));
+}
+
+#[gpui_kit::test]
+fn releasing_a_session_declines_its_pending_request(cx: &mut TestAppContext) {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    backend
+        .block_on(backend.client.set_config_option(&id, "mode", "plan"))
+        .expect("plan mode");
+    let registry = registry(cx, &mut backend);
+    let handle = registry.update(cx, |registry, cx| {
+        registry.attach(&summary(&backend, &id), cx)
+    });
+    eventually(cx, "attach", |cx| {
+        handle.read(cx).phase() == &AttachPhase::Attached
+    });
+    backend
+        .block_on(backend.client.prompt(
+            &id,
+            vec![wire::ContentBlock::Text(wire::TextContent::new("plan"))],
+        ))
+        .expect("prompt");
+    eventually(cx, "approval request", |cx| {
+        handle.read(cx).projection().controls().requests().len() == 1
+    });
+
+    // No tab can answer the approval any more: it is declined, the run
+    // ends, and the session closes instead of waiting forever.
+    registry.update(cx, |registry, cx| registry.release(&id, cx));
+    eventually(cx, "closed after the declined run ends", |cx| {
+        registry.read(cx).handle(&id).is_none()
+    });
 }

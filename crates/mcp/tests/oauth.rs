@@ -140,7 +140,9 @@ async fn token(
     Json(serde_json::json!({
         "access_token": "access-secret",
         "token_type": "Bearer",
-        "expires_in": if grant_type == Some("authorization_code") { 1 } else { 3600 },
+        // An already expired first token makes the restored connection refresh;
+        // rmcp refreshes only when less than `min(30s, lifetime / 2)` remains.
+        "expires_in": if grant_type == Some("authorization_code") { 0 } else { 3600 },
         "refresh_token": "refresh-secret",
         "scope": "tools:read"
     }))

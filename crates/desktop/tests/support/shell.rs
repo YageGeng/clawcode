@@ -8,7 +8,7 @@ use desktop::catalog::SessionSummary;
 use desktop::projection::{Role, TranscriptRow};
 use desktop::session::{AttachPhase, SessionHandle, SessionStatus};
 use desktop::state::DesktopState;
-use desktop::ui::{AppView, SidebarModel, SidebarRow};
+use desktop::ui::{AppView, SessionRow, SidebarModel, SidebarRow};
 use futures::channel::mpsc::unbounded;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, TestAppContext,
@@ -19,6 +19,7 @@ use gpui_kit::test::TestWindowExt as _;
 use typed_builder::TypedBuilder;
 
 use super::ScriptedBackend;
+pub use super::eventually;
 
 /// Opens the production shell in a headless 1280×820 window.
 pub fn open(
@@ -95,7 +96,9 @@ pub fn model(cx: &mut TestAppContext, view: &Entity<AppView>) -> SidebarModel {
 pub fn titles(rows: &[SidebarRow]) -> Vec<String> {
     rows.iter()
         .filter_map(|row| match row {
-            SidebarRow::Session { title, .. } => Some(title.to_string()),
+            SidebarRow::Session(SessionRow { title, .. }) => {
+                Some(title.to_string())
+            }
             _ => None,
         })
         .collect()
@@ -115,26 +118,6 @@ pub fn click_label(window: &mut Window, label: &str, cx: &mut gpui_kit::App) {
     window.pointer_up(center, gpui_kit::MouseButton::Left, cx);
 }
 
-/// Polls GPUI and real time until `check` holds; backends run on their own threads.
-pub fn eventually(
-    cx: &mut TestAppContext,
-    what: &str,
-    check: impl Fn(&mut gpui_kit::App) -> bool,
-) {
-    let deadline = std::time::Instant::now() + super::WAIT;
-    loop {
-        cx.run_until_parked();
-        if cx.update(|cx| check(cx)) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// A production shell connected to a scripted backend.
 #[derive(TypedBuilder)]
 pub struct Live {
@@ -144,15 +127,29 @@ pub struct Live {
     pub _dir: tempfile::TempDir,
 }
 
+/// Hands the backend's event stream and client to the shell.
+pub fn connect(
+    cx: &mut TestAppContext,
+    view: &Entity<AppView>,
+    backend: &mut ScriptedBackend,
+) {
+    cx.executor().allow_parking();
+    let events = std::mem::replace(&mut backend.events, unbounded().1);
+    let client = backend.client.clone();
+    view.update(cx, |view, cx| view.set_backend(Ok((client, events)), cx));
+}
+
+/// Desktop state with the backend's fixture workspace registered.
+pub fn fixture_state(backend: &ScriptedBackend) -> DesktopState {
+    let workspace = backend.workspace.path().to_str().expect("utf8");
+    with_workspaces(&[workspace])
+}
+
 /// Starts a scripted backend and hands its event stream to a freshly opened shell.
 pub fn live(cx: &mut TestAppContext, state: DesktopState) -> Live {
     let mut backend = ScriptedBackend::start();
-    cx.executor().allow_parking();
     let (handle, view, dir) = open(cx, state);
-    let events = std::mem::replace(&mut backend.events, unbounded().1);
-    view.update(cx, |view, cx| {
-        view.set_backend(Ok((backend.client.clone(), events)), cx)
-    });
+    connect(cx, &view, &mut backend);
     Live::builder()
         .handle(handle)
         .view(view)

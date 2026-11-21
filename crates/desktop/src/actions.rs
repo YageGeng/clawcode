@@ -28,6 +28,14 @@ gpui_kit::actions!(
         FocusComposer,
         /// Stops the active run of the session whose composer has focus.
         StopRun,
+        /// Highlights the previous slash command.
+        PaletteUp,
+        /// Highlights the next slash command.
+        PaletteDown,
+        /// Writes the highlighted slash command into the input.
+        PaletteAccept,
+        /// Closes the slash command list until the text changes.
+        PaletteDismiss,
         /// Opens the settings tab, or activates it when already open.
         OpenSettings,
         /// Quits the application.
@@ -82,6 +90,19 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", CloseSearch, Some(SEARCH_CONTEXT)),
         KeyBinding::new(primary!(","), OpenSettings, context),
         KeyBinding::new(primary!("q"), Quit, context),
+    ]);
+    // Bound at the input's own depth and registered after gpui-kit's input
+    // keys, so the open list takes these keys before the input does.
+    // Escape closes the list even when it shows nothing to pick; the picking
+    // keys only apply with matches, so Enter still sends text like `/home/me`.
+    let palette = Some("CommandPalette > Input");
+    let matches = Some("CommandMatches > Input");
+    cx.bind_keys([
+        KeyBinding::new("up", PaletteUp, matches),
+        KeyBinding::new("down", PaletteDown, matches),
+        KeyBinding::new("tab", PaletteAccept, matches),
+        KeyBinding::new("enter", PaletteAccept, matches),
+        KeyBinding::new("escape", PaletteDismiss, palette),
     ]);
     cx.bind_keys(TAB_KEYS.iter().enumerate().map(|(index, keys)| {
         KeyBinding::new(keys, SelectTab { index }, context)

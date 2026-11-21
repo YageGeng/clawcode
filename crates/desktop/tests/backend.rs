@@ -8,7 +8,7 @@ use agent_client_protocol::v2::schema as wire;
 use config::{
     AppConfig, ConfigHandle, ExtensionsConfig, SessionPersistenceConfig,
 };
-use desktop::backend::{Backend, BackendError};
+use desktop::backend::{AgentRequest, Backend, BackendError, QuestionKey};
 use protocol::ExtensionId;
 use support::ScriptedBackend;
 
@@ -214,4 +214,214 @@ fn pending_queue_round_trip() {
         .block_on(backend.client.pending_messages(&id))
         .expect("pending");
     assert!(pending.steering.is_empty() && pending.follow_up.is_empty());
+}
+
+/// Switches the session into plan mode.
+fn enter_plan_mode(
+    backend: &ScriptedBackend,
+    id: &desktop::backend::SessionId,
+) {
+    backend
+        .block_on(backend.client.set_config_option(id, "mode", "plan"))
+        .expect("plan mode");
+}
+
+/// Sends one text prompt.
+fn say(
+    backend: &ScriptedBackend,
+    id: &desktop::backend::SessionId,
+    text: &str,
+) {
+    backend
+        .block_on(backend.client.prompt(
+            id,
+            vec![wire::ContentBlock::Text(wire::TextContent::new(text))],
+        ))
+        .expect("prompt");
+}
+
+#[test]
+fn plan_approval_reaches_the_client_and_approve_executes() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    enter_plan_mode(&backend, &id);
+
+    say(&backend, &id, "plan");
+    let request = backend.wait_request();
+
+    let AgentRequest::Permission {
+        id: request_id,
+        request,
+    } = request
+    else {
+        panic!("expected a permission request");
+    };
+    assert_eq!(request.title, "Ready to execute the plan?");
+    backend
+        .block_on(async {
+            backend
+                .client
+                .answer_permission(request_id, Some("approve"))
+        })
+        .expect("answer");
+    let updates = backend.wait_for(&id, |update| {
+        matches!(
+            update,
+            wire::SessionUpdate::StateUpdate(wire::StateUpdate::Idle(_))
+        )
+    });
+    assert!(json(&updates).contains("\"completed\""));
+}
+
+#[test]
+fn cancelled_request_emits_request_cancelled() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    enter_plan_mode(&backend, &id);
+    say(&backend, &id, "plan");
+    let request = backend.wait_request();
+
+    backend.client.cancel(&id).expect("cancel");
+    backend.wait_request_cancelled(request.id());
+
+    // Answering a withdrawn request is a harmless no-op.
+    backend
+        .block_on(async {
+            backend
+                .client
+                .answer_permission(request.id(), Some("approve"))
+        })
+        .expect("late answer");
+}
+
+#[test]
+fn set_config_option_returns_the_new_list() {
+    let backend = ScriptedBackend::start();
+    let id = backend.new_session();
+
+    let options = backend
+        .block_on(backend.client.set_config_option(
+            &id,
+            "thinking_level",
+            "high",
+        ))
+        .expect("set");
+
+    let thinking = options
+        .iter()
+        .find(|option| option.config_id.to_string() == "thinking_level")
+        .expect("thinking option");
+    assert!(
+        serde_json::to_string(thinking)
+            .expect("json")
+            .contains("\"high\"")
+    );
+}
+
+#[test]
+fn set_config_option_rejects_unknown_values() {
+    let backend = ScriptedBackend::start();
+    let id = backend.new_session();
+
+    let result = backend.block_on(backend.client.set_config_option(
+        &id,
+        "model",
+        "nope/none",
+    ));
+
+    assert!(matches!(result, Err(BackendError::Request(_))));
+}
+
+#[test]
+fn compact_runs_and_reports_completion() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    say(&backend, &id, "hello");
+    backend.wait_idle(&id);
+
+    backend
+        .block_on(backend.client.compact(&id))
+        .expect("compact");
+
+    backend.wait_for(&id, |update| {
+        matches!(update, wire::SessionUpdate::CompactionUpdate(_))
+            && serde_json::to_string(update)
+                .is_ok_and(|text| text.contains("\"completed\""))
+    });
+}
+
+#[test]
+fn question_answer_and_dismiss_round_trip() {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    say(&backend, &id, "ask");
+    let updates = backend.wait_idle(&id);
+    let request_id = serde_json::to_value(&updates)
+        .expect("json")
+        .pointer_find("request_id")
+        .expect("question request id");
+    let first = QuestionKey {
+        request_id: request_id.clone(),
+        index: 0,
+    };
+    let second = QuestionKey {
+        request_id,
+        index: 1,
+    };
+
+    backend
+        .block_on(backend.client.answer_question(&id, &first, "a"))
+        .expect("answer");
+    backend
+        .block_on(
+            backend
+                .client
+                .dismiss_questions(&id, std::slice::from_ref(&second)),
+        )
+        .expect("dismiss");
+    backend.wait_idle(&id);
+
+    let again =
+        backend.block_on(backend.client.answer_question(&id, &first, "b"));
+    assert!(matches!(again, Err(BackendError::QuestionClosed)));
+}
+
+#[test]
+fn new_session_carries_config_options() {
+    let backend = ScriptedBackend::start();
+
+    let start = backend
+        .block_on(backend.client.new_session(backend.workspace.path()))
+        .expect("new session");
+
+    let ids: Vec<String> = start
+        .config_options
+        .iter()
+        .map(|option| option.config_id.to_string())
+        .collect();
+    assert_eq!(ids, ["model", "thinking_level", "mode"]);
+}
+
+/// Finds the first string value stored under `key` anywhere in a JSON tree.
+trait PointerFind {
+    /// Depth-first search for `key`.
+    fn pointer_find(&self, key: &str) -> Option<String>;
+}
+
+impl PointerFind for serde_json::Value {
+    fn pointer_find(&self, key: &str) -> Option<String> {
+        match self {
+            serde_json::Value::Object(map) => map
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    map.values().find_map(|value| value.pointer_find(key))
+                }),
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|value| value.pointer_find(key))
+            }
+            _ => None,
+        }
+    }
 }

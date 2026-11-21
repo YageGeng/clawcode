@@ -1,71 +1,31 @@
-//! In-process agent backend: the production `Application` behind an ACP v2 client connection.
-//!
-//! The backend lives on its own thread with a tokio runtime. The UI holds an
-//! [`AcpClient`], whose requests are spawned onto that runtime, and reads
-//! session notifications from an unbounded [`BackendEvent`] stream.
+//! The ACP client: the connection to the in-process agent and every request
+//! the UI sends through it.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use acp::{AcpServerFactory, AcpTransportKind};
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::v2::{ConnectionTo, schema as wire};
+use agent_client_protocol::v2::{ConnectionTo, Responder, schema as wire};
 use agent_client_protocol::{
     Agent, Client, ConnectTo, JsonRpcMessage, JsonRpcRequest, UntypedMessage,
 };
-use app::ApplicationFactory;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use protocol::{
     AcpExtensionMethod, PendingMessages, QueueId, SessionRuntimeSnapshot,
 };
 
-/// ACP session identifier used throughout the desktop client.
-pub type SessionId = wire::SessionId;
-
-/// Something the backend reports to the UI.
-#[derive(Debug)]
-pub enum BackendEvent {
-    /// One `session/update` notification, in arrival order.
-    Update(Box<wire::UpdateSessionNotification>),
-    /// The ACP connection ended; carries the error when it ended with one.
-    Stopped(Option<String>),
-}
-
-/// Why a backend operation failed.
-#[derive(Debug, thiserror::Error)]
-pub enum BackendError {
-    /// The application or the ACP connection could not be started.
-    #[error("{0}")]
-    Startup(String),
-    /// The agent rejected a request or answered with an unexpected shape.
-    #[error("{0}")]
-    Request(String),
-    /// The backend runtime is gone.
-    #[error("the backend has stopped")]
-    Stopped,
-    /// The agent cancelled the request (JSON-RPC `-32800`), for example a
-    /// queued prompt that was removed or whose run was stopped.
-    #[error("the request was cancelled")]
-    Cancelled,
-}
-
-impl From<agent_client_protocol::Error> for BackendError {
-    /// Keeps cancellation distinguishable from real failures.
-    fn from(error: agent_client_protocol::Error) -> Self {
-        if error.code == agent_client_protocol::ErrorCode::REQUEST_CANCELLED {
-            BackendError::Cancelled
-        } else {
-            BackendError::Request(error.to_string())
-        }
-    }
-}
+use super::requests::{PendingRequests, Waiting};
+use super::{
+    AgentRequest, BackendError, BackendEvent, QuestionKey, RequestId,
+    SessionId, SessionStart,
+};
 
 /// Handle to the in-process ACP connection; cheap to clone and usable from any executor.
 #[derive(Clone)]
 pub struct AcpClient {
     connection: ConnectionTo<Agent>,
     runtime: tokio::runtime::Handle,
+    pending: PendingRequests,
 }
 
 /// Keeps the ACP connection open until [`AcpConnection::close`] or drop.
@@ -151,6 +111,11 @@ impl AcpClient {
             oneshot::channel::<Result<ConnectionTo<Agent>, String>>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let updates = events.clone();
+        let pending = PendingRequests::default();
+        let (permissions, permission_events) =
+            (pending.clone(), events.clone());
+        let (elicitations, elicitation_events) =
+            (pending.clone(), events.clone());
         let task = tokio::spawn(async move {
             let result = Client
                 .v2()
@@ -163,15 +128,64 @@ impl AcpClient {
                     },
                     agent_client_protocol::on_receive_notification!(),
                 )
+                // Requests are parked at once; the user answers them later from the UI.
+                .on_receive_request(
+                    async move |request: wire::RequestPermissionRequest,
+                                responder: Responder<wire::RequestPermissionResponse>,
+                                _connection| {
+                        let cancellation = responder.cancellation();
+                        let session = request.session_id.clone();
+                        let id = permissions.park(
+                            Waiting::Permission(responder),
+                            cancellation,
+                            permission_events.clone(),
+                            |id| AgentRequest::Permission { id, request },
+                        );
+                        tracing::info!("permission request {} for session {}", id.0, session);
+                        Ok(())
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_request(
+                    async move |request: wire::CreateElicitationRequest,
+                                responder: Responder<wire::CreateElicitationResponse>,
+                                _connection| {
+                        // Request-scoped elicitations come from provider sign-in, which arrives in M4.
+                        if !matches!(request.scope(), wire::ElicitationScope::Session(_)) {
+                            tracing::info!("declining a request-scoped elicitation; sign-in is not supported yet");
+                            return responder.respond(wire::CreateElicitationResponse::new(
+                                wire::ElicitationAction::Cancel,
+                            ));
+                        }
+                        let cancellation = responder.cancellation();
+                        let id = elicitations.park(
+                            Waiting::Elicitation(responder),
+                            cancellation,
+                            elicitation_events.clone(),
+                            |id| AgentRequest::Elicitation { id, request },
+                        );
+                        tracing::info!("elicitation request {}", id.0);
+                        Ok(())
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
                 .connect_with(component, async move |connection| {
                     let initialize = connection
-                        .send_request(wire::InitializeRequest::new(
-                            ProtocolVersion::V2,
-                            wire::Implementation::new(
-                                "clawcode-desktop",
-                                env!("CARGO_PKG_VERSION"),
-                            ),
-                        ))
+                        .send_request(
+                            wire::InitializeRequest::new(
+                                ProtocolVersion::V2,
+                                wire::Implementation::new(
+                                    "clawcode-desktop",
+                                    env!("CARGO_PKG_VERSION"),
+                                ),
+                            )
+                            // Without these the agent never sends MCP elicitations.
+                            .capabilities(wire::ClientCapabilities::new().elicitation(
+                                wire::ElicitationCapabilities::new()
+                                    .form(wire::ElicitationFormCapabilities::new())
+                                    .url(wire::ElicitationUrlCapabilities::new()),
+                            )),
+                        )
                         .block_task()
                         .await;
                     if let Err(error) = initialize {
@@ -206,6 +220,7 @@ impl AcpClient {
             AcpClient {
                 connection,
                 runtime: tokio::runtime::Handle::current(),
+                pending,
             },
             AcpConnection {
                 shutdown: shutdown_tx,
@@ -246,11 +261,14 @@ impl AcpClient {
     pub async fn new_session(
         &self,
         cwd: &Path,
-    ) -> Result<SessionId, BackendError> {
-        Ok(self
+    ) -> Result<SessionStart, BackendError> {
+        let response = self
             .request(wire::NewSessionRequest::new(cwd.to_path_buf()))
-            .await?
-            .session_id)
+            .await?;
+        Ok(SessionStart {
+            id: response.session_id,
+            config_options: response.config_options,
+        })
     }
 
     /// Attaches to a session and replays its whole retained transcript as updates.
@@ -258,15 +276,19 @@ impl AcpClient {
         &self,
         id: &SessionId,
         cwd: &Path,
-    ) -> Result<(), BackendError> {
-        self.request(
-            wire::ResumeSessionRequest::new(id.clone(), cwd.to_path_buf())
-                .replay_from(wire::ReplayFrom::Start(
-                    wire::ReplayFromStart::new(),
-                )),
-        )
-        .await?;
-        Ok(())
+    ) -> Result<SessionStart, BackendError> {
+        let response = self
+            .request(
+                wire::ResumeSessionRequest::new(id.clone(), cwd.to_path_buf())
+                    .replay_from(wire::ReplayFrom::Start(
+                        wire::ReplayFromStart::new(),
+                    )),
+            )
+            .await?;
+        Ok(SessionStart {
+            id: id.clone(),
+            config_options: response.config_options,
+        })
     }
 
     /// Releases a session's live resources in the backend.
@@ -396,145 +418,102 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Changes one configuration option and returns the complete new option list.
+    pub async fn set_config_option(
+        &self,
+        id: &SessionId,
+        config_id: &str,
+        value: &str,
+    ) -> Result<Vec<wire::SessionConfigOption>, BackendError> {
+        Ok(self
+            .request(wire::SetSessionConfigOptionRequest::new(
+                id.clone(),
+                config_id.to_owned(),
+                wire::SessionConfigOptionValue::id(value.to_owned()),
+            ))
+            .await?
+            .config_options)
+    }
+
+    /// Compacts the session's context now.
+    pub async fn compact(&self, id: &SessionId) -> Result<(), BackendError> {
+        self.extension(
+            AcpExtensionMethod::Compact,
+            serde_json::json!({ "sessionId": id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Skips open questions; already settled ones are ignored by the agent.
+    pub async fn dismiss_questions(
+        &self,
+        id: &SessionId,
+        keys: &[QuestionKey],
+    ) -> Result<(), BackendError> {
+        let items: Vec<serde_json::Value> = keys
+            .iter()
+            .map(|key| {
+                serde_json::json!({ "requestId": key.request_id, "index": key.index })
+            })
+            .collect();
+        self.extension(
+            AcpExtensionMethod::QuestionDismiss,
+            serde_json::json!({ "sessionId": id, "items": items }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Answers one asynchronous question; the answer steers into the running run or starts one.
+    pub async fn answer_question(
+        &self,
+        id: &SessionId,
+        key: &QuestionKey,
+        text: &str,
+    ) -> Result<(), BackendError> {
+        let mut meta = wire::Meta::new();
+        meta.insert(
+            protocol::ProductIdentity::ACP_NAMESPACE.to_owned(),
+            serde_json::json!({
+                "questionReply": { "requestId": key.request_id, "index": key.index }
+            }),
+        );
+        self.request(
+            wire::PromptRequest::new(
+                id.clone(),
+                vec![wire::ContentBlock::Text(wire::TextContent::new(text))],
+            )
+            .meta(meta),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Answers a permission request with one of its options, or `None` to cancel it.
+    ///
+    /// A request the agent already withdrew is answered by nobody: this is then a no-op.
+    pub fn answer_permission(
+        &self,
+        id: RequestId,
+        option_id: Option<&str>,
+    ) -> Result<(), BackendError> {
+        self.pending.answer_permission(id, option_id)
+    }
+
+    /// Answers an elicitation; a request the agent already withdrew makes this a no-op.
+    pub fn answer_elicitation(
+        &self,
+        id: RequestId,
+        response: wire::CreateElicitationResponse,
+    ) -> Result<(), BackendError> {
+        self.pending.answer_elicitation(id, response)
+    }
+
     /// Asks the agent to stop the session's current run.
     pub fn cancel(&self, id: &SessionId) -> Result<(), BackendError> {
         self.connection
             .send_notification(wire::CancelSessionNotification::new(id.clone()))
             .map_err(|error| BackendError::Request(error.to_string()))
-    }
-}
-
-/// The running backend thread: production `Application` plus its in-process client.
-pub struct Backend {
-    client: AcpClient,
-    shutdown: Option<oneshot::Sender<()>>,
-    stopped: oneshot::Receiver<()>,
-}
-
-impl Backend {
-    /// Starts the backend thread and resolves once the ACP connection is initialized or failed.
-    pub async fn start(
-        config: config::ConfigHandle,
-    ) -> Result<(Backend, UnboundedReceiver<BackendEvent>), BackendError> {
-        let (events_tx, events_rx) = unbounded();
-        let (ready_tx, ready_rx) =
-            oneshot::channel::<Result<AcpClient, BackendError>>();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let (stopped_tx, stopped_rx) = oneshot::channel::<()>();
-        std::thread::Builder::new()
-            .name("clawcode-backend".to_string())
-            .spawn(move || {
-                match tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime.block_on(BackendTask::run(
-                        BackendTask {
-                            config,
-                            events: events_tx,
-                            shutdown: shutdown_rx,
-                        },
-                        ready_tx,
-                    )),
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(BackendError::Startup(
-                            error.to_string(),
-                        )));
-                    }
-                }
-                let _ = stopped_tx.send(());
-            })
-            .map_err(|error| BackendError::Startup(error.to_string()))?;
-        let client = ready_rx.await.map_err(|error| {
-            BackendError::Startup(format!(
-                "backend thread exited during startup: {error}"
-            ))
-        })??;
-        Ok((
-            Backend {
-                client,
-                shutdown: Some(shutdown_tx),
-                stopped: stopped_rx,
-            },
-            events_rx,
-        ))
-    }
-
-    /// Returns the client connected to this backend.
-    pub fn client(&self) -> &AcpClient {
-        &self.client
-    }
-
-    /// Closes the connection, shuts the application down, and waits for the thread to finish.
-    ///
-    /// The caller bounds the wait; the returned future does not time out itself.
-    pub fn shutdown(mut self) -> impl Future<Output = ()> + Send {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        async move {
-            // A dropped sender also means the thread finished.
-            let _ = self.stopped.await;
-        }
-    }
-}
-
-/// What the backend thread owns while it runs.
-struct BackendTask {
-    config: config::ConfigHandle,
-    events: UnboundedSender<BackendEvent>,
-    shutdown: oneshot::Receiver<()>,
-}
-
-impl BackendTask {
-    /// Builds the application, connects the client, serves until asked to stop, then shuts down.
-    async fn run(
-        self,
-        ready: oneshot::Sender<Result<AcpClient, BackendError>>,
-    ) {
-        let max_batch_size = self.config.current().app.recovery.max_batch_size;
-        let application = match ApplicationFactory::new(self.config)
-            .build()
-            .await
-        {
-            Ok(application) => application,
-            Err(error) => {
-                tracing::error!("desktop backend failed to start: {}", error);
-                let _ =
-                    ready.send(Err(BackendError::Startup(error.to_string())));
-                return;
-            }
-        };
-        let server = AcpServerFactory::new(
-            Arc::clone(&application.kernel),
-            max_batch_size,
-        );
-        match AcpClient::connect(
-            server.component(AcpTransportKind::InProcess),
-            self.events,
-        )
-        .await
-        {
-            Ok((client, mut connection)) => {
-                tracing::info!("desktop backend connected");
-                let _ = ready.send(Ok(client));
-                // A connection that ends on its own also shuts the application down,
-                // so its SQLite lease and pending state syncs do not outlive it.
-                tokio::select! {
-                    _ = self.shutdown => {}
-                    () = application.kernel.wait_for_shutdown() => {}
-                    () = connection.ended() => {}
-                }
-                connection.close().await;
-            }
-            Err(error) => {
-                tracing::error!("desktop backend failed to connect: {}", error);
-                let _ = ready.send(Err(error));
-            }
-        }
-        if let Err(error) = application.shutdown().await {
-            tracing::error!("desktop backend shutdown failed: {}", error);
-        }
-        tracing::info!("desktop backend stopped");
     }
 }
