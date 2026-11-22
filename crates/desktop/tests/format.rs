@@ -39,3 +39,14 @@ fn run_usage_label_skips_missing_parts() {
         "Scripted · in 12.4k · out 1.8k · cache 71% · 3s"
     );
 }
+
+#[test]
+fn precise_elapsed_shows_tenths_below_ten_seconds() {
+    rust_i18n::set_locale("en");
+    assert_eq!(desktop::ui::Elapsed(800).precise(), "0.8s");
+    assert_eq!(desktop::ui::Elapsed(9_960).precise(), "9.9s");
+    assert_eq!(
+        desktop::ui::Elapsed(12_000).precise(),
+        desktop::ui::Elapsed(12_000).label()
+    );
+}

@@ -58,6 +58,9 @@ impl AppView {
             SessionViewEvent::SelectWorkspace(workspace) => {
                 self.select_draft_workspace(view, workspace.clone(), window, cx)
             }
+            SessionViewEvent::Trajectory(event) => {
+                self.on_trajectory_event(event, window, cx)
+            }
         }
     }
 

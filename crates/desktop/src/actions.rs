@@ -48,6 +48,8 @@ gpui_kit::actions!(
         PaletteDismiss,
         /// Opens the settings tab, or activates it when already open.
         OpenSettings,
+        /// Switches the active session tab between its chat and its trajectory.
+        ToggleTrajectory,
         /// Quits the application.
         Quit
     ]
@@ -104,6 +106,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", StopRun, Some(COMPOSER_CONTEXT)),
         KeyBinding::new("escape", CloseSearch, Some(SEARCH_CONTEXT)),
         KeyBinding::new(primary!(","), OpenSettings, context),
+        KeyBinding::new(primary!("shift-t"), ToggleTrajectory, context),
         KeyBinding::new(primary!("q"), Quit, context),
     ]);
     // Bound at the input's own depth and registered after gpui-kit's input

@@ -20,7 +20,7 @@ use crate::session::SessionStatus;
 use crate::state::LayoutState;
 use crate::ui::format::Elapsed;
 use crate::ui::session::loading_skeleton;
-use crate::ui::{AppView, BackendPhase, StatusIcon, TabEntry};
+use crate::ui::{AppView, BackendPhase, StatusDot, StatusIcon, TabEntry};
 
 /// A resize handle that draws nothing at rest, so the chrome stays one undivided surface;
 /// it shows gpui-kit's indicator while hovered or dragged.
@@ -126,6 +126,7 @@ impl AppView {
                 resizable_panel().visible(!maximized).child(
                     div()
                         .size_full()
+                        .pt_2()
                         .pl_2()
                         .pr_2()
                         .pb_2()
@@ -220,8 +221,19 @@ impl AppView {
                 };
                 let (close, click, target) =
                     (tab.clone(), tab.clone(), tab.clone());
+                // The dot's color says the status at a glance; the tooltip
+                // and screen readers say it in words.
+                let status = self.tab_status(tab, cx);
+                let status_word = status.label();
                 div()
                     .id(SharedString::from(format!("tab:{key}")))
+                    .aria_label(format!("{title}, {status_word}"))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            status_word.clone(),
+                        )
+                        .build(window, cx)
+                    })
                     .test_support()
                     .flex()
                     .flex_none()
@@ -243,7 +255,7 @@ impl AppView {
                                 .hover(|style| style.bg(hover_bg))
                         }
                     })
-                    .child(StatusIcon::new(self.tab_status(tab, cx)))
+                    .child(StatusDot::new(status))
                     .child(div().flex_1().min_w_0().truncate().child(title))
                     .child(
                         Button::new(SharedString::from(format!(
@@ -294,6 +306,9 @@ impl AppView {
                 matches!(self.active_entry(), Some(TabEntry::Session(_)))
             });
         let border = cx.theme().border;
+        let switch = status
+            .and_then(|_| self.active_view().cloned())
+            .map(|view| self.render_view_switch("view-switch", view, cx));
         div()
             .flex()
             .items_center()
@@ -318,6 +333,7 @@ impl AppView {
                     .track_scroll(&self.tab_scroll)
                     .children(tabs),
             )
+            .children(switch)
             .when_some(status, |this, status| {
                 this.child(
                     div()

@@ -11,6 +11,7 @@ mod settings;
 mod shell;
 mod sidebar;
 mod status;
+mod trajectory;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -40,15 +41,20 @@ pub use interactions::elicitation_form::{
 };
 pub use interactions::questions::QuestionAnswer;
 pub use panel::{FileView, PanelOwner, PanelPresentation};
+pub use panel::{PromptMode, RecordSection, RecordView};
 pub use session::{
     MarkdownCache, MarkdownPart, SessionTarget, SessionView, SessionViewEvent,
+    ViewMode,
 };
 pub use shell::tabs::Tabs;
 pub use sidebar::{
     GroupKind, RECENT_SESSIONS, SESSIONS_PER_WORKSPACE, SessionRow,
     SidebarGroupModel, SidebarModel, SidebarRow, SidebarState, WorkspaceRow,
 };
-pub use status::StatusIcon;
+pub use status::{StatusDot, StatusIcon};
+pub use trajectory::{
+    ContentState, LoadState, TrajectoryEvent, TrajectoryView,
+};
 
 use crate::actions::{
     CloseSearch, FocusSearch, NewSession, ToggleSidebar, WORKSPACE_CONTEXT,
@@ -233,6 +239,9 @@ impl AppView {
             ._subscriptions(subscriptions)
             .build();
         view.refresh_missing();
+        cx.set_global(trajectory::TimelineVisible(
+            view.state.layout.timeline_open,
+        ));
         shell::title_bar::install_menus(&view.menu_bar, cx);
         view.observe_window(window, cx);
         view._ticker = Some(cx.spawn(async move |this, cx| {
@@ -592,6 +601,7 @@ impl Render for AppView {
             .on_action(cx.listener(Self::on_close_search))
             .on_action(cx.listener(Self::on_focus_composer))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_toggle_trajectory))
             .on_action(cx.listener(Self::on_quit))
             .size_full()
             .flex()

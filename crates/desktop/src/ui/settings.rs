@@ -1,17 +1,23 @@
 //! The settings dialog (M3b spec §7): language, appearance, fonts, and where
 //! subagents open. Every change applies at once and is saved.
 
+use std::rc::Rc;
+
 use gpui_kit::component::ThemeMode;
 use gpui_kit::component::ThemeRegistry;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::label::Label;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::select::{
+    SearchableVec, Select, SelectEvent, SelectState,
+};
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
     Settings,
 };
-use gpui_kit::component::{IndexPath, Sizable as _, WindowExt as _};
+use gpui_kit::component::{IndexPath, Side, Sizable as _, WindowExt as _};
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement as _,
+    Anchor, AnyElement, AppContext as _, Context, Entity, IntoElement as _,
     ParentElement as _, SharedString, Styled as _, Subscription, WeakEntity,
     Window, div, px, rems,
 };
@@ -23,8 +29,12 @@ use crate::state::{
     SubagentOpenTarget, ThemeModePreference,
 };
 
+/// Width of every settings dropdown and picker, in rems, so they line up.
+const CHOICE_REMS: f32 = 14.0;
+
 /// A searchable list of font families: "Default" first, then every installed family.
-type FontSelect = Entity<SelectState<Vec<SharedString>>>;
+/// `SearchableVec` filters on the query; a plain `Vec` ignores it.
+type FontSelect = Entity<SelectState<SearchableVec<SharedString>>>;
 
 /// The settings dialog's shell state.
 #[derive(Default)]
@@ -141,7 +151,7 @@ impl AppView {
             let families = families.clone();
             cx.new(|cx| {
                 SelectState::new(
-                    families,
+                    SearchableVec::new(families),
                     Some(IndexPath::new(selected)),
                     window,
                     cx,
@@ -155,7 +165,7 @@ impl AppView {
             let default = default.clone();
             move |this: &mut Self,
                   _: &FontSelect,
-                  event: &SelectEvent<Vec<SharedString>>,
+                  event: &SelectEvent<SearchableVec<SharedString>>,
                   _: &mut Window,
                   cx: &mut Context<'_, Self>| {
                 let SelectEvent::Confirm(Some(family)) = event else {
@@ -226,7 +236,9 @@ impl AppView {
         let this = cx.entity().downgrade();
         let t = |key: &str| SharedString::from(rust_i18n::t!(key).into_owned());
         let follow = t("Settings.follow_system");
-        let language = SettingField::dropdown(
+        let language = Self::choice_field(
+            "Settings.language",
+            false,
             vec![
                 ("system".into(), follow.clone()),
                 ("en".into(), "English".into()),
@@ -261,7 +273,9 @@ impl AppView {
                 }
             },
         );
-        let mode = SettingField::dropdown(
+        let mode = Self::choice_field(
+            "Settings.mode",
+            false,
             vec![
                 ("system".into(), follow),
                 ("light".into(), t("Settings.light")),
@@ -347,7 +361,7 @@ impl AppView {
                 Some(picker) => Select::new(picker)
                     .id(id)
                     .small()
-                    .w(rems(14.))
+                    .w(rems(CHOICE_REMS))
                     .into_any_element(),
                 None => div().into_any_element(),
             })
@@ -355,7 +369,9 @@ impl AppView {
         let (ui_picker, code_picker) = pickers.unzip();
         let ui_font = font_field("settings-ui-font", ui_picker);
         let code_font = font_field("settings-code-font", code_picker);
-        let subagents = SettingField::dropdown(
+        let subagents = Self::choice_field(
+            "Settings.subagents",
+            false,
             vec![
                 ("panel".into(), t("Settings.subagents_panel")),
                 ("main".into(), t("Settings.subagents_main")),
@@ -502,7 +518,13 @@ impl AppView {
                 (theme.key().into(), label)
             })
             .collect();
-        SettingField::dropdown(
+        Self::choice_field(
+            if light {
+                "Settings.light_file_icons"
+            } else {
+                "Settings.dark_file_icons"
+            },
+            false,
             options,
             {
                 let this = this.clone();
@@ -538,6 +560,64 @@ impl AppView {
         )
     }
 
+    /// One choice among `options`: a button as wide as the font pickers,
+    /// naming the current option, that opens a menu of all of them with the
+    /// current one checked on the right; long lists scroll.
+    /// `title` is the setting's name key, which screen readers hear before
+    /// the current option.
+    fn choice_field<V, S>(
+        title: &'static str,
+        scrollable: bool,
+        options: Vec<(SharedString, SharedString)>,
+        value: V,
+        set_value: S,
+    ) -> SettingField<SharedString>
+    where
+        V: Fn(&gpui_kit::App) -> SharedString + 'static,
+        S: Fn(SharedString, &mut gpui_kit::App) + 'static,
+    {
+        let set_value = Rc::new(set_value);
+        SettingField::render(move |_, _, cx| {
+            let current = value(cx);
+            let label = options
+                .iter()
+                .find(|(option, _)| *option == current)
+                .map_or_else(|| current.clone(), |(_, label)| label.clone());
+            let options = options.clone();
+            let set_value = Rc::clone(&set_value);
+            Button::new("btn")
+                .outline()
+                .small()
+                .w(rems(CHOICE_REMS))
+                .accessibility_label(format!(
+                    "{}: {label}",
+                    rust_i18n::t!(title)
+                ))
+                .dropdown_caret(true)
+                .label(label)
+                .dropdown_menu_with_anchor(
+                    Anchor::TopRight,
+                    move |menu, window, _| {
+                        let menu = menu
+                            .check_side(Side::Right)
+                            .min_w(window.rem_size() * CHOICE_REMS)
+                            .scrollable(scrollable);
+                        options.iter().fold(menu, |menu, (option, label)| {
+                            let set_value = Rc::clone(&set_value);
+                            let option = option.clone();
+                            menu.item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(option == current)
+                                    .on_click(move |_, _, cx| {
+                                        set_value(option.clone(), cx)
+                                    }),
+                            )
+                        })
+                    },
+                )
+        })
+    }
+
     /// A scrollable dropdown over the registered themes of one mode.
     fn theme_field(
         this: &WeakEntity<Self>,
@@ -553,7 +633,13 @@ impl AppView {
         let light = mode == ThemeMode::Light;
         let reader = this.clone();
         let writer = this.clone();
-        SettingField::scrollable_dropdown(
+        Self::choice_field(
+            if light {
+                "Settings.light_theme"
+            } else {
+                "Settings.dark_theme"
+            },
+            true,
             options,
             move |cx| {
                 reader.upgrade().map_or_else(SharedString::default, |this| {

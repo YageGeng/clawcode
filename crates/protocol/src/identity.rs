@@ -184,6 +184,10 @@ pub enum AcpExtensionMethod {
     WorkspaceGitStatus,
     /// Reads one workspace file's diff against the last commit.
     WorkspaceGitDiff,
+    /// Reads one page of a Session's active-branch trajectory.
+    Trajectory,
+    /// Reads one request content (system prompt or tools) by hash.
+    TrajectoryContent,
 }
 
 impl fmt::Display for AcpExtensionMethod {
@@ -230,6 +234,8 @@ impl AcpExtensionMethod {
             Self::WorkspaceReadFile => "_clawcode/workspace/read_file",
             Self::WorkspaceGitStatus => "_clawcode/workspace/git_status",
             Self::WorkspaceGitDiff => "_clawcode/workspace/git_diff",
+            Self::Trajectory => "_clawcode/session/trajectory",
+            Self::TrajectoryContent => "_clawcode/session/trajectory/content",
         }
     }
 
@@ -251,7 +257,9 @@ impl AcpExtensionMethod {
             | Self::WorkspaceListDir
             | Self::WorkspaceReadFile
             | Self::WorkspaceGitStatus
-            | Self::WorkspaceGitDiff => true,
+            | Self::WorkspaceGitDiff
+            | Self::Trajectory
+            | Self::TrajectoryContent => true,
             Self::Navigate
             | Self::Branch
             | Self::Fork
@@ -301,6 +309,8 @@ impl AcpExtensionMethod {
             Self::WorkspaceReadFile,
             Self::WorkspaceGitStatus,
             Self::WorkspaceGitDiff,
+            Self::Trajectory,
+            Self::TrajectoryContent,
         ]
         .into_iter()
         .find(|candidate| candidate.as_str() == method)

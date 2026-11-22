@@ -10,13 +10,13 @@ use gpui_kit::{
 use typed_builder::TypedBuilder;
 
 use super::{
-    ChangesView, FileView, FilesEvent, FilesView, PanelOwner, ViewerSource,
-    changes,
+    ChangesView, FileView, FilesEvent, FilesView, PanelOwner, RecordView,
+    ViewerSource, changes,
 };
 use crate::backend::SessionId;
 use crate::state::PanelTabKey;
-use crate::ui::session::SessionView;
-use crate::ui::{AppView, TabEntry};
+use crate::ui::session::{SessionView, SessionViewEvent};
+use crate::ui::{AppView, TabEntry, TrajectoryEvent};
 
 /// The view behind one panel tab.
 #[derive(Clone)]
@@ -29,6 +29,8 @@ pub enum PanelView {
     File(Entity<FileView>),
     /// A subagent session.
     Subagent(Entity<SessionView>),
+    /// The record selected in the session's trajectory.
+    Record(Entity<RecordView>),
 }
 
 impl PanelView {
@@ -44,7 +46,7 @@ impl PanelView {
             PanelView::File(view) => {
                 view.update(cx, |view, cx| view.reload(window, cx))
             }
-            PanelView::Subagent(_) => {}
+            PanelView::Subagent(_) | PanelView::Record(_) => {}
         }
     }
 
@@ -55,6 +57,7 @@ impl PanelView {
             PanelView::Files(view) => view.clone().into_any_element(),
             PanelView::File(view) => view.clone().into_any_element(),
             PanelView::Subagent(view) => view.clone().into_any_element(),
+            PanelView::Record(view) => view.clone().into_any_element(),
         }
     }
 }
@@ -139,7 +142,9 @@ impl AppView {
             .runtimes
             .get(&key)
             .and_then(|runtime| runtime.views.get(&tab))
-            .cloned();
+            .cloned()
+            // A detail of a trajectory the session dropped is built anew.
+            .filter(|view| !self.is_stale_record(view, cx));
         match &existing {
             // The icon theme may have changed since the tree was built.
             Some(PanelView::Files(files)) => {
@@ -150,7 +155,11 @@ impl AppView {
             Some(PanelView::Changes(changes)) => {
                 let summary =
                     self.git_status(&workspace).map(changes::GitSummary::from);
-                changes.update(cx, |changes, cx| changes.set_git(summary, cx));
+                let painter = self.file_icon_painter(cx);
+                changes.update(cx, |changes, cx| {
+                    changes.set_painter(painter);
+                    changes.set_git(summary, cx)
+                });
             }
             _ => {}
         }
@@ -180,6 +189,22 @@ impl AppView {
         }
     }
 
+    /// Whether `view` is a record detail following a trajectory its session
+    /// no longer shows, as after the session view took a new target.
+    fn is_stale_record(&self, view: &PanelView, cx: &gpui_kit::App) -> bool {
+        let PanelView::Record(record) = view else {
+            return false;
+        };
+        let current = match self.panel_owner() {
+            Some(PanelOwner::Session(id)) => self
+                .views
+                .get(&TabEntry::Session(id))
+                .and_then(|view| view.read(cx).trajectory_view().cloned()),
+            _ => None,
+        };
+        current.as_ref() != Some(record.read(cx).trajectory())
+    }
+
     /// A new view for one panel tab of `workspace`.
     pub(super) fn build_panel_view(
         &mut self,
@@ -190,9 +215,12 @@ impl AppView {
     ) -> Option<PanelView> {
         let client = self.host.client.clone();
         Some(match tab {
-            PanelTabKey::Changes => PanelView::Changes(
-                cx.new(|cx| ChangesView::new(workspace, client, window, cx)),
-            ),
+            PanelTabKey::Changes => PanelView::Changes({
+                let painter = self.file_icon_painter(cx);
+                cx.new(|cx| {
+                    ChangesView::new(workspace, client, painter, window, cx)
+                })
+            }),
             PanelTabKey::Files => {
                 let painter = self.file_icon_painter(cx);
                 let view =
@@ -223,14 +251,46 @@ impl AppView {
                 let registry = self.host.registry.clone()?;
                 let handle = registry
                     .update(cx, |registry, cx| registry.attach(&summary, cx));
-                PanelView::Subagent(cx.new(|cx| {
+                let view = cx.new(|cx| {
                     SessionView::new(
                         crate::ui::session::SessionTarget::Session(handle),
                         client,
                         window,
                         cx,
                     )
-                }))
+                });
+                // The overview setting is shared, so its toggle saves here as
+                // in the main card. The panel's record tab follows the owner
+                // session's trajectory, so a subagent's record opens below
+                // the subagent's own trajectory instead.
+                cx.subscribe_in(
+                    &view,
+                    window,
+                    |this, view, event, window, cx| match event {
+                        SessionViewEvent::Trajectory(
+                            TrajectoryEvent::Open(_),
+                        ) => {
+                            view.update(cx, |view, cx| view.open_detail(cx));
+                        }
+                        SessionViewEvent::Trajectory(
+                            event @ TrajectoryEvent::TimelineToggled(_),
+                        ) => this.on_trajectory_event(event, window, cx),
+                        _ => {}
+                    },
+                )
+                .detach();
+                PanelView::Subagent(view)
+            }
+            PanelTabKey::Record => {
+                // The detail follows the selection of the owner session's trajectory.
+                let Some(super::PanelOwner::Session(id)) = self.panel_owner()
+                else {
+                    return None;
+                };
+                let view = self.views.get(&TabEntry::Session(id))?.clone();
+                let trajectory =
+                    view.update(cx, |view, cx| view.trajectory(window, cx))?;
+                PanelView::Record(cx.new(|cx| RecordView::new(trajectory, cx)))
             }
             PanelTabKey::Unknown => return None,
         })

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -12,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::session::JsonlSessionStore;
 use crate::state::{NameFactMutation, SessionState};
 use crate::{
-    Clock, LogHeader, NewEntry, OwnedSessionCreateOptions,
-    SessionCreateOptions, SessionForkOptions, SessionHeader, SessionMetadata,
-    SessionStore, StoreError, StoreFactory, SyncObserver,
+    Clock, LogHeader, NewEntry, NewRecord, OwnedSessionCreateOptions,
+    RecordKind, SessionCreateOptions, SessionForkOptions, SessionHeader,
+    SessionMetadata, SessionStore, StoreError, StoreFactory, SyncObserver,
 };
 
 /// Filesystem-backed store factory using pi's cwd-encoded directory layout.
@@ -311,6 +312,43 @@ impl StoreFactory for JsonlStoreFactory {
         let mut target = self.create(options.create)?;
         if options.lane.as_str() != "main" {
             target.create_lane(options.lane.clone(), None)?;
+        }
+        // Copied assistant entries address their request contents by hash, so
+        // the contents they address travel with them, once each and before
+        // the entries, as the source logged them; the contents of the branch
+        // left behind and the source's Runs do not.
+        let addressed: HashSet<String> = branch
+            .iter()
+            .filter_map(|entry| {
+                entry.payload.get("content")?.pointer("/metadata/request")
+            })
+            .flat_map(|request| {
+                ["systemPrompt", "tools"].map(|key| request.get(key))
+            })
+            .flatten()
+            .filter_map(|hash| hash.as_str().map(str::to_owned))
+            .collect();
+        let mut copied = HashSet::new();
+        for record in source.records() {
+            let hash = record
+                .payload
+                .get(RecordKind::REQUEST_CONTENT_KEY)
+                .and_then(|content| content.get("hash"))
+                .and_then(serde_json::Value::as_str);
+            if record.kind == RecordKind::RequestContent
+                && let Some(hash) = hash
+                && addressed.contains(hash)
+                && copied.insert(hash.to_owned())
+            {
+                target.append_record(
+                    NewRecord::builder()
+                        .id(record.id)
+                        .lane(options.lane.clone())
+                        .kind(record.kind)
+                        .payload(serde_json::Value::Object(record.payload))
+                        .build(),
+                )?;
+            }
         }
         for entry in branch {
             target.append_entry(

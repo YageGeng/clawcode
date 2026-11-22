@@ -39,7 +39,7 @@ typed-builder = { workspace = true }
 ignore = { workspace = true }
 
 # protocol
-agent-client-protocol = { workspace = true, features = ["stdio", "unstable_end_turn_token_usage", "unstable_plan_operations", "unstable_protocol_v2", "unstable_session_set_title"] }
+agent-client-protocol = { workspace = true, features = ["stdio", "unstable_end_turn_token_usage", "unstable_protocol_v2", "unstable_session_set_title"] }
 
 # misc
 base64 = { workspace = true }
@@ -51,6 +51,7 @@ extension = { workspace = true }
 mcp = { workspace = true }
 prompt = { workspace = true }
 skill = { workspace = true }
+state = { workspace = true }
 store = { workspace = true }
 tools = { workspace = true }
 

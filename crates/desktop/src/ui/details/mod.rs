@@ -15,13 +15,13 @@ use gpui_kit::component::menu::{
 };
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex,
+    ActiveTheme as _, Icon, Selectable as _, Side, Sizable as _, h_flex,
 };
 use gpui_kit::{
-    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt as _, WeakEntity, Window, div, prelude::FluentBuilder as _,
-    px, rems,
+    Anchor, AnyElement, ClickEvent, Context, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity,
+    Window, div, prelude::FluentBuilder as _, px, rems,
 };
 use protocol::{WorkspaceDiffScope, WorkspaceGitStatus};
 
@@ -644,6 +644,7 @@ impl AppView {
         let menu_path = workspace.to_path_buf();
         let editors = self.details.editors.editors().to_vec();
         let view = cx.entity().downgrade();
+        let current = target.clone();
         details_row("details-open-in", &theme)
             .cursor_pointer()
             .hover(|style| style.bg(theme.accent))
@@ -664,35 +665,46 @@ impl AppView {
                     .ghost()
                     .xsmall()
                     .icon(LucideIcon::ChevronDown)
-                    .dropdown_menu(move |menu, _, _| {
-                        let mut menu = menu;
-                        let choices = std::iter::once(OpenIn::FileManager)
-                            .chain(editors.iter().cloned().map(OpenIn::Editor));
-                        for choice in choices {
-                            let label = match &choice {
-                                OpenIn::FileManager => {
-                                    rust_i18n::t!("Details.file_manager")
-                                        .into_owned()
-                                }
-                                OpenIn::Editor(name) => name.clone(),
-                            };
-                            let (view, path) =
-                                (view.clone(), menu_path.clone());
-                            menu =
-                                menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, _, cx| {
-                                        let _ = view.update(cx, |this, cx| {
-                                            this.state.open_in = choice.clone();
-                                            this.open_workspace_in(
-                                                &choice, &path, cx,
-                                            );
-                                            this.persist(cx);
-                                        });
-                                    },
-                                ));
-                        }
-                        menu
-                    }),
+                    // Like every choice menu: aligned to its button's right
+                    // edge, the current place checked on the right.
+                    .dropdown_menu_with_anchor(
+                        Anchor::TopRight,
+                        move |menu, _, _| {
+                            let mut menu = menu.check_side(Side::Right);
+                            let choices = std::iter::once(OpenIn::FileManager)
+                                .chain(
+                                    editors.iter().cloned().map(OpenIn::Editor),
+                                );
+                            for choice in choices {
+                                let label = match &choice {
+                                    OpenIn::FileManager => {
+                                        rust_i18n::t!("Details.file_manager")
+                                            .into_owned()
+                                    }
+                                    OpenIn::Editor(name) => name.clone(),
+                                };
+                                let (view, path) =
+                                    (view.clone(), menu_path.clone());
+                                let checked = choice == current;
+                                menu = menu.item(
+                                    PopupMenuItem::new(label)
+                                        .checked(checked)
+                                        .on_click(move |_, _, cx| {
+                                            let _ =
+                                                view.update(cx, |this, cx| {
+                                                    this.state.open_in =
+                                                        choice.clone();
+                                                    this.open_workspace_in(
+                                                        &choice, &path, cx,
+                                                    );
+                                                    this.persist(cx);
+                                                });
+                                        }),
+                                );
+                            }
+                            menu
+                        },
+                    ),
             )
             .into_any_element()
     }
@@ -785,6 +797,7 @@ fn details_items_menu(
         return menu;
     };
     let state = &state.read(cx).state;
+    let menu = menu.check_side(Side::Right);
     DetailsItem::ALL.into_iter().fold(menu, |menu, item| {
         let visible = state.details_item_visible(item);
         let view = view.clone();

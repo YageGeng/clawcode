@@ -389,3 +389,144 @@ fn the_inline_card_leaves_the_transcript_uncovered(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// A subagent in the panel switches to its trajectory.
+#[gpui_kit::test]
+fn a_subagent_in_the_panel_switches_to_its_trajectory(cx: &mut TestAppContext) {
+    let live = git_session(cx);
+    let parent = cx.update(|cx| match live.view.read(cx).tabs() {
+        [TabEntry::Session(id)] => id.clone(),
+        other => panic!("tabs {other:?}"),
+    });
+    let child = live.backend.new_session();
+    live.view.update(cx, |view, cx| {
+        let mut catalog = view.catalog().clone();
+        let mut summary = session(
+            &child.to_string(),
+            root(&live).to_str().expect("utf8"),
+            None,
+            5,
+        );
+        summary.parent_session_id = Some(parent.clone());
+        catalog.upsert(summary);
+        view.replace_catalog(catalog, cx);
+    });
+    live.window(cx, |window, cx| {
+        live.view.update(cx, |view, cx| {
+            view.open_panel_tab(
+                PanelTabKey::Subagent {
+                    session: child.to_string(),
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    // A tab bar's id names its tabs' path, not an element of its own.
+    let switch = gpui_kit::ElementId::Name("panel-view-switch".into());
+    live.until(cx, "the panel's view switch", |window| {
+        gpui_kit::base::test_support::snapshots(window)
+            .iter()
+            .any(|element| element.path().contains(&switch))
+    });
+    live.window(cx, |window, cx| {
+        window.within("panel-view-switch").click(1usize, cx)
+    });
+
+    // The main card stays on its chat; only the subagent shows its trajectory.
+    live.until(cx, "the subagent's trajectory", |window| {
+        shows(window, "0 runs · 0 requests · 0 tok")
+    });
+}
+
+/// A subagent record opens below its trajectory in the panel.
+#[gpui_kit::test]
+fn a_subagent_record_opens_below_its_trajectory_in_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let live = support::shell::live_with_history(cx, DesktopState::default());
+    live.open_new_session(cx);
+    let parent = cx.update(|cx| match live.view.read(cx).tabs() {
+        [TabEntry::Session(id)] => id.clone(),
+        other => panic!("tabs {other:?}"),
+    });
+    let child = live.backend.new_session();
+    live.view.update(cx, |view, cx| {
+        let mut catalog = view.catalog().clone();
+        let cwd = catalog.get(&parent).expect("parent").cwd.clone();
+        let mut summary =
+            session(&child.to_string(), cwd.to_str().expect("utf8"), None, 5);
+        summary.parent_session_id = Some(parent.clone());
+        catalog.upsert(summary);
+        view.replace_catalog(catalog, cx);
+    });
+    live.window(cx, |window, cx| {
+        live.view.update(cx, |view, cx| {
+            view.open_panel_tab(
+                PanelTabKey::Subagent {
+                    session: child.to_string(),
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    live.run(cx, &child, vec!["hello".into()]);
+    let switch = gpui_kit::ElementId::Name("panel-view-switch".into());
+    live.until(cx, "the panel's view switch", |window| {
+        gpui_kit::base::test_support::snapshots(window)
+            .iter()
+            .any(|element| element.path().contains(&switch))
+    });
+    live.window(cx, |window, cx| {
+        window.within("panel-view-switch").click(1usize, cx)
+    });
+    // The trajectory refreshes on the test clock, which moves on demand.
+    let request = |window: &mut gpui_kit::Window| {
+        gpui_kit::base::test_support::snapshots(window)
+            .into_iter()
+            .find_map(|element| match element.path().last()? {
+                gpui_kit::ElementId::Name(name)
+                    if name.starts_with("ledger-row:request:") =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+    };
+    let deadline = std::time::Instant::now() + support::WAIT;
+    let row = loop {
+        if let Some(row) = live.window(cx, |window, _| request(window)) {
+            break row;
+        }
+        assert!(std::time::Instant::now() < deadline, "no request row");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+    };
+    live.window(cx, |window, cx| window.click(row.clone(), cx));
+    live.window(cx, |window, cx| window.press("enter", cx));
+
+    live.until(cx, "the detail below the ledger", |window| {
+        window.try_find("record-view").is_some()
+    });
+    cx.update(|cx| {
+        let view = live.view.read(cx);
+        let panel = view.panel().expect("panel");
+        assert_eq!(panel.tabs.len(), 1, "no record tab beside the subagent");
+    });
+    live.window(cx, |window, cx| window.press("escape", cx));
+    live.until(cx, "the detail closed by Escape", |window| {
+        window.try_find("record-view").is_none()
+    });
+
+    live.window(cx, |window, cx| window.click(row.clone(), cx));
+    live.window(cx, |window, cx| window.press("enter", cx));
+    live.until(cx, "the detail again", |window| {
+        window.try_find("record-view").is_some()
+    });
+    live.window(cx, |window, cx| window.click("record-close", cx));
+    live.until(cx, "the detail closed by its button", |window| {
+        window.try_find("record-view").is_none()
+    });
+}

@@ -38,6 +38,20 @@ fn ctrl_comma_opens_one_dialog_and_no_tab(cx: &mut TestAppContext) {
             .filter(|text| text.text() == "Language")
             .count();
         assert_eq!(languages, 1, "one settings dialog");
+        // A dropdown names its setting for screen readers, then its value.
+        let settings = gpui_kit::ElementId::Name("settings".into());
+        let labels: Vec<String> =
+            gpui_kit::base::test_support::snapshots(window)
+                .into_iter()
+                .filter(|element| element.path().contains(&settings))
+                .filter_map(|element| element.label().map(|l| l.to_string()))
+                .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "Language: Follow system"),
+            "{labels:?}"
+        );
     })
     .expect("window");
 }

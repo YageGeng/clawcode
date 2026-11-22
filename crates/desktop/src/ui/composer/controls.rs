@@ -9,7 +9,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Side,
     Sizable as _, Theme, WindowExt as _, v_flex,
 };
 use gpui_kit::{
@@ -286,6 +286,7 @@ impl SessionView {
             .child(Icon::new(IconName::ChevronDown).xsmall().text_color(tone))
             .disabled(disabled)
             .dropdown_menu(move |menu, _, _| {
+                let menu = menu.check_side(Side::Right);
                 let mut menu = menu;
                 for (heading, option) in [
                     (rust_i18n::t!("Controls.models"), &model),

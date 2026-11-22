@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use agent_client_protocol::schema::IndexMap;
 
 use agent_client_protocol::v2::schema as wire;
 use protocol::{
@@ -680,8 +680,8 @@ impl<'a> AcpEventMapper<'a> {
                 wire::SessionUpdate::CompactionUpdate(
                     wire::CompactionUpdate::new(
                         CompactionIdOf(run_id).to_string(),
-                        wire::CompactionStatus::InProgress,
                     )
+                    .status(wire::CompactionStatus::InProgress)
                     .meta(metadata),
                 ),
             ],
@@ -692,28 +692,20 @@ impl<'a> AcpEventMapper<'a> {
                 let id = CompactionIdOf(run_id).to_string();
                 let update = match outcome {
                     CompactionOutcome::Completed { result } => {
-                        wire::CompactionUpdate::new(
-                            id,
-                            wire::CompactionStatus::Completed,
-                        )
-                        .summary(vec![
-                            wire::ContentBlock::Text(wire::TextContent::new(
-                                result.summary.clone(),
-                            )),
-                        ])
+                        wire::CompactionUpdate::new(id)
+                            .status(wire::CompactionStatus::Completed)
+                            .summary(vec![wire::ContentBlock::Text(
+                                wire::TextContent::new(result.summary.clone()),
+                            )])
                     }
                     CompactionOutcome::Failed { message } => {
-                        wire::CompactionUpdate::new(
-                            id,
-                            wire::CompactionStatus::Failed,
-                        )
-                        .error(message.clone())
+                        wire::CompactionUpdate::new(id)
+                            .status(wire::CompactionStatus::Failed)
+                            .error(message.clone())
                     }
                     CompactionOutcome::Cancelled => {
-                        wire::CompactionUpdate::new(
-                            id,
-                            wire::CompactionStatus::Cancelled,
-                        )
+                        wire::CompactionUpdate::new(id)
+                            .status(wire::CompactionStatus::Cancelled)
                     }
                 };
                 vec![
@@ -1175,7 +1167,7 @@ impl<'a> AcpEventMapper<'a> {
                 .ok_or(AcpMappingError::UsageProjection)? =
                 UsageOf(usage).metadata();
         }
-        let fields = BTreeMap::from([
+        let fields = IndexMap::from([
             ("payload".to_string(), payload),
             ("_meta".to_string(), serde_json::to_value(&self.metadata)?),
         ]);
@@ -1216,7 +1208,7 @@ impl<'a> AcpEventMapper<'a> {
             // Pi stores a standard unified patch; ACP v2's native `git_patch`
             // shape additionally requires the leading file-change header.
             let acp_patch = format!("diff --git {path} {path}\n{patch}");
-            content.push(wire::ToolCallContent::Diff(
+            content.push(wire::ToolCallContent::from(
                 wire::Diff::patch(
                     acp_patch,
                     vec![wire::DiffChange::modify(path.clone())],

@@ -285,6 +285,7 @@ M3b 参照 T3 Code（`~/Documents/WorkSpace/t3code`，`apps/web` 的 `ThreadDeta
 - 「上下文」中的计划、待办、后台终端做成右侧面板的标签。
 - Skills 和 MCP 做成右侧面板的标签。
 - Provider 登录不变，设置对话框补齐「工作区」「Provider」「关于」分页。
+- 新增 M4a 轨迹视图，见 [Desktop 轨迹视图（M4a）设计](./2026-11-21-desktop-trajectory-design.md)。
 
 ## 13. 测试与验收
 

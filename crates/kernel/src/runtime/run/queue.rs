@@ -394,7 +394,8 @@ impl PendingQueue {
                 | RecordKind::StepAttempt
                 | RecordKind::ToolStarted
                 | RecordKind::WriteDeferred
-                | RecordKind::Usage => {}
+                | RecordKind::Usage
+                | RecordKind::RequestContent => {}
             }
         }
         Ok(queue)

@@ -452,3 +452,73 @@ fn running_or_usage_less_runs_have_no_usage_row() {
     assert!(usage_rows(&layout(&running)).is_empty());
     assert!(usage_rows(&layout(&silent)).is_empty());
 }
+
+/// Adds an assistant step that only thought before calling its tools.
+fn thought(projection: &mut SessionProjection, id: &str, seq: u64, ts: u64) {
+    apply(
+        projection,
+        json!({ "sessionUpdate": "agent_thought", "messageId": id,
+            "content": [{ "type": "text", "text": "hmm" }], "_meta": meta(seq, ts) }),
+    );
+}
+
+/// A folded run takes its thought only steps along.
+#[test]
+fn a_folded_run_takes_its_thought_only_steps_along() {
+    let mut p = SessionProjection::default();
+    user(&mut p, "u1", 1, 0);
+    thought(&mut p, "t1", 2, 500);
+    tool(&mut p, "a", "read", 3, 1_000);
+    thought(&mut p, "t2", 4, 1_500);
+    tool(&mut p, "b", "edit", 5, 2_000);
+    assistant(&mut p, "m1", 6, 3_000);
+    state(&mut p, "idle");
+
+    // Folded: the prompt, the summary, the answer, and its usage at most.
+    let folded = layout(&p);
+    let shown: Vec<_> = (0..folded.len())
+        .filter_map(|ix| match folded.row(ix)? {
+            LayoutRow::Row { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown, vec![msg("u1"), msg("m1")]);
+
+    // Unfolded, each thought stays beside the tools it led to.
+    let open = TranscriptLayout::build(&p, &HashSet::from([msg("u1")]));
+    let shown: Vec<_> = (0..open.len())
+        .filter_map(|ix| match open.row(ix)? {
+            LayoutRow::Row { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown.len(), 6);
+}
+
+/// A run whose steps all fold away as thinking still reports its usage,
+/// after the summary that stands for them.
+#[test]
+fn a_run_of_thought_only_steps_keeps_its_usage() {
+    let mut p = SessionProjection::default();
+    user(&mut p, "u1", 1, 0);
+    thought(&mut p, "t1", 2, 500);
+    // The step's message carries no text, only its usage.
+    apply(
+        &mut p,
+        json!({ "sessionUpdate": "agent_message", "messageId": "t1",
+            "content": [],
+            "_meta": { "clawcode": {
+                "sequence": 2, "timestampMs": "500",
+                "assistant": { "provider_id": "p", "model_id": "m",
+                    "stop_reason": "tool_use",
+                    "usage": { "input_tokens": "10", "output_tokens": "2" } }
+            } } }),
+    );
+    tool(&mut p, "a", "read", 3, 1_000);
+    state(&mut p, "idle");
+
+    let l = layout(&p);
+
+    assert_eq!(usage_rows(&l), [(msg("t1"), Some(10))]);
+    assert!(matches!(l.row(l.len() - 1), Some(LayoutRow::Usage { .. })));
+}

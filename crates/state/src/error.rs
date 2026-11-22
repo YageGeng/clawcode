@@ -52,6 +52,12 @@ pub enum StateError {
     /// A stored identifier is not a valid protocol scalar.
     #[error("state column holds an invalid identifier: {0}")]
     Scalar(#[from] protocol::ScalarError),
+    /// A stored name matches no variant of its enum.
+    #[error("state column holds an unknown name: {0}")]
+    UnknownVariant(#[from] protocol::UnknownVariant),
+    /// A stored request-content hash is not a SHA-256 digest.
+    #[error("state column holds an invalid content hash: {0}")]
+    ContentHash(#[from] protocol::ContentHashError),
     /// A stored value names an invalid agent.
     #[error("state column holds an invalid agent name: {0}")]
     AgentName(String),

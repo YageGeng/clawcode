@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acp::{AcpServerFactory, AcpTransportKind};
+use agent_client_protocol::schema::IndexMap;
 use agent_client_protocol::{
     Agent, Client, v2::ConnectionTo as V2ConnectionTo,
 };
@@ -1296,7 +1297,7 @@ fn resume_from_cursor(
     wire::ResumeSessionRequest::new(session_id.clone(), workspace.to_path_buf())
         .replay_from(wire::ReplayFrom::Other(wire::OtherReplayFrom::new(
             "_clawcode/event",
-            std::collections::BTreeMap::from([
+            IndexMap::from([
                 ("runId".to_string(), serde_json::json!(run_id)),
                 ("sequence".to_string(), serde_json::json!(sequence)),
             ]),

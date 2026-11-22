@@ -236,13 +236,15 @@ impl TryFrom<Option<wire::ReplayFrom>> for AcpReplayRequest {
                     ));
                 }
                 let run_id =
-                    cursor.fields.remove("runId").ok_or_else(|| {
+                    cursor.fields.shift_remove("runId").ok_or_else(|| {
                         AcpRecoveryError::InvalidCursor(
                             "missing runId".to_string(),
                         )
                     })?;
-                let sequence =
-                    cursor.fields.remove("sequence").ok_or_else(|| {
+                let sequence = cursor
+                    .fields
+                    .shift_remove("sequence")
+                    .ok_or_else(|| {
                         AcpRecoveryError::InvalidCursor(
                             "missing sequence".to_string(),
                         )
@@ -273,7 +275,7 @@ impl TryFrom<Option<wire::ReplayFrom>> for AcpReplayRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use agent_client_protocol::schema::IndexMap;
 
     use agent_client_protocol::v2::schema as wire;
     use protocol::{RunId, Sequence, SessionId};
@@ -289,7 +291,7 @@ mod tests {
     fn parses_clawcode_event_replay_cursor() {
         let cursor = wire::OtherReplayFrom::new(
             "_clawcode/event",
-            BTreeMap::from([
+            IndexMap::from([
                 (
                     "runId".to_string(),
                     serde_json::Value::String("run-1".to_string()),
@@ -314,7 +316,7 @@ mod tests {
     /// Unknown custom replay cursors are rejected instead of guessing recovery semantics.
     #[test]
     fn rejects_unknown_replay_cursor() {
-        let cursor = wire::OtherReplayFrom::new("future", BTreeMap::new());
+        let cursor = wire::OtherReplayFrom::new("future", IndexMap::new());
 
         let error =
             AcpReplayRequest::try_from(Some(wire::ReplayFrom::Other(cursor)))

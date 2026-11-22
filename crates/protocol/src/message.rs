@@ -193,6 +193,12 @@ pub struct AssistantMetadata {
     #[serde(default)]
     #[builder(default)]
     pub context_overflow: bool,
+    /// The request this attempt sent; `None` for assistant messages that no
+    /// agent-loop request produced (compaction, fork, MCP sampling). Boxed
+    /// so assistant content stays close to the size of the other variants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub request: Option<Box<crate::RequestSnapshot>>,
 }
 
 /// Text or binary payload embedded by an MCP Resource content block.

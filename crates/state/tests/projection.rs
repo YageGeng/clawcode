@@ -804,3 +804,141 @@ async fn listing_timestamp_is_written_once_per_batch() {
     assert_eq!(times.len(), 3);
     assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
 }
+
+/// Two request contents with different hashes.
+fn request_contents() -> [protocol::RequestContent; 2] {
+    let content = |kind, text: &str| protocol::RequestContent {
+        hash: protocol::ContentHash::of(text.as_bytes()),
+        kind,
+        content: text.into(),
+    };
+    [
+        content(
+            protocol::RequestContentKind::SystemPrompt,
+            "You are helpful.",
+        ),
+        content(protocol::RequestContentKind::Tools, "[]"),
+    ]
+}
+
+/// Counts the rows of `table` for `session-a` in the history database.
+async fn rows(pool: &sqlx::SqlitePool, table: &str) -> i64 {
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) FROM {table} WHERE session_id = 'session-a'"
+    )))
+    .fetch_one(pool)
+    .await
+    .expect("count")
+}
+
+#[tokio::test]
+async fn records_are_mirrored_verbatim() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("session-a"));
+    log.run_started("run-1", "agent");
+    let user = log.user("hello");
+    log.queue_enqueued("run-1", &user, "steering");
+    log.run_finished("run-1", "completed", None);
+    log.sync();
+    let records = log.store.records();
+    fixture
+        .runtime
+        .refresh(&log.id(), &log.path())
+        .await
+        .expect("refresh");
+
+    let mirrored: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind, record_json FROM records WHERE session_id = 'session-a' ORDER BY sequence",
+    )
+    .fetch_all(&fixture.history_pool().await)
+    .await
+    .expect("records");
+    let kinds: Vec<&str> =
+        mirrored.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["operation_started", "queue_enqueued", "operation_finished"]
+    );
+    for ((_, json), record) in mirrored.iter().zip(&records) {
+        let back: store::SessionRecord =
+            serde_json::from_str(json).expect("record json");
+        assert_eq!(&back, record);
+    }
+}
+
+#[tokio::test]
+async fn request_contents_are_addressed_by_hash() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("session-a"));
+    log.run_started("run-1", "agent");
+    for content in &request_contents() {
+        log.request_content("run-1", content);
+    }
+    log.sync();
+    fixture
+        .runtime
+        .refresh(&log.id(), &log.path())
+        .await
+        .expect("refresh");
+
+    let stored: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT hash, kind, byte_len, content FROM request_contents \
+         WHERE session_id = 'session-a' ORDER BY kind",
+    )
+    .fetch_all(&fixture.history_pool().await)
+    .await
+    .expect("contents");
+    let [prompt, tools] = request_contents();
+    assert_eq!(
+        stored,
+        [
+            (
+                prompt.hash.to_string(),
+                "system_prompt".to_string(),
+                16,
+                prompt.content
+            ),
+            (
+                tools.hash.to_string(),
+                "tools".to_string(),
+                2,
+                tools.content
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn rebuild_restores_trajectory_tables() {
+    let fixture = Fixture::new().await;
+    let mut log = fixture.session(fixture.options("session-a"));
+    log.run_started("run-1", "agent");
+    for content in &request_contents() {
+        log.request_content("run-1", content);
+    }
+    log.run_finished("run-1", "completed", None);
+    log.sync();
+    fixture
+        .runtime
+        .refresh(&log.id(), &log.path())
+        .await
+        .expect("refresh");
+    // Keep only the metadata database; history is recreated from the logs.
+    let recovered =
+        state::SqliteConfig::new(fixture.home.path().join("recovered"));
+    std::fs::create_dir(recovered.home()).expect("recovery directory");
+    sqlx::query("VACUUM INTO ?")
+        .bind(recovered.state_db_path().to_str().expect("path"))
+        .execute(&fixture.state_pool().await)
+        .await
+        .expect("metadata snapshot");
+    let runtime = state::StateRuntime::init(&recovered).await.expect("reopen");
+    runtime
+        .sync_logs(&fixture.factory)
+        .await
+        .expect("reconcile");
+
+    let history = support::external(&recovered.session_history_db_path()).await;
+    assert_eq!(rows(&history, "records").await, 4);
+    assert_eq!(rows(&history, "request_contents").await, 2);
+}

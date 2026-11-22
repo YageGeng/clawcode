@@ -46,6 +46,12 @@ Files:
     en: Retry
     zh-CN: 重试
 Changes:
+  files:
+    en: "Files"
+    zh-CN: "文件"
+  toggle_tree:
+    en: "Show or hide the file tree"
+    zh-CN: "显示或隐藏文件树"
   refresh:
     en: Refresh
     zh-CN: 刷新
@@ -277,6 +283,9 @@ Elapsed:
   seconds:
     en: "%{s}s"
     zh-CN: "%{s} 秒"
+  tenths:
+    en: "%{s}.%{t}s"
+    zh-CN: "%{s}.%{t} 秒"
   minutes:
     en: "%{m}m %{s}s"
     zh-CN: "%{m} 分 %{s} 秒"
@@ -739,3 +748,326 @@ Details:
   item_usage:
     en: "Usage"
     zh-CN: "用量"
+Trajectory:
+  view_chat:
+    en: "Chat"
+    zh-CN: "对话"
+  view_trajectory:
+    en: "Trajectory"
+    zh-CN: "轨迹"
+  toggle:
+    en: "Switch chat / trajectory"
+    zh-CN: "切换对话 / 轨迹"
+  duration_actual:
+    en: "Actual time"
+    zh-CN: "实际时长"
+  duration_equal:
+    en: "Equal width"
+    zh-CN: "等宽"
+  fold_runs:
+    en: "Runs"
+    zh-CN: "轮次"
+  fold_calls:
+    en: "Calls"
+    zh-CN: "调用"
+  timeline:
+    en: "Overview"
+    zh-CN: "总览"
+  more:
+    en: "More"
+    zh-CN: "更多"
+  load_all:
+    en: "Load all"
+    zh-CN: "加载全部"
+  summary:
+    en: "%{runs} runs · %{requests} requests · %{tokens} tok"
+    zh-CN: "%{runs} 轮 · %{requests} 次请求 · %{tokens} tok"
+  summary_cache:
+    en: "%{summary} · cache hit %{percent}%"
+    zh-CN: "%{summary} · 缓存命中 %{percent}%"
+  interval:
+    en: "Time %{from}–%{to}"
+    zh-CN: "时间范围 %{from}–%{to}"
+  interval_clear:
+    en: "Clear time range"
+    zh-CN: "清除时间范围"
+  col_kind:
+    en: "Type"
+    zh-CN: "类型"
+  col_content:
+    en: "Content"
+    zh-CN: "内容"
+  col_input:
+    en: "In"
+    zh-CN: "输入"
+  col_output:
+    en: "Out"
+    zh-CN: "输出"
+  col_reasoning:
+    en: "Thinking"
+    zh-CN: "思考"
+  col_duration:
+    en: "Time"
+    zh-CN: "耗时"
+  kind_user:
+    en: "User"
+    zh-CN: "用户"
+  kind_command:
+    en: "Command"
+    zh-CN: "命令"
+  kind_request:
+    en: "Request"
+    zh-CN: "请求"
+  kind_assistant:
+    en: "Assistant"
+    zh-CN: "助手"
+  kind_tool:
+    en: "Tool"
+    zh-CN: "工具"
+  kind_compaction:
+    en: "Compaction"
+    zh-CN: "压缩"
+  kind_branch:
+    en: "Branch"
+    zh-CN: "分支摘要"
+  kind_setting:
+    en: "Setting"
+    zh-CN: "设置"
+  kind_extension:
+    en: "Extension"
+    zh-CN: "扩展"
+  kind_calls:
+    en: "Calls"
+    zh-CN: "调用"
+  kind_running:
+    en: "Running"
+    zh-CN: "进行中"
+  run:
+    en: "Run %{index}"
+    zh-CN: "第 %{index} 轮"
+  between:
+    en: "Between runs"
+    zh-CN: "运行之间"
+  request:
+    en: "Request #%{index} · %{model}"
+    zh-CN: "请求 #%{index} · %{model}"
+  first_token:
+    en: "first token %{time}"
+    zh-CN: "首 token %{time}"
+  initial_prompt:
+    en: "Initial system prompt"
+    zh-CN: "初始系统提示词"
+  prompt_changed:
+    en: "System prompt changed"
+    zh-CN: "系统提示词有变化"
+  tools_changed:
+    en: "+%{added} tools −%{removed} tools"
+    zh-CN: "+%{added} 工具 −%{removed} 工具"
+  tool_calls_only:
+    en: "(tool calls only)"
+    zh-CN: "（仅工具调用）"
+  failed:
+    en: "failed"
+    zh-CN: "失败"
+  cancelled:
+    en: "cancelled"
+    zh-CN: "已取消"
+  call_group:
+    en: "%{count} tool calls · %{time} · %{failures} failed"
+    zh-CN: "%{count} 个工具调用 · 合计 %{time} · %{failures} 个失败"
+  load_earlier:
+    en: "Load earlier records"
+    zh-CN: "加载更早的记录"
+  running_request:
+    en: "Waiting for the model"
+    zh-CN: "等待模型"
+  running_tool:
+    en: "Running %{name}"
+    zh-CN: "正在运行 %{name}"
+  latest:
+    en: "Back to latest"
+    zh-CN: "回到最新"
+  empty:
+    en: "No records yet. Send a message and every step of the agent shows here."
+    zh-CN: "还没有记录。发送消息后，这里会显示 agent 的每一步。"
+  unavailable:
+    en: "The session history is not ready yet."
+    zh-CN: "会话历史还没有准备好。"
+  failed_load:
+    en: "Could not load the trajectory: %{error}"
+    zh-CN: "无法加载轨迹：%{error}"
+  refresh_failed:
+    en: "Could not load new records: %{error}"
+    zh-CN: "无法加载新的记录：%{error}"
+  retry:
+    en: "Retry"
+    zh-CN: "重试"
+  origin_steering:
+    en: "steering"
+    zh-CN: "插话"
+  origin_follow_up:
+    en: "queued"
+    zh-CN: "排队"
+  origin_skill:
+    en: "skill"
+    zh-CN: "skill"
+  attachments:
+    en: "%{count} attachments"
+    zh-CN: "%{count} 个附件"
+  setting_model:
+    en: "Model → %{model}"
+    zh-CN: "模型 → %{model}"
+  setting_thinking:
+    en: "Thinking → %{level}"
+    zh-CN: "思考等级 → %{level}"
+  setting_tools:
+    en: "Tools: %{tools}"
+    zh-CN: "启用工具：%{tools}"
+Record:
+  title:
+    en: "Record detail"
+    zh-CN: "记录详情"
+  hint:
+    en: "Select a record in the trajectory"
+    zh-CN: "在轨迹中选择一条记录"
+  prev:
+    en: "Previous record"
+    zh-CN: "上一条"
+  next:
+    en: "Next record"
+    zh-CN: "下一条"
+  close:
+    en: "Close detail"
+    zh-CN: "关闭详情"
+  section_summary:
+    en: "Summary"
+    zh-CN: "概述"
+  section_timing:
+    en: "Timing"
+    zh-CN: "计时"
+  section_usage:
+    en: "Usage"
+    zh-CN: "用量"
+  section_system_prompt:
+    en: "System prompt"
+    zh-CN: "系统提示词"
+  section_tools:
+    en: "Tools"
+    zh-CN: "工具"
+  section_options:
+    en: "Options"
+    zh-CN: "选项"
+  section_arguments:
+    en: "Arguments"
+    zh-CN: "参数"
+  section_result:
+    en: "Result"
+    zh-CN: "结果"
+  section_raw:
+    en: "Raw"
+    zh-CN: "原始内容"
+  status_done:
+    en: "Done"
+    zh-CN: "完成"
+  status_failed:
+    en: "Failed"
+    zh-CN: "失败"
+  status_running:
+    en: "Running"
+    zh-CN: "进行中"
+  prompt_full:
+    en: "Full"
+    zh-CN: "完整"
+  prompt_diff:
+    en: "Diff"
+    zh-CN: "差异"
+  missing:
+    en: "This session does not hold this content."
+    zh-CN: "本会话没有这份内容"
+  content_failed:
+    en: "Could not load the content: %{error}"
+    zh-CN: "无法加载内容：%{error}"
+  sent:
+    en: "Sent"
+    zh-CN: "发出"
+  first_token:
+    en: "First token"
+    zh-CN: "首 token"
+  last_token:
+    en: "Last token"
+    zh-CN: "末 token"
+  latency:
+    en: "First-token latency"
+    zh-CN: "首 token 延迟"
+  generation:
+    en: "Generation"
+    zh-CN: "生成时长"
+  throughput:
+    en: "Throughput"
+    zh-CN: "吞吐量"
+  throughput_value:
+    en: "%{value} tok/s"
+    zh-CN: "%{value} tok/s"
+  too_short:
+    en: "Too short to measure"
+    zh-CN: "时长过短"
+  started:
+    en: "Started"
+    zh-CN: "开始"
+  duration:
+    en: "Duration"
+    zh-CN: "时长"
+  this_request:
+    en: "This request"
+    zh-CN: "本次请求"
+  session_total:
+    en: "Session so far"
+    zh-CN: "会话累计"
+  input:
+    en: "Input"
+    zh-CN: "输入"
+  cache_read:
+    en: "Cache read"
+    zh-CN: "缓存读取"
+  output:
+    en: "Output"
+    zh-CN: "输出"
+  reasoning:
+    en: "Reasoning"
+    zh-CN: "推理"
+  tools_added:
+    en: "Added: %{names}"
+    zh-CN: "新增：%{names}"
+  tools_removed:
+    en: "Removed: %{names}"
+    zh-CN: "移除：%{names}"
+  no_result:
+    en: "No result yet"
+    zh-CN: "还没有结果"
+  copy:
+    en: "Copy"
+    zh-CN: "复制"
+  tool_calls:
+    en: "Tool calls"
+    zh-CN: "工具调用"
+  thinking:
+    en: "Thinking"
+    zh-CN: "思考"
+  answer:
+    en: "Answer"
+    zh-CN: "正文"
+  tool:
+    en: "Tool"
+    zh-CN: "工具"
+  status:
+    en: "Status"
+    zh-CN: "状态"
+  status_cancelled:
+    en: "Cancelled"
+    zh-CN: "已取消"
+  no_output:
+    en: "No output"
+    zh-CN: "无输出"
+  result_more:
+    en: "%{count} more lines in Result"
+    zh-CN: "还有 %{count} 行，完整内容见「结果」"

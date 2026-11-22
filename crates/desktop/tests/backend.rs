@@ -457,3 +457,17 @@ fn workspace_tools_round_trip_through_the_client() {
         Err(BackendError::Request(_))
     ));
 }
+
+#[test]
+fn history_unavailable_error_is_recognised() {
+    let error = agent_client_protocol::Error::internal_error().data(
+        serde_json::json!({
+            "reason": "historyUnavailable",
+            "message": "session history is unavailable for s",
+        }),
+    );
+    assert!(matches!(
+        BackendError::from(error),
+        BackendError::HistoryUnavailable
+    ));
+}

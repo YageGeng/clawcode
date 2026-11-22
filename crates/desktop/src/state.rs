@@ -216,6 +216,10 @@ pub struct LayoutState {
     /// Whether the session details card shows when it fits inline.
     #[builder(default = true)]
     pub details_open: bool,
+    /// Whether the trajectory view shows its time overview; one setting for
+    /// every session.
+    #[builder(default = true)]
+    pub timeline_open: bool,
 }
 
 impl LayoutState {
@@ -284,6 +288,8 @@ pub enum PanelTabKey {
         /// The subagent's session id.
         session: String,
     },
+    /// The record selected in the session's trajectory.
+    Record,
     /// A tab kind a newer build saved; dropped on load.
     #[serde(other)]
     Unknown,

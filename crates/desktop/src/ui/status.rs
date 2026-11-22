@@ -5,6 +5,7 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::{
     App, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
+    rems,
 };
 
 use crate::session::SessionStatus;
@@ -44,6 +45,35 @@ impl RenderOnce for StatusIcon {
             ),
         };
         div().flex().items_center().flex_none().children(glyph)
+    }
+}
+
+/// A tab's status as a small dot that is always there: gray at rest, blue
+/// while running, amber while waiting for the user, red when failed. The
+/// tab's title and the card header's word say the same in text.
+#[derive(IntoElement)]
+pub struct StatusDot {
+    status: SessionStatus,
+}
+
+impl StatusDot {
+    /// Creates the dot for `status`.
+    pub fn new(status: SessionStatus) -> Self {
+        Self { status }
+    }
+}
+
+impl RenderOnce for StatusDot {
+    /// A filled circle in the status color.
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let color = match self.status {
+            SessionStatus::Idle => theme.muted_foreground.opacity(0.5),
+            SessionStatus::Running => theme.info,
+            SessionStatus::Waiting => theme.warning,
+            SessionStatus::Failed => theme.danger,
+        };
+        div().flex_none().size(rems(0.5)).rounded_full().bg(color)
     }
 }
 

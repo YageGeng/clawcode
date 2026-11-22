@@ -31,6 +31,7 @@ impl PanelTabKey {
             PanelTabKey::Files => "files".to_string(),
             PanelTabKey::File { path } => format!("file:{path}"),
             PanelTabKey::Subagent { session } => format!("agent:{session}"),
+            PanelTabKey::Record => "record".to_string(),
             PanelTabKey::Unknown => "unknown".to_string(),
         }
     }
@@ -61,6 +62,10 @@ impl PanelTabKey {
                     .get(&SessionId::from(session.clone()))
                     .map(|summary| summary.display_title().to_string())
                     .unwrap_or_default(),
+            ),
+            PanelTabKey::Record => (
+                icon(LucideIcon::ScrollText),
+                rust_i18n::t!("Record.title").into_owned(),
             ),
             PanelTabKey::Unknown => (div().into_any_element(), String::new()),
         }
@@ -120,6 +125,19 @@ impl AppView {
             })
             .collect();
         let maximized = panel.maximized;
+        // A subagent shown here switches between its chat and its trajectory
+        // like a session tab in the main card.
+        let switch = panel
+            .active
+            .and_then(|index| panel.tabs.get(index))
+            .zip(self.panel_owner())
+            .and_then(|(tab, owner)| {
+                match self.panels.runtimes.get(&owner.key())?.views.get(tab)? {
+                    PanelView::Subagent(view) => Some(view.clone()),
+                    _ => None,
+                }
+            })
+            .map(|view| self.render_view_switch("panel-view-switch", view, cx));
         h_flex()
             .flex_none()
             .h_10()
@@ -140,6 +158,7 @@ impl AppView {
                     .overflow_x_scroll()
                     .children(tabs),
             )
+            .children(switch)
             .child(
                 Button::new("panel-maximize")
                     .ghost()
@@ -313,10 +332,12 @@ impl AppView {
             return None;
         }
         let card = self.render_panel_card(cx)?;
-        // The column's padding sets the card's `sm` gaps to the window's right and bottom edges.
+        // The column's padding sets the card's `sm` gaps to the title bar and
+        // the window's right and bottom edges.
         Some(
             div()
                 .size_full()
+                .pt_2()
                 .pr_2()
                 .pb_2()
                 .child(card)

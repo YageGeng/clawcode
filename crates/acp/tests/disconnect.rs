@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use agent_client_protocol::schema::IndexMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -359,7 +359,7 @@ async fn prompt_run_survives_client_disconnect() {
             );
             let cursor = wire::OtherReplayFrom::new(
                 "_clawcode/event",
-                BTreeMap::from([
+                IndexMap::from([
                     ("runId".to_string(), serde_json::json!(run_id)),
                     ("sequence".to_string(), serde_json::json!(sequence)),
                 ]),

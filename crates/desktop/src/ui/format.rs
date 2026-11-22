@@ -35,6 +35,22 @@ impl ToolCategory {
 pub struct Elapsed(pub u64);
 
 impl Elapsed {
+    /// Like [`Self::label`], but tenths of a second below ten seconds, for
+    /// request latencies such as `0.8s`.
+    pub fn precise(self) -> SharedString {
+        if self.0 < 10_000 {
+            rust_i18n::t!(
+                "Elapsed.tenths",
+                s = self.0 / 1000,
+                t = self.0 % 1000 / 100
+            )
+            .into_owned()
+            .into()
+        } else {
+            self.label()
+        }
+    }
+
     /// Localized label with the two most significant units.
     pub fn label(self) -> SharedString {
         let seconds = self.0 / 1000;

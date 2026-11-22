@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-
+use agent_client_protocol::schema::IndexMap;
 use agent_client_protocol::v2::schema as wire;
 use protocol::{ContentBlock, EmbeddedResourceContent, ProductIdentity};
 
@@ -79,7 +78,7 @@ impl AcpContentMapper {
                     .meta(metadata.clone()),
             )),
             ContentBlock::Structured { value } => {
-                let fields = BTreeMap::from([
+                let fields = IndexMap::from([
                     ("value".to_string(), value.clone()),
                     ("_meta".to_string(), serde_json::to_value(metadata)?),
                 ]);

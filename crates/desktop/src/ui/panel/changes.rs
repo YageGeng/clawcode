@@ -1,9 +1,12 @@
-//! The Changes tab (M3b spec §6.2): a workspace's changed files above the
-//! patch of every one of them, against the diff base or the index.
+//! The Changes tab (M3b spec §6.2): the patch of every changed file of a
+//! workspace, against the diff base or the index, beside a folder tree of
+//! those files with their line counts; a file clicked in the tree scrolls the
+//! patch to it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gpui_kit::assets::IconName as LucideIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,16 +14,17 @@ use gpui_kit::component::diff::{
     Diff, DiffFile, DiffFileStatus, DiffParseOptions, DiffState,
 };
 use gpui_kit::component::label::Label;
+use gpui_kit::component::list::ListItem;
+use gpui_kit::component::tree::{TreeEvent, TreeItem, TreeState, tree};
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, StyledExt as _, Theme,
-    h_flex,
+    ActiveTheme as _, ResizableState, Selectable as _, Sizable as _,
+    StyledExt as _, Theme, h_flex, h_resizable, resizable_panel,
 };
 use gpui_kit::{
-    AppContext as _, ClickEvent, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    TestSupportExt as _, Window, div, prelude::FluentBuilder as _, rems,
-    uniform_list,
+    AnyElement, AppContext as _, ClickEvent, Context, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Styled as _, Subscription, Task, TestSupportExt as _, Window,
+    div, prelude::FluentBuilder as _, px, rems,
 };
 use protocol::{WorkspaceDiff, WorkspaceDiffScope, WorkspaceGitStatus};
 
@@ -28,11 +32,11 @@ use typed_builder::TypedBuilder;
 
 use super::ViewerState;
 use crate::backend::{AcpClient, BackendError};
+use crate::file::ChangeNode;
+use crate::ui::file_icon::FileIconPainter;
 
-/// Height of one file row in rems: small text plus its vertical padding.
-const ROW_REMS: f32 = 1.75;
-/// Tallest the file list grows before it scrolls, in rems.
-const LIST_MAX_REMS: f32 = 12.0;
+/// Width the file tree starts at, in rems; it is resizable.
+const TREE_REMS: f32 = 12.0;
 
 /// One changed file as the parsed patch names it.
 #[derive(Debug, Clone, PartialEq, Eq, TypedBuilder)]
@@ -60,7 +64,8 @@ impl From<&DiffFile> for ChangedFile {
 }
 
 impl ChangedFile {
-    /// The status letter and its theme color (M3 plan Global Constraints).
+    /// The status letter and its theme color (M3 plan Global Constraints);
+    /// the tree colors the file's name with it too.
     fn letter(&self, theme: &Theme) -> (&'static str, Hsla) {
         match self.status {
             DiffFileStatus::Added => ("A", theme.success),
@@ -146,6 +151,24 @@ pub struct ChangesView {
     /// The read in flight; a newer one replaces it.
     #[builder(default)]
     _load: Option<Task<()>>,
+    /// The folder tree of the shown scope's files.
+    tree: Entity<TreeState>,
+    /// Folders the user folded, by path; they stay folded as the tree is
+    /// rebuilt for new reads.
+    #[builder(default)]
+    collapsed: HashSet<String>,
+    /// Tracks folders folding and unfolding.
+    _tree_events: Subscription,
+    /// The shown files by path: their place in the patch and their counts.
+    #[builder(default)]
+    tree_files: Rc<HashMap<String, (usize, ChangedFile)>>,
+    /// Whether the file tree shows beside the patch.
+    #[builder(default = true)]
+    tree_open: bool,
+    /// The sizes of the patch and the tree as the user drags between them.
+    split: Entity<ResizableState>,
+    /// Picks the icons of files and folders in the tree.
+    painter: FileIconPainter,
 }
 
 impl ChangesView {
@@ -153,13 +176,77 @@ impl ChangesView {
     pub fn new(
         workspace: PathBuf,
         client: Option<AcpClient>,
+        painter: FileIconPainter,
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let mut view =
-            Self::builder().workspace(workspace).client(client).build();
+        let tree = cx.new(|cx| TreeState::new(cx));
+        let events = cx.subscribe(&tree, Self::on_tree_event);
+        let mut view = Self::builder()
+            .workspace(workspace)
+            .client(client)
+            .tree(tree)
+            ._tree_events(events)
+            .split(cx.new(|_| ResizableState::default()))
+            .painter(painter)
+            .build();
         view.reload(cx);
         view
+    }
+
+    /// Takes the icon theme the shell uses now.
+    pub fn set_painter(&mut self, painter: FileIconPainter) {
+        self.painter = painter;
+    }
+
+    /// Lays the shown scope's files out as a folder tree. An unchanged file
+    /// list keeps the tree as it is, its selection included; a new one keeps
+    /// the folders the user folded.
+    fn sync_tree(&mut self, cx: &mut Context<'_, Self>) {
+        let files = self
+            .contents
+            .get(&self.scope)
+            .map(|content| content.files.as_slice())
+            .unwrap_or_default();
+        let shown: HashMap<String, (usize, ChangedFile)> = files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.path.clone(), (index, file.clone())))
+            .collect();
+        if *self.tree_files == shown && !shown.is_empty() {
+            return;
+        }
+        let items: Vec<TreeItem> =
+            ChangeNode::tree(files.iter().map(|file| file.path.as_str()))
+                .iter()
+                .map(|node| self.tree_item(node))
+                .collect();
+        self.tree_files = Rc::new(shown);
+        self.tree.update(cx, |tree, cx| tree.set_items(items, cx));
+    }
+
+    /// One row of the tree, open unless the user folded it.
+    fn tree_item(&self, node: &ChangeNode) -> TreeItem {
+        TreeItem::new(node.path.clone(), node.name.clone())
+            .expanded(!self.collapsed.contains(&node.path))
+            .children(node.children.iter().map(|child| self.tree_item(child)))
+    }
+
+    /// Remembers a folder folded or unfolded in the tree.
+    fn on_tree_event(
+        &mut self,
+        _: Entity<TreeState>,
+        event: &TreeEvent,
+        _: &mut Context<'_, Self>,
+    ) {
+        match event {
+            TreeEvent::Collapsed(path) => {
+                self.collapsed.insert(path.to_string());
+            }
+            TreeEvent::Expanded(path) => {
+                self.collapsed.remove(path.as_ref());
+            }
+        }
     }
 
     /// The workspace this tab shows.
@@ -196,6 +283,7 @@ impl ChangesView {
         cx: &mut Context<'_, Self>,
     ) {
         self.scope = scope;
+        self.sync_tree(cx);
         self.reload(cx);
         cx.notify();
     }
@@ -221,6 +309,9 @@ impl ChangesView {
             let result = client.git_diff(&workspace, None, scope).await;
             let _ = this.update(cx, |this, cx| {
                 this.show(scope, result, cx);
+                if this.scope == scope {
+                    this.sync_tree(cx);
+                }
                 cx.notify();
             });
         }));
@@ -356,6 +447,18 @@ impl ChangesView {
                     ),
             )
             .child(
+                Button::new("changes-tree")
+                    .ghost()
+                    .small()
+                    .icon(LucideIcon::FolderTree)
+                    .selected(self.tree_open)
+                    .tooltip(rust_i18n::t!("Changes.toggle_tree").into_owned())
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.tree_open = !this.tree_open;
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("changes-refresh")
                     .ghost()
                     .small()
@@ -367,85 +470,115 @@ impl ChangesView {
             )
     }
 
-    /// The changed files within `range`, as the list scrolls.
-    fn render_rows(
-        &self,
-        range: std::ops::Range<usize>,
-        cx: &mut Context<'_, Self>,
-    ) -> Vec<gpui_kit::AnyElement> {
+    /// The shown files as a folder tree under a count: each file in its
+    /// status color with its added and removed lines; a click scrolls the
+    /// patch to it.
+    fn render_tree(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let start = range.start;
-        // Only the rows in view are drawn; the file list itself is borrowed, not copied.
-        self.contents
-            .get(&self.scope)
-            .and_then(|content| content.files.get(range))
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .map(|(offset, file)| {
-                let (letter, color) = file.letter(&theme);
-                let (directory, name) = super::split_path(&file.path);
-                let (directory, name) = (directory.to_owned(), name.to_owned());
-                let path = file.path.clone();
-                div()
-                    .id(SharedString::from(format!(
-                        "changed-file-{}",
-                        start + offset
-                    )))
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(theme.radius)
-                    .text_sm()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.accent))
-                    .child(
-                        div().w_3().flex_none().child(
-                            Label::new(letter)
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(color),
+        let files = Rc::clone(&self.tree_files);
+        let painter = self.painter.clone();
+        let view = cx.entity().downgrade();
+        let count = files.len();
+        let rows = tree(&self.tree, move |_, entry, _, _, _| {
+            let item = entry.item();
+            let path = item.id.clone();
+            // One indent step per level, as in the Files tab.
+            let indent = rems(0.75 * entry.depth() as f32);
+            let Some((index, file)) = files.get(path.as_ref()) else {
+                return ListItem::new(SharedString::from(format!(
+                    "change-folder-{path}"
+                )))
+                .py_0p5()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .pl(indent)
+                        .text_sm()
+                        .child(painter.folder(&item.label, entry.is_expanded()))
+                        .child(Label::new(item.label.clone()).text_sm()),
+                );
+            };
+            let (letter, color) = file.letter(&theme);
+            let view = view.clone();
+            ListItem::new(SharedString::from(format!("changed-file-{index}")))
+                .py_0p5()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .pl(indent)
+                        .text_sm()
+                        .child(painter.file(&item.label))
+                        .child(
+                            div().flex_1().min_w_0().truncate().child(
+                                Label::new(item.label.clone())
+                                    .text_sm()
+                                    .text_color(color),
+                            ),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                .gap_1()
+                                .text_xs()
+                                .font_family(theme.mono_font_family.clone())
+                                .child(
+                                    Label::new(format!("+{}", file.additions))
+                                        .text_xs()
+                                        .text_color(theme.success),
+                                )
+                                .child(
+                                    Label::new(format!("−{}", file.deletions))
+                                        .text_xs()
+                                        .text_color(theme.danger),
+                                )
+                                // The letter says the status in text, too.
+                                .child(
+                                    Label::new(letter)
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(color),
+                                ),
                         ),
-                    )
-                    .child(div().flex_none().child(Label::new(name).text_sm()))
-                    // Files at the workspace root have no directory to show.
-                    .child(div().flex_1().min_w_0().truncate().when(
-                        !directory.is_empty(),
-                        |this| {
-                            this.child(
-                                Label::new(directory)
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            )
-                        },
-                    ))
+                )
+                .on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |this, cx| this.reveal(&path, cx));
+                })
+        });
+        div()
+            .id("changes-tree")
+            .test_support()
+            .size_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
                     .child(
-                        Label::new(format!(
-                            "+{} −{}",
-                            file.additions, file.deletions
-                        ))
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
+                        Label::new(rust_i18n::t!("Changes.files").into_owned())
+                            .text_xs()
+                            .font_semibold(),
                     )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.reveal(&path, cx)
-                        },
-                    ))
-                    .into_any_element()
-            })
-            .collect()
+                    .child(div().flex_1())
+                    .child(Label::new(count.to_string()).text_xs()),
+            )
+            .child(div().flex_1().min_h_0().px_1().child(rows))
+            .into_any_element()
     }
 }
 
 impl Render for ChangesView {
-    /// The header above the file list and the patch, or the state that replaces them.
+    /// The header above the patch and its file tree, or the state that
+    /// replaces them.
     fn render(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let header = self.render_header(cx).into_any_element();
@@ -469,14 +602,12 @@ impl Render for ChangesView {
             content
                 .filter(|_| placeholder.is_none())
                 .and_then(|content| {
-                    Some((
-                        content.diff.clone()?,
-                        content.files.len(),
-                        content.truncated,
-                    ))
+                    Some((content.diff.clone()?, content.truncated))
                 });
         let warning = cx.theme().warning;
         let code_weight = crate::theme::FontWeights::get(cx).code;
+        let tree =
+            (self.tree_open && ready.is_some()).then(|| self.render_tree(cx));
         div()
             .id("changes-view")
             .test_support()
@@ -485,7 +616,30 @@ impl Render for ChangesView {
             .flex_col()
             .child(header)
             .when_some(placeholder, |this, placeholder| this.child(placeholder))
-            .when_some(ready, |this, (diff, count, truncated)| {
+            .when_some(ready, |this, (diff, truncated)| {
+                let patch = div()
+                    .id("changes-diff")
+                    .test_support()
+                    .size_full()
+                    .font_weight(code_weight)
+                    .child(
+                        Diff::new(&diff)
+                            .line_number(true)
+                            .syntax_highlight(true),
+                    );
+                // The patch takes the room; the tree keeps its width, like
+                // the review pane it follows.
+                let mut split = h_resizable("changes-split")
+                    .with_state(&self.split)
+                    .child(resizable_panel().child(patch));
+                if let Some(tree) = tree {
+                    split = split.child(
+                        resizable_panel()
+                            .size(window.rem_size() * TREE_REMS)
+                            .size_range(px(160.)..Pixels::MAX)
+                            .child(tree),
+                    );
+                }
                 this.when(truncated, |this| {
                     this.child(
                         div().flex_none().px_3().py_1().child(
@@ -499,33 +653,12 @@ impl Render for ChangesView {
                     )
                 })
                 .child(
-                    // Only the rows in view are built: a large change set must not slow every frame.
-                    uniform_list(
-                        "changes-files",
-                        count,
-                        cx.processor(|this, range, _, cx| {
-                            this.render_rows(range, cx)
-                        }),
-                    )
-                    .flex_none()
-                    // A virtual list needs a definite height: its rows, up to 12rem.
-                    .h(rems((count as f32 * ROW_REMS).min(LIST_MAX_REMS)))
-                    .px_1(),
-                )
-                .child(
                     div()
-                        .id("changes-diff")
-                        .test_support()
                         .flex_1()
                         .min_h_0()
                         .border_t_1()
                         .border_color(cx.theme().border)
-                        .font_weight(code_weight)
-                        .child(
-                            Diff::new(&diff)
-                                .line_number(true)
-                                .syntax_highlight(true),
-                        ),
+                        .child(split),
                 )
             })
     }

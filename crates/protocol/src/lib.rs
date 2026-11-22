@@ -22,6 +22,7 @@ mod skill;
 mod slash_command;
 mod tool;
 mod trace;
+mod trajectory;
 mod turn;
 mod workspace;
 
@@ -155,6 +156,15 @@ pub use tool::{
     ToolExposure, ToolLocation, ToolMetadata, ToolOutputInfo, ToolOutputPolicy,
     ToolOutputSaveFailure, ToolResult, ToolResultDetails, ToolSelection,
     TruncationDetails, TruncationLimit,
+};
+pub use trajectory::{
+    AssistantRecord, CommandKind, CommandRecord, ContentHash, ContentHashError,
+    ExtensionRecord, RequestCapture, RequestContent, RequestContentKind,
+    RequestOptions, RequestRecord, RequestSnapshot, RunRef, SettingChange,
+    ToolRecord, TrajectoryContentParameters, TrajectoryCursor,
+    TrajectoryCursorError, TrajectoryPage, TrajectoryParameters,
+    TrajectoryRecord, TrajectoryRecordKind, UnknownVariant, UserOrigin,
+    UserRecord,
 };
 pub use turn::{
     StopReason, TurnIdentity, TurnOutcome, TurnRecord, TurnTiming,

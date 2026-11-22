@@ -209,6 +209,34 @@ pub enum RecordKind {
     WriteDeferred,
     /// Records provider or adjustment token usage.
     Usage,
+    /// Stores one request content (system prompt or tools) under its hash,
+    /// written once per Session before the first attempt that sends it. The
+    /// payload nests it under `requestContent`: payload keys are flattened
+    /// into the mutation, whose own `kind` would collide with the content's.
+    RequestContent,
+}
+
+impl RecordKind {
+    /// Payload key under which a [`Self::RequestContent`] record holds its
+    /// content; see that variant for why it is nested.
+    pub const REQUEST_CONTENT_KEY: &'static str = "requestContent";
+
+    /// Returns the persisted discriminant, as serde writes it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OperationStarted => "operation_started",
+            Self::AbortRequested => "abort_requested",
+            Self::OperationFinished => "operation_finished",
+            Self::StepAttempt => "step_attempt",
+            Self::ToolStarted => "tool_started",
+            Self::QueueEnqueued => "queue_enqueued",
+            Self::QueueCancelled => "queue_cancelled",
+            Self::WriteDeferred => "write_deferred",
+            Self::Usage => "usage",
+            Self::RequestContent => "request_content",
+        }
+    }
 }
 
 /// Lane-record fields supplied before storage assigns sequence and timestamp.

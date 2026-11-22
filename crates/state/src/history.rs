@@ -3,6 +3,8 @@
 //! Every read first catches the Session up with its log, so a GUI reading
 //! while no server runs still sees the latest entries.
 
+mod trajectory;
+
 use protocol::{
     EntryId, LaneId, RunId, SessionId, SessionTreeEntry, SessionTreeSnapshot,
     TimestampMs,

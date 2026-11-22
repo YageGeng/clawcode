@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use agent_client_protocol::schema::IndexMap;
 use agent_client_protocol::v2::schema as wire;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -688,8 +689,9 @@ impl ElicitationDialog {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         match self.form.validate(&self.values(cx)) {
             Ok(content) => {
-                let accept =
-                    wire::ElicitationAcceptAction::new().content(content);
+                // The wire keeps the form's field order in an `IndexMap`.
+                let accept = wire::ElicitationAcceptAction::new()
+                    .content(content.into_iter().collect::<IndexMap<_, _>>());
                 self.finish(
                     wire::ElicitationAction::Accept(accept),
                     window,

@@ -22,6 +22,9 @@ pub enum BackendError {
     /// The question was answered or skipped elsewhere already.
     #[error("the question is closed")]
     QuestionClosed,
+    /// The history database is off, still backfilling, or repairing.
+    #[error("the session history is not available yet")]
+    HistoryUnavailable,
 }
 
 impl From<agent_client_protocol::Error> for BackendError {
@@ -36,6 +39,8 @@ impl From<agent_client_protocol::Error> for BackendError {
             BackendError::Cancelled
         } else if field("reason") == Some("questionClosed") {
             BackendError::QuestionClosed
+        } else if field("reason") == Some("historyUnavailable") {
+            BackendError::HistoryUnavailable
         } else if let Some(method) = field("methodId") {
             BackendError::AuthRequired(method.to_owned())
         } else {

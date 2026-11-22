@@ -1,6 +1,9 @@
 //! Applies log lines to the runs, entries, and lanes of one Session (spec §3.1, history rules).
 
-use protocol::{EntryId, LaneId, MessageTiming, SessionId};
+use protocol::{
+    EntryId, LaneId, MessageTiming, RequestContent, RunId, SessionId,
+};
+use serde::Deserialize as _;
 use sqlx::types::Json;
 use sqlx::{Acquire, Sqlite, SqliteConnection, Transaction};
 use store::{
@@ -16,6 +19,14 @@ const IN_PROGRESS: &str = "in_progress";
 /// Selects the latest active run using only the partial index for this lane.
 const OPEN_RUN_SQL: &str = "SELECT run_id FROM runs WHERE session_id = ? AND lane = ? AND status = 'in_progress' \
              ORDER BY start_sequence DESC LIMIT 1";
+
+/// Mirrors one lane record; a repeated record keeps the first copy.
+const INSERT_RECORD_SQL: &str = "INSERT INTO records (session_id, record_id, sequence, lane, run_id, kind, \
+             timestamp_ms, record_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING";
+
+/// Stores one request content under its hash; a hash is stored once.
+const INSERT_REQUEST_CONTENT_SQL: &str = "INSERT INTO request_contents (session_id, hash, kind, byte_len, content) \
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING";
 
 /// History-database side of one projection pass.
 #[derive(typed_builder::TypedBuilder)]
@@ -144,11 +155,21 @@ impl HistoryLine<'_> {
             LogMutation::Lane { lane, leaf_id, .. } => {
                 self.move_lane(lane, leaf_id.as_ref()).await
             }
-            LogMutation::Record(record) => match record.kind {
-                RecordKind::OperationStarted => self.start_run(record).await,
-                RecordKind::OperationFinished => self.finish_run(record).await,
-                _ => Ok(()),
-            },
+            LogMutation::Record(record) => {
+                self.insert_record(record).await?;
+                match record.kind {
+                    RecordKind::OperationStarted => {
+                        self.start_run(record).await
+                    }
+                    RecordKind::OperationFinished => {
+                        self.finish_run(record).await
+                    }
+                    RecordKind::RequestContent => {
+                        self.insert_request_content(record).await
+                    }
+                    _ => Ok(()),
+                }
+            }
             LogMutation::Name { .. } | LogMutation::Label { .. } => Ok(()),
         }
     }
@@ -198,9 +219,11 @@ impl HistoryLine<'_> {
             .transpose()?;
         // An imported parent must already exist earlier in this Session's log.
         let inserted = sqlx::query(
+            // An assistant entry's usage is kept apart for the trajectory's sums.
             "INSERT INTO entries (session_id, entry_id, sequence, lane, parent_id, run_id, kind, \
-             message_type, created_at_ms, started_at_ms, completed_at_ms, entry_json) \
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12 \
+             message_type, created_at_ms, started_at_ms, completed_at_ms, entry_json, usage_json) \
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, \
+             CASE WHEN ?8 = 'assistant' THEN json_extract(?12, '$.content.metadata.usage') END \
              WHERE ?5 IS NULL OR EXISTS (SELECT 1 FROM entries \
              WHERE session_id = ?1 AND entry_id = ?5 AND sequence < ?3)",
         )
@@ -264,6 +287,46 @@ impl HistoryLine<'_> {
         .bind(leaf.map(EntryId::as_str))
         .execute(&mut *self.connection)
         .await?;
+        Ok(())
+    }
+
+    /// Mirrors one lane record verbatim.
+    async fn insert_record(
+        &mut self,
+        record: &SessionRecord,
+    ) -> Result<(), StateError> {
+        sqlx::query(INSERT_RECORD_SQL)
+            .bind(self.session_id.as_str())
+            .bind(record.id.as_str())
+            .bind(i64::try_from(record.sequence.get())?)
+            .bind(record.lane.as_str())
+            .bind(record.run_id.as_ref().map(RunId::as_str))
+            .bind(record.kind.as_str())
+            .bind(i64::try_from(record.timestamp_ms.get())?)
+            .bind(Json(record))
+            .execute(&mut *self.connection)
+            .await?;
+        Ok(())
+    }
+
+    /// Stores the request content a `request_content` record carries.
+    async fn insert_request_content(
+        &mut self,
+        record: &SessionRecord,
+    ) -> Result<(), StateError> {
+        let Some(value) = record.payload.get(RecordKind::REQUEST_CONTENT_KEY)
+        else {
+            return Ok(());
+        };
+        let content = RequestContent::deserialize(value)?;
+        sqlx::query(INSERT_REQUEST_CONTENT_SQL)
+            .bind(self.session_id.as_str())
+            .bind(content.hash.as_str())
+            .bind(content.kind.as_str())
+            .bind(i64::try_from(content.content.len())?)
+            .bind(&content.content)
+            .execute(&mut *self.connection)
+            .await?;
         Ok(())
     }
 

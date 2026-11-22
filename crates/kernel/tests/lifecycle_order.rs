@@ -313,7 +313,8 @@ impl SessionStore for DurabilityStore {
             | RecordKind::AbortRequested
             | RecordKind::ToolStarted
             | RecordKind::WriteDeferred
-            | RecordKind::Usage => None,
+            | RecordKind::Usage
+            | RecordKind::RequestContent => None,
         };
         if let Some(marker) = marker {
             self.order.lock().expect("durability lock").push(marker);

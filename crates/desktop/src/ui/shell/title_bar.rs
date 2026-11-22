@@ -68,6 +68,7 @@ pub(in crate::ui) fn install_menus(
 
     use crate::actions::{
         AddWorkspace, CloseTab, NewSession, OpenSettings, Quit,
+        ToggleTrajectory,
     };
 
     let build = || {
@@ -96,6 +97,10 @@ pub(in crate::ui) fn install_menus(
                 MenuItem::action(
                     rust_i18n::t!("Sidebar.toggle").into_owned(),
                     ToggleSidebar,
+                ),
+                MenuItem::action(
+                    rust_i18n::t!("Trajectory.toggle").into_owned(),
+                    ToggleTrajectory,
                 ),
             ]),
         ]

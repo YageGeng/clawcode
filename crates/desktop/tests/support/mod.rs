@@ -2,6 +2,7 @@
 #![allow(dead_code)] // Each test binary uses a different subset of the fixture.
 
 pub mod shell;
+pub mod trajectory;
 
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -292,8 +293,12 @@ impl ModelFactory for ScriptedModelFactory {
     }
 }
 
-/// Builds a production Kernel around the scripted model, persisting under `root`.
-fn scripted_kernel(root: &Path) -> Arc<Kernel> {
+/// Builds a production Kernel around the scripted model, persisting under
+/// `root`, with the history database `state` when given.
+fn scripted_kernel(
+    root: &Path,
+    state: Option<Arc<state::StateRuntime>>,
+) -> Arc<Kernel> {
     let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
     let model = Arc::new(ScriptedModel {
         profile: ModelProfile::builder()
@@ -319,6 +324,7 @@ fn scripted_kernel(root: &Path) -> Arc<Kernel> {
             .extension_factory(Arc::new(StaticExtensionFactory::default()))
             .clock(clock)
             .id_generator(Arc::new(NanoidIdGenerator))
+            .state(state)
             // Keeps nothing back, so even a one-turn session can be compacted.
             .compaction_policy(
                 protocol::CompactionPolicy::builder()
@@ -356,6 +362,18 @@ pub struct ScriptedBackend {
 impl ScriptedBackend {
     /// Builds the Kernel and connects a desktop `AcpClient` to it in-process.
     pub fn start() -> ScriptedBackend {
+        Self::start_with(false)
+    }
+
+    /// Like [`Self::start`], with a ready history database behind the
+    /// Kernel, as the trajectory view needs.
+    pub fn start_with_history() -> ScriptedBackend {
+        Self::start_with(true)
+    }
+
+    /// Builds the Kernel, with a history database when `history`, and
+    /// connects a desktop `AcpClient` to it in-process.
+    fn start_with(history: bool) -> ScriptedBackend {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -364,7 +382,21 @@ impl ScriptedBackend {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("notes.txt"), "alpha\n")
             .expect("fixture notes");
-        let kernel = scripted_kernel(root.path());
+        let state = history.then(|| {
+            runtime.block_on(async {
+                let state = state::StateRuntime::init(
+                    &state::SqliteConfig::new(root.path().join("state")),
+                )
+                .await
+                .expect("state runtime");
+                state
+                    .backfill(root.path(), &[])
+                    .await
+                    .expect("empty backfill");
+                state
+            })
+        });
+        let kernel = scripted_kernel(root.path(), state);
         let server = Arc::new(AcpServerFactory::new(
             Arc::clone(&kernel),
             NonZeroUsize::new(128).expect("positive batch size"),

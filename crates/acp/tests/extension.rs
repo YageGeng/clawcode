@@ -158,6 +158,8 @@ impl JsonRpcMessage for IntegrationRequest {
             || method == AcpExtensionMethod::Navigate.as_str()
             || method == AcpExtensionMethod::WorkspaceListDir.as_str()
             || method == AcpExtensionMethod::WorkspaceReadFile.as_str()
+            || method == AcpExtensionMethod::Trajectory.as_str()
+            || method == AcpExtensionMethod::TrajectoryContent.as_str()
     }
 
     /// Returns the static ACP method associated with this request.
@@ -207,6 +209,14 @@ impl JsonRpcMessage for IntegrationRequest {
                     == AcpExtensionMethod::PendingMessageRemove.as_str() =>
             {
                 AcpExtensionMethod::PendingMessageRemove.as_str()
+            }
+            method if method == AcpExtensionMethod::Trajectory.as_str() => {
+                AcpExtensionMethod::Trajectory.as_str()
+            }
+            method
+                if method == AcpExtensionMethod::TrajectoryContent.as_str() =>
+            {
+                AcpExtensionMethod::TrajectoryContent.as_str()
             }
             _ => {
                 return Err(agent_client_protocol::Error::method_not_found());
@@ -300,6 +310,15 @@ fn integration_kernel_with(
     root: &Path,
     extensions: StaticExtensionFactory,
 ) -> Arc<Kernel> {
+    integration_kernel_with_state(root, extensions, None)
+}
+
+/// Builds the integration Kernel over `root` with an optional history database.
+fn integration_kernel_with_state(
+    root: &Path,
+    extensions: StaticExtensionFactory,
+    state: Option<Arc<state::StateRuntime>>,
+) -> Arc<Kernel> {
     let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
     let kernel = KernelFactory::builder()
         .model_factory(Arc::new(UnusedModelFactory))
@@ -321,6 +340,7 @@ fn integration_kernel_with(
         .extension_factory(Arc::new(extensions))
         .clock(clock)
         .id_generator(Arc::new(NanoidIdGenerator))
+        .state(state)
         .build()
         .build()
         .expect("integration kernel");
@@ -2013,4 +2033,240 @@ async fn workspace_methods_answer_and_reject_escapes() {
     .await
     .expect_err("not a repository");
     assert_eq!(error.code, agent_client_protocol::ErrorCode::INTERNAL_ERROR);
+}
+
+/// Writes one Session log with a user message, one request content, and one
+/// assistant attempt carrying its snapshot; returns its id and prompt hash.
+fn trajectory_session(
+    root: &Path,
+) -> (SessionId, protocol::ContentHash, std::path::PathBuf) {
+    let factory = JsonlStoreFactory::new(root, Arc::new(SystemClock));
+    let session_id = SessionId::try_from("session-trajectory").expect("id");
+    let mut store = factory
+        .create(
+            SessionCreateOptions::builder()
+                .session_id(session_id.clone())
+                .cwd(root.to_path_buf())
+                .build(),
+        )
+        .expect("session");
+    let lane = protocol::LaneId::try_from("main").expect("lane");
+    let prompt = protocol::RequestContent {
+        hash: protocol::ContentHash::of(b"system prompt"),
+        kind: protocol::RequestContentKind::SystemPrompt,
+        content: "system prompt".into(),
+    };
+    store
+        .append_record(
+            NewRecord::builder()
+                .id(RecordId::try_from("record-1").expect("record"))
+                .lane(lane.clone())
+                .run_id(Some(RunId::try_from("run-1").expect("run")))
+                .kind(RecordKind::RequestContent)
+                .payload(serde_json::json!({ "requestContent": prompt }))
+                .build(),
+        )
+        .expect("content");
+    let at = TimestampMs::from(1_000);
+    let message = |id: &str, content| AgentMessage {
+        identity: MessageIdentity {
+            message_id: MessageId::try_from(id).expect("message"),
+            turn_id: TurnId::try_from("turn-1").expect("turn"),
+        },
+        timing: MessageTiming::try_from((at, at, at)).expect("timing"),
+        content,
+    };
+    let snapshot = protocol::RequestSnapshot::builder()
+        .system_prompt(prompt.hash.clone())
+        .tools(protocol::ContentHash::of(b"[]"))
+        .options(
+            protocol::RequestOptions::builder()
+                .provider_id("integration".into())
+                .model_id("scripted".into())
+                .thinking_level(protocol::ThinkingLevel::Off)
+                .build(),
+        )
+        .message_count(1)
+        .build();
+    for (id, content) in [
+        (
+            "user-1",
+            MessageContent::User {
+                blocks: vec![ContentBlock::Text { text: "hi".into() }],
+            },
+        ),
+        (
+            "assistant-1",
+            MessageContent::Assistant {
+                blocks: vec![ContentBlock::Text {
+                    text: "hello".into(),
+                }],
+                metadata: AssistantMetadata::builder()
+                    .provider_id("integration".into())
+                    .model_id("scripted".into())
+                    .stop_reason(StopReason::EndTurn)
+                    .usage(protocol::ModelUsage::default())
+                    .request(Some(Box::new(snapshot.clone())))
+                    .build(),
+                model_message: None,
+            },
+        ),
+    ] {
+        store
+            .append_entry(
+                &lane,
+                NewEntry {
+                    id: EntryId::try_from(id).expect("entry"),
+                    kind: EntryKind::Message,
+                    payload: serde_json::to_value(message(id, content))
+                        .expect("message json"),
+                },
+            )
+            .expect("entry");
+    }
+    store.sync().expect("sync");
+    (session_id, prompt.hash, store.path().to_path_buf())
+}
+
+/// A kernel whose ready history database already projects `trajectory_session`.
+async fn trajectory_kernel(
+    root: &Path,
+    home: &Path,
+) -> (Arc<Kernel>, SessionId, protocol::ContentHash) {
+    let (session_id, prompt, path) = trajectory_session(root);
+    let runtime = state::StateRuntime::init(&state::SqliteConfig::new(home))
+        .await
+        .expect("state runtime");
+    runtime.backfill(root, &[path]).await.expect("backfill");
+    let kernel = integration_kernel_with_state(
+        root,
+        StaticExtensionFactory::default(),
+        Some(runtime),
+    );
+    (kernel, session_id, prompt)
+}
+
+/// The trajectory method pages a Session and its content method reads by hash.
+#[tokio::test]
+async fn trajectory_method_pages_a_session() {
+    let root = tempfile::tempdir().expect("store");
+    let home = tempfile::tempdir().expect("state home");
+    let (kernel, session_id, prompt) =
+        trajectory_kernel(root.path(), home.path()).await;
+
+    let page = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::Trajectory.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("trajectory");
+    let kinds: Vec<&str> = page["records"]
+        .as_array()
+        .expect("records")
+        .iter()
+        .map(|record| record["kind"]["type"].as_str().expect("type"))
+        .collect();
+    assert_eq!(kinds, ["user", "request", "assistant"]);
+    assert_eq!(page["leafId"], "assistant-1");
+    let hash = page["records"][1]["kind"]["snapshot"]["systemPrompt"].clone();
+    assert_eq!(hash, prompt.as_str());
+
+    let content = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::TrajectoryContent.as_str(),
+            serde_json::json!({ "sessionId": session_id, "hash": hash }),
+        ),
+    )
+    .await
+    .expect("content");
+    assert_eq!(content["kind"], "system_prompt");
+    assert_eq!(content["content"], "system prompt");
+}
+
+/// Naming both cursors is a parameter error.
+#[tokio::test]
+async fn trajectory_rejects_two_cursors() {
+    let root = tempfile::tempdir().expect("store");
+    let home = tempfile::tempdir().expect("state home");
+    let (kernel, session_id, _) =
+        trajectory_kernel(root.path(), home.path()).await;
+
+    let error = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::Trajectory.as_str(),
+            serde_json::json!({ "sessionId": session_id, "before": 3, "after": 5 }),
+        ),
+    )
+    .await
+    .expect_err("two cursors");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
+}
+
+/// Without a history database the error names the reason for clients.
+#[tokio::test]
+async fn trajectory_reports_history_unavailable() {
+    let root = tempfile::tempdir().expect("store");
+    let (session_id, _, _) = trajectory_session(root.path());
+    let kernel = integration_kernel(root.path());
+
+    let error = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::Trajectory.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect_err("no history");
+    assert_eq!(
+        error.data.as_ref().and_then(|data| data.get("reason")),
+        Some(&serde_json::json!("historyUnavailable"))
+    );
+}
+
+/// A Session the history database has not indexed yet is indexed from its
+/// log on the first read, rather than reported missing.
+#[tokio::test]
+async fn trajectory_indexes_a_session_on_first_read() {
+    let root = tempfile::tempdir().expect("store");
+    let home = tempfile::tempdir().expect("state home");
+    let (session_id, prompt, _) = trajectory_session(root.path());
+    let runtime =
+        state::StateRuntime::init(&state::SqliteConfig::new(home.path()))
+            .await
+            .expect("state runtime");
+    // Ready, but the backfill saw no logs: this Session is not indexed.
+    runtime.backfill(root.path(), &[]).await.expect("backfill");
+    let kernel = integration_kernel_with_state(
+        root.path(),
+        StaticExtensionFactory::default(),
+        Some(runtime),
+    );
+
+    let page = send_request(
+        Arc::clone(&kernel),
+        IntegrationRequest::new(
+            AcpExtensionMethod::Trajectory.as_str(),
+            serde_json::json!({ "sessionId": session_id }),
+        ),
+    )
+    .await
+    .expect("trajectory");
+    assert_eq!(page["leafId"], "assistant-1");
+
+    let content = send_request(
+        kernel,
+        IntegrationRequest::new(
+            AcpExtensionMethod::TrajectoryContent.as_str(),
+            serde_json::json!({ "sessionId": session_id, "hash": prompt }),
+        ),
+    )
+    .await
+    .expect("content");
+    assert_eq!(content["content"], "system prompt");
 }

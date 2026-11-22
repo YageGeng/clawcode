@@ -167,7 +167,20 @@ pub fn fixture_state(backend: &ScriptedBackend) -> DesktopState {
 
 /// Starts a scripted backend and hands its event stream to a freshly opened shell.
 pub fn live(cx: &mut TestAppContext, state: DesktopState) -> Live {
-    let mut backend = ScriptedBackend::start();
+    live_on(cx, state, ScriptedBackend::start())
+}
+
+/// Like [`live`], with a history database behind the backend.
+pub fn live_with_history(cx: &mut TestAppContext, state: DesktopState) -> Live {
+    live_on(cx, state, ScriptedBackend::start_with_history())
+}
+
+/// Hands `backend`'s event stream to a freshly opened shell.
+fn live_on(
+    cx: &mut TestAppContext,
+    state: DesktopState,
+    mut backend: ScriptedBackend,
+) -> Live {
     let (handle, view, dir) = open(cx, state);
     connect(cx, &view, &mut backend);
     Live::builder()

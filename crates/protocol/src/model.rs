@@ -99,6 +99,65 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
+    /// Snapshots what this request sends: the system prompt and tool
+    /// definitions by hash, with both contents, the generation options, and
+    /// the number of history messages.
+    pub fn capture(
+        &self,
+        profile: &ModelProfile,
+    ) -> Result<crate::RequestCapture, serde_json::Error> {
+        use crate::{
+            ContentHash, RequestCapture, RequestContent, RequestContentKind,
+            RequestOptions, RequestSnapshot,
+        };
+
+        let is_system = |message: &&AgentMessage| {
+            matches!(message.content, MessageContent::System { .. })
+        };
+        let system_prompt = self
+            .messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                MessageContent::System { blocks } => Some(blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(ContentBlock::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let history = self.messages.iter().filter(|m| !is_system(m)).count();
+        let tools = serde_json::to_string(&self.tools)?;
+        let content = |kind, content: String| RequestContent {
+            hash: ContentHash::of(content.as_bytes()),
+            kind,
+            content,
+        };
+        let contents = [
+            content(RequestContentKind::SystemPrompt, system_prompt),
+            content(RequestContentKind::Tools, tools),
+        ];
+        let options = RequestOptions::builder()
+            .provider_id(profile.provider_id.clone())
+            .model_id(profile.model_id.clone())
+            .thinking_level(self.options.thinking_level)
+            .max_tokens(self.options.max_tokens)
+            .temperature(self.options.temperature)
+            .prompt_cache(
+                self.options
+                    .prompt_cache
+                    .as_ref()
+                    .map(|cache| cache.retention),
+            )
+            .build();
+        let snapshot = RequestSnapshot::builder()
+            .system_prompt(contents[0].hash.clone())
+            .tools(contents[1].hash.clone())
+            .options(options)
+            .message_count(u32::try_from(history).unwrap_or(u32::MAX))
+            .build();
+        Ok(RequestCapture { snapshot, contents })
+    }
+
     /// Replaces unsupported images in this request without touching stored messages.
     pub fn adapt_input(&mut self, profile: &ModelProfile) -> bool {
         if profile.input.supports(ModelInputModality::Image) {

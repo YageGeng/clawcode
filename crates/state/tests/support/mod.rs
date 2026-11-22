@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use protocol::{
     AgentMessage, AgentName, AssistantMetadata, ContentBlock, EntryId, LaneId,
     MessageContent, MessageId, MessageIdentity, MessageTiming, ModelUsage,
-    RecordId, RunId, SessionId, SessionOwnership, SlashCommandExpansion,
-    SlashCommandInvocation, SlashCommandSource, StopReason, TimestampMs,
-    ToolCallId, TurnId,
+    RecordId, RequestContent, RequestSnapshot, RunId, SessionId,
+    SessionOwnership, SlashCommandExpansion, SlashCommandInvocation,
+    SlashCommandSource, StopReason, TimestampMs, ToolCallId, TurnId,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use state::{SqliteConfig, StateRuntime};
@@ -116,6 +116,35 @@ pub async fn external(path: &Path) -> SqlitePool {
         .expect("external pool")
 }
 
+/// An assistant attempt as the kernel persists it, for [`SessionLog::assistant_with`].
+#[derive(typed_builder::TypedBuilder)]
+pub struct AssistantFixture {
+    /// The request snapshot the attempt carries.
+    #[builder(default, setter(strip_option))]
+    pub request: Option<RequestSnapshot>,
+    /// Input tokens.
+    #[builder(default)]
+    pub input: u64,
+    /// Output tokens.
+    #[builder(default)]
+    pub output: u64,
+    /// Cache-read input tokens.
+    #[builder(default, setter(strip_option))]
+    pub cache_read: Option<u64>,
+    /// Request sent, first token, and last token, in milliseconds.
+    #[builder(default = (500, 500, 500))]
+    pub timing: (u64, u64, u64),
+    /// Terminal error of a failed attempt.
+    #[builder(default, setter(strip_option, into))]
+    pub error: Option<String>,
+    /// Answer text.
+    #[builder(default = "ok".into(), setter(into))]
+    pub text: String,
+    /// Tool calls as `(call id, tool name)`.
+    #[builder(default)]
+    pub tool_calls: Vec<(&'static str, &'static str)>,
+}
+
 /// Writes kernel-shaped entries and records into one Session log.
 pub struct SessionLog {
     pub store: Box<dyn SessionStore>,
@@ -186,15 +215,29 @@ impl SessionLog {
 
     /// Appends one kernel-shaped message entry.
     pub fn message(&mut self, content: MessageContent) -> EntryId {
+        let at = 500 + self.counter + 1;
+        self.message_at(content, (at, at, at))
+    }
+
+    /// Appends one message entry with explicit creation, start, and end times.
+    pub fn message_at(
+        &mut self,
+        content: MessageContent,
+        (created, started, ended): (u64, u64, u64),
+    ) -> EntryId {
         let n = self.next();
-        let at = TimestampMs::from(500 + n);
         let message = AgentMessage {
             identity: MessageIdentity {
                 message_id: MessageId::try_from(format!("message-{n}"))
                     .expect("message"),
                 turn_id: TurnId::try_from("turn-1").expect("turn"),
             },
-            timing: MessageTiming::try_from((at, at, at)).expect("timing"),
+            timing: MessageTiming::try_from((
+                TimestampMs::from(created),
+                TimestampMs::from(started),
+                TimestampMs::from(ended),
+            ))
+            .expect("timing"),
             content,
         };
         let payload = serde_json::to_value(&message).expect("message json");
@@ -247,6 +290,46 @@ impl SessionLog {
                 .build(),
             model_message: None,
         })
+    }
+
+    /// Appends an assistant attempt with a snapshot, usage, timing, and calls.
+    pub fn assistant_with(&mut self, fixture: AssistantFixture) -> EntryId {
+        let usage = ModelUsage::from(
+            protocol::Usage::new()
+                .input_tokens(fixture.input)
+                .output_tokens(fixture.output)
+                .cached_input_tokens(fixture.cache_read),
+        );
+        let mut blocks = vec![ContentBlock::Text { text: fixture.text }];
+        blocks.extend(fixture.tool_calls.iter().map(|(id, name)| {
+            ContentBlock::ToolCall {
+                tool_call_id: ToolCallId::try_from(*id).expect("call"),
+                name: (*name).into(),
+                arguments: serde_json::json!({"path": "a.rs"}),
+                invalid_arguments: None,
+            }
+        }));
+        let stop_reason = match (&fixture.error, fixture.tool_calls.is_empty())
+        {
+            (Some(_), _) => StopReason::Error,
+            (None, false) => StopReason::ToolUse,
+            (None, true) => StopReason::EndTurn,
+        };
+        self.message_at(
+            MessageContent::Assistant {
+                blocks,
+                metadata: AssistantMetadata::builder()
+                    .provider_id("deepseek".into())
+                    .model_id("deepseek-flash".into())
+                    .stop_reason(stop_reason)
+                    .usage(usage)
+                    .error(fixture.error)
+                    .request(fixture.request.map(Box::new))
+                    .build(),
+                model_message: None,
+            },
+            fixture.timing,
+        )
     }
 
     /// Appends a successful tool result.
@@ -312,6 +395,35 @@ impl SessionLog {
                     .build(),
             )
             .expect("append record");
+    }
+
+    /// Stores one request content as `SessionTranscript::append_request_contents` does.
+    pub fn request_content(&mut self, run_id: &str, content: &RequestContent) {
+        self.record(
+            run_id,
+            RecordKind::RequestContent,
+            serde_json::json!({"requestContent": content}),
+        );
+    }
+
+    /// Marks `entry` as queued for `target` (`steering` or `followUp`), as
+    /// `crates/kernel/src/runtime/run/queue.rs` does.
+    pub fn queue_enqueued(
+        &mut self,
+        run_id: &str,
+        entry: &EntryId,
+        target: &str,
+    ) {
+        let n = self.next();
+        self.record(
+            run_id,
+            RecordKind::QueueEnqueued,
+            serde_json::json!({
+                "queueId": format!("queue-{n}"),
+                "target": target,
+                "entryId": entry,
+            }),
+        );
     }
 
     /// Opens a Run as `crates/kernel/src/runtime/run.rs` does.

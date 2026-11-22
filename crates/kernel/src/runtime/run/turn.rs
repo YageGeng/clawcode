@@ -615,6 +615,14 @@ impl RunScope<'_> {
         let kernel = self.kernel;
         let turn_id = &turn.turn_id;
         let extension_context = &turn.extension_context;
+        // The snapshot is taken from the final request, after extension
+        // rewrites and input adaptation; its contents precede the message.
+        let capture = request.capture(turn.model.profile())?;
+        self.session.transcript.append_request_contents(
+            self.run_id,
+            &capture.contents,
+            || kernel.record_id(),
+        )?;
         let assistant_id = kernel.message_id()?;
         let assistant_timestamp = kernel.clock.now();
         let mut attempt = AssistantAttempt::new(
@@ -622,7 +630,8 @@ impl RunScope<'_> {
             turn_id.clone(),
             turn.model.profile().clone(),
             assistant_timestamp,
-        );
+        )
+        .with_request(capture.snapshot);
         self.emitter
             .emit_at(
                 turn_id.clone(),

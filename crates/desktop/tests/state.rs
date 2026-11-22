@@ -320,3 +320,25 @@ fn values_from_a_newer_build_keep_the_state_file() {
     assert_eq!(state.details_items.get(&DetailsItem::Branch), Some(&false));
     assert_eq!(state.open_in, OpenIn::FileManager);
 }
+
+#[test]
+fn timeline_visibility_is_saved() {
+    assert!(LayoutState::default().timeline_open);
+    let layout = LayoutState::builder().timeline_open(false).build();
+    let json = serde_json::to_string(&layout).expect("json");
+    let back: LayoutState = serde_json::from_str(&json).expect("layout");
+    assert!(!back.timeline_open);
+    let older: LayoutState =
+        serde_json::from_str(r#"{"sidebar_open":true}"#).expect("layout");
+    assert!(older.timeline_open, "a missing value shows the overview");
+}
+
+#[test]
+fn record_panel_tab_round_trips() {
+    let json = serde_json::to_value(desktop::state::PanelTabKey::Record)
+        .expect("json");
+    assert_eq!(json, serde_json::json!({"kind": "record"}));
+    let back: desktop::state::PanelTabKey =
+        serde_json::from_value(json).expect("tab");
+    assert_eq!(back, desktop::state::PanelTabKey::Record);
+}

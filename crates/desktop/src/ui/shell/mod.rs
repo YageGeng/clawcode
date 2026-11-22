@@ -8,3 +8,4 @@ pub(in crate::ui) mod lifecycle;
 pub(in crate::ui) mod tab_ops;
 pub(in crate::ui) mod tabs;
 pub(in crate::ui) mod title_bar;
+pub(in crate::ui) mod trajectory;

@@ -11,11 +11,11 @@ use agent_client_protocol::{
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use protocol::{
-    AcpExtensionMethod, PendingMessages, QueueId, SessionRuntimeSnapshot,
-    WorkspaceDiff, WorkspaceDiffParameters, WorkspaceDiffScope,
-    WorkspaceDirListing, WorkspaceFileContent, WorkspaceGitStatus,
-    WorkspaceListDirParameters, WorkspacePathParameters,
-    WorkspaceRootParameters,
+    AcpExtensionMethod, ContentHash, PendingMessages, QueueId, RequestContent,
+    SessionRuntimeSnapshot, TrajectoryCursor, TrajectoryPage, WorkspaceDiff,
+    WorkspaceDiffParameters, WorkspaceDiffScope, WorkspaceDirListing,
+    WorkspaceFileContent, WorkspaceGitStatus, WorkspaceListDirParameters,
+    WorkspacePathParameters, WorkspaceRootParameters,
 };
 
 use super::requests::{PendingRequests, Waiting};
@@ -370,8 +370,8 @@ impl AcpClient {
         .await
     }
 
-    /// Sends one workspace tool request and decodes its typed answer.
-    async fn workspace<P: serde::Serialize, R: serde::de::DeserializeOwned>(
+    /// Sends one extension request and decodes its typed answer.
+    async fn typed<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self,
         method: AcpExtensionMethod,
         params: &P,
@@ -399,7 +399,7 @@ impl AcpClient {
             path: path.to_owned(),
             show_hidden,
         };
-        self.workspace(AcpExtensionMethod::WorkspaceListDir, &params)
+        self.typed(AcpExtensionMethod::WorkspaceListDir, &params)
             .await
     }
 
@@ -413,7 +413,7 @@ impl AcpClient {
             root: root.to_path_buf(),
             path: path.to_owned(),
         };
-        self.workspace(AcpExtensionMethod::WorkspaceReadFile, &params)
+        self.typed(AcpExtensionMethod::WorkspaceReadFile, &params)
             .await
     }
 
@@ -425,7 +425,7 @@ impl AcpClient {
         let params = WorkspaceRootParameters {
             root: root.to_path_buf(),
         };
-        self.workspace(AcpExtensionMethod::WorkspaceGitStatus, &params)
+        self.typed(AcpExtensionMethod::WorkspaceGitStatus, &params)
             .await
     }
 
@@ -441,7 +441,38 @@ impl AcpClient {
             path: path.map(str::to_owned),
             scope,
         };
-        self.workspace(AcpExtensionMethod::WorkspaceGitDiff, &params)
+        self.typed(AcpExtensionMethod::WorkspaceGitDiff, &params)
+            .await
+    }
+
+    /// Reads one page of the session's active-branch trajectory.
+    pub async fn trajectory(
+        &self,
+        id: &SessionId,
+        cursor: TrajectoryCursor,
+    ) -> Result<TrajectoryPage, BackendError> {
+        let (before, after) = match cursor {
+            TrajectoryCursor::Tail => (None, None),
+            TrajectoryCursor::Before(sequence) => (Some(sequence), None),
+            TrajectoryCursor::After(sequence) => (None, Some(sequence)),
+        };
+        let params = serde_json::json!({
+            "sessionId": id,
+            "before": before,
+            "after": after,
+        });
+        self.typed(AcpExtensionMethod::Trajectory, &params).await
+    }
+
+    /// Reads one request content (system prompt or tools) by hash; `None`
+    /// when the session's log does not hold it.
+    pub async fn request_content(
+        &self,
+        id: &SessionId,
+        hash: &ContentHash,
+    ) -> Result<Option<RequestContent>, BackendError> {
+        let params = serde_json::json!({ "sessionId": id, "hash": hash });
+        self.typed(AcpExtensionMethod::TrajectoryContent, &params)
             .await
     }
 

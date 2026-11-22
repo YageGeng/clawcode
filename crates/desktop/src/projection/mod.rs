@@ -77,6 +77,14 @@ pub struct ProjectionChange {
     /// streamed text or tool output, so their positions are unchanged.
     #[builder(default)]
     pub structural: bool,
+    /// Whether the history database gained something the trajectory shows:
+    /// a finished message or tool call, or the end of a turn or run.
+    #[builder(default)]
+    pub history: bool,
+    /// Whether a subagent was spawned, so the session list now holds a new
+    /// child of this session.
+    #[builder(default)]
+    pub agents: bool,
 }
 
 impl ProjectionChange {
@@ -89,6 +97,8 @@ impl ProjectionChange {
             && !self.queue
             && !self.controls
             && !self.structural
+            && !self.history
+            && !self.agents
     }
 
     /// Folds a later change into this one; an inserted row is never also reported as updated.
@@ -103,7 +113,9 @@ impl ProjectionChange {
         self.title |= other.title;
         self.queue |= other.queue;
         self.controls |= other.controls;
+        self.agents |= other.agents;
         self.structural |= other.structural;
+        self.history |= other.history;
     }
 
     /// Records a new row; it supersedes an earlier update of the same key.
@@ -271,8 +283,16 @@ impl SessionProjection {
 
     /// Whether some tool is still executing, so its elapsed time must advance.
     pub fn has_running_tools(&self) -> bool {
-        self.entries.iter().any(|entry| {
-            matches!(&entry.row, TranscriptRow::Tool(tool) if tool.status == ToolStatus::Running)
+        self.running_tools().next().is_some()
+    }
+
+    /// The tools still executing, in transcript order.
+    pub fn running_tools(&self) -> impl Iterator<Item = &ToolRow> {
+        self.entries.iter().filter_map(|entry| match &entry.row {
+            TranscriptRow::Tool(tool) if tool.status == ToolStatus::Running => {
+                Some(tool)
+            }
+            _ => None,
         })
     }
 
@@ -290,6 +310,39 @@ impl SessionProjection {
         self.max_sequence = 0;
     }
 
+    /// Whether `update` reports something finished that the history database
+    /// now holds. Only the event name is read; nothing is decoded.
+    fn ends_history_item(update: &wire::SessionUpdate) -> bool {
+        match update {
+            wire::SessionUpdate::Other(other) => {
+                other.session_update
+                    == protocol::ProductIdentity::ACP_EVENT_UPDATE
+                    && matches!(
+                        other
+                            .fields
+                            .get("payload")
+                            .and_then(|payload| payload.get("event"))
+                            .and_then(serde_json::Value::as_str),
+                        Some("message_end" | "turn_end" | "run_end")
+                    )
+            }
+            // Finished assistant and user messages arrive whole; a settings
+            // change is logged as it is announced.
+            wire::SessionUpdate::AgentMessage(_)
+            | wire::SessionUpdate::UserMessage(_)
+            | wire::SessionUpdate::ConfigOptionUpdate(_) => true,
+            wire::SessionUpdate::ToolCallUpdate(tool) => matches!(
+                tool.status.value(),
+                Some(
+                    wire::ToolCallStatus::Completed
+                        | wire::ToolCallStatus::Failed
+                        | wire::ToolCallStatus::Cancelled
+                )
+            ),
+            _ => false,
+        }
+    }
+
     /// Folds one update into the transcript and reports what changed.
     pub fn apply(&mut self, update: &wire::SessionUpdate) -> ProjectionChange {
         self.arrivals += 1;
@@ -299,6 +352,7 @@ impl SessionProjection {
         };
         let mut change = ProjectionChange::builder()
             .controls(self.controls.apply(update, event.as_ref()))
+            .history(Self::ends_history_item(update))
             .build();
         if let Some(event) = &event {
             self.apply_event(event, &mut change);
@@ -542,7 +596,7 @@ impl SessionProjection {
         update: &wire::CompactionUpdate,
         change: &mut ProjectionChange,
     ) {
-        if update.status != wire::CompactionStatus::Completed {
+        if update.status.value() != Some(&wire::CompactionStatus::Completed) {
             return;
         }
         let meta = Self::product(update.meta.value());
@@ -847,6 +901,9 @@ impl SessionProjection {
                 // Pending, paused, and statuses newer than this client all wait.
                 _ => ToolStatus::Pending,
             };
+            // The child session exists once its spawn call has finished.
+            change.agents |= row.status == ToolStatus::Completed
+                && row.name.as_deref() == Some(protocol::SPAWN_AGENT_TOOL);
         }
         if let Some(content) = update.content.value() {
             let terminal = content

@@ -161,7 +161,7 @@ impl AppView {
             None => self.create_view(entry, target, window, cx),
         };
         let client = self.host.client.as_ref();
-        view.update(cx, |view, _| view.set_client(client));
+        view.update(cx, |view, cx| view.set_client(client, cx));
     }
 
     /// Attaches the active session tab; restored tabs attach only when they become active.

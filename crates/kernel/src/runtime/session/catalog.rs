@@ -8,7 +8,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use protocol::{SessionId, SessionSummary};
+use protocol::{
+    ContentHash, RequestContent, SessionId, SessionSummary, TrajectoryCursor,
+    TrajectoryPage,
+};
 use state::{SessionFilter, StateError, StateRuntime};
 use store::{SessionHeader, StoreFactory};
 use tokio::sync::{Mutex, RwLock};
@@ -125,6 +128,55 @@ impl SessionCatalog {
             Some(header) => state.refresh(id, &header.path).await,
             None => state.delete_session(id).await,
         }
+    }
+
+    /// Reads one trajectory page; only the history database can answer.
+    pub(in crate::runtime) async fn trajectory(
+        &self,
+        id: &SessionId,
+        cursor: TrajectoryCursor,
+        limit: Option<u32>,
+    ) -> Result<TrajectoryPage, KernelError> {
+        let state = self
+            .state_for_read()
+            .ok_or_else(|| KernelError::HistoryUnavailable(id.clone()))?;
+        if let Some(page) = state.trajectory(id, cursor, limit).await? {
+            return Ok(page);
+        }
+        // Not indexed yet: index it from its log, or learn that it is gone,
+        // ordered against identity changes as background repairs are.
+        {
+            let _order = self.repairs.writers.write().await;
+            self.repair(id, state).await?;
+        }
+        state
+            .trajectory(id, cursor, limit)
+            .await?
+            .ok_or_else(|| KernelError::SessionNotFound(id.clone()))
+    }
+
+    /// Reads one request content by hash from the history database.
+    pub(in crate::runtime) async fn request_content(
+        &self,
+        id: &SessionId,
+        hash: &ContentHash,
+    ) -> Result<Option<RequestContent>, KernelError> {
+        let state = self
+            .state_for_read()
+            .ok_or_else(|| KernelError::HistoryUnavailable(id.clone()))?;
+        if let Some(content) = state.request_content(id, hash).await? {
+            return Ok(content);
+        }
+        // Not indexed yet: index it from its log, or learn that it is gone,
+        // ordered against identity changes as background repairs are.
+        {
+            let _order = self.repairs.writers.write().await;
+            self.repair(id, state).await?;
+        }
+        state
+            .request_content(id, hash)
+            .await?
+            .ok_or_else(|| KernelError::SessionNotFound(id.clone()))
     }
 
     /// Lists Sessions newest first, optionally within one working directory.

@@ -10,8 +10,8 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
-    h_flex,
+    ActiveTheme as _, Disableable as _, IconName, Side, Sizable as _,
+    WindowExt as _, h_flex,
 };
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, Entity, ExternalPaths,
@@ -581,6 +581,7 @@ impl SessionView {
                     // The session is being created in the chosen workspace.
                     .disabled(self.creating)
                     .dropdown_menu(move |menu, _, _| {
+                        let menu = menu.check_side(Side::Right);
                         choices.iter().fold(menu, |menu, path| {
                             let view = view.clone();
                             let picked: PathBuf = path.clone();

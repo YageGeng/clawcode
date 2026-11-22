@@ -57,6 +57,25 @@ impl Kernel {
         self.catalog.list(cwd).await
     }
 
+    /// Reads one page of a Session's active-branch trajectory.
+    pub async fn session_trajectory(
+        &self,
+        session_id: &SessionId,
+        cursor: protocol::TrajectoryCursor,
+        limit: Option<u32>,
+    ) -> Result<protocol::TrajectoryPage, KernelError> {
+        self.catalog.trajectory(session_id, cursor, limit).await
+    }
+
+    /// Reads one request content (system prompt or tools) by hash.
+    pub async fn session_request_content(
+        &self,
+        session_id: &SessionId,
+        hash: &protocol::ContentHash,
+    ) -> Result<Option<protocol::RequestContent>, KernelError> {
+        self.catalog.request_content(session_id, hash).await
+    }
+
     /// Returns one persisted Session's listing summary.
     pub async fn session_summary(
         &self,
@@ -330,6 +349,12 @@ impl Kernel {
         session.transcript.append_context_message(entry_id, message)
     }
 
+    /// Generates one lane-record identifier.
+    pub(super) fn record_id(&self) -> Result<RecordId, KernelError> {
+        RecordId::try_from(self.id_generator.next(IdKind::Record))
+            .map_err(|error| KernelError::Protocol(error.to_string()))
+    }
+
     /// Appends one durable pi v4 lane record for run recovery and inspection.
     pub(super) fn record_operation(
         &self,
@@ -338,12 +363,9 @@ impl Kernel {
         kind: RecordKind,
         payload: serde_json::Value,
     ) -> Result<(), KernelError> {
-        let record_id =
-            RecordId::try_from(self.id_generator.next(IdKind::Record))
-                .map_err(|error| KernelError::Protocol(error.to_string()))?;
         session.transcript.append_record(
             NewRecord::builder()
-                .id(record_id)
+                .id(self.record_id()?)
                 .lane(session.transcript.lane())
                 .run_id(Some(run_id.clone()))
                 .kind(kind)

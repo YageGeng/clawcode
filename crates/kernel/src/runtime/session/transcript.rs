@@ -1,12 +1,14 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use protocol::{
-    AgentMessage, EntryId, ExtensionEntryData, LaneId, SessionId,
-    SessionTreeEntry, SessionTreeSnapshot,
+    AgentMessage, ContentHash, EntryId, ExtensionEntryData, LaneId, RecordId,
+    RequestContent, RunId, SessionId, SessionTreeEntry, SessionTreeSnapshot,
 };
 use store::{
-    EntryKind, NewEntry, NewRecord, SessionEntry, SessionRecord, SessionStore,
+    EntryKind, NewEntry, NewRecord, RecordKind, SessionEntry, SessionRecord,
+    SessionStore,
 };
 
 use super::ClawcodeEntry as _;
@@ -37,6 +39,9 @@ struct SessionTranscriptState {
     /// the file, so a write through this one would duplicate a sequence.
     #[builder(default)]
     sealed: bool,
+    /// Hashes of the request contents the log already stores.
+    #[builder(default)]
+    request_hashes: HashSet<ContentHash>,
 }
 
 impl SessionTranscriptState {
@@ -227,6 +232,21 @@ impl SessionTranscript {
             &lane,
             delegated,
         )?;
+        let request_hashes = store
+            .records()
+            .into_iter()
+            .filter(|record| record.kind == RecordKind::RequestContent)
+            .filter_map(|record| {
+                record
+                    .payload
+                    .get(RecordKind::REQUEST_CONTENT_KEY)
+                    .and_then(|content| content.get("hash"))
+                    .and_then(|hash| hash.as_str())
+                    .and_then(|hash| {
+                        ContentHash::try_from(hash.to_owned()).ok()
+                    })
+            })
+            .collect();
         Ok(Self {
             lane,
             delegated,
@@ -235,9 +255,41 @@ impl SessionTranscript {
                     .store(store)
                     .history(rebuilt.messages)
                     .notes(rebuilt.notes)
+                    .request_hashes(request_hashes)
                     .build(),
             ),
         })
+    }
+
+    /// Appends the request contents the log does not hold yet, in order,
+    /// under one lock so concurrent attempts never write a hash twice.
+    pub(in crate::runtime) fn append_request_contents(
+        &self,
+        run_id: &RunId,
+        contents: &[RequestContent],
+        mut next_id: impl FnMut() -> Result<RecordId, KernelError>,
+    ) -> Result<(), KernelError> {
+        let mut state = self.writable()?;
+        for content in contents {
+            if state.request_hashes.contains(&content.hash) {
+                continue;
+            }
+            let payload = serde_json::Map::from_iter([(
+                RecordKind::REQUEST_CONTENT_KEY.to_owned(),
+                serde_json::to_value(content)?,
+            )]);
+            state.store.append_record(
+                NewRecord::builder()
+                    .id(next_id()?)
+                    .lane(self.lane.clone())
+                    .run_id(Some(run_id.clone()))
+                    .kind(RecordKind::RequestContent)
+                    .payload(serde_json::Value::Object(payload))
+                    .build(),
+            )?;
+            state.request_hashes.insert(content.hash.clone());
+        }
+        Ok(())
     }
 
     /// Returns the stable Session identifier as an owned value.

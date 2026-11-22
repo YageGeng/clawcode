@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use agent_client_protocol::schema::IndexMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -516,7 +516,7 @@ fn accept(
 ) -> wire::CreateElicitationResponse {
     wire::CreateElicitationResponse::new(wire::ElicitationAction::Accept(
         wire::ElicitationAcceptAction::new()
-            .content(BTreeMap::from([("strategy".to_string(), strategy)])),
+            .content(IndexMap::from([("strategy".to_string(), strategy)])),
     ))
 }
 
@@ -665,7 +665,7 @@ async fn unknown_action_is_treated_as_cancel() {
         responder.respond(wire::CreateElicitationResponse::new(
             wire::ElicitationAction::Other(wire::OtherElicitationAction::new(
                 "snooze",
-                BTreeMap::new(),
+                IndexMap::new(),
             )),
         ))?;
         tokio::time::sleep(SETTLE).await;

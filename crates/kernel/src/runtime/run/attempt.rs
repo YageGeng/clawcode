@@ -1,8 +1,8 @@
 use protocol::{
     AgentMessage, AssistantMetadata, ContentBlock, MessageId, MessageIdentity,
     MessageTiming, ModelFailure, ModelFinal, ModelProfile,
-    ModelRetryDisposition, ModelStreamEvent, ModelUsage, StopReason,
-    TimestampMs, TurnId,
+    ModelRetryDisposition, ModelStreamEvent, ModelUsage, RequestSnapshot,
+    StopReason, TimestampMs, TurnId,
 };
 
 use crate::ModelError;
@@ -21,6 +21,9 @@ pub(super) struct AssistantAttempt {
     blocks: Vec<ContentBlock>,
     #[builder(default)]
     final_: Option<ModelFinal>,
+    /// The request this attempt sends.
+    #[builder(default)]
+    request: Option<RequestSnapshot>,
 }
 
 /// Terminal cause supplied by the runtime after the provider stream settles.
@@ -81,6 +84,12 @@ impl AssistantAttempt {
             .profile(profile)
             .timestamp_ms(timestamp_ms)
             .build()
+    }
+
+    /// Records the request this attempt sends, for its persisted metadata.
+    pub(super) fn with_request(mut self, snapshot: RequestSnapshot) -> Self {
+        self.request = Some(snapshot);
+        self
     }
 
     /// Applies one ordered model event while enforcing a single terminal Final.
@@ -163,6 +172,7 @@ impl AssistantAttempt {
                     .stop_reason(final_.stop_reason)
                     .raw_stop_reason(final_.raw_stop_reason)
                     .usage(final_.usage)
+                    .request(self.request.clone().map(Box::new))
                     .build(),
             },
         })
@@ -299,6 +309,7 @@ impl AssistantAttempt {
                             .as_ref()
                             .is_some_and(|failure| failure.context_overflow),
                     )
+                    .request(self.request.map(Box::new))
                     .build(),
             },
         };

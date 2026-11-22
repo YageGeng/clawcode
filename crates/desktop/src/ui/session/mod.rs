@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use agent_client_protocol::v2::schema as wire;
 use base64::Engine as _;
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::diff::{DiffFile, DiffState};
 use gpui_kit::component::input::{InputEvent, TextareaState};
@@ -18,10 +19,11 @@ use gpui_kit::component::message_scroller::{
 };
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextViewState;
+use gpui_kit::component::{ResizableState, resizable_panel, v_resizable};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, Image, ImageFormat,
-    IntoElement, ParentElement as _, Render, StyleRefinement, Styled as _,
-    Subscription, Window, div,
+    App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, Image,
+    ImageFormat, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, StyleRefinement, Styled as _, Subscription, Window, div,
 };
 use typed_builder::TypedBuilder;
 
@@ -32,6 +34,8 @@ use crate::projection::{
 use crate::session::{AttachPhase, SessionHandle};
 use crate::transcript::{LayoutRow, TranscriptLayout};
 use crate::ui::composer::Composer;
+use crate::ui::panel::RecordView;
+use crate::ui::trajectory::{TrajectoryEvent, TrajectoryView};
 
 /// What a tab shows: a draft that has no backend session yet, or an attached session.
 pub enum SessionTarget {
@@ -42,6 +46,16 @@ pub enum SessionTarget {
     },
     /// An attached session.
     Session(Entity<SessionHandle>),
+}
+
+/// What a session tab's body shows above the composer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    /// The conversation transcript.
+    #[default]
+    Chat,
+    /// The trajectory of the agent loop.
+    Trajectory,
 }
 
 /// Which text of a message a Markdown document renders.
@@ -104,6 +118,8 @@ pub enum SessionViewEvent {
     },
     /// The draft should run in another registered workspace.
     SelectWorkspace(PathBuf),
+    /// Something the tab's trajectory asks of the shell.
+    Trajectory(TrajectoryEvent),
 }
 
 /// Loading placeholder shown while a session's transcript is attaching.
@@ -183,6 +199,32 @@ pub struct SessionView {
     /// Space kept free at the right edge for the details card.
     #[builder(default)]
     right_inset: gpui_kit::Pixels,
+    /// Whether the body shows the chat or the trajectory; kept in memory only.
+    #[builder(default)]
+    view_mode: ViewMode,
+    /// The trajectory, created the first time it shows.
+    #[builder(default)]
+    trajectory: Option<Entity<TrajectoryView>>,
+    /// Passes the trajectory's requests on to the shell.
+    #[builder(default)]
+    _trajectory_events: Option<Subscription>,
+    /// A record's detail shown below the trajectory, where no panel tab can
+    /// hold it: in a subagent opened in the panel.
+    #[builder(default, setter(skip))]
+    detail: Option<InlineDetail>,
+}
+
+/// Starting height of the record detail below the trajectory, in rems.
+const DETAIL_REMS: f32 = 22.0;
+
+/// A record detail split below the trajectory.
+struct InlineDetail {
+    /// The detail, following the trajectory's selection.
+    record: Entity<RecordView>,
+    /// The split's sizes as the user drags its handle.
+    split: Entity<ResizableState>,
+    /// Closes the split when the detail's close button is pressed.
+    _dismiss: Subscription,
 }
 
 impl EventEmitter<SessionViewEvent> for SessionView {}
@@ -250,9 +292,102 @@ impl SessionView {
     }
 
     /// Takes the client once the backend is ready; nothing drawn depends on it.
-    pub(super) fn set_client(&mut self, client: Option<&AcpClient>) {
+    pub(super) fn set_client(
+        &mut self,
+        client: Option<&AcpClient>,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self.client.is_none() {
             self.client = client.cloned();
+        }
+        if let Some(trajectory) = &self.trajectory {
+            trajectory
+                .update(cx, |trajectory, cx| trajectory.set_client(client, cx));
+        }
+    }
+
+    /// Whether the body shows the chat or the trajectory.
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    /// Shows the chat or the trajectory; a draft has no trajectory. Showing
+    /// the trajectory again reads what it missed while hidden.
+    pub fn set_view_mode(
+        &mut self,
+        mode: ViewMode,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if mode == ViewMode::Trajectory {
+            let existed = self.trajectory.is_some();
+            let Some(trajectory) = self.trajectory(window, cx) else {
+                return;
+            };
+            if existed {
+                trajectory.update(cx, |trajectory, cx| trajectory.refresh(cx));
+            }
+        }
+        self.view_mode = mode;
+        cx.notify();
+    }
+
+    /// The trajectory, if it was shown.
+    pub fn trajectory_view(&self) -> Option<&Entity<TrajectoryView>> {
+        self.trajectory.as_ref()
+    }
+
+    /// The trajectory of the attached session, created on first use; `None`
+    /// for a draft.
+    pub fn trajectory(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Entity<TrajectoryView>> {
+        if let Some(trajectory) = &self.trajectory {
+            return Some(trajectory.clone());
+        }
+        let handle = self.handle()?.clone();
+        let client = self.client.clone();
+        let trajectory =
+            cx.new(|cx| TrajectoryView::new(handle, client, window, cx));
+        self._trajectory_events = Some(cx.subscribe(
+            &trajectory,
+            |_, _, event: &TrajectoryEvent, cx| {
+                cx.emit(SessionViewEvent::Trajectory(event.clone()))
+            },
+        ));
+        self.trajectory = Some(trajectory.clone());
+        Some(trajectory)
+    }
+
+    /// Shows the trajectory's selected record below it, once; the detail
+    /// follows the selection from then on.
+    pub fn open_detail(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(trajectory) = &self.trajectory else {
+            return;
+        };
+        if self.detail.is_none() {
+            let trajectory = trajectory.clone();
+            let record =
+                cx.new(|cx| RecordView::new(trajectory, cx).closable());
+            let dismiss = cx
+                .subscribe(&record, |this, _, _: &DismissEvent, cx| {
+                    this.close_detail(cx)
+                });
+            self.detail = Some(InlineDetail {
+                record,
+                split: cx.new(|_| ResizableState::default()),
+                _dismiss: dismiss,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Closes the record detail below the trajectory.
+    pub fn close_detail(&mut self, cx: &mut Context<'_, Self>) {
+        if self.detail.take().is_some() {
+            cx.notify();
         }
     }
 
@@ -299,6 +434,10 @@ impl SessionView {
         self.open_commands.clear();
         self.open_cards.clear();
         self._subscriptions.clear();
+        self.trajectory = None;
+        self._trajectory_events = None;
+        self.detail = None;
+        self.view_mode = ViewMode::Chat;
         self.scroller
             .update(cx, |scroller, cx| scroller.reset(0, cx));
         if let SessionTarget::Session(handle) = &self.target {
@@ -315,6 +454,14 @@ impl SessionView {
                         if change.controls {
                             this.close_withdrawn_form(window, cx);
                             this.push_commands(cx);
+                        }
+                        // A hidden trajectory catches up when it shows again.
+                        if this.view_mode == ViewMode::Trajectory
+                            && let Some(trajectory) = &this.trajectory
+                        {
+                            trajectory.update(cx, |trajectory, cx| {
+                                trajectory.session_changed(change, cx)
+                            });
                         }
                     },
                 ),
@@ -617,6 +764,42 @@ impl Render for SessionView {
                         .p_6()
                         .child(Label::new(error).text_color(cx.theme().danger))
                         .into_any_element(),
+                    AttachPhase::Attached
+                        if self.view_mode == ViewMode::Trajectory
+                            && let Some(trajectory) = &self.trajectory =>
+                    {
+                        let body = div().flex_1().min_h_0();
+                        match &self.detail {
+                            None => body.child(trajectory.clone()),
+                            // The ledger above, the detail below. Escape
+                            // closes the detail first: the ledger binds it
+                            // to `Cancel`, which is caught on the way down.
+                            Some(detail) => body
+                                .capture_action(cx.listener(
+                                    |this, _: &Cancel, _, cx| {
+                                        this.close_detail(cx);
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                                .child(
+                                    v_resizable("trajectory-detail-split")
+                                        .with_state(&detail.split)
+                                        .child(
+                                            resizable_panel()
+                                                .child(trajectory.clone()),
+                                        )
+                                        .child(
+                                            resizable_panel()
+                                                .size(
+                                                    window.rem_size()
+                                                        * DETAIL_REMS,
+                                                )
+                                                .child(detail.record.clone()),
+                                        ),
+                                ),
+                        }
+                        .into_any_element()
+                    }
                     AttachPhase::Attached => {
                         let view = cx.entity();
                         MessageScroller::new(

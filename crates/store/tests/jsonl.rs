@@ -1117,3 +1117,22 @@ fn rename_imported_session_uses_header_identity() {
         Some("imported")
     );
 }
+
+/// Record discriminants written to the history database match the log's.
+#[test]
+fn record_kind_names_match_serde() {
+    for kind in [
+        RecordKind::OperationStarted,
+        RecordKind::AbortRequested,
+        RecordKind::OperationFinished,
+        RecordKind::StepAttempt,
+        RecordKind::ToolStarted,
+        RecordKind::QueueEnqueued,
+        RecordKind::QueueCancelled,
+        RecordKind::WriteDeferred,
+        RecordKind::Usage,
+        RecordKind::RequestContent,
+    ] {
+        assert_eq!(serde_json::to_value(kind).expect("json"), kind.as_str());
+    }
+}

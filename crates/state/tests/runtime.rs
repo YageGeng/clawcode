@@ -91,7 +91,14 @@ async fn init_creates_both_databases() {
     }
     assert_eq!(
         names(&history, "table").await,
-        ["entries", "lanes", "projection_state", "runs"]
+        [
+            "entries",
+            "lanes",
+            "projection_state",
+            "records",
+            "request_contents",
+            "runs"
+        ]
     );
     assert_eq!(
         names(&history, "index").await,
@@ -99,6 +106,7 @@ async fn init_creates_both_databases() {
             "idx_entries_by_run_page",
             "idx_entries_page",
             "idx_entries_user_messages",
+            "idx_records_by_kind",
             "idx_runs_end_page",
             "idx_runs_open_lane",
             "idx_runs_page",

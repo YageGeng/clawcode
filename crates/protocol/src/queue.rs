@@ -12,6 +12,32 @@ pub enum QueueKind {
     FollowUp,
 }
 
+impl QueueKind {
+    /// Returns the wire name, as serde writes it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Steering => "steering",
+            Self::FollowUp => "followUp",
+        }
+    }
+}
+
+impl std::str::FromStr for QueueKind {
+    type Err = crate::UnknownVariant;
+
+    /// Reads the wire name [`Self::as_str`] writes.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [Self::Steering, Self::FollowUp]
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+            .ok_or_else(|| crate::UnknownVariant {
+                kind: "queue kind",
+                value: value.to_owned(),
+            })
+    }
+}
+
 /// One fully formed message waiting to enter a Turn.
 #[derive(
     Debug, Clone, PartialEq, Serialize, Deserialize, typed_builder::TypedBuilder,

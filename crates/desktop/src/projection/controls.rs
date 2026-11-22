@@ -504,7 +504,7 @@ impl SessionControls {
                 true
             }
             wire::SessionUpdate::UsageUpdate(usage) => {
-                let product = Self::product(usage.meta.as_ref());
+                let product = Self::product(usage.meta.value());
                 self.set_context(
                     product.and_then(|product| product.get("usage")),
                     product
@@ -629,18 +629,21 @@ impl SessionControls {
 
     /// Tracks the compaction status; a completed one empties the context fill.
     fn apply_compaction(&mut self, update: &wire::CompactionUpdate) -> bool {
-        self.compaction = match update.status {
-            wire::CompactionStatus::InProgress => {
+        // An update may leave the status out; only a reported one counts.
+        self.compaction = match update.status.value() {
+            Some(wire::CompactionStatus::InProgress) => {
                 Some(CompactionStatus::Running)
             }
-            wire::CompactionStatus::Completed => {
+            Some(wire::CompactionStatus::Completed) => {
                 self.context = None;
                 None
             }
-            wire::CompactionStatus::Failed => Some(CompactionStatus::Failed(
-                update.error.value().cloned().unwrap_or_default(),
-            )),
-            wire::CompactionStatus::Cancelled => {
+            Some(wire::CompactionStatus::Failed) => {
+                Some(CompactionStatus::Failed(
+                    update.error.value().cloned().unwrap_or_default(),
+                ))
+            }
+            Some(wire::CompactionStatus::Cancelled) => {
                 Some(CompactionStatus::Cancelled)
             }
             _ => return false,

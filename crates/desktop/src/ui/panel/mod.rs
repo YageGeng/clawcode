@@ -12,6 +12,8 @@ mod files;
 mod git;
 mod layout;
 mod lifecycle;
+mod record;
+mod record_sections;
 mod render;
 mod state;
 mod viewer;
@@ -22,6 +24,7 @@ pub use files::{FilesEvent, FilesView};
 pub use git::GitSnapshot;
 pub use layout::PanelPresentation;
 pub use lifecycle::{PanelHost, PanelView};
+pub use record::{PromptMode, RecordSection, RecordView};
 pub use state::PanelOwner;
 pub use viewer::{ViewerSource, ViewerState};
 

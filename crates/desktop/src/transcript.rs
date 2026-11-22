@@ -209,11 +209,22 @@ impl<'a> LayoutBuilder<'a> {
         let expanded = self.expanded_runs.contains(&anchor);
         let fold = summarize && !expanded;
         let mut summary_placed = false;
-        // Position in `self.rows` of the segment's last reply, where usage goes.
-        let mut last_reply: Option<(usize, RowKey)> = None;
+        // The segment's last reply and its position in `self.rows`, where
+        // usage goes; `None` as the position when it folded away, and the
+        // usage then closes the segment.
+        let mut last_reply: Option<(Option<usize>, RowKey)> = None;
         // Index in `self.rows` where the open run of consecutive tool rows began.
         let mut group_start: Option<usize> = None;
         for (index, row) in segment {
+            // A step that only thought before calling tools belongs to the
+            // work the summary stands for; folded, it goes along with them.
+            if fold
+                && let TranscriptRow::Message(message) = row
+                && message.is_thought_only()
+            {
+                last_reply = Some((None, row.key()));
+                continue;
+            }
             let is_tool = matches!(row, TranscriptRow::Tool(_));
             // The summary goes where the first tool was; an unfolded run keeps it
             // as the header of its tools so it can be folded again.
@@ -258,7 +269,7 @@ impl<'a> LayoutBuilder<'a> {
             if let TranscriptRow::Message(message) = row
                 && message.role == Role::Assistant
             {
-                last_reply = Some((self.rows.len(), row.key()));
+                last_reply = Some((Some(self.rows.len()), row.key()));
             }
             self.rows.push(LayoutRow::Row {
                 key: row.key(),
@@ -271,8 +282,8 @@ impl<'a> LayoutBuilder<'a> {
             && let Some((position, anchor)) = last_reply
             && let Some(usage) = Self::run_usage(segment)
         {
-            self.rows
-                .insert(position + 1, LayoutRow::Usage { anchor, usage });
+            let at = position.map_or(self.rows.len(), |position| position + 1);
+            self.rows.insert(at, LayoutRow::Usage { anchor, usage });
         }
     }
 

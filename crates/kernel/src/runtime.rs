@@ -99,6 +99,12 @@ pub enum KernelError {
     /// A requested session has not been registered with this kernel.
     #[error("session not found: {0}")]
     SessionNotFound(SessionId),
+    /// The history database is off, still backfilling, or repairing.
+    #[error("session history is unavailable for {0}")]
+    HistoryUnavailable(SessionId),
+    /// The history database failed a read.
+    #[error("session history read failed: {0}")]
+    History(#[from] state::StateError),
     /// A session identifier was registered more than once.
     #[error("session already exists: {0}")]
     DuplicateSession(SessionId),

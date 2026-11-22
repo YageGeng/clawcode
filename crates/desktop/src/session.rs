@@ -382,8 +382,10 @@ impl SessionRegistry {
             if let Some(handle) = self.handles.get(&id)
                 && !change.is_empty()
             {
-                // A new title or a settled run makes the catalog (title, sort order) stale.
+                // A new title, a spawned subagent, or a settled run makes the
+                // catalog (title, children, sort order) stale.
                 let catalog_stale = change.title
+                    || change.agents
                     || (change.run_state
                         && handle.read(cx).projection.run_state()
                             == RunState::Idle);

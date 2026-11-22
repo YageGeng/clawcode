@@ -17,7 +17,7 @@ use gpui_kit::component::sidebar::{
     SidebarMenuItem,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Side, Sizable as _,
     StyledExt as _,
 };
 use gpui_kit::{
@@ -229,6 +229,7 @@ impl AppView {
             .icon(LucideIcon::ListFilter)
             .tooltip(rust_i18n::t!("Sidebar.filter").into_owned())
             .dropdown_menu(move |menu, _, _| {
+                let menu = menu.check_side(Side::Right);
                 let item = |label: &str, checked: bool| {
                     PopupMenuItem::new(label.to_owned()).checked(checked)
                 };
@@ -784,9 +785,12 @@ impl AppView {
     ) -> AnyElement {
         let sidebar = self.render_sidebar(window, cx).into_any_element();
         let theme = cx.theme();
-        // The panel's padding sets the card's `sm` gaps to the window's left and bottom edges.
+        // The panel's padding sets the card's `sm` gaps to the title bar and
+        // the window's left and bottom edges; the top gap also keeps the
+        // light theme's card shadow from being cut along the title bar.
         div()
             .size_full()
+            .pt_2()
             .pl_2()
             .pb_2()
             .child(

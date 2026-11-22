@@ -809,3 +809,30 @@ fn escape_closes_a_sheet_that_appeared_by_resizing(cx: &mut TestAppContext) {
     live.window(cx, |window, cx| window.press("escape", cx));
     cx.update(|cx| assert!(!is_open(&live, cx), "Esc closes the sheet"));
 }
+
+/// A folder the user folded in the Changes tree stays folded when the tab
+/// reads the workspace again.
+#[gpui_kit::test]
+fn a_folded_changes_folder_stays_folded_on_refresh(cx: &mut TestAppContext) {
+    let live = with_session(live_in_git_repo(cx), cx);
+    std::fs::create_dir_all(root(&live).join("dir")).expect("dir");
+    std::fs::write(root(&live).join("dir/x.rs"), "x\n").expect("new");
+
+    live.window(cx, |window, cx| window.press("ctrl-shift-g", cx));
+    live.until(cx, "the file in its folder", |window| {
+        window.try_find("changed-file-0").is_some()
+    });
+    click(&live, cx, "change-folder-dir");
+    live.until(cx, "folded", |window| {
+        window.try_find("changed-file-0").is_none()
+    });
+
+    click(&live, cx, "changes-refresh");
+    // The read lands within these frames; the folder must not open again.
+    for _ in 0..30 {
+        live.window(cx, |window, _| {
+            assert!(window.try_find("changed-file-0").is_none(), "unfolded")
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}

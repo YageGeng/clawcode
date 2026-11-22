@@ -11,14 +11,15 @@ use protocol::{
     AcpExtensionMethod, AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
     AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
-    McpSessionRevisionNotification, ProductIdentity, WorkspaceDiffParameters,
+    McpSessionRevisionNotification, ProductIdentity,
+    TrajectoryContentParameters, TrajectoryParameters, WorkspaceDiffParameters,
     WorkspaceListDirParameters, WorkspacePathParameters,
     WorkspaceRootParameters,
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::projection::ProjectionRegistry;
-use crate::server::{AcpServer, ProjectionWatch};
+use crate::server::{AcpServer, KernelFailure, ProjectionWatch};
 use crate::workspace::WorkspaceRoot;
 
 /// Converts any parameter decoding failure into the ACP invalid-parameters category.
@@ -566,6 +567,33 @@ impl AcpExtensionDispatcher {
                     .git_status()
                     .await;
                 serde_json::to_value(status).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::Trajectory => {
+                let input: TrajectoryParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let cursor = input.cursor().map_err(invalid_parameters)?;
+                let page = self
+                    .kernel
+                    .session_trajectory(&input.session_id, cursor, input.limit)
+                    .await
+                    .map_err(KernelFailure)?;
+                serde_json::to_value(page).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::TrajectoryContent => {
+                let input: TrajectoryContentParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let content = self
+                    .kernel
+                    .session_request_content(&input.session_id, &input.hash)
+                    .await
+                    .map_err(KernelFailure)?;
+                serde_json::to_value(content).map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )?
             }

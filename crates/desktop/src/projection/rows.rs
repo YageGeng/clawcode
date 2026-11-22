@@ -273,6 +273,20 @@ impl From<Option<&wire::ToolKind>> for ToolCategory {
 }
 
 impl MessageRow {
+    /// Whether this is a finished assistant step with reasoning and nothing
+    /// else to show: no text, no images, no error.
+    pub fn is_thought_only(&self) -> bool {
+        self.role == Role::Assistant
+            && !self.reasoning.is_empty()
+            && self.text.is_empty()
+            && self.images.is_empty()
+            && !self.streaming
+            && self
+                .assistant
+                .as_ref()
+                .is_none_or(|assistant| assistant.error.is_none())
+    }
+
     /// Whether the message has anything to show: text, reasoning, images, or live streaming.
     pub fn is_visible(&self) -> bool {
         !self.text.is_empty()

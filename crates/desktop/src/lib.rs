@@ -14,6 +14,7 @@ pub mod projection;
 pub mod session;
 pub mod state;
 pub mod theme;
+pub mod trajectory;
 pub mod transcript;
 pub mod ui;
 pub mod workspace;

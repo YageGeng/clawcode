@@ -1013,3 +1013,89 @@ fn hidden_extension_messages_stay_out_of_the_transcript() {
     );
     assert_eq!(projection.len(), 0);
 }
+
+#[test]
+fn history_marks_finished_messages_tools_and_turns() {
+    let mut projection = SessionProjection::default();
+    let event = |name: &str| {
+        json!({
+            "sessionUpdate": "_clawcode/event",
+            "payload": { "event": name },
+            "_meta": meta(1),
+        })
+    };
+    assert!(apply(&mut projection, event("turn_end")).history);
+    assert!(apply(&mut projection, event("run_end")).history);
+    assert!(!apply(&mut projection, event("turn_start")).history);
+
+    let chunk = json!({
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "m1",
+        "content": { "type": "text", "text": "Hi" },
+        "_meta": meta(2),
+    });
+    assert!(!apply(&mut projection, chunk).history);
+
+    let tool = |status: &str| {
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "t1",
+            "status": status,
+            "_meta": meta(3),
+        })
+    };
+    assert!(!apply(&mut projection, tool("in_progress")).history);
+    assert!(apply(&mut projection, tool("completed")).history);
+
+    let mut change = ProjectionChange::default();
+    change.extend(ProjectionChange::builder().history(true).build());
+    assert!(change.history);
+}
+
+/// A finished spawn reports a new agent.
+#[test]
+fn a_finished_spawn_reports_a_new_agent() {
+    let mut projection = SessionProjection::default();
+    let started = apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "s1",
+            "name": "spawn_agent", "title": "spawn_agent",
+            "status": "in_progress", "_meta": meta(1)
+        }),
+    );
+    assert!(
+        !started.agents,
+        "the child does not exist before the call ends"
+    );
+
+    let finished = apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "s1",
+            "status": "completed"
+        }),
+    );
+    assert!(finished.agents);
+
+    let other = apply(
+        &mut projection,
+        json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "r1",
+            "name": "read", "status": "completed", "_meta": meta(2)
+        }),
+    );
+    assert!(!other.agents);
+}
+
+/// A settings change writes a Setting record, so the open trajectory reads
+/// again instead of waiting for the next message.
+#[test]
+fn a_settings_change_reaches_the_history() {
+    let mut projection = SessionProjection::default();
+    let change = apply(
+        &mut projection,
+        json!({ "sessionUpdate": "config_option_update", "configOptions": [] }),
+    );
+    assert!(change.history);
+}

@@ -20,6 +20,10 @@ fn panel_and_details_icons_are_bundled() {
         IconName::CornerLeftUp,
         IconName::FileDiff,
         IconName::Bot,
+        IconName::ScrollText,
+        IconName::User,
+        IconName::Send,
+        IconName::Puzzle,
     ] {
         let path = icon.path();
         assert!(

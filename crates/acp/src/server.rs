@@ -916,6 +916,8 @@ impl AcpServerFactory {
                         AcpExtensionMethod::WorkspaceReadFile,
                         AcpExtensionMethod::WorkspaceGitStatus,
                         AcpExtensionMethod::WorkspaceGitDiff,
+                        AcpExtensionMethod::Trajectory,
+                        AcpExtensionMethod::TrajectoryContent,
                     ]
                     .into_iter()
                     .map(|method| serde_json::Value::String(method.to_string()))
@@ -2048,7 +2050,8 @@ impl TryFrom<Option<&wire::Meta>> for PromptOptions {
     }
 }
 
-/// Kernel failure that ended a prompt before insertion.
+/// Kernel failure that ended a prompt before insertion, or a read whose
+/// cause the client must recognise.
 pub(crate) struct KernelFailure(pub(crate) KernelError);
 
 impl From<KernelFailure> for agent_client_protocol::Error {
@@ -2068,6 +2071,13 @@ impl From<KernelFailure> for agent_client_protocol::Error {
                     "reason": "questionClosed",
                     "requestId": request_id,
                     "index": index,
+                }))
+            }
+            // The client offers a retry while the history database catches up.
+            error @ KernelError::HistoryUnavailable(_) => {
+                Self::internal_error().data(serde_json::json!({
+                    "reason": "historyUnavailable",
+                    "message": error.to_string(),
                 }))
             }
             error => Self::internal_error().data(error.to_string()),

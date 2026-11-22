@@ -411,7 +411,7 @@ fn usage_maps_to_native_acp_v2_update_with_exact_metadata() {
     };
     assert_eq!(update.used, 80_000);
     assert_eq!(update.size, 100_000);
-    let metadata = update.meta.as_ref().expect("usage metadata");
+    let metadata = update.meta.value().expect("usage metadata");
     assert_eq!(
         metadata[ProductIdentity::ACP_NAMESPACE]["turnId"],
         "turn-usage"

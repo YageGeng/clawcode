@@ -1755,9 +1755,17 @@ async fn prompt_snapshot_is_stable_until_session_resume() {
     assert!(system_prompts[0].contains("INITIAL PRIVATE INSTRUCTION"));
     assert!(!system_prompts[0].contains("UPDATED PRIVATE INSTRUCTION"));
     assert!(system_prompts[1].contains("UPDATED PRIVATE INSTRUCTION"));
+    // The prompt text is stored only as trajectory request contents, never
+    // as an entry that replay could feed back into model context.
     let persisted = fs::read_to_string(session_path).expect("read Session");
-    assert!(!persisted.contains("INITIAL PRIVATE INSTRUCTION"));
-    assert!(!persisted.contains("UPDATED PRIVATE INSTRUCTION"));
+    let outside_contents = persisted
+        .lines()
+        .filter(|line| !line.contains(r#""type":"request_content""#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!outside_contents.contains("INITIAL PRIVATE INSTRUCTION"));
+    assert!(!outside_contents.contains("UPDATED PRIVATE INSTRUCTION"));
+    assert!(persisted.contains("UPDATED PRIVATE INSTRUCTION"));
 }
 
 /// Follow-up records survive runtime release until explicitly cancelled by QueueId.

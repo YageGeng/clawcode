@@ -112,7 +112,7 @@ impl SessionView {
                         (Self::render_error(row, cx), false)
                     }
                     Some(TranscriptRow::Mail(row)) => {
-                        (Self::render_mail(row, cx), false)
+                        (self.render_mail(row, cx), false)
                     }
                     None => return div().into_any_element(),
                 }
@@ -963,34 +963,75 @@ impl SessionView {
             .into_any_element()
     }
 
-    /// A message between agents: a compact card with the sender and what it sent.
-    fn render_mail(row: &MailRow, cx: &Context<'_, Self>) -> AnyElement {
+    /// A message between agents, folded to one line by default: the
+    /// sender, what kind of mail it is, and its first line; a click unfolds
+    /// the whole payload as Markdown.
+    fn render_mail(&self, row: &MailRow, cx: &Context<'_, Self>) -> AnyElement {
         let theme = cx.theme();
         let kind = match row.kind.as_str() {
             "new_task" => rust_i18n::t!("Transcript.mail_task"),
             "result" => rust_i18n::t!("Transcript.mail_result"),
             _ => rust_i18n::t!("Transcript.mail_message"),
         };
+        let key = RowKey::Mail(row.id.clone());
+        let open = self.open_cards.contains(&key);
+        let toggle = key.clone();
+        let header = h_flex()
+            .id(SharedString::from(format!("mail:{}", row.id)))
+            .w_full()
+            .min_w_0()
+            .gap_1p5()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .small(),
+            )
+            .child(Icon::new(IconName::Bot).small())
+            .child(Label::new(row.author.clone()).text_xs())
+            .child(Label::new(kind.into_owned()).text_xs())
+            // Folded, the first line hints at what the mail is about.
+            .when(!open, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        // A Markdown heading's `#`s are noise in one line.
+                        .child(
+                            single_line(&row.payload)
+                                .trim_start_matches(['#', ' '])
+                                .to_owned(),
+                        ),
+                )
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.toggle_card(toggle.clone(), cx)
+            }));
         div()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_2()
             .px_3()
             .py_2()
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.border)
             .bg(theme.muted)
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Bot).small())
-                    .child(Label::new(row.author.clone()).text_xs())
-                    .child(Label::new(kind.into_owned()).text_xs()),
-            )
-            .child(Label::new(row.payload.clone()).text_sm())
+            .child(header)
+            .when(open, |this| {
+                this.child(TextView::markdown(
+                    SharedString::from(format!("mail-body:{}", row.id)),
+                    SharedString::from(row.payload.clone()),
+                ))
+            })
             .into_any_element()
     }
 
