@@ -6,6 +6,7 @@
 //! - `command`: direct operations that bypass the Turn loop (Slash Commands, user bash).
 //! - `compaction`, `tools`, `extension`, `mcp`, `subagent`: capabilities a Session uses.
 
+mod checkpoint;
 mod command;
 mod compaction;
 mod exec;
@@ -43,6 +44,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::{EventSink, ModelCatalog, ModelError, ModelFactory, SinkError};
+pub use checkpoint::{CheckpointPoint, CheckpointStage, RunCheckpoints};
 pub use compaction::ContextUsageEstimate;
 use compaction::{CompactionExecution, CompactionIdentity};
 pub use run::admission::{AdmissionTicket, PromptOutcome, PromptRequest};
@@ -257,6 +259,9 @@ pub struct KernelFactory {
     /// Shell tool settings; `None` registers no `exec_command`/`write_stdin`.
     #[builder(default)]
     exec: Option<Arc<::tools::exec::ExecSettings>>,
+    /// Takes workspace snapshots around each Run; `None` takes none.
+    #[builder(default)]
+    checkpoints: Option<Arc<dyn RunCheckpoints>>,
 }
 
 impl KernelFactory {
@@ -359,6 +364,7 @@ impl KernelFactory {
             .retry_policy(self.retry_policy)
             .provider_retry_delay_limit_ms(self.provider_retry_delay_limit_ms)
             .exec(self.exec)
+            .checkpoints(self.checkpoints)
             .sessions(Arc::new(RwLock::new(HashMap::new())))
             .pending_sessions(Arc::new(Mutex::new(HashMap::new())))
             .shutdown(CancellationToken::new())
@@ -400,6 +406,9 @@ pub struct Kernel {
     /// Shell tool settings shared by every Session's process manager.
     #[builder(default)]
     exec: Option<Arc<::tools::exec::ExecSettings>>,
+    /// Takes workspace snapshots around each top-level Run.
+    #[builder(default)]
+    checkpoints: Option<Arc<dyn RunCheckpoints>>,
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
     pending_sessions:
         Arc<Mutex<HashMap<SessionId, tokio::sync::watch::Sender<()>>>>,

@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use protocol::{
-    WORKSPACE_CHANGE_LIMIT, WORKSPACE_FILE_LIMIT, WorkspaceChangeKind,
+    WORKSPACE_CHANGE_LIMIT, WORKSPACE_FILE_LIMIT, WorkspaceChange,
+    WorkspaceChangeKind, WorkspaceChanges, WorkspaceDiffScope,
     WorkspaceGitStatus,
 };
 
@@ -182,6 +183,78 @@ impl WorkspaceRoot {
             }
         }
         Ok(())
+    }
+
+    /// Every changed file of `scope` with its line counts: tracked files as
+    /// `git diff` lists them against the scope's revision, then untracked
+    /// files, which count every line as added. At most
+    /// [`WORKSPACE_CHANGE_LIMIT`] files in all.
+    pub async fn git_changes(
+        &self,
+        scope: WorkspaceDiffScope,
+    ) -> Result<WorkspaceChanges, WorkspaceError> {
+        let rev = self.scope_rev(scope).await?;
+        let mut args = vec![
+            "diff",
+            "--raw",
+            "--numstat",
+            "-z",
+            "-M",
+            "--relative",
+            "--no-ext-diff",
+        ];
+        args.extend(rev.as_deref());
+        let diff = self.git(&args).await?;
+        if !diff.status.success() {
+            return Err(Self::failure(&diff.stderr));
+        }
+        let mut changes = WorkspaceChanges::from_raw_numstat(
+            &diff.stdout,
+            WORKSPACE_CHANGE_LIMIT,
+        );
+        let untracked = self
+            .git(&["ls-files", "--others", "--exclude-standard", "-z"])
+            .await?;
+        if !untracked.status.success() {
+            return Err(Self::failure(&untracked.stderr));
+        }
+        let room = WORKSPACE_CHANGE_LIMIT.saturating_sub(changes.changes.len());
+        let mut names = untracked
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty());
+        // Names stay bytes until counted, so a non-UTF-8 name still opens.
+        let files: Vec<Vec<u8>> =
+            names.by_ref().take(room).map(<[u8]>::to_vec).collect();
+        changes.truncated |= names.next().is_some();
+        let root = self.0.clone();
+        let counted = tokio::task::spawn_blocking(move || {
+            use std::os::unix::ffi::OsStrExt as _;
+            files
+                .into_iter()
+                .map(|name| {
+                    let lines = count_file_lines(
+                        &root.join(std::ffi::OsStr::from_bytes(&name)),
+                    );
+                    (protocol::git_path(&name), lines)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        for ((path, path_bytes), lines) in counted {
+            changes.insertions += lines.unwrap_or(0);
+            changes.changes.push(
+                WorkspaceChange::builder()
+                    .path(path)
+                    .path_bytes(path_bytes)
+                    .kind(WorkspaceChangeKind::Untracked)
+                    .insertions(lines)
+                    .deletions(lines.map(|_| 0))
+                    .build(),
+            );
+        }
+        Ok(changes)
     }
 
     /// Removes the workspace's prefix inside its repository from a Git path.

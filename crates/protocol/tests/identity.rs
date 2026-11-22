@@ -59,3 +59,27 @@ fn webui_extension_methods_are_centralized() {
         format!("_{}/session/bash", ProductIdentity::ACP_NAMESPACE)
     );
 }
+
+/// The change-list and checkpoint methods have their names, parse back, and only read.
+#[test]
+fn checkpoint_methods_round_trip() {
+    let methods = [
+        (
+            AcpExtensionMethod::WorkspaceGitChanges,
+            "_clawcode/workspace/git_changes",
+        ),
+        (
+            AcpExtensionMethod::Checkpoints,
+            "_clawcode/session/checkpoints",
+        ),
+        (
+            AcpExtensionMethod::CheckpointDiff,
+            "_clawcode/session/checkpoint_diff",
+        ),
+    ];
+    for (method, name) in methods {
+        assert_eq!(method.as_str(), name);
+        assert_eq!(AcpExtensionMethod::parse(name), Some(method));
+        assert!(method.is_query());
+    }
+}

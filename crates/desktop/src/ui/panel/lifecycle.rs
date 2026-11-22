@@ -76,6 +76,11 @@ pub struct PanelHost {
     /// Whether the panel showed as a sheet on the last frame.
     #[builder(default)]
     pub(in crate::ui) was_sheet: bool,
+    /// A run to show in a panel's Changes tab once that view exists: the
+    /// panel owner's key, the run, and the file to bring into view.
+    #[builder(default)]
+    pub(in crate::ui) pending_changes:
+        Option<(String, protocol::RunId, Option<String>)>,
 }
 
 impl PanelHost {
@@ -156,8 +161,10 @@ impl AppView {
                 let summary =
                     self.git_status(&workspace).map(changes::GitSummary::from);
                 let painter = self.file_icon_painter(cx);
+                let session = self.owner_session(&owner, cx);
                 changes.update(cx, |changes, cx| {
                     changes.set_painter(painter);
+                    changes.set_session(session, cx);
                     changes.set_git(summary, cx)
                 });
             }
@@ -180,13 +187,42 @@ impl AppView {
                 {
                     self.panels
                         .runtimes
-                        .entry(key)
+                        .entry(key.clone())
                         .or_default()
                         .views
-                        .insert(tab, view);
+                        .insert(tab.clone(), view);
                 }
             }
         }
+        // A turn's change card asked for this run; the view exists now.
+        if tab == PanelTabKey::Changes
+            && self
+                .panels
+                .pending_changes
+                .as_ref()
+                .is_some_and(|(owner_key, ..)| *owner_key == key)
+            && let Some((_, run, path)) = self.panels.pending_changes.take()
+            && let Some(PanelView::Changes(changes)) = self
+                .panels
+                .runtimes
+                .get(&key)
+                .and_then(|runtime| runtime.views.get(&tab))
+                .cloned()
+        {
+            changes.update(cx, |changes, cx| changes.show_run(run, path, cx));
+        }
+    }
+
+    /// The attached session that owns a panel, if a session owns it.
+    fn owner_session(
+        &self,
+        owner: &PanelOwner,
+        cx: &gpui_kit::App,
+    ) -> Option<Entity<crate::session::SessionHandle>> {
+        let PanelOwner::Session(id) = owner else {
+            return None;
+        };
+        self.host.registry.as_ref()?.read(cx).handle(id)
     }
 
     /// Whether `view` is a record detail following a trajectory its session
@@ -217,8 +253,15 @@ impl AppView {
         Some(match tab {
             PanelTabKey::Changes => PanelView::Changes({
                 let painter = self.file_icon_painter(cx);
+                let session = self
+                    .panel_owner()
+                    .and_then(|owner| self.owner_session(&owner, cx));
                 cx.new(|cx| {
-                    ChangesView::new(workspace, client, painter, window, cx)
+                    let mut view = ChangesView::new(
+                        workspace, client, painter, window, cx,
+                    );
+                    view.set_session(session, cx);
+                    view
                 })
             }),
             PanelTabKey::Files => {
@@ -252,12 +295,15 @@ impl AppView {
                 let handle = registry
                     .update(cx, |registry, cx| registry.attach(&summary, cx));
                 let view = cx.new(|cx| {
-                    SessionView::new(
+                    let mut view = SessionView::new(
                         crate::ui::session::SessionTarget::Session(handle),
                         client,
                         window,
                         cx,
-                    )
+                    );
+                    // A subagent's history is its owner's to branch or fork.
+                    view.set_copy_only();
+                    view
                 });
                 // The overview setting is shared, so its toggle saves here as
                 // in the main card. The panel's record tab follows the owner

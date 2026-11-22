@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::mem::Discriminant;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::diff::DiffState;
 use gpui_kit::component::label::Label;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
@@ -129,9 +128,6 @@ pub struct RecordView {
     /// through records.
     #[builder(default)]
     pub(super) folded: HashSet<&'static str>,
-    /// The prompt diff and the pair of hashes it was built for.
-    #[builder(default)]
-    pub(super) diff: Option<(String, Entity<DiffState>)>,
     /// Tools whose description and schema are unfolded.
     #[builder(default)]
     pub(super) open_tools: HashSet<String>,

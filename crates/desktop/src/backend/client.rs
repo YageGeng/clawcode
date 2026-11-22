@@ -11,11 +11,14 @@ use agent_client_protocol::{
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use protocol::{
-    AcpExtensionMethod, ContentHash, PendingMessages, QueueId, RequestContent,
-    SessionRuntimeSnapshot, TrajectoryCursor, TrajectoryPage, WorkspaceDiff,
-    WorkspaceDiffParameters, WorkspaceDiffScope, WorkspaceDirListing,
-    WorkspaceFileContent, WorkspaceGitStatus, WorkspaceListDirParameters,
-    WorkspacePathParameters, WorkspaceRootParameters,
+    AcpExtensionMethod, CheckpointDiffParameters, CheckpointList,
+    CheckpointsParameters, ContentHash, EntryId, PendingMessages, QueueId,
+    RequestContent, RunId, SessionRuntimeSnapshot, SessionTreeSnapshot,
+    TrajectoryCursor, TrajectoryPage, WorkspaceChange, WorkspaceChanges,
+    WorkspaceChangesParameters, WorkspaceDiff, WorkspaceDiffParameters,
+    WorkspaceDiffScope, WorkspaceDirListing, WorkspaceFileContent,
+    WorkspaceGitStatus, WorkspaceListDirParameters, WorkspacePathParameters,
+    WorkspaceRootParameters,
 };
 
 use super::requests::{PendingRequests, Waiting};
@@ -429,20 +432,148 @@ impl AcpClient {
             .await
     }
 
-    /// Reads a diff of one workspace file, or of every changed file when `path` is `None`.
+    /// Reads the diff of one changed workspace file: by its raw name when
+    /// that is not UTF-8, and with its old path when it was renamed.
     pub async fn git_diff(
         &self,
         root: &Path,
-        path: Option<&str>,
+        change: &WorkspaceChange,
         scope: WorkspaceDiffScope,
     ) -> Result<WorkspaceDiff, BackendError> {
-        let params = WorkspaceDiffParameters {
-            root: root.to_path_buf(),
-            path: path.map(str::to_owned),
-            scope,
-        };
+        let params = WorkspaceDiffParameters::builder()
+            .root(root.to_path_buf())
+            .path(change.path.clone())
+            .original_path(change.original_path.clone())
+            .path_bytes(change.path_bytes.clone())
+            .scope(scope)
+            .build();
         self.typed(AcpExtensionMethod::WorkspaceGitDiff, &params)
             .await
+    }
+
+    /// Lists a workspace's changed files of one scope with line counts.
+    pub async fn git_changes(
+        &self,
+        root: &Path,
+        scope: WorkspaceDiffScope,
+    ) -> Result<WorkspaceChanges, BackendError> {
+        let params = WorkspaceChangesParameters {
+            root: root.to_path_buf(),
+            scope,
+        };
+        self.typed(AcpExtensionMethod::WorkspaceGitChanges, &params)
+            .await
+    }
+
+    /// Lists the session's runs that changed `root`, its working directory.
+    pub async fn checkpoints(
+        &self,
+        root: &Path,
+        id: &SessionId,
+    ) -> Result<CheckpointList, BackendError> {
+        let params = CheckpointsParameters {
+            root: root.to_path_buf(),
+            session_id: protocol::SessionId::try_from(id.to_string())
+                .map_err(|error| BackendError::Request(error.to_string()))?,
+        };
+        self.typed(AcpExtensionMethod::Checkpoints, &params).await
+    }
+
+    /// Reads one changed file's change within one run of the session, by
+    /// its raw name and old path like [`Self::git_diff`].
+    pub async fn checkpoint_diff(
+        &self,
+        root: &Path,
+        id: &SessionId,
+        run: &RunId,
+        change: &WorkspaceChange,
+    ) -> Result<WorkspaceDiff, BackendError> {
+        let params = CheckpointDiffParameters::builder()
+            .root(root.to_path_buf())
+            .session_id(
+                protocol::SessionId::try_from(id.to_string()).map_err(
+                    |error| BackendError::Request(error.to_string()),
+                )?,
+            )
+            .run_id(run.clone())
+            .path(change.path.clone())
+            .original_path(change.original_path.clone())
+            .path_bytes(change.path_bytes.clone())
+            .build();
+        self.typed(AcpExtensionMethod::CheckpointDiff, &params)
+            .await
+    }
+
+    /// Reads the session's whole persisted tree and its active leaf.
+    pub async fn tree(
+        &self,
+        id: &SessionId,
+    ) -> Result<SessionTreeSnapshot, BackendError> {
+        let params = serde_json::json!({ "sessionId": id });
+        self.typed(AcpExtensionMethod::Tree, &params).await
+    }
+
+    /// The tree entry of message `message_id` written by `author`; an error
+    /// when the session has no record of it.
+    pub async fn message_entry(
+        &self,
+        id: &SessionId,
+        message_id: &str,
+        author: crate::branch::MessageAuthor,
+    ) -> Result<protocol::SessionTreeEntry, BackendError> {
+        use crate::branch::MessageEntries as _;
+
+        self.tree(id)
+            .await?
+            .message_entry(message_id, author)
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::Request(
+                    rust_i18n::t!("Message.entry_missing").into_owned(),
+                )
+            })
+    }
+
+    /// Moves the session's active branch to `entry`, the root when `None`,
+    /// without summarizing the branch it leaves. A user message moves it to
+    /// that message's parent, so the message can be asked again.
+    pub async fn branch(
+        &self,
+        id: &SessionId,
+        entry: Option<&EntryId>,
+    ) -> Result<(), BackendError> {
+        let params = serde_json::json!({
+            "sessionId": id,
+            "entryId": entry,
+            "summarize": false,
+        });
+        let _: serde_json::Value =
+            self.typed(AcpExtensionMethod::Branch, &params).await?;
+        Ok(())
+    }
+
+    /// Forks the session's history up to `entry` into a new session in
+    /// `cwd`; returns the new session's id.
+    pub async fn fork(
+        &self,
+        id: &SessionId,
+        entry: &EntryId,
+        cwd: &Path,
+    ) -> Result<SessionId, BackendError> {
+        /// The fork's answer: only the new session's id.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Forked {
+            session_id: SessionId,
+        }
+        let params = serde_json::json!({
+            "sessionId": id,
+            "entryId": entry,
+            "cwd": cwd,
+        });
+        let forked: Forked =
+            self.typed(AcpExtensionMethod::Fork, &params).await?;
+        Ok(forked.session_id)
     }
 
     /// Reads one page of the session's active-branch trajectory.
@@ -543,6 +674,15 @@ impl AcpClient {
             ))
             .await?
             .config_options)
+    }
+
+    /// The config options a new session starts with, for a draft to offer
+    /// before its session exists.
+    pub async fn default_config(
+        &self,
+    ) -> Result<Vec<wire::SessionConfigOption>, BackendError> {
+        self.typed(AcpExtensionMethod::DefaultConfig, &serde_json::json!({}))
+            .await
     }
 
     /// Compacts the session's context now.

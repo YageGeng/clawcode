@@ -20,9 +20,6 @@ Viewer:
   too_large:
     en: "File too large to preview (%{size} MiB)"
     zh-CN: "文件过大，无法预览（%{size} MiB）"
-  diff_truncated:
-    en: The diff is too large; only its first 2 MiB are shown.
-    zh-CN: 差异过大，只显示前 2 MiB。
 Files:
   loading:
     en: Loading…
@@ -70,6 +67,30 @@ Changes:
   git_missing:
     en: git was not found
     zh-CN: 未找到 git
+  loading_file:
+    en: Loading…
+    zh-CN: 加载中…
+  file_too_large:
+    en: This file is too large to show in full; the counts include every change.
+    zh-CN: 文件过大，无法完整显示；行数包含全部改动
+  binary:
+    en: Binary file
+    zh-CN: 二进制文件
+  too_many_files:
+    en: Only the first 5000 files are shown
+    zh-CN: 只显示前 5000 个文件
+  turns:
+    en: Turns
+    zh-CN: 轮次
+  latest_turn:
+    en: Latest turn
+    zh-CN: 最近一轮
+  turn:
+    en: "Turn %{n} · %{prompt}"
+    zh-CN: "第 %{n} 轮 · %{prompt}"
+  no_turns:
+    en: No turn with recorded changes yet
+    zh-CN: 还没有记录到改动的轮次
 Sidebar:
   toggle:
     en: Toggle sidebar
@@ -293,6 +314,9 @@ Elapsed:
     en: "%{h}h %{m}m"
     zh-CN: "%{h} 小时 %{m} 分"
 Transcript:
+  turn_changed:
+    en: "Files changed: %{count}"
+    zh-CN: "改动了 %{count} 个文件"
   mail_task:
     en: "Task"
     zh-CN: "任务"
@@ -402,7 +426,26 @@ Tool:
   show_less:
     en: Show less
     zh-CN: 收起
+Message:
+  branch:
+    en: Edit and ask again
+    zh-CN: 编辑并重新提问
+  fork:
+    en: Fork into a new session
+    zh-CN: Fork 为新会话
+  busy:
+    en: Unavailable while the agent is running
+    zh-CN: Agent 运行中，暂不可用
+  entry_missing:
+    en: This message has no record in the session.
+    zh-CN: 找不到这条消息的记录
 Composer:
+  editing:
+    en: Editing an earlier message
+    zh-CN: 正在编辑之前的消息
+  cancel_edit:
+    en: Cancel
+    zh-CN: 取消
   placeholder:
     en: Continue the task
     zh-CN: 继续描述任务

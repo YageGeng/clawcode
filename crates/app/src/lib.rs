@@ -260,6 +260,10 @@ impl ApplicationFactory {
             .provider_retry_delay_limit_ms(
                 snapshot.retry.provider.max_retry_delay_ms,
             )
+            // Per-run workspace snapshots back the desktop's per-turn changes.
+            .checkpoints(Some(Arc::new(
+                acp::workspace::checkpoint::GitCheckpoints::default(),
+            )))
             .exec(snapshot.tools.enable_shell.then(|| {
                 Arc::new(tools::exec::ExecSettings {
                     config: snapshot.tools.exec.clone(),

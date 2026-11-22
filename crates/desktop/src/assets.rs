@@ -43,7 +43,8 @@ gpui_kit::assets::icon_assets!(
         ScrollText,
         User,
         Send,
-        Puzzle
+        Puzzle,
+        GitFork
     ]
 );
 

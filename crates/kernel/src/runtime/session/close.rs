@@ -188,8 +188,8 @@ impl Kernel {
                     Ok(()) | Err(KernelError::SessionNotFound(_)) => {}
                     Err(error) => return Err(error),
                 }
-                if let Some(cwd) = cwd {
-                    for child in self.catalog.children(session_id, &cwd).await? {
+                if let Some(cwd) = &cwd {
+                    for child in self.catalog.children(session_id, cwd).await? {
                         tracing::info!("started cascading deletion of session {} owned by {}", child.id, session_id);
                         self.perform_delete(&child.id).await?;
                         tracing::info!("completed cascading deletion of session {} owned by {}", child.id, session_id);
@@ -197,6 +197,16 @@ impl Kernel {
                 }
                 self.store_factory.delete(session_id)?;
                 self.catalog.record_deleted(session_id).await;
+                // Snapshots are a view of history; failing to drop them only leaves refs behind.
+                if let (Some(checkpoints), Some(cwd)) = (&self.checkpoints, &cwd)
+                    && let Err(error) = checkpoints.remove(cwd, session_id).await
+                {
+                    tracing::warn!(
+                        "failed to remove snapshots of deleted session {}: {}",
+                        session_id,
+                        error
+                    );
+                }
                 // A deleted child leaves its live owner's roster at once.
                 if let Some(edge) = ownership
                     && let Ok(owner) = self.session(&edge.session_id)

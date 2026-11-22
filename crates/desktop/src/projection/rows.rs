@@ -380,6 +380,24 @@ pub enum TranscriptRow {
     Mail(MailRow),
 }
 
+impl MessageRow {
+    /// Whether this row starts a turn: the user's own message, not a slash
+    /// command, a command run directly, or a branch summary.
+    pub fn starts_turn(&self) -> bool {
+        self.role == Role::User
+            && self.command.is_none()
+            && self.origin == MessageOrigin::Prompt
+    }
+
+    /// Whether this row is a model reply rather than a command's output or a
+    /// branch summary.
+    pub fn is_reply(&self) -> bool {
+        self.role == Role::Assistant
+            && self.command.is_none()
+            && self.origin != MessageOrigin::BranchSummary
+    }
+}
+
 impl TranscriptRow {
     /// Stable identity of the row, independent of its position.
     pub fn key(&self) -> RowKey {

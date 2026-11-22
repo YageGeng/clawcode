@@ -184,6 +184,14 @@ pub enum AcpExtensionMethod {
     WorkspaceGitStatus,
     /// Reads one workspace file's diff against the last commit.
     WorkspaceGitDiff,
+    /// Lists a workspace's changed files of one scope with line counts.
+    WorkspaceGitChanges,
+    /// Lists a Session's runs that changed its workspace.
+    Checkpoints,
+    /// Reads one file's change within one run of a Session.
+    CheckpointDiff,
+    /// Lists the config options a new Session starts with, before one exists.
+    DefaultConfig,
     /// Reads one page of a Session's active-branch trajectory.
     Trajectory,
     /// Reads one request content (system prompt or tools) by hash.
@@ -234,6 +242,10 @@ impl AcpExtensionMethod {
             Self::WorkspaceReadFile => "_clawcode/workspace/read_file",
             Self::WorkspaceGitStatus => "_clawcode/workspace/git_status",
             Self::WorkspaceGitDiff => "_clawcode/workspace/git_diff",
+            Self::WorkspaceGitChanges => "_clawcode/workspace/git_changes",
+            Self::Checkpoints => "_clawcode/session/checkpoints",
+            Self::CheckpointDiff => "_clawcode/session/checkpoint_diff",
+            Self::DefaultConfig => "_clawcode/session/default_config",
             Self::Trajectory => "_clawcode/session/trajectory",
             Self::TrajectoryContent => "_clawcode/session/trajectory/content",
         }
@@ -258,6 +270,10 @@ impl AcpExtensionMethod {
             | Self::WorkspaceReadFile
             | Self::WorkspaceGitStatus
             | Self::WorkspaceGitDiff
+            | Self::WorkspaceGitChanges
+            | Self::Checkpoints
+            | Self::CheckpointDiff
+            | Self::DefaultConfig
             | Self::Trajectory
             | Self::TrajectoryContent => true,
             Self::Navigate
@@ -309,6 +325,10 @@ impl AcpExtensionMethod {
             Self::WorkspaceReadFile,
             Self::WorkspaceGitStatus,
             Self::WorkspaceGitDiff,
+            Self::WorkspaceGitChanges,
+            Self::Checkpoints,
+            Self::CheckpointDiff,
+            Self::DefaultConfig,
             Self::Trajectory,
             Self::TrajectoryContent,
         ]

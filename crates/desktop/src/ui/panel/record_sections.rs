@@ -4,7 +4,6 @@
 use gpui_kit::assets::IconName as LucideIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
-use gpui_kit::component::diff::{Diff, DiffFile, DiffState};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::text::TextView;
@@ -12,7 +11,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Theme,
 };
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, InteractiveElement as _, IntoElement,
+    AnyElement, Context, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _,
     Styled as _, Window, div, prelude::FluentBuilder as _, rems,
 };
@@ -442,18 +441,35 @@ impl RecordView {
             .map(|call| {
                 let id = format!("tool:{call}");
                 let target = id.clone();
-                Button::new(SharedString::from(format!("record-call:{call}")))
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(LucideIcon::Wrench).text_color(theme.yellow),
+                let summary = trajectory
+                    .model()
+                    .record(&id)
+                    .map(|candidate| candidate.summary())
+                    .unwrap_or_else(|| call.to_string());
+                // A row rather than a Button: a Button's label cannot
+                // shrink, so a long summary would overflow the panel
+                // instead of ending in an ellipsis.
+                div()
+                    .id(SharedString::from(format!("record-call:{call}")))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .w_full()
+                    .px_1()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.accent))
+                    .child(
+                        Icon::new(LucideIcon::Wrench)
+                            .xsmall()
+                            .text_color(theme.yellow),
                     )
-                    .label(
-                        trajectory
-                            .model()
-                            .record(&id)
-                            .map(|candidate| candidate.summary())
-                            .unwrap_or_else(|| call.to_string()),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(Label::new(summary).text_sm()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.trajectory.update(cx, |trajectory, cx| {
@@ -687,9 +703,13 @@ impl RecordView {
                 ),
             (PromptMode::Diff, ContentState::Ready(content)) => {
                 match previous.map(|previous| self.content(&previous, cx)) {
-                    Some(ContentState::Ready(old)) => {
-                        self.render_diff(&old, &content, cx)
-                    }
+                    Some(ContentState::Ready(old)) => self.render_code(
+                        record,
+                        "diff",
+                        || prompt_diff(&old, &content),
+                        window,
+                        cx,
+                    ),
                     Some(state) => self.render_content_state(state, cx),
                     None => {
                         self.render_content_state(ContentState::Missing, cx)
@@ -867,8 +887,8 @@ impl RecordView {
     ) -> AnyElement {
         // A record changes only when its tool result arrives, which ends it.
         let key = format!(
-            "{}:{:?}:{:?}",
-            record.id, self.section, record.ended_at_ms
+            "{}:{:?}:{:?}:{}",
+            record.id, self.section, record.ended_at_ms, language
         );
         let (raw, markdown) = match &self.code {
             Some((shown, raw, markdown)) if *shown == key => {
@@ -896,42 +916,16 @@ impl RecordView {
             .child(TextView::markdown("record-code", markdown).selectable(true))
             .into_any_element()
     }
+}
 
-    /// The unified diff from `old` to `new`, drawn by gpui-kit's diff view.
-    fn render_diff(
-        &mut self,
-        old: &RequestContent,
-        new: &RequestContent,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let key = format!("{}:{}", old.hash, new.hash);
-        let state = match &self.diff {
-            Some((shown, state)) if *shown == key => Some(state.clone()),
-            _ => {
-                let patch =
-                    similar::TextDiff::from_lines(&old.content, &new.content)
-                        .unified_diff()
-                        .context_radius(3)
-                        .header("a/system_prompt", "b/system_prompt")
-                        .to_string();
-                match DiffFile::parse(&patch) {
-                    Ok(files) if !files.is_empty() => {
-                        let state = cx.new(|cx| DiffState::new(files, cx));
-                        self.diff = Some((key, state.clone()));
-                        Some(state)
-                    }
-                    _ => None,
-                }
-            }
-        };
-        match state {
-            Some(state) => div()
-                .h(rems(30.))
-                .child(Diff::new(&state).line_number(true))
-                .into_any_element(),
-            None => self.render_content_state(ContentState::Missing, cx),
-        }
-    }
+/// The unified diff from the `old` prompt to the `new` one, with three
+/// lines of context around each change.
+fn prompt_diff(old: &RequestContent, new: &RequestContent) -> String {
+    similar::TextDiff::from_lines(&old.content, &new.content)
+        .unified_diff()
+        .context_radius(3)
+        .header("a/system_prompt", "b/system_prompt")
+        .to_string()
 }
 
 /// `text` as a Markdown code block in `language`, fenced with more

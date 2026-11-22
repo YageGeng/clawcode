@@ -235,6 +235,17 @@ impl Session {
 }
 
 impl Kernel {
+    /// The model, thinking level, and mode a new Session starts with, and
+    /// the models it may pick, as a client drafting one shows them.
+    pub fn default_session_settings(&self) -> SessionSettings {
+        SessionSettings {
+            model: self.login_catalog.active().profile().clone(),
+            thinking_level: ThinkingLevel::default(),
+            models: self.login_catalog.profiles(),
+            mode: SessionMode::default(),
+        }
+    }
+
     /// Returns a Session's model, thinking level, and selectable models.
     pub fn session_settings(
         &self,

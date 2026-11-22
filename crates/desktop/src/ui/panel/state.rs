@@ -251,7 +251,9 @@ impl AppView {
             .get(&owner.key())
             .and_then(|runtime| runtime.views.get(&PanelTabKey::Changes))
         {
-            changes.update(cx, |changes, cx| changes.set_scope(scope, cx));
+            changes.update(cx, |changes, cx| {
+                changes.set_scope(super::changes::ChangesScope::Git(scope), cx)
+            });
         }
     }
 }

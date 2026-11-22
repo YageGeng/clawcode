@@ -11,8 +11,10 @@ use protocol::{
     AcpExtensionMethod, AcpForkParameters, AcpNavigateParameters,
     AcpPendingMessageRemoveParameters, AcpQuestionDismissParameters,
     AcpSessionParameters, AcpSkillParameters, AcpUserBashParameters,
+    CheckpointDiffParameters, CheckpointsParameters,
     McpSessionRevisionNotification, ProductIdentity,
-    TrajectoryContentParameters, TrajectoryParameters, WorkspaceDiffParameters,
+    TrajectoryContentParameters, TrajectoryParameters,
+    WorkspaceChangesParameters, WorkspaceDiffParameters,
     WorkspaceListDirParameters, WorkspacePathParameters,
     WorkspaceRootParameters,
 };
@@ -602,9 +604,60 @@ impl AcpExtensionDispatcher {
                     serde_json::from_value(request.parameters)
                         .map_err(invalid_parameters)?;
                 let diff = WorkspaceRoot::try_from(input.root.as_path())?
-                    .git_diff(input.path.as_deref(), input.scope)
+                    .git_diff(
+                        &input.path,
+                        input.original_path.as_deref(),
+                        input.scope,
+                    )
                     .await?;
                 serde_json::to_value(diff).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::DefaultConfig => {
+                let settings = self.kernel.default_session_settings();
+                serde_json::to_value(Vec::<
+                    agent_client_protocol::v2::schema::SessionConfigOption,
+                >::from(
+                    crate::config::ConfigOptionsOf(&settings),
+                ))
+                .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::Checkpoints => {
+                let input: CheckpointsParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let list = WorkspaceRoot::try_from(input.root.as_path())?
+                    .checkpoints(&input.session_id)
+                    .await?;
+                serde_json::to_value(list).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::CheckpointDiff => {
+                let input: CheckpointDiffParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let diff = WorkspaceRoot::try_from(input.root.as_path())?
+                    .checkpoint_diff(
+                        &input.session_id,
+                        &input.run_id,
+                        input.file_path(),
+                        input.original_path.as_deref(),
+                    )
+                    .await?;
+                serde_json::to_value(diff).map_err(
+                    agent_client_protocol::Error::into_internal_error,
+                )?
+            }
+            AcpExtensionMethod::WorkspaceGitChanges => {
+                let input: WorkspaceChangesParameters =
+                    serde_json::from_value(request.parameters)
+                        .map_err(invalid_parameters)?;
+                let changes = WorkspaceRoot::try_from(input.root.as_path())?
+                    .git_changes(input.scope)
+                    .await?;
+                serde_json::to_value(changes).map_err(
                     agent_client_protocol::Error::into_internal_error,
                 )?
             }

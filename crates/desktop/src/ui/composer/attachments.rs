@@ -153,3 +153,32 @@ impl Outgoing {
         blocks
     }
 }
+
+impl From<&crate::projection::MessageRow> for Outgoing {
+    /// The message as the user sent it, for editing it again: its text and
+    /// its images, decoded; an image that no longer decodes or fits is left out.
+    fn from(row: &crate::projection::MessageRow) -> Self {
+        use base64::Engine as _;
+
+        let mut images = AttachmentSet::default();
+        for (index, image) in row.images.iter().enumerate() {
+            let Ok(bytes) =
+                base64::engine::general_purpose::STANDARD.decode(&image.data)
+            else {
+                continue;
+            };
+            let extension = match image.mime_type.as_str() {
+                "image/jpeg" => "jpg",
+                "image/gif" => "gif",
+                "image/webp" => "webp",
+                _ => "png",
+            };
+            let _ =
+                images.add(format!("image-{}.{extension}", index + 1), bytes);
+        }
+        Self {
+            text: row.text.clone(),
+            images,
+        }
+    }
+}

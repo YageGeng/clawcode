@@ -20,7 +20,7 @@ use gpui_kit::{
 use crate::backend::BackendError;
 use crate::projection::{ConfigOption, ContextUsage};
 use crate::ui::format::TokenCount;
-use crate::ui::session::SessionView;
+use crate::ui::session::{SessionTarget, SessionView};
 
 /// Height of a composer chip: the M1b queue chip's height (plan Global Constraints).
 const CHIP_HEIGHT: f32 = 1.625;
@@ -44,14 +44,21 @@ fn chip_tone(theme: &Theme, disabled: bool, selected: bool) -> Hsla {
 }
 
 impl SessionView {
-    /// Options of the attached session; empty for drafts and before they arrive.
+    /// Options of the attached session, or for a draft, the options a new
+    /// session starts with, showing the choices made in the draft.
     fn option(&self, id: &str, cx: &Context<'_, Self>) -> Option<ConfigOption> {
-        self.handle()?
-            .read(cx)
-            .projection()
-            .controls()
-            .config(id)
-            .cloned()
+        let Some(handle) = self.handle() else {
+            let mut option = self
+                .draft_config
+                .iter()
+                .find(|option| option.id == id)
+                .cloned()?;
+            if let Some(choice) = self.draft_choices.get(id) {
+                option.current.clone_from(choice);
+            }
+            return Some(option);
+        };
+        handle.read(cx).projection().controls().config(id).cloned()
     }
 
     /// Changes one configuration option; the agent's answer replaces the list.
@@ -65,6 +72,12 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // A draft has no session yet: the choice waits until it is created.
+        if matches!(self.target, SessionTarget::Draft { .. }) {
+            self.draft_choices.insert(config_id, value);
+            cx.notify();
+            return;
+        }
         let (Some(handle), Some(client)) =
             (self.handle().cloned(), self.client.clone())
         else {
@@ -145,9 +158,12 @@ impl SessionView {
         &self,
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
-        let context = self.handle().and_then(|handle| {
-            handle.read(cx).projection().controls().context().cloned()
-        });
+        // A draft has no context yet, so it shows no ring.
+        let Some(handle) = self.handle() else {
+            return vec![self.render_model(cx)];
+        };
+        let context =
+            handle.read(cx).projection().controls().context().cloned();
         vec![self.render_context(context, cx), self.render_model(cx)]
     }
 

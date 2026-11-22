@@ -4,13 +4,14 @@
 
 use std::path::PathBuf;
 
+use gpui_kit::assets::IconName as LucideIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::label::Label;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Side, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Side, Sizable as _,
     WindowExt as _, h_flex,
 };
 use gpui_kit::{
@@ -29,7 +30,7 @@ use crate::projection::{CompactionStatus, RetryState, RunState};
 use crate::ui::session::{SessionTarget, SessionView, SessionViewEvent};
 
 impl SessionView {
-    /// Reacts to the composer: Enter sends, Escape stops.
+    /// Reacts to the composer: Enter sends; Escape cancels an edit, else stops.
     pub(in crate::ui) fn on_composer_event(
         &mut self,
         _: &Entity<Composer>,
@@ -39,7 +40,20 @@ impl SessionView {
     ) {
         match event {
             ComposerEvent::Submit => self.submit(window, cx),
-            ComposerEvent::Stop => self.stop(cx),
+            ComposerEvent::Stop => {
+                let editing = self.composer.read(cx).editing().is_some();
+                // An edit on its way can no longer be cancelled.
+                if self.branching {
+                    return;
+                }
+                if editing {
+                    self.composer.update(cx, |composer, cx| {
+                        composer.cancel_edit(window, cx)
+                    });
+                } else {
+                    self.stop(cx);
+                }
+            }
         }
     }
 
@@ -63,12 +77,22 @@ impl SessionView {
         if self.composer.read(cx).reading() {
             return;
         }
+        let editing = self.composer.read(cx).editing().cloned();
+        // An edit branches the session, which a running turn or another
+        // edit on its way would race.
+        if self.branching || (editing.is_some() && self.running(cx)) {
+            return;
+        }
         let Some(message) = self
             .composer
             .update(cx, |composer, cx| composer.take_message(window, cx))
         else {
             return;
         };
+        if let Some(edited) = editing {
+            self.send_edit(edited, message, window, cx);
+            return;
+        }
         match &self.target {
             SessionTarget::Draft { .. } => {
                 self.creating = true;
@@ -90,9 +114,24 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.send_keeping(message, None, window, cx);
+    }
+
+    /// Sends `message` like [`Self::send`]; when it comes back, `kept`, the
+    /// draft an edit set aside, returns under it, so neither is lost.
+    pub(in crate::ui) fn send_keeping(
+        &mut self,
+        message: Outgoing,
+        kept: Option<Outgoing>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let (Some(handle), Some(client)) = (self.handle(), self.client.clone())
         else {
             self.composer.update(cx, |composer, cx| {
+                if let Some(kept) = kept {
+                    composer.restore(kept, window, cx);
+                }
                 composer.restore(message, window, cx)
             });
             return;
@@ -122,6 +161,11 @@ impl SessionView {
                 }
             };
             let _ = composer.update_in(cx, |composer, window, cx| {
+                // Restored text goes above what is there: the message ends
+                // up first, the kept draft under it.
+                if let Some(kept) = kept {
+                    composer.restore(kept, window, cx);
+                }
                 composer.restore(message, window, cx);
                 if failed {
                     window.push_notification(
@@ -247,6 +291,9 @@ impl SessionView {
             .when_some(self.render_questions(cx), |this, panel| {
                 this.child(panel)
             })
+            .when_some(self.render_edit_banner(cx), |this, banner| {
+                this.child(banner)
+            })
             .child(self.composer.clone())
             .child(self.render_bar(matches!(draft_workspace, Some(None)), cx));
         let composer = self.composer.downgrade();
@@ -286,6 +333,58 @@ impl SessionView {
             })
             .child(card)
             .into_any_element()
+    }
+
+    /// The line above the input while an earlier question is being edited,
+    /// with a button that cancels the edit.
+    fn render_edit_banner(
+        &self,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<AnyElement> {
+        self.composer.read(cx).editing()?;
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .id("composer-editing")
+                .test_support()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    Icon::new(LucideIcon::Pencil)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    Label::new(rust_i18n::t!("Composer.editing").into_owned())
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .flex_1(),
+                )
+                .child(
+                    Button::new("composer-cancel-edit")
+                        .ghost()
+                        .xsmall()
+                        .label(
+                            rust_i18n::t!("Composer.cancel_edit").into_owned(),
+                        )
+                        // An edit on its way can no longer be cancelled.
+                        .disabled(self.branching)
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| {
+                                if this.branching {
+                                    return;
+                                }
+                                this.composer.update(cx, |composer, cx| {
+                                    composer.cancel_edit(window, cx)
+                                });
+                            },
+                        )),
+                )
+                .into_any_element(),
+        )
     }
 
     /// One line above the composer for a retry or compaction in progress.

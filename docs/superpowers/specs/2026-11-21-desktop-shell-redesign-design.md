@@ -280,7 +280,7 @@ M3b 参照 T3 Code（`~/Documents/WorkSpace/t3code`，`apps/web` 的 `ThreadDeta
 | 15 里程碑 | 插入 M3b；M4 调整如下 |
 
 **M4 的调整：**
-- 会话树做成右侧面板的一种标签。
+- 取消会话树：浏览历史用 M4a 轨迹视图。消息操作（复制、Branch、Fork）、「改动」标签重做和按轮次改动见 [Desktop M4b 设计](./2026-11-22-desktop-m4b-design.md)。
 - Agents 并入详情卡的「会话关系」组：M3b 已经做了列表，M4 补邮件和后台状态。
 - 「上下文」中的计划、待办、后台终端做成右侧面板的标签。
 - Skills 和 MCP 做成右侧面板的标签。

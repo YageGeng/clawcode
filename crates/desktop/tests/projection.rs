@@ -1099,3 +1099,157 @@ fn a_settings_change_reaches_the_history() {
     );
     assert!(change.history);
 }
+
+/// Applies a user message, an assistant message, or a finished tool, in order.
+fn transcript(steps: &[(&str, &str)], state: &str) -> SessionProjection {
+    let mut projection = SessionProjection::default();
+    for (sequence, (kind, id)) in steps.iter().enumerate() {
+        let sequence = sequence as u64 + 1;
+        let value = match *kind {
+            "user" => json!({
+                "sessionUpdate": "user_message", "messageId": id,
+                "content": [{ "type": "text", "text": format!("ask {id}\nmore") }],
+                "_meta": meta(sequence)
+            }),
+            "assistant" => json!({
+                "sessionUpdate": "agent_message", "messageId": id,
+                "content": [{ "type": "text", "text": "reply" }],
+                "_meta": meta(sequence)
+            }),
+            "slash" => json!({
+                "sessionUpdate": "user_message", "messageId": id,
+                "content": [{ "type": "text", "text": "/compact" }],
+                "_meta": { "clawcode": {
+                    "turnId": "t1", "timestampMs": "1000", "sequence": sequence,
+                    "slashCommand": { "name": "compact", "source": "builtin", "messageKind": "invocation" }
+                } }
+            }),
+            _ => json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": id,
+                "title": "Read", "kind": "read", "status": "completed",
+                "_meta": meta(sequence)
+            }),
+        };
+        apply(&mut projection, value);
+    }
+    apply(
+        &mut projection,
+        json!({ "sessionUpdate": "state_update", "state": state }),
+    );
+    projection
+}
+
+/// The message ids of a set, sorted, for comparing.
+fn ids(points: HashSet<wire::MessageId>) -> Vec<String> {
+    let mut ids: Vec<String> = points.iter().map(ToString::to_string).collect();
+    ids.sort();
+    ids
+}
+
+/// Each finished turn forks from its last reply, not from a reply a tool follows.
+#[test]
+fn fork_points_are_the_last_reply_of_each_finished_turn() {
+    let projection = transcript(
+        &[
+            ("user", "u1"),
+            ("assistant", "a1"),
+            ("tool", "c1"),
+            ("assistant", "a2"),
+            ("user", "u2"),
+            ("assistant", "b1"),
+        ],
+        "idle",
+    );
+
+    assert_eq!(ids(projection.fork_points()), vec!["a2", "b1"]);
+}
+
+/// The running turn offers no fork point yet.
+#[test]
+fn fork_points_skip_the_running_turn() {
+    let projection = transcript(
+        &[
+            ("user", "u1"),
+            ("assistant", "a1"),
+            ("tool", "c1"),
+            ("assistant", "a2"),
+            ("user", "u2"),
+            ("assistant", "b1"),
+        ],
+        "running",
+    );
+
+    assert_eq!(ids(projection.fork_points()), vec!["a2"]);
+}
+
+/// A turn that ended on a tool, as a cancelled one may, has no fork point.
+#[test]
+fn fork_points_skip_a_turn_ending_in_a_tool() {
+    let projection = transcript(
+        &[("user", "u1"), ("assistant", "a1"), ("tool", "c1")],
+        "idle",
+    );
+
+    assert!(projection.fork_points().is_empty());
+}
+
+/// A slash command does not start a turn.
+#[test]
+fn fork_points_ignore_command_rows_as_boundaries() {
+    let projection = transcript(
+        &[
+            ("user", "u1"),
+            ("assistant", "a1"),
+            ("slash", "s1"),
+            ("assistant", "a2"),
+        ],
+        "idle",
+    );
+
+    assert_eq!(ids(projection.fork_points()), vec!["a2"]);
+}
+
+/// Runs show newest first when their reply is in the transcript, numbered
+/// by turn and labelled with their question's first line.
+#[test]
+fn shown_runs_drop_unknown_anchors_and_number_by_turn() {
+    let projection = transcript(
+        &[
+            ("user", "u1"),
+            ("assistant", "a1"),
+            ("tool", "c1"),
+            ("assistant", "a2"),
+            ("user", "u2"),
+            ("assistant", "b1"),
+        ],
+        "idle",
+    );
+    let run = |run: &str, anchor: &str| {
+        std::sync::Arc::new(
+            protocol::RunCheckpoint::builder()
+                .run_id(protocol::RunId::try_from(run).expect("run"))
+                .anchor_message_id(Some(
+                    protocol::MessageId::try_from(anchor).expect("message"),
+                ))
+                .started_at_ms(1)
+                .changes(protocol::WorkspaceChanges::default())
+                .build(),
+        )
+    };
+    let runs = vec![run("r1", "a2"), run("r2", "b1"), run("r3", "gone")];
+
+    let shown: Vec<(String, usize, String)> = projection
+        .shown_runs(&runs)
+        .into_iter()
+        .map(|shown| {
+            (shown.run.run_id.to_string(), shown.ordinal, shown.prompt)
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("r2".to_owned(), 2, "ask u2".to_owned()),
+            ("r1".to_owned(), 1, "ask u1".to_owned()),
+        ]
+    );
+}

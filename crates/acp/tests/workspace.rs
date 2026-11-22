@@ -5,8 +5,9 @@ use std::process::Command;
 
 use acp::workspace::{WorkspaceError, WorkspaceRoot};
 use protocol::{
-    WORKSPACE_ENTRY_LIMIT, WorkspaceDiff, WorkspaceDiffScope,
-    WorkspaceDirListing, WorkspaceFileContent, WorkspaceGitStatus,
+    WORKSPACE_ENTRY_LIMIT, WorkspaceChangeKind, WorkspaceChanges,
+    WorkspaceDiff, WorkspaceDiffScope, WorkspaceDirListing,
+    WorkspaceFileContent, WorkspaceGitStatus,
 };
 
 /// File names of a listing, in order.
@@ -205,7 +206,7 @@ async fn diff_covers_tracked_untracked_and_binary_files() {
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
     let WorkspaceDiff::Patch { patch, truncated } = root
-        .git_diff(Some("a.rs"), WorkspaceDiffScope::Base)
+        .git_diff("a.rs", None, WorkspaceDiffScope::Base)
         .await
         .expect("diff")
     else {
@@ -213,7 +214,7 @@ async fn diff_covers_tracked_untracked_and_binary_files() {
     };
     assert!(patch.contains("+changed") && !truncated);
     let WorkspaceDiff::Patch { patch, .. } = root
-        .git_diff(Some("u.rs"), WorkspaceDiffScope::Base)
+        .git_diff("u.rs", None, WorkspaceDiffScope::Base)
         .await
         .expect("diff")
     else {
@@ -221,7 +222,7 @@ async fn diff_covers_tracked_untracked_and_binary_files() {
     };
     assert!(patch.contains("+untracked"));
     assert_eq!(
-        root.git_diff(Some("b.bin"), WorkspaceDiffScope::Base)
+        root.git_diff("b.bin", None, WorkspaceDiffScope::Base)
             .await
             .expect("diff"),
         WorkspaceDiff::Binary
@@ -235,7 +236,7 @@ async fn diff_of_a_deleted_file_and_an_unchanged_file() {
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
     let WorkspaceDiff::Patch { patch, .. } = root
-        .git_diff(Some("a.rs"), WorkspaceDiffScope::Base)
+        .git_diff("a.rs", None, WorkspaceDiffScope::Base)
         .await
         .expect("diff")
     else {
@@ -244,13 +245,13 @@ async fn diff_of_a_deleted_file_and_an_unchanged_file() {
     assert!(patch.contains("-original"));
     git(repo.path(), &["checkout", "--", "a.rs"]);
     assert_eq!(
-        root.git_diff(Some("a.rs"), WorkspaceDiffScope::Base)
+        root.git_diff("a.rs", None, WorkspaceDiffScope::Base)
             .await
             .expect("diff"),
         WorkspaceDiff::Unchanged
     );
     assert!(matches!(
-        root.git_diff(Some("../a.rs"), WorkspaceDiffScope::Base)
+        root.git_diff("../a.rs", None, WorkspaceDiffScope::Base)
             .await,
         Err(WorkspaceError::OutsideRoot)
     ));
@@ -264,7 +265,7 @@ async fn diff_in_a_repository_without_commits() {
     let root = WorkspaceRoot::try_from(dir.path()).expect("root");
 
     let WorkspaceDiff::Patch { patch, .. } = root
-        .git_diff(Some("first.rs"), WorkspaceDiffScope::Base)
+        .git_diff("first.rs", None, WorkspaceDiffScope::Base)
         .await
         .expect("diff")
     else {
@@ -292,7 +293,7 @@ async fn status_of_a_workspace_inside_a_larger_repository() {
         changes.iter().map(|change| change.path.as_str()).collect();
     assert_eq!(paths, ["lib.rs"]);
     let WorkspaceDiff::Patch { patch, .. } = root
-        .git_diff(Some("lib.rs"), WorkspaceDiffScope::Base)
+        .git_diff("lib.rs", None, WorkspaceDiffScope::Base)
         .await
         .expect("diff")
     else {
@@ -322,7 +323,7 @@ async fn diff_paths_are_literal_not_pathspecs() {
         [("app/[id]/page.tsx", "app/i/page.tsx"), (":x.txt", "x.txt")]
     {
         let WorkspaceDiff::Patch { patch, .. } = root
-            .git_diff(Some(path), WorkspaceDiffScope::Base)
+            .git_diff(path, None, WorkspaceDiffScope::Base)
             .await
             .expect("diff")
         else {
@@ -440,14 +441,14 @@ async fn diff_unstaged_scope_ignores_staged_changes() {
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
     let (unstaged, _) = patch(
-        root.git_diff(Some("a.rs"), WorkspaceDiffScope::Unstaged)
+        root.git_diff("a.rs", None, WorkspaceDiffScope::Unstaged)
             .await
             .expect("diff"),
     )
     .expect("patch");
     assert!(unstaged.contains("+loose") && !unstaged.contains("+staged"));
     let (base, _) = patch(
-        root.git_diff(Some("a.rs"), WorkspaceDiffScope::Base)
+        root.git_diff("a.rs", None, WorkspaceDiffScope::Base)
             .await
             .expect("diff"),
     )
@@ -455,51 +456,116 @@ async fn diff_unstaged_scope_ignores_staged_changes() {
     assert!(base.contains("+loose") && base.contains("+staged"));
 }
 
+/// Paths, kinds, and counts of a change list, for comparing in one assertion.
+fn listed(
+    changes: &WorkspaceChanges,
+) -> Vec<(String, WorkspaceChangeKind, Option<u64>)> {
+    changes
+        .changes
+        .iter()
+        .map(|change| (change.path.clone(), change.kind, change.insertions))
+        .collect()
+}
+
+/// Against the base, the list holds committed-but-unpushed work and untracked files.
 #[tokio::test]
-async fn whole_workspace_patch_includes_untracked_files() {
+async fn git_changes_base_includes_committed_and_untracked() {
+    let origin = git_repo();
+    let clone = tempfile::tempdir().expect("clone");
+    git(
+        clone.path(),
+        &["clone", "-q", origin.path().to_str().expect("utf8"), "."],
+    );
+    std::fs::write(clone.path().join("a.rs"), "committed\nmore\n")
+        .expect("edit");
+    git(clone.path(), &["commit", "-q", "-am", "local"]);
+    std::fs::write(clone.path().join("n.rs"), "x\ny\n").expect("new");
+    let root = WorkspaceRoot::try_from(clone.path()).expect("root");
+
+    let changes = root
+        .git_changes(WorkspaceDiffScope::Base)
+        .await
+        .expect("changes");
+    assert_eq!(
+        listed(&changes),
+        vec![
+            ("a.rs".to_owned(), WorkspaceChangeKind::Modified, Some(2)),
+            ("n.rs".to_owned(), WorkspaceChangeKind::Untracked, Some(2)),
+        ]
+    );
+    assert_eq!((changes.insertions, changes.deletions), (4, 1));
+}
+
+/// Against the index, staged edits drop out and unstaged ones stay.
+#[tokio::test]
+async fn git_changes_unstaged_is_against_the_index() {
     let repo = git_repo();
-    std::fs::write(repo.path().join("a.rs"), "changed\n").expect("edit");
-    std::fs::write(repo.path().join("u.rs"), "fresh\n").expect("new");
+    std::fs::write(repo.path().join("staged.rs"), "s\n").expect("new");
+    git(repo.path(), &["add", "staged.rs"]);
+    std::fs::write(repo.path().join("a.rs"), "loose\n").expect("edit");
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
-    let (patch, truncated) = patch(
-        root.git_diff(None, WorkspaceDiffScope::Base)
-            .await
-            .expect("diff"),
-    )
-    .expect("patch");
-    assert!(!truncated);
-    assert!(
-        patch.contains("+changed") && patch.contains("+fresh"),
-        "{patch}"
+    let changes = root
+        .git_changes(WorkspaceDiffScope::Unstaged)
+        .await
+        .expect("changes");
+    assert_eq!(
+        listed(&changes),
+        vec![("a.rs".to_owned(), WorkspaceChangeKind::Modified, Some(1))]
     );
 }
 
+/// A workspace inside a larger repository lists only its own files, root-relative.
 #[tokio::test]
-async fn whole_workspace_patch_stops_at_the_limit() {
+async fn git_changes_in_a_subdirectory_are_relative() {
+    let repo = git_repo();
+    std::fs::create_dir(repo.path().join("sub")).expect("sub");
+    std::fs::write(repo.path().join("sub/in.rs"), "x\n").expect("file");
+    git(repo.path(), &["add", "sub/in.rs"]);
+    git(repo.path(), &["commit", "-q", "-m", "sub"]);
+    std::fs::write(repo.path().join("sub/in.rs"), "y\n").expect("edit");
+    std::fs::write(repo.path().join("sub/new.rs"), "z\n").expect("new");
+    std::fs::write(repo.path().join("a.rs"), "outside\n").expect("edit");
+    let root = WorkspaceRoot::try_from(repo.path().join("sub").as_path())
+        .expect("root");
+
+    let changes = root
+        .git_changes(WorkspaceDiffScope::Base)
+        .await
+        .expect("changes");
+    let paths: Vec<_> = changes
+        .changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["in.rs", "new.rs"]);
+}
+
+/// One file's patch stops at the per-file limit on a whole line.
+#[tokio::test]
+async fn single_file_diff_stops_at_one_mebibyte() {
     let repo = git_repo();
     let line =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n";
-    std::fs::write(repo.path().join("big.log"), line.repeat(48 * 1024))
+    std::fs::write(repo.path().join("big.log"), line.repeat(32 * 1024))
         .expect("large file");
-    std::fs::write(repo.path().join("a.rs"), "changed\n").expect("edit");
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
     let (patch, truncated) = patch(
-        root.git_diff(None, WorkspaceDiffScope::Base)
+        root.git_diff("big.log", None, WorkspaceDiffScope::Base)
             .await
             .expect("diff"),
     )
     .expect("patch");
     assert!(truncated);
-    assert!(patch.len() <= protocol::WORKSPACE_DIFF_LIMIT);
+    assert!(patch.len() <= 1024 * 1024);
     assert!(patch.ends_with('\n'));
 }
 
+/// With autocrlf on, `git diff` writes one warning per changed file to
+/// stderr; well past a pipe's 64 KiB, listing changes must still finish.
 #[tokio::test]
-async fn heavy_git_stderr_does_not_stall_the_whole_diff() {
-    // With autocrlf on, `git diff` writes one warning per changed file to
-    // stderr; well past a pipe's 64 KiB, it must still finish.
+async fn heavy_git_stderr_does_not_stall_the_change_list() {
     let repo = git_repo();
     for n in 0..1500 {
         std::fs::write(repo.path().join(format!("f{n:04}.txt")), "a\n")
@@ -515,13 +581,14 @@ async fn heavy_git_stderr_does_not_stall_the_whole_diff() {
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
     let started = std::time::Instant::now();
-    let diff = root.git_diff(None, WorkspaceDiffScope::Base).await;
-    assert!(diff.is_ok(), "{diff:?}");
+    let changes = root.git_changes(WorkspaceDiffScope::Base).await;
+    assert_eq!(changes.expect("changes").changes.len(), 1500);
     assert!(started.elapsed() < std::time::Duration::from_secs(8));
 }
 
+/// Thousands of untracked files list quickly, a non-UTF-8 name included.
 #[tokio::test]
-async fn many_untracked_files_diff_quickly_and_odd_ones_are_skipped_or_kept() {
+async fn many_untracked_files_list_quickly() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let repo = git_repo();
@@ -529,28 +596,22 @@ async fn many_untracked_files_diff_quickly_and_odd_ones_are_skipped_or_kept() {
         std::fs::write(repo.path().join(format!("u{n:04}.txt")), "x\n")
             .expect("file");
     }
-    // A name that is not UTF-8 is still diffed.
     let odd = std::ffi::OsStr::from_bytes(b"odd-\xff.txt");
     std::fs::write(repo.path().join(odd), "odd\n").expect("odd file");
     let root = WorkspaceRoot::try_from(repo.path()).expect("root");
 
     let started = std::time::Instant::now();
-    let (patch, _) = patch(
-        root.git_diff(None, WorkspaceDiffScope::Base)
-            .await
-            .expect("diff"),
-    )
-    .expect("patch");
+    let changes = root
+        .git_changes(WorkspaceDiffScope::Base)
+        .await
+        .expect("changes");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),
         "took {:?}",
         started.elapsed()
     );
-    assert!(
-        patch.contains("+++ b/u1999.txt"),
-        "last untracked file listed"
-    );
-    assert!(patch.contains("+odd"), "the non-UTF-8 name is diffed");
+    assert_eq!(changes.changes.len(), 2001);
+    assert_eq!(changes.insertions, 2001);
 }
 
 #[tokio::test]
@@ -568,4 +629,89 @@ async fn untracked_line_counts_stop_at_the_file_limit() {
         "{counts:?}"
     );
     assert!(counts.contains(&("small.txt".to_owned(), Some(2), Some(0))));
+}
+
+/// A renamed file's patch shows the rename and only the edited lines.
+#[tokio::test]
+async fn renamed_file_diff_shows_the_rename() {
+    let repo = git_repo();
+    let body: String = (0..50).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(repo.path().join("old.rs"), &body).expect("file");
+    git(repo.path(), &["add", "old.rs"]);
+    git(repo.path(), &["commit", "-q", "-m", "old"]);
+    git(repo.path(), &["mv", "old.rs", "new.rs"]);
+    std::fs::write(repo.path().join("new.rs"), format!("{body}added\n"))
+        .expect("edit");
+    let root = WorkspaceRoot::try_from(repo.path()).expect("root");
+
+    let (patch, _) = patch(
+        root.git_diff("new.rs", Some("old.rs"), WorkspaceDiffScope::Base)
+            .await
+            .expect("diff"),
+    )
+    .expect("patch");
+    assert!(patch.contains("rename from old.rs"), "{patch}");
+    assert!(!patch.contains("new file mode"), "{patch}");
+}
+
+/// A file deleted and staged, or deleted in a local commit ahead of the
+/// upstream, still diffs against the base: its removed lines show.
+#[tokio::test]
+async fn deleted_files_diff_against_the_base() {
+    let origin = git_repo();
+    std::fs::write(origin.path().join("gone.rs"), "bye\n").expect("file");
+    std::fs::write(origin.path().join("committed.rs"), "old\n").expect("file");
+    git(origin.path(), &["add", "gone.rs", "committed.rs"]);
+    git(origin.path(), &["commit", "-q", "-m", "two"]);
+    let clone = tempfile::tempdir().expect("clone");
+    git(
+        clone.path(),
+        &["clone", "-q", origin.path().to_str().expect("utf8"), "."],
+    );
+    git(clone.path(), &["rm", "-q", "committed.rs"]);
+    git(clone.path(), &["commit", "-q", "-m", "drop"]);
+    git(clone.path(), &["rm", "-q", "gone.rs"]);
+    let root = WorkspaceRoot::try_from(clone.path()).expect("root");
+
+    for (path, line) in [("gone.rs", "-bye"), ("committed.rs", "-old")] {
+        let (patch, _) = patch(
+            root.git_diff(path, None, WorkspaceDiffScope::Base)
+                .await
+                .expect("diff"),
+        )
+        .expect("patch");
+        assert!(patch.contains(line), "{path}: {patch}");
+    }
+}
+
+/// A file whose name is not UTF-8 is listed with its raw bytes, and its
+/// patch loads by those bytes; the lossy name shown would not find it.
+#[tokio::test]
+async fn a_non_utf8_name_diffs_by_its_bytes() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let repo = git_repo();
+    let odd = std::ffi::OsStr::from_bytes(b"odd-\xff.txt");
+    std::fs::write(repo.path().join(odd), "odd\n").expect("odd file");
+    let root = WorkspaceRoot::try_from(repo.path()).expect("root");
+
+    let changes = root
+        .git_changes(WorkspaceDiffScope::Base)
+        .await
+        .expect("changes");
+    let change = changes
+        .changes
+        .iter()
+        .find(|change| change.path.starts_with("odd-"))
+        .expect("listed");
+    let file = change.file_path();
+    assert_eq!(file.as_os_str(), odd);
+
+    let (patch, _) = patch(
+        root.git_diff(&file, None, WorkspaceDiffScope::Base)
+            .await
+            .expect("diff"),
+    )
+    .expect("patch");
+    assert!(patch.contains("+odd"), "{patch}");
 }

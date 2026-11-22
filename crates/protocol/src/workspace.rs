@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 pub const WORKSPACE_ENTRY_LIMIT: usize = 2000;
 /// Largest file a preview returns, in bytes.
 pub const WORKSPACE_FILE_LIMIT: u64 = 1024 * 1024;
-/// Largest patch a diff returns, in bytes.
-pub const WORKSPACE_DIFF_LIMIT: usize = 2 * 1024 * 1024;
+/// Largest patch of one file a diff returns, in bytes.
+pub const WORKSPACE_DIFF_LIMIT: usize = 1024 * 1024;
+/// Bytes at the start of a file or patch inspected to tell binary content.
+const BINARY_PROBE_BYTES: usize = 8 * 1024;
 /// Most changes one Git status returns.
 pub const WORKSPACE_CHANGE_LIMIT: usize = 5000;
 
@@ -61,16 +63,50 @@ pub enum WorkspaceDiffScope {
     Unstaged,
 }
 
-/// Parameters of a diff: one file, or the whole workspace when `path` is absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Parameters of one file's diff.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceDiffParameters {
     /// Absolute workspace directory.
     pub root: PathBuf,
-    /// Root-relative path of one file; `None` diffs every changed file.
+    /// Root-relative path of the file.
+    pub path: String,
+    /// The file's path before a rename, so the diff shows the rename.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+    #[builder(default)]
+    pub original_path: Option<String>,
+    /// The path's bytes in hex when its name is not UTF-8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub path_bytes: Option<String>,
     /// Which changes to show.
+    #[serde(default)]
+    #[builder(default)]
+    pub scope: WorkspaceDiffScope,
+}
+
+impl WorkspaceDiffParameters {
+    /// The file's root-relative path as the file system knows it.
+    pub fn file_path(&self) -> PathBuf {
+        file_path(&self.path, self.path_bytes.as_deref())
+    }
+}
+
+/// Parameters of a change list: every changed file of one scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceChangesParameters {
+    /// Absolute workspace directory.
+    pub root: PathBuf,
+    /// Which changes to list.
     #[serde(default)]
     pub scope: WorkspaceDiffScope,
 }
@@ -187,6 +223,190 @@ pub struct WorkspaceChange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub deletions: Option<u64>,
+    /// The path's bytes in hex when they are not UTF-8, which `path` can
+    /// only show lossily; reading the file goes by these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub path_bytes: Option<String>,
+}
+
+impl WorkspaceChange {
+    /// The file's root-relative path as the file system knows it: its raw
+    /// bytes when the name is not UTF-8.
+    pub fn file_path(&self) -> PathBuf {
+        file_path(&self.path, self.path_bytes.as_deref())
+    }
+}
+
+/// A root-relative path from its shown form and, for a name that is not
+/// UTF-8, its bytes in hex; malformed hex falls back to the shown form.
+pub fn file_path(path: &str, bytes: Option<&str>) -> PathBuf {
+    #[cfg(unix)]
+    if let Some(bytes) = bytes.and_then(decode_hex) {
+        use std::os::unix::ffi::OsStringExt as _;
+        return PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    }
+    #[cfg(not(unix))]
+    let _ = bytes;
+    PathBuf::from(path)
+}
+
+/// A path git wrote as raw bytes: its lossy text and, when the bytes are
+/// not UTF-8, the bytes in hex, so the file can still be opened.
+pub fn git_path(bytes: &[u8]) -> (String, Option<String>) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (text.to_owned(), None),
+        Err(_) => (
+            String::from_utf8_lossy(bytes).into_owned(),
+            Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
+        ),
+    }
+}
+
+/// Bytes from their hex form; `None` when it is not hex.
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect()
+}
+
+/// Every changed file of one scope, with line counts, as a diff lists them.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    typed_builder::TypedBuilder,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChanges {
+    /// Changed files in diff order, at most [`WORKSPACE_CHANGE_LIMIT`].
+    #[builder(default)]
+    pub changes: Vec<WorkspaceChange>,
+    /// Whether files past the limit were left out.
+    #[builder(default)]
+    pub truncated: bool,
+    /// Lines added across every counted file.
+    #[builder(default)]
+    pub insertions: u64,
+    /// Lines removed across every counted file.
+    #[builder(default)]
+    pub deletions: u64,
+}
+
+impl WorkspaceChanges {
+    /// Parses `git diff --raw --numstat -z -M` output, keeping at most `limit` files.
+    ///
+    /// Raw records (`:mode mode sha sha STATUS` then one path, or two for a
+    /// rename or copy) give each file and its status; the numstat records
+    /// after them (`added\tremoved\tpath`, or an empty path followed by the
+    /// old and new paths for a rename) give its line counts, `-` for binary.
+    pub fn from_raw_numstat(output: &[u8], limit: usize) -> Self {
+        let mut records = output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .peekable();
+        let mut changes = Self::default();
+        // Each kept file's position by its path after the change.
+        let mut index: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        while let Some(record) =
+            records.next_if(|record| record.first() == Some(&b':'))
+        {
+            let record = String::from_utf8_lossy(record);
+            let status = record.split(' ').nth(4).unwrap_or_default();
+            let kind = match status.chars().next() {
+                Some('A' | 'C') => WorkspaceChangeKind::Added,
+                Some('D') => WorkspaceChangeKind::Deleted,
+                Some('R') => WorkspaceChangeKind::Renamed,
+                Some('U') => WorkspaceChangeKind::Conflicted,
+                _ => WorkspaceChangeKind::Modified,
+            };
+            let first = records.next();
+            // Renames and copies name the old path first, then the new one.
+            let (original, path) = if status.starts_with(['R', 'C']) {
+                (first, records.next())
+            } else {
+                (None, first)
+            };
+            let Some(path) = path else {
+                break;
+            };
+            let (path, path_bytes) = git_path(path);
+            // An unmerged file comes once as `U` and again as its work-tree
+            // change: one file, and still a conflict.
+            if let Some(change) =
+                index.get(&path).and_then(|at| changes.changes.get_mut(*at))
+            {
+                if kind == WorkspaceChangeKind::Conflicted {
+                    change.kind = kind;
+                }
+                continue;
+            }
+            if changes.changes.len() >= limit {
+                changes.truncated = true;
+                continue;
+            }
+            index.insert(path.clone(), changes.changes.len());
+            changes.changes.push(
+                WorkspaceChange::builder()
+                    .path(path)
+                    .original_path(
+                        original
+                            .filter(|_| kind == WorkspaceChangeKind::Renamed)
+                            .map(|original| git_path(original).0),
+                    )
+                    .kind(kind)
+                    .path_bytes(path_bytes)
+                    .build(),
+            );
+        }
+        while let Some(record) = records.next() {
+            let record = String::from_utf8_lossy(record);
+            let mut fields = record.splitn(3, '\t');
+            let (Some(added), Some(removed), Some(path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            // An empty path is a rename: the old and new paths follow.
+            let path = if path.is_empty() {
+                let _old = records.next();
+                match records.next() {
+                    Some(new) => git_path(new).0,
+                    None => break,
+                }
+            } else {
+                path.to_owned()
+            };
+            let Some(change) =
+                index.get(&path).and_then(|at| changes.changes.get_mut(*at))
+            else {
+                continue;
+            };
+            // `-` marks a binary file, which has no line counts; a file with
+            // two records sums their counts.
+            let (Ok(added), Ok(removed)) =
+                (added.parse::<u64>(), removed.parse::<u64>())
+            else {
+                change.insertions = None;
+                change.deletions = None;
+                continue;
+            };
+            change.insertions = Some(change.insertions.unwrap_or(0) + added);
+            change.deletions = Some(change.deletions.unwrap_or(0) + removed);
+            changes.insertions += added;
+            changes.deletions += removed;
+        }
+        changes
+    }
 }
 
 /// A workspace's Git state.
@@ -378,4 +598,41 @@ pub enum WorkspaceDiff {
     Binary,
     /// No difference.
     Unchanged,
+}
+
+impl WorkspaceDiff {
+    /// Turns one file's raw `git diff` output into a patch, a binary notice,
+    /// or no change; `over_limit` says its producer was stopped at the limit.
+    pub fn from_git_output(output: Vec<u8>, over_limit: bool) -> Self {
+        if output.is_empty() {
+            return Self::Unchanged;
+        }
+        // A binary diff is a header and one "Binary files … differ" line, so
+        // the head of the output decides it without scanning the whole patch.
+        let head = output.get(..BINARY_PROBE_BYTES).unwrap_or(&output);
+        let head = String::from_utf8_lossy(head);
+        if head.contains("Binary files") && !head.contains("@@") {
+            return Self::Binary;
+        }
+        Self::patch(output, over_limit)
+    }
+
+    /// A patch cut at the last whole line within [`WORKSPACE_DIFF_LIMIT`] when
+    /// it is longer or its producer was stopped there.
+    fn patch(mut output: Vec<u8>, over_limit: bool) -> Self {
+        let truncated = over_limit || output.len() > WORKSPACE_DIFF_LIMIT;
+        if truncated {
+            let limit = output.get(..WORKSPACE_DIFF_LIMIT).unwrap_or(&output);
+            let end = limit
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(limit.len(), |newline| newline + 1);
+            output.truncate(end);
+        }
+        // Valid UTF-8 moves into the String without a copy.
+        let patch = String::from_utf8(output).unwrap_or_else(|error| {
+            String::from_utf8_lossy(error.as_bytes()).into_owned()
+        });
+        Self::Patch { patch, truncated }
+    }
 }

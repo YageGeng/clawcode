@@ -3,6 +3,7 @@
 mod acp;
 mod agent;
 mod capability;
+mod checkpoint;
 mod event;
 mod exec;
 mod extension;
@@ -79,6 +80,10 @@ pub use extension::{
     TurnStartEvent, UserBashDisposition, UserBashEvent, UserBashResult,
 };
 
+pub use checkpoint::{
+    CheckpointDiffParameters, CheckpointList, CheckpointsParameters,
+    RunCheckpoint,
+};
 pub use id::{IdGenerator, IdKind};
 pub use identity::{
     AcpExtensionMethod, ConfigOverridePath, ConfigOverridePathError,
@@ -172,11 +177,12 @@ pub use turn::{
 };
 pub use workspace::{
     WORKSPACE_CHANGE_LIMIT, WORKSPACE_DIFF_LIMIT, WORKSPACE_ENTRY_LIMIT,
-    WORKSPACE_FILE_LIMIT, WorkspaceChange, WorkspaceChangeKind, WorkspaceDiff,
+    WORKSPACE_FILE_LIMIT, WorkspaceChange, WorkspaceChangeKind,
+    WorkspaceChanges, WorkspaceChangesParameters, WorkspaceDiff,
     WorkspaceDiffParameters, WorkspaceDiffScope, WorkspaceDirEntry,
     WorkspaceDirListing, WorkspaceEntryKind, WorkspaceFileContent,
     WorkspaceGitStatus, WorkspaceListDirParameters, WorkspacePathParameters,
-    WorkspaceRootParameters,
+    WorkspaceRootParameters, file_path, git_path,
 };
 
 pub use login::{DeviceCode, DeviceCodeSink, LoginMethod};

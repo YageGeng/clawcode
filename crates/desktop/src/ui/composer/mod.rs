@@ -8,6 +8,8 @@ pub(in crate::ui) mod controls;
 
 use std::sync::Arc;
 
+use agent_client_protocol::v2::schema as wire;
+
 use gpui_kit::component::attachment::{Attachment, AttachmentMedia};
 use gpui_kit::component::input::{InputEvent, Paste, Textarea, TextareaState};
 use gpui_kit::component::notification::Notification;
@@ -53,6 +55,10 @@ pub struct Composer {
     /// Files still being read for attaching.
     #[builder(default)]
     reading: usize,
+    /// The earlier message being edited (M4b spec §3.3), and what the
+    /// composer held before editing began, restored on cancel.
+    #[builder(default)]
+    editing: Option<(wire::MessageId, Outgoing)>,
     #[builder(default)]
     _subscriptions: Vec<Subscription>,
 }
@@ -119,6 +125,67 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.set_placeholder(placeholder.into_owned(), window, cx)
         });
+    }
+
+    /// Starts editing the earlier message `message_id`: the composer shows
+    /// `message`. Its own content is kept to restore on cancel; editing
+    /// another message keeps what was kept before the first edit.
+    pub fn begin_edit(
+        &mut self,
+        message_id: wire::MessageId,
+        message: Outgoing,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let saved = match self.editing.take() {
+            Some((_, saved)) => saved,
+            None => Outgoing {
+                text: self.input.read(cx).value().to_string(),
+                images: std::mem::take(&mut self.attachments),
+            },
+        };
+        self.show(message, window, cx);
+        self.editing = Some((message_id, saved));
+        cx.notify();
+    }
+
+    /// Stops editing and puts back what the composer held before.
+    pub fn cancel_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some((_, saved)) = self.editing.take() {
+            self.show(saved, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The earlier message being edited, if any.
+    pub fn editing(&self) -> Option<&wire::MessageId> {
+        self.editing.as_ref().map(|(id, _)| id)
+    }
+
+    /// Ends editing once the edit is on its way; returns the content kept
+    /// from before, which comes back if the send fails.
+    pub fn finish_edit(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Outgoing> {
+        cx.notify();
+        self.editing.take().map(|(_, kept)| kept)
+    }
+
+    /// Replaces the input's text and the attached images with `message`.
+    fn show(
+        &mut self,
+        message: Outgoing,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.input
+            .update(cx, |input, cx| input.set_value(message.text, window, cx));
+        self.attachments = message.images;
     }
 
     /// The text input.

@@ -10,7 +10,7 @@ use tokio::io::AsyncReadExt as _;
 use super::{WorkspaceError, WorkspaceRoot};
 
 /// Longest one `git` command may run.
-const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bytes of a `git` run's stderr kept for its error message.
 const STDERR_KEPT: usize = 64 * 1024;
 

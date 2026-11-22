@@ -5,6 +5,7 @@
 //! canonicalized directory; client paths are resolved against it and may
 //! never leave it, symbolic links included.
 
+pub mod checkpoint;
 mod diff;
 mod git;
 mod status;
@@ -79,8 +80,11 @@ impl WorkspaceRoot {
     ///
     /// The path is checked lexically first (no absolute path, no `..`), then
     /// canonicalized, so a symbolic link pointing outside is rejected too.
-    pub fn resolve(&self, relative: &str) -> Result<PathBuf, WorkspaceError> {
-        let joined = self.0.join(Self::checked(relative)?);
+    pub fn resolve(
+        &self,
+        relative: impl AsRef<Path>,
+    ) -> Result<PathBuf, WorkspaceError> {
+        let joined = self.0.join(Self::checked(relative.as_ref())?);
         let resolved =
             joined.canonicalize().map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => WorkspaceError::NotFound,
@@ -94,8 +98,10 @@ impl WorkspaceRoot {
     }
 
     /// The lexical check of a client path: relative, without `..` or a root.
-    fn checked(relative: &str) -> Result<&Path, WorkspaceError> {
-        let path = Path::new(relative);
+    fn checked<P: AsRef<Path> + ?Sized>(
+        relative: &P,
+    ) -> Result<&Path, WorkspaceError> {
+        let path = relative.as_ref();
         let escapes = path.components().any(|component| {
             !matches!(component, Component::Normal(_) | Component::CurDir)
         });

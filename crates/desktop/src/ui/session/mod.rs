@@ -1,6 +1,8 @@
 //! One tab's session view: the transcript in a `MessageScroller`, its render caches, and the composer slot.
 
+mod message_actions;
 pub(in crate::ui) mod rows;
+mod turn_changes;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -23,7 +25,7 @@ use gpui_kit::component::{ResizableState, resizable_panel, v_resizable};
 use gpui_kit::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, Image,
     ImageFormat, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, StyleRefinement, Styled as _, Subscription, Window, div,
+    Render, StyleRefinement, Styled as _, Subscription, Task, Window, div,
 };
 use typed_builder::TypedBuilder;
 
@@ -120,6 +122,16 @@ pub enum SessionViewEvent {
     SelectWorkspace(PathBuf),
     /// Something the tab's trajectory asks of the shell.
     Trajectory(TrajectoryEvent),
+    /// A reply was forked into this new session, which should open in a tab.
+    Forked(crate::backend::SessionId),
+    /// A turn's change card asked to show what `run` changed, and `path`
+    /// within it, in the panel's Changes tab.
+    OpenChanges {
+        /// The run whose changes to show.
+        run: protocol::RunId,
+        /// The file to bring into view.
+        path: Option<String>,
+    },
 }
 
 /// Loading placeholder shown while a session's transcript is attaching.
@@ -164,6 +176,16 @@ pub struct SessionView {
     /// Set while a configuration change waits for the agent; the bar's controls are disabled.
     #[builder(default)]
     pub(super) config_busy: bool,
+    /// The options a new session starts with, which a draft offers.
+    #[builder(default)]
+    pub(super) draft_config: Vec<crate::projection::ConfigOption>,
+    /// Choices made in a draft, by option id; applied once its session exists.
+    #[builder(default)]
+    pub(in crate::ui) draft_choices:
+        std::collections::BTreeMap<&'static str, String>,
+    /// The read of `draft_config` in flight.
+    #[builder(default)]
+    _draft_config_read: Option<Task<()>>,
     /// Choices made in the question panel, per question.
     #[builder(default = crate::ui::interactions::questions::QuestionDraft::builder().build())]
     pub(super) question: crate::ui::interactions::questions::QuestionDraft,
@@ -199,6 +221,23 @@ pub struct SessionView {
     /// Space kept free at the right edge for the details card.
     #[builder(default)]
     right_inset: gpui_kit::Pixels,
+    /// Whether messages offer copy only: a subagent shown in the panel
+    /// neither branches nor forks (M4b spec §3.1).
+    #[builder(default)]
+    pub(super) copy_only: bool,
+    /// Replies whose fork is in flight.
+    #[builder(default)]
+    pub(super) forking: HashSet<wire::MessageId>,
+    /// Whether an edit is being branched and sent; other branch, fork, and
+    /// send actions wait for it.
+    #[builder(default)]
+    pub(in crate::ui) branching: bool,
+    /// Turn change cards shown with their files.
+    #[builder(default)]
+    pub(super) open_turn_changes: HashSet<protocol::RunId>,
+    /// Which messages carry a Fork action or a turn's change card.
+    #[builder(default)]
+    pub(super) marks: message_actions::MessageMarks,
     /// Whether the body shows the chat or the trajectory; kept in memory only.
     #[builder(default)]
     view_mode: ViewMode,
@@ -254,6 +293,11 @@ impl SessionView {
             })
     }
 
+    /// Limits message actions to copy, for a subagent shown in the panel.
+    pub(in crate::ui) fn set_copy_only(&mut self) {
+        self.copy_only = true;
+    }
+
     /// Creates the view and shows `target`; `client` sends its messages.
     pub fn new(
         target: SessionTarget,
@@ -299,6 +343,7 @@ impl SessionView {
     ) {
         if self.client.is_none() {
             self.client = client.cloned();
+            self.load_draft_config(cx);
         }
         if let Some(trajectory) = &self.trajectory {
             trajectory
@@ -450,6 +495,13 @@ impl SessionView {
                         // Inserted rows always land in the splice, so only
                         // updated rows can need a re-measure in place.
                         this.sync(&change.updated, change.structural, cx);
+                        // Streamed text moves no turn boundary or run.
+                        if change.structural
+                            || change.run_state
+                            || change.checkpoints
+                        {
+                            this.refresh_marks(cx);
+                        }
                         // A withdrawn elicitation takes its open form with it.
                         if change.controls {
                             this.close_withdrawn_form(window, cx);
@@ -471,7 +523,49 @@ impl SessionView {
             self.sync(&HashSet::new(), true, cx);
             self.push_commands(cx);
         }
+        self.refresh_marks(cx);
+        self.load_draft_config(cx);
         cx.notify();
+    }
+
+    /// Reads the options a new session starts with, once, for a draft.
+    fn load_draft_config(&mut self, cx: &mut Context<'_, Self>) {
+        if !matches!(self.target, SessionTarget::Draft { .. })
+            || !self.draft_config.is_empty()
+            || self._draft_config_read.is_some()
+        {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self._draft_config_read = Some(cx.spawn(async move |this, cx| {
+            match client.default_config().await {
+                Ok(options) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.draft_config = options
+                            .iter()
+                            .filter_map(|option| {
+                                crate::projection::ConfigOption::try_from(
+                                    option,
+                                )
+                                .ok()
+                            })
+                            .collect();
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to read the default config: {}",
+                        error
+                    );
+                    // Allow another try when the view is shown again.
+                    let _ = this
+                        .update(cx, |this, _| this._draft_config_read = None);
+                }
+            }
+        }));
     }
 
     /// Hands the session's slash commands to the composer's list.

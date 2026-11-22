@@ -51,7 +51,7 @@ pub use sidebar::{
     GroupKind, RECENT_SESSIONS, SESSIONS_PER_WORKSPACE, SessionRow,
     SidebarGroupModel, SidebarModel, SidebarRow, SidebarState, WorkspaceRow,
 };
-pub use status::{StatusDot, StatusIcon};
+pub use status::{LineCounts, StatusDot, StatusIcon};
 pub use trajectory::{
     ContentState, LoadState, TrajectoryEvent, TrajectoryView,
 };

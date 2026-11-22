@@ -8,7 +8,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Context, Entity, Window};
 
 use crate::actions::FocusComposer;
-use crate::backend::SessionStart;
+use crate::backend::{SessionId, SessionStart};
 use crate::catalog::SessionSummary;
 use crate::ui::composer::attachments::Outgoing;
 use crate::ui::{
@@ -61,7 +61,45 @@ impl AppView {
             SessionViewEvent::Trajectory(event) => {
                 self.on_trajectory_event(event, window, cx)
             }
+            SessionViewEvent::Forked(fork) => self.open_fork(fork.clone(), cx),
+            SessionViewEvent::OpenChanges { run, path } => {
+                // The Changes view may not exist yet; it takes the run when it does.
+                if let Some(owner) = self.panel_owner() {
+                    self.panels.pending_changes =
+                        Some((owner.key(), run.clone(), path.clone()));
+                }
+                self.open_panel_tab(
+                    crate::state::PanelTabKey::Changes,
+                    window,
+                    cx,
+                );
+                cx.notify();
+            }
         }
+    }
+
+    /// Opens a session forked from a reply in a tab of its own, once the
+    /// session list, which the tab reads its summary from, holds it.
+    fn open_fork(&mut self, fork: SessionId, cx: &mut Context<'_, Self>) {
+        let Some(client) = self.host.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| match client.list_sessions().await {
+            Ok(sessions) => {
+                let catalog = sessions.iter().map(Into::into).collect();
+                let _ = this.update(cx, |this, cx| {
+                    this.replace_catalog(catalog, cx);
+                    this.open_session(&fork, cx);
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "failed to list sessions after a fork: {}",
+                    error
+                )
+            }
+        })
+        .detach();
     }
 
     /// The tab a view belongs to.
@@ -92,9 +130,27 @@ impl AppView {
             Self::creation_failed(view, message, window, cx);
             return;
         };
+        // Choices made in the draft apply before its first message runs.
+        let choices = view.read(cx).draft_choices.clone();
         let view = view.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let created = client.new_session(&cwd).await;
+            let mut created = client.new_session(&cwd).await;
+            if let Ok(start) = &mut created {
+                for (config_id, value) in &choices {
+                    match client
+                        .set_config_option(&start.id, config_id, value)
+                        .await
+                    {
+                        Ok(options) => start.config_options = options,
+                        Err(error) => tracing::warn!(
+                            "failed to apply the draft's {} to session {}: {}",
+                            config_id,
+                            start.id,
+                            error
+                        ),
+                    }
+                }
+            }
             let _ = this.update_in(cx, |this, window, cx| match created {
                 Ok(start) => {
                     if this.adopt_draft(&view, &cwd, start, window, cx) {

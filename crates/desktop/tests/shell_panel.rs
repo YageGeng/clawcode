@@ -462,9 +462,12 @@ fn changes_tab_lists_files_and_reveals_one(cx: &mut TestAppContext) {
         assert!(
             row_texts(window, "changed-file-1").contains(&"new.rs".to_string())
         );
-        // gpui-kit marks the rows of the n-th file in view as ("diff-file", n).
-        assert!(diff_file_shown(window, 0));
-        assert!(!diff_file_shown(window, 1));
+    });
+    // Both headers start as placeholders in view; once a.rs's long patch
+    // loads, it pushes new.rs below the fold. gpui-kit marks the rows of the
+    // n-th file in view as ("diff-file", n).
+    live.until(cx, "a.rs loaded", |window| {
+        diff_file_shown(window, 0) && !diff_file_shown(window, 1)
     });
     click(&live, cx, "changed-file-1");
     live.until(cx, "revealed", |window| diff_file_shown(window, 1));
@@ -529,13 +532,14 @@ fn a_diff_cut_at_the_size_limit_renders_with_a_note(cx: &mut TestAppContext) {
     let live = with_session(live_in_git_repo(cx), cx);
     let line =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n";
-    std::fs::write(root(&live).join("big.txt"), line.repeat(48 * 1024))
+    // 1.5 MiB: past the 1 MiB limit of one file's patch.
+    std::fs::write(root(&live).join("big.txt"), line.repeat(24 * 1024))
         .expect("large file");
     live.window(cx, |window, cx| window.press("ctrl-shift-g", cx));
     live.until(cx, "truncated note", |window| {
         shows(
             window,
-            "The diff is too large; only its first 2 MiB are shown.",
+            "This file is too large to show in full; the counts include every change.",
         )
     });
     live.window(cx, |window, _| {

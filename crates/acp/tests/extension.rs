@@ -1992,6 +1992,30 @@ async fn resume_with_replay_ends_history_with_replay_complete() {
         .expect("ACP connection");
 }
 
+/// A client drafting a session reads the options a new session starts with,
+/// before any session exists.
+#[tokio::test]
+async fn default_config_lists_the_options_of_a_new_session() {
+    let data = tempfile::tempdir().expect("kernel data");
+    let options = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::DefaultConfig.as_str(),
+            serde_json::json!({}),
+        ),
+    )
+    .await
+    .expect("default config");
+    let ids: Vec<&str> = options
+        .as_array()
+        .expect("options")
+        .iter()
+        .filter_map(|option| option["configId"].as_str())
+        .collect();
+    assert_eq!(ids, ["model", "thinking_level", "mode"]);
+    assert_eq!(options[2]["currentValue"], "default");
+}
+
 /// Workspace tools answer through the public connection and refuse paths outside the root.
 #[tokio::test]
 async fn workspace_methods_answer_and_reject_escapes() {
@@ -2022,7 +2046,7 @@ async fn workspace_methods_answer_and_reject_escapes() {
     .expect_err("escape");
     assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
 
-    // A whole-workspace diff takes a scope and no path; outside Git it fails as internal.
+    // A diff names one file; leaving the path out is a parameter error.
     let error = send_request(
         integration_kernel(data.path()),
         IntegrationRequest::new(
@@ -2031,8 +2055,101 @@ async fn workspace_methods_answer_and_reject_escapes() {
         ),
     )
     .await
+    .expect_err("missing path");
+    assert_eq!(error.code, agent_client_protocol::ErrorCode::INVALID_PARAMS);
+
+    // A change list outside Git fails as internal.
+    let error = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::WorkspaceGitChanges.as_str(),
+            serde_json::json!({ "root": root, "scope": "unstaged" }),
+        ),
+    )
+    .await
     .expect_err("not a repository");
     assert_eq!(error.code, agent_client_protocol::ErrorCode::INTERNAL_ERROR);
+}
+
+/// The checkpoint methods list a run's changes and diff one file through
+/// the public connection.
+#[tokio::test]
+async fn checkpoint_methods_answer_through_the_extension() {
+    use kernel::RunCheckpoints as _;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(workspace.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(workspace.path().join("a.rs"), "one\n").expect("file");
+    git(&["add", "a.rs"]);
+    git(&["commit", "-q", "-m", "first"]);
+    let store = acp::workspace::checkpoint::GitCheckpoints::default();
+    let session = SessionId::try_from("session-1").expect("session");
+    let run = RunId::try_from("run-1").expect("run");
+    for stage in [kernel::CheckpointStage::Start, kernel::CheckpointStage::End]
+    {
+        if stage == kernel::CheckpointStage::End {
+            std::fs::write(workspace.path().join("a.rs"), "one\ntwo\n")
+                .expect("edit");
+        }
+        store
+            .capture(
+                kernel::CheckpointPoint::builder()
+                    .cwd(workspace.path())
+                    .session_id(&session)
+                    .run_id(&run)
+                    .stage(stage)
+                    .build(),
+            )
+            .await
+            .expect("capture");
+    }
+    let root = workspace.path().to_string_lossy().into_owned();
+    let data = tempfile::tempdir().expect("kernel data");
+
+    let listed = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::Checkpoints.as_str(),
+            serde_json::json!({ "root": root, "sessionId": "session-1" }),
+        ),
+    )
+    .await
+    .expect("checkpoints");
+    let list: protocol::CheckpointList =
+        serde_json::from_value(listed).expect("checkpoint list");
+    assert_eq!(list.runs.len(), 1);
+    assert_eq!(list.runs[0].run_id, run);
+
+    let diff = send_request(
+        integration_kernel(data.path()),
+        IntegrationRequest::new(
+            AcpExtensionMethod::CheckpointDiff.as_str(),
+            serde_json::json!({
+                "root": root,
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "path": "a.rs",
+            }),
+        ),
+    )
+    .await
+    .expect("checkpoint diff");
+    let diff: protocol::WorkspaceDiff =
+        serde_json::from_value(diff).expect("diff");
+    assert!(
+        matches!(&diff, protocol::WorkspaceDiff::Patch { patch, .. } if patch.contains("+two")),
+        "{diff:?}"
+    );
 }
 
 /// Writes one Session log with a user message, one request content, and one

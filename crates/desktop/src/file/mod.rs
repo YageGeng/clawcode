@@ -4,4 +4,4 @@
 pub mod changes;
 pub mod icons;
 pub mod tree;
-pub use changes::ChangeNode;
+pub use changes::{ChangeNode, PATCH_BATCH, PatchLoader};

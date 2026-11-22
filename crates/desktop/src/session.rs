@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent_client_protocol::v2::schema as wire;
 use futures::StreamExt as _;
@@ -54,6 +55,12 @@ pub struct SessionHandle {
     /// Set when the tab closed during a run; the session closes once idle.
     #[builder(default)]
     close_when_idle: bool,
+    /// The runs that changed the workspace, as last read (M4b spec §6.1).
+    #[builder(default)]
+    checkpoints: Vec<Arc<protocol::RunCheckpoint>>,
+    /// The read of `checkpoints` in flight; a newer one replaces it.
+    #[builder(default)]
+    _checkpoints_read: Option<Task<()>>,
 }
 
 impl EventEmitter<ProjectionChange> for SessionHandle {}
@@ -79,6 +86,52 @@ impl SessionHandle {
         &self.phase
     }
 
+    /// The runs that changed the workspace, oldest first, as last read.
+    pub fn checkpoints(&self) -> &[Arc<protocol::RunCheckpoint>] {
+        &self.checkpoints
+    }
+
+    /// Reads the runs that changed the workspace again; a session outside
+    /// Git simply has none.
+    pub fn refresh_checkpoints(
+        &mut self,
+        client: AcpClient,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let id = self.id.clone();
+        let cwd = self.cwd.clone();
+        self._checkpoints_read = Some(cx.spawn(async move |this, cx| {
+            match client.checkpoints(&cwd, &id).await {
+                Ok(list) => {
+                    let _ = this.update(cx, |handle, cx| {
+                        let same = handle.checkpoints.len() == list.runs.len()
+                            && handle
+                                .checkpoints
+                                .iter()
+                                .zip(&list.runs)
+                                .all(|(held, read)| **held == *read);
+                        if !same {
+                            // Shared, so views mark messages without copying change lists.
+                            handle.checkpoints =
+                                list.runs.into_iter().map(Arc::new).collect();
+                            cx.emit(
+                                ProjectionChange::builder()
+                                    .checkpoints(true)
+                                    .build(),
+                            );
+                            cx.notify();
+                        }
+                    });
+                }
+                Err(error) => tracing::warn!(
+                    "failed to read the changed runs of session {}: {}",
+                    id,
+                    error
+                ),
+            }
+        }));
+    }
+
     /// Status shown next to the session.
     pub fn status(&self) -> SessionStatus {
         if matches!(self.phase, AttachPhase::Failed(_)) {
@@ -100,6 +153,89 @@ impl SessionHandle {
     /// Mutable control state, for answering requests and questions from the UI.
     pub fn controls_mut(&mut self) -> &mut crate::projection::SessionControls {
         self.projection.controls_mut()
+    }
+
+    /// Replays the transcript from the backend into a cleared projection:
+    /// reads the run state and the queue, then resumes the session with
+    /// replay. Attaching uses it, and so does a branch switch, whose old rows
+    /// belong to the branch it left.
+    ///
+    /// Live updates keep flowing in meanwhile and merge by row identity;
+    /// success is reported by the server's `replay_complete`, so only a
+    /// failure sets the phase here.
+    pub fn replay(
+        &mut self,
+        client: AcpClient,
+        cx: &mut Context<'_, Self>,
+    ) -> Task<Result<(), crate::backend::BackendError>> {
+        // Only a failed attach shows the loading state again: a branch switch
+        // replaces the rows in place instead of flashing a skeleton.
+        if matches!(self.phase, AttachPhase::Failed(_)) {
+            self.phase = AttachPhase::Attaching;
+        }
+        let id = self.id.clone();
+        let cwd = self.cwd.clone();
+        cx.spawn(async move |target, cx| {
+            let outcome: Result<(), crate::backend::BackendError> = async {
+                let running = client.session_running(&id).await?;
+                target
+                    .update(cx, |handle, cx| {
+                        handle.projection.clear();
+                        let state = if running {
+                            RunState::Running
+                        } else {
+                            RunState::Idle
+                        };
+                        handle.projection.set_run_state(state);
+                        cx.notify();
+                    })
+                    .map_err(|closed| {
+                        crate::backend::BackendError::Request(format!(
+                            "session closed while replaying: {closed}"
+                        ))
+                    })?;
+                // The queue is a nicety: failing to read it must not fail the replay.
+                match client.pending_messages(&id).await {
+                    Ok(pending) => {
+                        let _ = target.update(cx, |handle, cx| {
+                            if handle.projection.set_pending(pending) {
+                                cx.emit(
+                                    ProjectionChange::builder()
+                                        .queue(true)
+                                        .build(),
+                                );
+                                cx.notify();
+                            }
+                        });
+                    }
+                    Err(error) => tracing::warn!(
+                        "failed to load pending messages of session {}: {}",
+                        id,
+                        error
+                    ),
+                }
+                let start = client.resume_with_replay(&id, &cwd).await?;
+                let _ = target.update(cx, |handle, cx| {
+                    handle
+                        .projection
+                        .controls_mut()
+                        .set_config(start.config_options);
+                    cx.emit(ProjectionChange::builder().controls(true).build());
+                    cx.notify();
+                });
+                Ok(())
+            }
+            .await;
+            if let Err(error) = &outcome {
+                tracing::warn!("failed to replay session {}: {}", id, error);
+                // The handle may be gone if the tab closed meanwhile.
+                let _ = target.update(cx, |handle, cx| {
+                    handle.phase = AttachPhase::Failed(error.to_string());
+                    cx.notify();
+                });
+            }
+            outcome
+        })
     }
 
     /// Whether a run is active or blocked on a request, so the session must stay attached.
@@ -212,8 +348,6 @@ impl SessionRegistry {
         self.handles
             .insert(summary.session_id.clone(), handle.clone());
         let client = self.client.clone();
-        let id = summary.session_id.clone();
-        let cwd = summary.cwd.clone();
         let target = handle.downgrade();
         let pending_close = self.closing.get(&summary.session_id).cloned();
         tracing::info!("attaching session {}", summary.session_id);
@@ -222,74 +356,12 @@ impl SessionRegistry {
             if let Some(pending_close) = pending_close {
                 pending_close.await;
             }
-            let outcome: Result<(), crate::backend::BackendError> = async {
-                let running = client.session_running(&id).await?;
-                let alive = target
-                    .update(cx, |handle, cx| {
-                        handle.projection.clear();
-                        let state = if running {
-                            RunState::Running
-                        } else {
-                            RunState::Idle
-                        };
-                        handle.projection.set_run_state(state);
-                        cx.notify();
-                    })
-                    .is_ok();
-                // The tab closed while attaching; there is nothing left to replay into.
-                if !alive {
-                    return Ok(());
-                }
-                // The queue is a nicety: failing to read it must not fail the attach.
-                match client.pending_messages(&id).await {
-                    Ok(pending) => {
-                        let _ = target.update(cx, |handle, cx| {
-                            if handle.projection.set_pending(pending) {
-                                cx.emit(
-                                    ProjectionChange::builder()
-                                        .queue(true)
-                                        .build(),
-                                );
-                                cx.notify();
-                            }
-                        });
-                    }
-                    Err(error) => tracing::warn!(
-                        "failed to load pending messages of session {}: {}",
-                        id,
-                        error
-                    ),
-                }
-                let start = client.resume_with_replay(&id, &cwd).await?;
-                let _ = target.update(cx, |handle, cx| {
-                    handle
-                        .projection
-                        .controls_mut()
-                        .set_config(start.config_options);
-                    cx.emit(ProjectionChange::builder().controls(true).build());
-                    cx.notify();
-                });
-                Ok(())
+            // The tab may have closed meanwhile; then there is nothing to replay into.
+            if let Ok(replay) =
+                target.update(cx, |handle, cx| handle.replay(client, cx))
+            {
+                let _ = replay.await;
             }
-            .await;
-            let phase = match outcome {
-                // Success is reported by the server's `replay_complete` (see `apply_batch`);
-                // only a failed resume decides the phase here.
-                Ok(()) => return,
-                Err(error) => {
-                    tracing::warn!(
-                        "failed to attach session {}: {}",
-                        id,
-                        error
-                    );
-                    AttachPhase::Failed(error.to_string())
-                }
-            };
-            // The handle may be gone if the tab closed while attaching.
-            let _ = target.update(cx, |handle, cx| {
-                handle.phase = phase;
-                cx.notify();
-            });
         })
         .detach();
         handle
@@ -323,16 +395,28 @@ impl SessionRegistry {
                     };
                     let change = handle.update(cx, |handle, _| {
                         // The server marks the end of replayed history: the transcript is complete.
-                        if matches!(
+                        let attached = matches!(
                             notification.update,
                             wire::SessionUpdate::ReplayComplete(_)
-                        ) && handle.phase == AttachPhase::Attaching
-                        {
+                        ) && handle.phase
+                            == AttachPhase::Attaching;
+                        if attached {
                             handle.phase = AttachPhase::Attached;
                             tracing::info!("attached session {}", handle.id);
                         }
-                        handle.projection.apply(&notification.update)
+                        (
+                            attached,
+                            handle.projection.apply(&notification.update),
+                        )
                     });
+                    let (attached, change) = change;
+                    // The transcript is complete: the runs it shows can be matched now.
+                    if attached {
+                        let client = self.client.clone();
+                        handle.update(cx, |handle, cx| {
+                            handle.refresh_checkpoints(client, cx)
+                        });
+                    }
                     changes
                         .entry(notification.session_id.clone())
                         .or_default()
@@ -384,11 +468,16 @@ impl SessionRegistry {
             {
                 // A new title, a spawned subagent, or a settled run makes the
                 // catalog (title, children, sort order) stale.
-                let catalog_stale = change.title
-                    || change.agents
-                    || (change.run_state
-                        && handle.read(cx).projection.run_state()
-                            == RunState::Idle);
+                let settled = change.run_state
+                    && handle.read(cx).projection.run_state() == RunState::Idle;
+                let catalog_stale = change.title || change.agents || settled;
+                // A settled run took its end snapshot before reporting its end.
+                if settled {
+                    let client = self.client.clone();
+                    handle.update(cx, |handle, cx| {
+                        handle.refresh_checkpoints(client, cx)
+                    });
+                }
                 handle.update(cx, |_, cx| {
                     cx.emit(change);
                     cx.notify();

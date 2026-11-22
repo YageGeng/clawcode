@@ -7,6 +7,7 @@ pub mod actions;
 pub mod app;
 pub mod assets;
 pub mod backend;
+pub mod branch;
 pub mod catalog;
 pub mod file;
 pub mod i18n;

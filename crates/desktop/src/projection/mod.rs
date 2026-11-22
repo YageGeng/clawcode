@@ -85,6 +85,10 @@ pub struct ProjectionChange {
     /// child of this session.
     #[builder(default)]
     pub agents: bool,
+    /// Whether the session's list of runs that changed its workspace was
+    /// read again (M4b spec §6).
+    #[builder(default)]
+    pub checkpoints: bool,
 }
 
 impl ProjectionChange {
@@ -99,6 +103,7 @@ impl ProjectionChange {
             && !self.structural
             && !self.history
             && !self.agents
+            && !self.checkpoints
     }
 
     /// Folds a later change into this one; an inserted row is never also reported as updated.
@@ -116,6 +121,7 @@ impl ProjectionChange {
         self.agents |= other.agents;
         self.structural |= other.structural;
         self.history |= other.history;
+        self.checkpoints |= other.checkpoints;
     }
 
     /// Records a new row; it supersedes an earlier update of the same key.
@@ -196,6 +202,17 @@ impl Default for SessionProjection {
     }
 }
 
+/// A run whose change a session view shows, with the turn it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownRun<'a> {
+    /// The run and its changes.
+    pub run: &'a Arc<protocol::RunCheckpoint>,
+    /// The turn's number in the transcript, from 1.
+    pub ordinal: usize,
+    /// The first line of the turn's question.
+    pub prompt: String,
+}
+
 impl SessionProjection {
     /// Session-wide control state.
     pub fn controls(&self) -> &SessionControls {
@@ -230,6 +247,69 @@ impl SessionProjection {
     /// Current position of a row.
     pub fn index_of(&self, key: &RowKey) -> Option<usize> {
         self.index.get(key).copied()
+    }
+
+    /// The replies a session can fork from: in each turn, the last reply,
+    /// when no tool row follows it before the next turn. The turn a run is
+    /// still writing has none.
+    pub fn fork_points(&self) -> HashSet<wire::MessageId> {
+        let mut points = HashSet::new();
+        // The last reply of the turn being read, cleared when a tool follows it.
+        let mut last: Option<&wire::MessageId> = None;
+        for entry in &self.entries {
+            match &entry.row {
+                TranscriptRow::Message(row) if row.starts_turn() => {
+                    points.extend(last.take().cloned());
+                }
+                TranscriptRow::Message(row) if row.is_reply() => {
+                    last = Some(&row.message_id);
+                }
+                TranscriptRow::Tool(_) => last = None,
+                _ => {}
+            }
+        }
+        if self.run_state == RunState::Idle {
+            points.extend(last.cloned());
+        }
+        points
+    }
+
+    /// The runs of `runs` whose reply is in this transcript, newest first,
+    /// each with its turn's number and the first line of its question.
+    pub fn shown_runs<'a>(
+        &self,
+        runs: &'a [Arc<protocol::RunCheckpoint>],
+    ) -> Vec<ShownRun<'a>> {
+        // Each reply's turn number and question, in one pass.
+        let mut turns: HashMap<&str, (usize, &str)> = HashMap::new();
+        let mut ordinal = 0;
+        let mut prompt = "";
+        for entry in &self.entries {
+            if let TranscriptRow::Message(row) = &entry.row {
+                if row.starts_turn() {
+                    ordinal += 1;
+                    prompt = row.text.lines().next().unwrap_or_default();
+                } else if row.role == Role::Assistant {
+                    turns.insert(row.message_id.0.as_ref(), (ordinal, prompt));
+                }
+            }
+        }
+        let mut shown: Vec<ShownRun<'a>> = runs
+            .iter()
+            .filter_map(|run| {
+                let anchor = run.anchor_message_id.as_ref()?;
+                let (ordinal, prompt) = turns.get(anchor.as_ref())?;
+                Some(ShownRun {
+                    run,
+                    ordinal: *ordinal,
+                    prompt: (*prompt).to_owned(),
+                })
+            })
+            .collect();
+        // Newest first: later turns, then later runs within one turn.
+        shown.reverse();
+        shown.sort_by_key(|shown| std::cmp::Reverse(shown.ordinal));
+        shown
     }
 
     /// Whether foreground work is active.

@@ -178,26 +178,35 @@ impl SessionView {
                 ))
             })
             .collect();
-        h_flex()
+        let bubble = h_flex().w_full().justify_end().child(
+            v_flex()
+                .max_w(relative(0.78))
+                .gap_2()
+                .px_3p5()
+                .py_2()
+                .bg(theme.muted)
+                .rounded(theme.radius_lg)
+                .when(!thumbnails.is_empty(), |this| {
+                    this.child(
+                        h_flex().flex_wrap().gap_2().children(thumbnails),
+                    )
+                })
+                .when_some(
+                    self.markdown.get(id, MarkdownPart::Body),
+                    |this, state| this.child(TextView::new(state)),
+                ),
+        );
+        let group = SharedString::from(format!("msg-{id}"));
+        v_flex()
             .w_full()
-            .justify_end()
+            .group(group.clone())
+            .gap_1()
+            .child(bubble)
             .child(
-                v_flex()
-                    .max_w(relative(0.78))
-                    .gap_2()
-                    .px_3p5()
-                    .py_2()
-                    .bg(theme.muted)
-                    .rounded(theme.radius_lg)
-                    .when(!thumbnails.is_empty(), |this| {
-                        this.child(
-                            h_flex().flex_wrap().gap_2().children(thumbnails),
-                        )
-                    })
-                    .when_some(
-                        self.markdown.get(id, MarkdownPart::Body),
-                        |this, state| this.child(TextView::new(state)),
-                    ),
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .child(self.render_message_actions(message, &group, cx)),
             )
             .into_any_element()
     }
@@ -409,6 +418,15 @@ impl SessionView {
                     )
                 },
             )
+            // A reply still streaming has nothing final to copy or fork from.
+            .when(!message.streaming, |this| {
+                let group = SharedString::from(format!("msg-{id}"));
+                this.group(group.clone())
+                    .child(self.render_message_actions(message, &group, cx))
+            })
+            .when_some(self.render_turn_changes(id, cx), |this, card| {
+                this.child(card)
+            })
             .into_any_element()
     }
 

@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 use turn::{RunScope, TurnLoop};
 
 use crate::EventSink;
-use crate::runtime::{EventEmitter, Kernel, KernelError, Session, command};
+use crate::runtime::{
+    EventEmitter, Kernel, KernelError, Session, checkpoint, command,
+};
 use admission::AdmissionTicket;
 use input::PromptInputExpansion;
 use insertion::{InsertionNotice, WaiterCancellation};
@@ -246,10 +248,25 @@ impl Kernel {
             serde_json::json!({ "operation": "agent" }),
         )?;
 
+        // The start snapshot precedes the first model request; without it
+        // there is no end to compare, so the end is skipped too.
+        let checkpointing = checkpoint::RunCheckpointing::builder()
+            .checkpoints(self.checkpoints.as_ref())
+            .session(&session)
+            .session_id(&request.session_id)
+            .run_id(&run_id)
+            .build();
+        let start_mark = checkpointing.start().await;
+
         session.execution.open_queue()?;
         let execution = scope
             .execute(&mut turn_loop, prompt, &extension_context)
             .await;
+        // The end snapshot is taken whatever the outcome, and before
+        // settlement emits RunEnd, so a client refreshing on the end finds it.
+        if let Some(start_mark) = &start_mark {
+            checkpointing.end(start_mark).await;
+        }
         scope.settle(execution, turn_loop, first_turn_id).await
     }
 }
