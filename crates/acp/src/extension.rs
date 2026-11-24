@@ -79,6 +79,12 @@ pub(crate) struct AcpExtensionRequest {
 }
 
 impl AcpExtensionRequest {
+    /// Whether answering may wait on the network, so it must not hold the
+    /// connection's dispatch loop.
+    pub(crate) fn is_slow(&self) -> bool {
+        self.method == AcpExtensionMethod::AuthStatus
+    }
+
     /// Returns the original extension parameters without adding method metadata.
     pub(crate) fn parameters(&self) -> &serde_json::Value {
         &self.parameters
@@ -622,6 +628,12 @@ impl AcpExtensionDispatcher {
                     crate::config::ConfigOptionsOf(&settings),
                 ))
                 .map_err(agent_client_protocol::Error::into_internal_error)?
+            }
+            AcpExtensionMethod::AuthStatus => {
+                serde_json::to_value(self.kernel.sign_in_statuses().await)
+                    .map_err(
+                        agent_client_protocol::Error::into_internal_error,
+                    )?
             }
             AcpExtensionMethod::Checkpoints => {
                 let input: CheckpointsParameters =

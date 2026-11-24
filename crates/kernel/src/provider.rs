@@ -15,7 +15,7 @@ use protocol::llm::{
 use protocol::{
     AgentMessage, ContentBlock, DeviceCodeSink, LoginMethod, MessageContent,
     ModelFailure, ModelFinal, ModelProfile, ModelRequest, ModelStreamEvent,
-    ModelUsage, Role, StopReason, ToolCall as AgentToolCall,
+    ModelUsage, Role, SignInStatus, StopReason, ToolCall as AgentToolCall,
 };
 use provider::{ConfiguredModel, ProviderConnectError, ProviderFactory};
 use serde_json::Value;
@@ -401,6 +401,11 @@ impl Model for ProviderModel {
             .ensure_signed_in()
             .await
             .map_err(|error| self.connection_failure("sign-in check", error))
+    }
+
+    /// Passes the provider's own verdict on.
+    async fn sign_in_status(&self) -> SignInStatus {
+        self.configured.sign_in_status().await
     }
 
     /// Runs the provider's sign-in; dropping the future stops it.

@@ -1,6 +1,7 @@
 //! Scripted Kernel behind a real in-process ACP connection, for integration tests.
 #![allow(dead_code)] // Each test binary uses a different subset of the fixture.
 
+pub mod login;
 pub mod shell;
 pub mod trajectory;
 
@@ -14,6 +15,7 @@ use agent_client_protocol::v2::schema as wire;
 use async_trait::async_trait;
 use desktop::backend::{
     AcpClient, AcpConnection, AgentRequest, BackendEvent, RequestId, SessionId,
+    SignInPrompt,
 };
 use extension::StaticExtensionFactory;
 use futures::StreamExt as _;
@@ -275,29 +277,38 @@ impl Model for ScriptedModel {
     }
 }
 
-/// Offers the one scripted model.
-struct ScriptedModelFactory(Arc<ScriptedModel>);
+/// Offers the scripted model, plus one that needs a sign-in when given.
+struct ScriptedModelFactory {
+    model: Arc<ScriptedModel>,
+    login: Option<Arc<login::LoginModel>>,
+}
 
 impl ModelFactory for ScriptedModelFactory {
     /// Returns the shared scripted model.
     fn create(&self) -> Result<Arc<dyn Model>, ModelError> {
-        Ok(Arc::clone(&self.0) as Arc<dyn Model>)
+        Ok(Arc::clone(&self.model) as Arc<dyn Model>)
     }
 
-    /// Builds a one-model catalog.
+    /// Builds the catalog, active on the scripted model.
     fn create_catalog(
         &self,
         _registration: &StaticExtensionRegistration,
     ) -> Result<kernel::ModelCatalog, ModelError> {
-        kernel::ModelCatalog::new("fixture", "scripted", vec![self.create()?])
+        let mut models = vec![self.create()?];
+        if let Some(login) = &self.login {
+            models.push(Arc::clone(login) as Arc<dyn Model>);
+        }
+        kernel::ModelCatalog::new("fixture", "scripted", models)
     }
 }
 
 /// Builds a production Kernel around the scripted model, persisting under
-/// `root`, with the history database `state` when given.
+/// `root`, with the history database `state` and the sign-in model `login`
+/// when given.
 fn scripted_kernel(
     root: &Path,
     state: Option<Arc<state::StateRuntime>>,
+    login: Option<Arc<login::LoginModel>>,
 ) -> Arc<Kernel> {
     let clock: Arc<dyn store::Clock> = Arc::new(SystemClock);
     let model = Arc::new(ScriptedModel {
@@ -311,7 +322,7 @@ fn scripted_kernel(
     });
     Arc::new(
         KernelFactory::builder()
-            .model_factory(Arc::new(ScriptedModelFactory(model)))
+            .model_factory(Arc::new(ScriptedModelFactory { model, login }))
             .tool_factory(Arc::new(BuiltinToolFactory::new()))
             .store_factory(Arc::new(JsonlStoreFactory::new(
                 root,
@@ -366,18 +377,27 @@ pub struct ScriptedBackend {
 impl ScriptedBackend {
     /// Builds the Kernel and connects a desktop `AcpClient` to it in-process.
     pub fn start() -> ScriptedBackend {
-        Self::start_with(false)
+        Self::start_with(false, None)
     }
 
     /// Like [`Self::start`], with a ready history database behind the
     /// Kernel, as the trajectory view needs.
     pub fn start_with_history() -> ScriptedBackend {
-        Self::start_with(true)
+        Self::start_with(true, None)
     }
 
-    /// Builds the Kernel, with a history database when `history`, and
-    /// connects a desktop `AcpClient` to it in-process.
-    fn start_with(history: bool) -> ScriptedBackend {
+    /// Like [`Self::start`], with `login` in the catalog beside the scripted model.
+    pub fn start_with_login(login: &Arc<login::LoginModel>) -> ScriptedBackend {
+        Self::start_with(false, Some(Arc::clone(login)))
+    }
+
+    /// Builds the Kernel, with a history database when `history` and a model
+    /// needing a sign-in when given, and connects a desktop `AcpClient` to it
+    /// in-process.
+    fn start_with(
+        history: bool,
+        login: Option<Arc<login::LoginModel>>,
+    ) -> ScriptedBackend {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -400,7 +420,7 @@ impl ScriptedBackend {
                 state
             })
         });
-        let kernel = scripted_kernel(root.path(), state);
+        let kernel = scripted_kernel(root.path(), state, login);
         let server = Arc::new(AcpServerFactory::new(
             Arc::clone(&kernel),
             NonZeroUsize::new(128).expect("positive batch size"),
@@ -504,6 +524,14 @@ impl ScriptedBackend {
     pub fn wait_request(&mut self) -> AgentRequest {
         self.wait_event(|event| match event {
             BackendEvent::Request(request) => Some(*request),
+            _ => None,
+        })
+    }
+
+    /// Waits for the next device code; fails after `WAIT`.
+    pub fn wait_sign_in(&mut self) -> (RequestId, SignInPrompt) {
+        self.wait_event(|event| match event {
+            BackendEvent::SignIn(id, prompt) => Some((id, prompt)),
             _ => None,
         })
     }

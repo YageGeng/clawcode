@@ -175,6 +175,15 @@ pub fn live_with_history(cx: &mut TestAppContext, state: DesktopState) -> Live {
     live_on(cx, state, ScriptedBackend::start_with_history())
 }
 
+/// Like [`live`], with `login` in the catalog beside the scripted model.
+pub fn live_with_login(
+    cx: &mut TestAppContext,
+    state: DesktopState,
+    login: &std::sync::Arc<super::login::LoginModel>,
+) -> Live {
+    live_on(cx, state, ScriptedBackend::start_with_login(login))
+}
+
 /// Hands `backend`'s event stream to a freshly opened shell.
 fn live_on(
     cx: &mut TestAppContext,

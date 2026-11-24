@@ -552,6 +552,60 @@ Settings:
   dark_theme:
     en: "Dark theme"
     zh-CN: "深色主题"
+  workspaces:
+    en: "Workspaces"
+    zh-CN: "工作区"
+  new_workspace:
+    en: "New workspace"
+    zh-CN: "新工作区"
+  new_workspace_hint:
+    en: "Add a folder to start sessions in it."
+    zh-CN: "添加一个文件夹，就可以在里面开始会话。"
+  providers:
+    en: "Providers"
+    zh-CN: "Provider"
+  signed_in:
+    en: "Signed in"
+    zh-CN: "已登录"
+  signed_out:
+    en: "Not signed in"
+    zh-CN: "未登录"
+  sign_in_unknown:
+    en: "Could not check the sign-in"
+    zh-CN: "无法确认登录状态"
+  sign_in_checking:
+    en: "Checking…"
+    zh-CN: "检查中…"
+  sign_in:
+    en: "Sign in"
+    zh-CN: "登录"
+  sign_in_again:
+    en: "Sign in again"
+    zh-CN: "重新登录"
+  retry:
+    en: "Retry"
+    zh-CN: "重试"
+  backend_not_running:
+    en: "The backend is not running"
+    zh-CN: "后端未运行"
+  api_keys:
+    en: "API keys are set in the configuration file."
+    zh-CN: "API key 在配置文件中设置。"
+  about:
+    en: "About"
+    zh-CN: "关于"
+  version:
+    en: "Version"
+    zh-CN: "版本"
+  config_file:
+    en: "Configuration file"
+    zh-CN: "配置文件"
+  data_dir:
+    en: "Data folder"
+    zh-CN: "数据目录"
+  config_not_loaded:
+    en: "Configuration not loaded"
+    zh-CN: "配置未加载"
   font_size:
     en: "Font size"
     zh-CN: "界面字号"
@@ -620,9 +674,6 @@ Controls:
   thinking:
     en: Thinking
     zh-CN: 思考级别
-  needs_login:
-    en: Sign in to this model's provider first
-    zh-CN: 需要先登录该模型的 Provider
   switch_failed:
     en: Could not switch
     zh-CN: 切换失败
@@ -1117,3 +1168,22 @@ Record:
   result_more:
     en: "%{count} more lines in Result"
     zh-CN: "还有 %{count} 行，完整内容见「结果」"
+SignIn:
+  title:
+    en: Sign in to %{provider}
+    zh-CN: 登录 %{provider}
+  instruction:
+    en: "Open the verification page and enter this code:"
+    zh-CN: 打开验证页面，输入下面的代码：
+  waiting:
+    en: Waiting for authorization…
+    zh-CN: 等待授权…
+  cancel:
+    en: Cancel
+    zh-CN: 取消
+  open:
+    en: Open verification page
+    zh-CN: 打开验证页面
+  failed:
+    en: Sign-in did not complete. Try again.
+    zh-CN: 登录未完成，请重试

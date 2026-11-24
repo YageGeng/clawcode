@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use protocol::{
     DeviceCodeSink, LoginMethod, ModelFailure, ModelProfile, ModelRequest,
-    ModelStreamEvent,
+    ModelStreamEvent, ProviderSignIn, SignInStatus,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -67,6 +67,17 @@ pub trait Model: Send + Sync {
     /// Reports `AuthRequired` when this model cannot be used before a sign-in.
     async fn ensure_signed_in(&self) -> Result<(), ModelError> {
         Ok(())
+    }
+
+    /// Reports whether this model's provider credential is usable.
+    async fn sign_in_status(&self) -> SignInStatus {
+        match self.ensure_signed_in().await {
+            Ok(()) => SignInStatus::SignedIn,
+            Err(ModelError::AuthRequired { .. }) => {
+                SignInStatus::SignInRequired
+            }
+            Err(_) => SignInStatus::Unknown,
+        }
     }
 
     /// Runs one interactive sign-in, handing its device code to `on_code`.
@@ -196,15 +207,34 @@ impl ModelCatalog {
     /// Lists each sign-in once, however many models of a provider share it.
     #[must_use]
     pub fn login_methods(&self) -> Vec<LoginMethod> {
+        self.login_models()
+            .into_values()
+            .map(|(method, _model)| method)
+            .collect()
+    }
+
+    /// Reports each sign-in's status once, checking the providers together.
+    pub async fn sign_in_statuses(&self) -> Vec<ProviderSignIn> {
+        futures::future::join_all(self.login_models().into_iter().map(
+            |(method_id, (_method, model))| async move {
+                ProviderSignIn {
+                    method_id,
+                    status: model.sign_in_status().await,
+                }
+            },
+        ))
+        .await
+    }
+
+    /// Each sign-in by its method identifier, with a model that offers it.
+    fn login_models(&self) -> BTreeMap<String, (LoginMethod, &Arc<dyn Model>)> {
         let mut methods = BTreeMap::new();
-        for method in self
-            .models
-            .values()
-            .filter_map(|model| model.login_method())
-        {
-            methods.entry(method.id.clone()).or_insert(method);
+        for model in self.models.values() {
+            if let Some(method) = model.login_method() {
+                methods.entry(method.id.clone()).or_insert((method, model));
+            }
         }
-        methods.into_values().collect()
+        methods
     }
 
     /// Runs one sign-in through any model that offers `method_id`.
@@ -213,15 +243,8 @@ impl ModelCatalog {
         method_id: &str,
         on_code: DeviceCodeSink,
     ) -> Result<(), ModelError> {
-        let model = self
-            .models
-            .values()
-            .find(|model| {
-                model
-                    .login_method()
-                    .is_some_and(|method| method.id == method_id)
-            })
-            .ok_or_else(|| {
+        let (_method, model) =
+            self.login_models().remove(method_id).ok_or_else(|| {
                 ModelError::Unavailable(format!(
                     "no login method named {method_id}"
                 ))
@@ -347,5 +370,84 @@ mod tests {
             catalog.sign_in("missing", Arc::new(|_code| {})).await,
             Err(ModelError::Unavailable(_))
         ));
+    }
+
+    /// Each method reports once, with the verdict of the provider's check.
+    #[tokio::test]
+    async fn catalog_reports_one_status_per_method() {
+        let statuses = catalog(
+            &[
+                ("chatgpt", "a", Some("chatgpt")),
+                ("chatgpt", "b", Some("chatgpt")),
+                ("corp", "c", None),
+            ],
+            &Arc::default(),
+        )
+        .sign_in_statuses()
+        .await;
+
+        assert_eq!(
+            statuses,
+            [protocol::ProviderSignIn {
+                method_id: "chatgpt".to_owned(),
+                status: SignInStatus::SignedIn,
+            }]
+        );
+    }
+
+    /// A model that only knows `ensure_signed_in` still reports a status.
+    #[tokio::test]
+    async fn default_status_follows_the_request_check() {
+        /// A model whose check answers as scripted.
+        struct Checked(ModelProfile, Result<(), ModelError>);
+
+        #[async_trait]
+        impl Model for Checked {
+            /// Returns the scripted identity.
+            fn profile(&self) -> &ModelProfile {
+                &self.0
+            }
+
+            /// Never blocks.
+            async fn preflight(&self) -> Result<(), ModelError> {
+                Ok(())
+            }
+
+            /// Answers as scripted.
+            async fn ensure_signed_in(&self) -> Result<(), ModelError> {
+                self.1.clone()
+            }
+
+            /// Never streams.
+            async fn stream(
+                &self,
+                _request: ModelRequest,
+                _cancellation: CancellationToken,
+            ) -> Result<ModelStream, ModelError> {
+                Err(ModelError::Unavailable("not streamed".to_owned()))
+            }
+        }
+
+        let required = ModelError::AuthRequired {
+            method_id: "chatgpt".to_owned(),
+        };
+        for (check, expected) in [
+            (Ok(()), SignInStatus::SignedIn),
+            (Err(required), SignInStatus::SignInRequired),
+            (
+                Err(ModelError::Unavailable("down".to_owned())),
+                SignInStatus::Unknown,
+            ),
+        ] {
+            let profile = ModelProfile::builder()
+                .provider_id("chatgpt".to_owned())
+                .model_id("a".to_owned())
+                .display_name("a".to_owned())
+                .context_tokens(1_000)
+                .max_output_tokens(100)
+                .build();
+            let model = Checked(profile, check);
+            assert_eq!(model.sign_in_status().await, expected);
+        }
     }
 }

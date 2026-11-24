@@ -8,7 +8,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Context, Entity, Window};
 
 use crate::actions::FocusComposer;
-use crate::backend::{SessionId, SessionStart};
+use crate::backend::{SessionId, SessionStart, StartError};
 use crate::catalog::SessionSummary;
 use crate::ui::composer::attachments::Outgoing;
 use crate::ui::{
@@ -127,57 +127,66 @@ impl AppView {
             _ => None,
         };
         let (Some(cwd), Some(client)) = (cwd, self.host.client.clone()) else {
-            Self::creation_failed(view, message, window, cx);
+            Self::creation_failed(
+                view,
+                message,
+                Self::create_failed(),
+                window,
+                cx,
+            );
             return;
         };
         // Choices made in the draft apply before its first message runs.
         let choices = view.read(cx).draft_choices.clone();
         let view = view.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let mut created = client.new_session(&cwd).await;
-            if let Ok(start) = &mut created {
-                for (config_id, value) in &choices {
-                    match client
-                        .set_config_option(&start.id, config_id, value)
-                        .await
-                    {
-                        Ok(options) => start.config_options = options,
-                        Err(error) => tracing::warn!(
-                            "failed to apply the draft's {} to session {}: {}",
-                            config_id,
-                            start.id,
-                            error
-                        ),
-                    }
-                }
-            }
-            let _ = this.update_in(cx, |this, window, cx| match created {
+            let started = client.start_session(&cwd, &choices).await;
+            let _ = this.update_in(cx, |this, window, cx| match started {
                 Ok(start) => {
                     if this.adopt_draft(&view, &cwd, start, window, cx) {
                         view.update(cx, |view, cx| {
                             view.send(message, window, cx)
                         });
                     } else {
-                        Self::creation_failed(&view, message, window, cx);
+                        let notice = Self::create_failed();
+                        Self::creation_failed(
+                            &view, message, notice, window, cx,
+                        );
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        "failed to create a session in {}: {}",
-                        cwd.display(),
-                        error
-                    );
-                    Self::creation_failed(&view, message, window, cx);
+                    let notice = match &error {
+                        StartError::Create(_) => Self::create_failed(),
+                        StartError::Configure(error) => error.switch_notice(),
+                    };
+                    // Without a notice the user gave up the sign-in.
+                    if notice.is_some() {
+                        tracing::warn!(
+                            "failed to start a session in {}: {}",
+                            cwd.display(),
+                            error
+                        );
+                    }
+                    // A listing meanwhile may have shown the deleted session.
+                    this.refresh_catalog(cx);
+                    Self::creation_failed(&view, message, notice, window, cx);
                 }
             });
         })
         .detach();
     }
 
-    /// Gives the text back to the draft's composer and reports the failure.
+    /// What to tell the user when a draft's session could not be created.
+    fn create_failed() -> Option<String> {
+        Some(rust_i18n::t!("Composer.create_failed").into_owned())
+    }
+
+    /// Gives the text back to the draft's composer and reports the failure,
+    /// when there is something to say.
     fn creation_failed(
         view: &Entity<SessionView>,
         message: Outgoing,
+        notice: Option<String>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
@@ -189,12 +198,9 @@ impl AppView {
         });
         composer
             .update(cx, |composer, cx| composer.restore(message, window, cx));
-        window.push_notification(
-            Notification::error(
-                rust_i18n::t!("Composer.create_failed").into_owned(),
-            ),
-            cx,
-        );
+        if let Some(notice) = notice {
+            window.push_notification(Notification::error(notice), cx);
+        }
     }
 
     /// Turns the draft shown by `view` into the just-created session;

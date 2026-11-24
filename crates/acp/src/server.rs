@@ -1751,9 +1751,11 @@ impl AcpServerFactory {
                         &responder,
                         request.parameters(),
                     );
+                    let slow = request.is_slow();
+                    let tasks = connection.clone();
                     // The extension dispatcher covers every product method;
                     // boxing keeps that large state machine out of the ACP handler future.
-                    operation.run(Box::pin(async move {
+                    let answer = operation.run(Box::pin(async move {
                         let response = AcpExtensionDispatcher::builder()
                             .kernel(kernel)
                             .connection(connection)
@@ -1765,7 +1767,15 @@ impl AcpServerFactory {
                         .execute(request)
                         .await?;
                         responder.respond(response)
-                    })).await
+                    }));
+                    if slow {
+                        // A failure drops the responder, which answers with an error.
+                        return tasks.spawn(async move {
+                            let _settled = answer.await;
+                            Ok(())
+                        });
+                    }
+                    answer.await
                     }
                 },
                 agent_client_protocol::on_receive_request!(),

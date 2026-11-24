@@ -142,8 +142,8 @@ impl PendingRequests {
         }
     }
 
-    /// Parks a responder, reports the request built by `request`, and starts
-    /// watching for the agent withdrawing it.
+    /// Parks a responder, reports the event built by `report`, and starts
+    /// watching for the agent withdrawing the request.
     ///
     /// Returns the request's local id. When the agent sends `$/cancel_request`
     /// first, the request is answered as cancelled and `RequestCancelled` is reported.
@@ -152,15 +152,14 @@ impl PendingRequests {
         waiting: Waiting,
         cancellation: agent_client_protocol::RequestCancellation,
         events: UnboundedSender<BackendEvent>,
-        request: impl FnOnce(RequestId) -> AgentRequest,
+        report: impl FnOnce(RequestId) -> BackendEvent,
     ) -> RequestId {
         let id = RequestId(self.next.fetch_add(1, Ordering::Relaxed));
         let (answered, answered_rx) = oneshot::channel();
         self.lock().insert(id, Pending { waiting, answered });
         // Reported before the watcher starts, so a withdrawal can never be
         // seen ahead of the request it withdraws.
-        let _ =
-            events.unbounded_send(BackendEvent::Request(Box::new(request(id))));
+        let _ = events.unbounded_send(report(id));
         let pending = self.clone();
         tokio::spawn(async move {
             tokio::select! {

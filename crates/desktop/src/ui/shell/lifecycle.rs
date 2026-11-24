@@ -110,6 +110,7 @@ impl AppView {
         cx: &mut Context<'_, Self>,
     ) {
         self.host.phase = BackendPhase::Starting;
+        self.host.config_path = Some(config_location());
         cx.notify();
         let config = match config {
             Ok(config) => config,
@@ -121,6 +122,7 @@ impl AppView {
                 return;
             }
         };
+        self.host.data_root = config.current().session_persistence.data_root();
         cx.spawn(async move |this, cx| {
             let result = Backend::start(config).await;
             let _ =
@@ -202,7 +204,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.quitting {
+        if self.quitting || self.confirming_quit {
             return;
         }
         let running = self
@@ -219,9 +221,11 @@ impl AppView {
         } else {
             rust_i18n::t!("Quit.title_other", count = running).into_owned()
         };
+        self.confirming_quit = true;
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let view = view.clone();
+            let closed = view.clone();
             dialog
                 .confirm()
                 .title(Label::new(title.clone()))
@@ -240,6 +244,12 @@ impl AppView {
                     let _ =
                         view.update(cx, |this, cx| this.quit_now(false, cx));
                     true
+                })
+                .on_close(move |_, _, cx| {
+                    let _ = closed.update(cx, |this, cx| {
+                        this.confirming_quit = false;
+                        cx.notify();
+                    });
                 })
         });
     }

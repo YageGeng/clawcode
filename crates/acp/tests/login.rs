@@ -22,7 +22,7 @@ use kernel::{
 use prompt::FilesystemPromptFactory;
 use protocol::{
     DeviceCode, DeviceCodeSink, LoginMethod, ModelProfile, ModelRequest,
-    SessionId, StaticExtensionRegistration,
+    SessionId, SignInStatus, StaticExtensionRegistration,
 };
 use store::{JsonlStoreFactory, SystemClock};
 use tokio::sync::{Notify, Semaphore, mpsc};
@@ -78,6 +78,8 @@ struct LoginModel {
     before_code: Option<Arc<Notify>>,
     /// Fails a sign-in before any device code exists.
     fails_before_code: AtomicBool,
+    /// Holds the sign-in status check until notified, when set.
+    status_gate: Mutex<Option<Arc<Notify>>>,
     /// One permit completes one waiting sign-in.
     release: Semaphore,
     live: Arc<AtomicUsize>,
@@ -92,6 +94,7 @@ impl LoginModel {
             signed_in: AtomicBool::new(false),
             before_code,
             fails_before_code: AtomicBool::new(false),
+            status_gate: Mutex::new(None),
             release: Semaphore::new(0),
             live: Arc::default(),
             codes_issued: AtomicUsize::new(0),
@@ -143,6 +146,19 @@ impl Model for LoginModel {
             Err(ModelError::AuthRequired {
                 method_id: "chatgpt".to_owned(),
             })
+        }
+    }
+
+    /// Waits for the gate when there is one, then reports the scripted state.
+    async fn sign_in_status(&self) -> SignInStatus {
+        let gate = self.status_gate.lock().expect("gate").clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        if self.signed_in.load(Ordering::SeqCst) {
+            SignInStatus::SignedIn
+        } else {
+            SignInStatus::SignInRequired
         }
     }
 
@@ -908,4 +924,95 @@ async fn login_logs_omit_device_code() {
     let output = logs.content();
     assert!(output.contains("auth/login"), "{output}");
     assert!(!output.contains("CODE-1"), "{output}");
+}
+
+/// Asks for every login method's status.
+fn auth_status() -> agent_client_protocol::UntypedMessage {
+    agent_client_protocol::UntypedMessage::new(
+        protocol::AcpExtensionMethod::AuthStatus.as_str(),
+        serde_json::json!({}),
+    )
+    .expect("auth status request")
+}
+
+/// The status names each method once and follows a completed sign-in.
+#[tokio::test]
+async fn auth_status_reports_each_method() {
+    let root = tempfile::tempdir().expect("root");
+    let login = LoginModel::new(None);
+    let (_kernel, acp) = server(
+        root.path(),
+        LoginModelFactory {
+            login: Some(Arc::clone(&login)),
+            starts_on_login: false,
+        },
+    );
+    with_client(&acp, true, async |connection, _side| {
+        for (signed_in, expected) in
+            [(false, "signInRequired"), (true, "signedIn")]
+        {
+            login.signed_in.store(signed_in, Ordering::SeqCst);
+            let status =
+                connection.send_request(auth_status()).block_task().await?;
+            assert_eq!(
+                status,
+                serde_json::json!([
+                    { "methodId": "chatgpt", "status": expected }
+                ])
+            );
+        }
+        Ok(())
+    })
+    .await;
+}
+
+/// Without a sign-in there is nothing to report.
+#[tokio::test]
+async fn auth_status_is_empty_without_oauth() {
+    let root = tempfile::tempdir().expect("root");
+    let (_kernel, acp) = server(
+        root.path(),
+        LoginModelFactory {
+            login: None,
+            starts_on_login: false,
+        },
+    );
+    with_client(&acp, true, async |connection, _side| {
+        let status =
+            connection.send_request(auth_status()).block_task().await?;
+        assert_eq!(status, serde_json::json!([]));
+        Ok(())
+    })
+    .await;
+}
+
+/// A check may wait on the network; the connection answers others meanwhile.
+#[tokio::test]
+async fn a_slow_auth_status_does_not_hold_the_connection() {
+    let root = tempfile::tempdir().expect("root");
+    let login = LoginModel::new(None);
+    let gate = Arc::new(Notify::new());
+    *login.status_gate.lock().expect("gate") = Some(Arc::clone(&gate));
+    let (_kernel, acp) = server(
+        root.path(),
+        LoginModelFactory {
+            login: Some(login),
+            starts_on_login: false,
+        },
+    );
+    with_client(&acp, true, async move |connection, _side| {
+        let status = connection.send_request(auth_status());
+        tokio::time::timeout(
+            WAIT,
+            connection
+                .send_request(wire::ListSessionsRequest::new())
+                .block_task(),
+        )
+        .await
+        .expect("answered while the check waits")?;
+        gate.notify_one();
+        status.block_task().await?;
+        Ok(())
+    })
+    .await;
 }

@@ -267,7 +267,7 @@ mod sign_in {
     use std::time::Duration;
 
     use http::StatusCode;
-    use protocol::{DeviceCode, DeviceCodeSink};
+    use protocol::{DeviceCode, DeviceCodeSink, SignInStatus};
     use provider::{ConfiguredModel, ProviderConnectError, ProviderFactory};
     use rig_core::http_client::{
         self, Bytes, DynHttpClient, HttpClientExt, LazyBody, MultipartForm,
@@ -545,6 +545,56 @@ max_output_tokens=128
         }
         let record = std::fs::read_to_string(&stored).expect("record");
         assert!(record.contains("rotated-refresh"), "{record}");
+    }
+
+    /// The status tells a usable credential from a missing or rejected one.
+    #[tokio::test]
+    async fn status_separates_signed_in_from_required() {
+        let directory = tempfile::tempdir().expect("store");
+        let model =
+            chatgpt_model(directory.path(), RecordingHttpClient::new(""));
+        assert_eq!(model.sign_in_status().await, SignInStatus::SignInRequired);
+        seed(directory.path(), &live_record()).await;
+        let model =
+            chatgpt_model(directory.path(), RecordingHttpClient::new(""));
+        assert_eq!(model.sign_in_status().await, SignInStatus::SignedIn);
+        model.note_failure_status(Some(401));
+        assert_eq!(model.sign_in_status().await, SignInStatus::SignInRequired);
+    }
+
+    /// Failures that say nothing about the credential leave the status open,
+    /// where the check for a request would let the request report them.
+    #[tokio::test(start_paused = true)]
+    async fn status_is_unknown_when_the_check_cannot_decide() {
+        let directory = tempfile::tempdir().expect("store");
+        seed(directory.path(), &expired_record()).await;
+        let failing = chatgpt_model(
+            directory.path(),
+            RecordingHttpClient::with_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "down",
+            ),
+        );
+        assert_eq!(failing.sign_in_status().await, SignInStatus::Unknown);
+
+        // Nothing ever answers this one; the limit ends the wait.
+        let stalled =
+            chatgpt_model(directory.path(), GatedHttpClient::new(0, []));
+        assert_eq!(stalled.sign_in_status().await, SignInStatus::Unknown);
+
+        let file = tempfile::NamedTempFile::new().expect("file");
+        let broken = chatgpt_model(
+            &file.path().join("below-a-file"),
+            RecordingHttpClient::new(""),
+        );
+        assert_eq!(broken.sign_in_status().await, SignInStatus::Unknown);
+    }
+
+    /// A keyed provider has nothing to sign in to, so it never needs it.
+    #[tokio::test]
+    async fn keyed_provider_status_is_signed_in() {
+        let model = api_key_factory().resolve("corp", "a").expect("model");
+        assert_eq!(model.sign_in_status().await, SignInStatus::SignedIn);
     }
 
     /// A 401 makes every model of the provider ask for a sign-in despite an unexpired token.

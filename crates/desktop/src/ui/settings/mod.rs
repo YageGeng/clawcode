@@ -1,5 +1,10 @@
-//! The settings dialog (M3b spec §7): language, appearance, fonts, and where
-//! subagents open. Every change applies at once and is saved.
+//! The settings dialog (M3b spec §7, M4c spec §5): language, appearance,
+//! fonts, where subagents open, workspaces, providers, and about. Every
+//! change applies at once and is saved.
+
+mod about;
+mod providers;
+mod workspaces;
 
 use std::rc::Rc;
 
@@ -43,6 +48,8 @@ pub struct SettingsHost {
     pub(in crate::ui) open: bool,
     /// The font family pickers, built when the dialog first opens.
     pub(in crate::ui) font_pickers: Option<FontPickers>,
+    /// What the Provider page knows about the sign-ins.
+    providers: providers::ProviderStatus,
 }
 
 /// The two font family pickers of the Fonts page, built when the dialog first opens.
@@ -78,6 +85,7 @@ impl AppView {
             return;
         }
         self.settings.open = true;
+        self.read_sign_in_status(cx);
         if self.settings.font_pickers.is_none() {
             self.settings.font_pickers =
                 Some(self.build_font_pickers(window, cx));
@@ -457,6 +465,9 @@ impl AppView {
                             code_weight,
                         )),
                 ),
+                self.workspaces_page(cx),
+                self.providers_page(cx),
+                self.about_page(),
             ])
             .into_any_element()
     }

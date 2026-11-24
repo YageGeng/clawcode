@@ -19,12 +19,26 @@ pub enum BackendError {
     /// The chosen model needs its provider signed in first; carries the auth method id.
     #[error("sign-in required ({0})")]
     AuthRequired(String),
+    /// A sign-in the request needed did not complete; the reason is logged.
+    #[error("the sign-in did not complete")]
+    SignInFailed,
     /// The question was answered or skipped elsewhere already.
     #[error("the question is closed")]
     QuestionClosed,
     /// The history database is off, still backfilling, or repairing.
     #[error("the session history is not available yet")]
     HistoryUnavailable,
+}
+
+/// Why a session could not be started with its options.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    /// The session could not be created.
+    #[error("{0}")]
+    Create(BackendError),
+    /// An option could not be applied; the session was deleted again.
+    #[error("{0}")]
+    Configure(BackendError),
 }
 
 impl From<agent_client_protocol::Error> for BackendError {

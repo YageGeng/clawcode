@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use protocol::{DeviceCode, DeviceCodeSink, LoginMethod};
+use protocol::{DeviceCode, DeviceCodeSink, LoginMethod, SignInStatus};
 use rig_core::http_client::DynHttpClient;
 use rig_core::providers::auth::{
     AuthContext, AuthError, DeviceCodeHandler, FileTokenStore,
@@ -80,22 +80,33 @@ impl ProviderAuth {
     }
 
     /// Reports only a certain need to sign in; anything else surfaces on the request.
-    ///
-    /// The check runs in its own task, and the limit abandons the wait rather than
-    /// the task: cancelling a refresh in flight could lose a rotated refresh token.
     pub(crate) async fn check(
         self: Arc<Self>,
         http: DynHttpClient,
     ) -> Result<(), ProviderConnectError> {
+        match Arc::clone(&self).status(http).await {
+            SignInStatus::SignInRequired => Err(self.sign_in_required()),
+            SignInStatus::SignedIn | SignInStatus::Unknown => Ok(()),
+        }
+    }
+
+    /// Decides whether the credential is usable, refreshing it if needed but never prompting.
+    ///
+    /// The check runs in its own task, and the limit abandons the wait rather than
+    /// the task: cancelling a refresh in flight could lose a rotated refresh token.
+    pub(crate) async fn status(
+        self: Arc<Self>,
+        http: DynHttpClient,
+    ) -> SignInStatus {
         let id = self.method.id.clone();
         let task = tokio::spawn(async move { self.context(&http).await });
         let undecided = match tokio::time::timeout(SIGN_IN_CHECK_LIMIT, task)
             .await
         {
-            Ok(Ok(Ok(_context))) => return Ok(()),
-            Ok(Ok(Err(
-                error @ ProviderConnectError::SignInRequired { .. },
-            ))) => return Err(error),
+            Ok(Ok(Ok(_context))) => return SignInStatus::SignedIn,
+            Ok(Ok(Err(ProviderConnectError::SignInRequired { .. }))) => {
+                return SignInStatus::SignInRequired;
+            }
             Ok(Ok(Err(error))) => error.to_string(),
             Ok(Err(error)) => error.to_string(),
             Err(_elapsed) => {
@@ -107,7 +118,7 @@ impl ProviderAuth {
             id,
             undecided
         );
-        Ok(())
+        SignInStatus::Unknown
     }
 
     /// Runs one device sign-in, handing the code to `on_code` once upstream issues it.

@@ -128,6 +128,12 @@ pub struct HostState {
     registry: Option<Entity<SessionRegistry>>,
     #[builder(default)]
     catalog: SessionCatalog,
+    /// The backend's configuration file, or the folder it belongs in.
+    #[builder(default)]
+    config_path: Option<PathBuf>,
+    /// Where the backend keeps its data, once its configuration is loaded.
+    #[builder(default)]
+    data_root: Option<PathBuf>,
     /// Keeps the backend event pump alive.
     #[builder(default)]
     _pump: Option<Task<()>>,
@@ -159,6 +165,9 @@ pub struct AppView {
     /// The settings dialog's state.
     #[builder(default)]
     settings: settings::SettingsHost,
+    /// The sign-ins waiting for the user.
+    #[builder(default)]
+    sign_in: shell::sign_in::SignInHost,
     /// Catppuccin icons already decoded, by name and flavor.
     #[builder(default)]
     file_icon_cache: file_icon::FileIconCache,
@@ -183,6 +192,9 @@ pub struct AppView {
     /// Redraws the shell while a run is active and refreshes relative ages every minute.
     #[builder(default)]
     _ticker: Option<Task<()>>,
+    /// Whether the quit confirmation is open, above any other dialog.
+    #[builder(default)]
+    confirming_quit: bool,
     /// Set once quitting started, so a second request does nothing.
     #[builder(default)]
     quitting: bool,
@@ -341,6 +353,7 @@ impl AppView {
                             RegistryEvent::BackendStopped(reason) => {
                                 this.host.phase =
                                     BackendPhase::Stopped(reason.clone());
+                                this.clear_sign_ins();
                                 cx.notify();
                             }
                             // Agent-set titles and fresh modification times live in the catalog.
@@ -355,6 +368,12 @@ impl AppView {
                                     description.clone(),
                                     cx,
                                 )
+                            }
+                            RegistryEvent::SignIn(id, prompt) => {
+                                this.queue_sign_in(*id, prompt.clone(), cx)
+                            }
+                            RegistryEvent::RequestWithdrawn(id) => {
+                                this.withdraw_sign_in(*id, cx)
                             }
                             RegistryEvent::Released(_) => {}
                         }
@@ -371,6 +390,9 @@ impl AppView {
                 self.reset_panel_views();
                 self.refresh_all_git(cx);
                 self.refresh_catalog(cx);
+                if self.settings.open {
+                    self.read_sign_in_status(cx);
+                }
             }
             Err(error) => {
                 tracing::error!("desktop backend unavailable: {}", error);
@@ -572,6 +594,7 @@ impl Render for AppView {
         self.ensure_panel_view(window, cx);
         self.sync_panel_focus(window, cx);
         self.sync_details_inset(window, cx);
+        self.sync_sign_in(window, cx);
         // Notices arrive without a window; the frame that has one shows them.
         for (title, description) in std::mem::take(&mut self.notices) {
             let notification = match description {

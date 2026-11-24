@@ -196,6 +196,8 @@ pub enum AcpExtensionMethod {
     Trajectory,
     /// Reads one request content (system prompt or tools) by hash.
     TrajectoryContent,
+    /// Reports every login method's sign-in status.
+    AuthStatus,
 }
 
 impl fmt::Display for AcpExtensionMethod {
@@ -248,6 +250,7 @@ impl AcpExtensionMethod {
             Self::DefaultConfig => "_clawcode/session/default_config",
             Self::Trajectory => "_clawcode/session/trajectory",
             Self::TrajectoryContent => "_clawcode/session/trajectory/content",
+            Self::AuthStatus => "_clawcode/auth/status",
         }
     }
 
@@ -275,7 +278,8 @@ impl AcpExtensionMethod {
             | Self::CheckpointDiff
             | Self::DefaultConfig
             | Self::Trajectory
-            | Self::TrajectoryContent => true,
+            | Self::TrajectoryContent
+            | Self::AuthStatus => true,
             Self::Navigate
             | Self::Branch
             | Self::Fork
@@ -331,6 +335,7 @@ impl AcpExtensionMethod {
             Self::DefaultConfig,
             Self::Trajectory,
             Self::TrajectoryContent,
+            Self::AuthStatus,
         ]
         .into_iter()
         .find(|candidate| candidate.as_str() == method)

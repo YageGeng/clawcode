@@ -3,6 +3,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 /// One way a client can sign in to a provider; holds no credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginMethod {
@@ -10,6 +12,28 @@ pub struct LoginMethod {
     pub id: String,
     /// Human-readable provider name.
     pub name: String,
+}
+
+/// Whether a provider's stored credential can be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SignInStatus {
+    /// The credential is usable.
+    SignedIn,
+    /// The provider cannot be used before a sign-in.
+    SignInRequired,
+    /// The check could not decide, such as while the network is down.
+    Unknown,
+}
+
+/// One login method's sign-in status; holds no credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSignIn {
+    /// The method, as [`LoginMethod::id`].
+    pub method_id: String,
+    /// Its status.
+    pub status: SignInStatus,
 }
 
 /// What a user must do to authorize a device sign-in.

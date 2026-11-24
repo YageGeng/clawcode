@@ -457,6 +457,11 @@ impl Kernel {
         self.login_catalog.login_methods()
     }
 
+    /// Reports every sign-in's status; a check may wait on the network.
+    pub async fn sign_in_statuses(&self) -> Vec<protocol::ProviderSignIn> {
+        self.login_catalog.sign_in_statuses().await
+    }
+
     /// Forwards one sign-in to the provider that owns `method_id`.
     ///
     /// Dropping the returned future stops the sign-in.

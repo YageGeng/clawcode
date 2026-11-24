@@ -1,7 +1,9 @@
 //! The ACP client: the connection to the in-process agent and every request
 //! the UI sends through it.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v2::{ConnectionTo, Responder, schema as wire};
@@ -12,27 +14,35 @@ use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot;
 use protocol::{
     AcpExtensionMethod, CheckpointDiffParameters, CheckpointList,
-    CheckpointsParameters, ContentHash, EntryId, PendingMessages, QueueId,
-    RequestContent, RunId, SessionRuntimeSnapshot, SessionTreeSnapshot,
-    TrajectoryCursor, TrajectoryPage, WorkspaceChange, WorkspaceChanges,
-    WorkspaceChangesParameters, WorkspaceDiff, WorkspaceDiffParameters,
-    WorkspaceDiffScope, WorkspaceDirListing, WorkspaceFileContent,
-    WorkspaceGitStatus, WorkspaceListDirParameters, WorkspacePathParameters,
-    WorkspaceRootParameters,
+    CheckpointsParameters, ContentHash, EntryId, LoginMethod, PendingMessages,
+    ProviderSignIn, QueueId, RequestContent, RunId, SessionRuntimeSnapshot,
+    SessionTreeSnapshot, TrajectoryCursor, TrajectoryPage, WorkspaceChange,
+    WorkspaceChanges, WorkspaceChangesParameters, WorkspaceDiff,
+    WorkspaceDiffParameters, WorkspaceDiffScope, WorkspaceDirListing,
+    WorkspaceFileContent, WorkspaceGitStatus, WorkspaceListDirParameters,
+    WorkspacePathParameters, WorkspaceRootParameters,
 };
+use typed_builder::TypedBuilder;
 
 use super::requests::{PendingRequests, Waiting};
+use super::sign_in::SignIns;
 use super::{
     AgentRequest, BackendError, BackendEvent, QuestionKey, RequestId,
-    SessionId, SessionStart,
+    SessionId, SessionStart, SignInPrompt, StartError,
 };
 
 /// Handle to the in-process ACP connection; cheap to clone and usable from any executor.
-#[derive(Clone)]
+#[derive(Clone, TypedBuilder)]
+#[builder(builder_method(vis = ""))]
 pub struct AcpClient {
-    connection: ConnectionTo<Agent>,
-    runtime: tokio::runtime::Handle,
+    pub(super) connection: ConnectionTo<Agent>,
+    pub(super) runtime: tokio::runtime::Handle,
     pending: PendingRequests,
+    /// The sign-ins the agent offers.
+    login_methods: Arc<[LoginMethod]>,
+    /// The sign-ins in progress.
+    #[builder(default)]
+    pub(super) sign_ins: SignIns,
 }
 
 /// Keeps the ACP connection open until [`AcpConnection::close`] or drop.
@@ -114,8 +124,10 @@ impl AcpClient {
         component: impl ConnectTo<Client> + 'static,
         events: UnboundedSender<BackendEvent>,
     ) -> Result<(AcpClient, AcpConnection), BackendError> {
-        let (ready_tx, ready_rx) =
-            oneshot::channel::<Result<ConnectionTo<Agent>, String>>();
+        // The connection and the sign-in methods it offers.
+        let (ready_tx, ready_rx) = oneshot::channel::<
+            Result<(ConnectionTo<Agent>, Arc<[LoginMethod]>), String>,
+        >();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let updates = events.clone();
         let pending = PendingRequests::default();
@@ -146,7 +158,11 @@ impl AcpClient {
                             Waiting::Permission(responder),
                             cancellation,
                             permission_events.clone(),
-                            |id| AgentRequest::Permission { id, request },
+                            |id| {
+                                BackendEvent::Request(Box::new(
+                                    AgentRequest::Permission { id, request },
+                                ))
+                            },
                         );
                         tracing::info!("permission request {} for session {}", id.0, session);
                         Ok(())
@@ -157,9 +173,12 @@ impl AcpClient {
                     async move |request: wire::CreateElicitationRequest,
                                 responder: Responder<wire::CreateElicitationResponse>,
                                 _connection| {
-                        // Request-scoped elicitations come from provider sign-in, which arrives in M4.
-                        if !matches!(request.scope(), wire::ElicitationScope::Session(_)) {
-                            tracing::info!("declining a request-scoped elicitation; sign-in is not supported yet");
+                        let sign_in = SignInPrompt::of(&request);
+                        // Outside a session only a sign-in has anything to show.
+                        if sign_in.is_none()
+                            && !matches!(request.scope(), wire::ElicitationScope::Session(_))
+                        {
+                            tracing::info!("declining an elicitation outside any session");
                             return responder.respond(wire::CreateElicitationResponse::new(
                                 wire::ElicitationAction::Cancel,
                             ));
@@ -169,7 +188,12 @@ impl AcpClient {
                             Waiting::Elicitation(responder),
                             cancellation,
                             elicitation_events.clone(),
-                            |id| AgentRequest::Elicitation { id, request },
+                            |id| match sign_in {
+                                Some(prompt) => BackendEvent::SignIn(id, prompt),
+                                None => BackendEvent::Request(Box::new(
+                                    AgentRequest::Elicitation { id, request },
+                                )),
+                            },
                         );
                         tracing::info!("elicitation request {}", id.0);
                         Ok(())
@@ -195,11 +219,24 @@ impl AcpClient {
                         )
                         .block_task()
                         .await;
-                    if let Err(error) = initialize {
-                        let _ = ready_tx.send(Err(error.to_string()));
-                        return Err(error);
-                    }
-                    let _ = ready_tx.send(Ok(connection.clone()));
+                    let methods = match initialize {
+                        Ok(initialized) => initialized
+                            .auth_methods
+                            .into_iter()
+                            .filter_map(|method| match method {
+                                wire::AuthMethod::Agent(method) => Some(LoginMethod {
+                                    id: method.method_id.to_string(),
+                                    name: method.name,
+                                }),
+                                _ => None,
+                            })
+                            .collect(),
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return Err(error);
+                        }
+                    };
+                    let _ = ready_tx.send(Ok((connection.clone(), methods)));
                     // Either an explicit close or a dropped `AcpConnection` ends the connection.
                     let _ = shutdown_rx.await;
                     Ok(())
@@ -215,7 +252,7 @@ impl AcpClient {
             }
             let _ = events.unbounded_send(BackendEvent::Stopped(reason));
         });
-        let connection = ready_rx
+        let (connection, login_methods) = ready_rx
             .await
             .map_err(|error| {
                 BackendError::Startup(format!(
@@ -224,11 +261,12 @@ impl AcpClient {
             })?
             .map_err(BackendError::Startup)?;
         Ok((
-            AcpClient {
-                connection,
-                runtime: tokio::runtime::Handle::current(),
-                pending,
-            },
+            AcpClient::builder()
+                .connection(connection)
+                .runtime(tokio::runtime::Handle::current())
+                .pending(pending)
+                .login_methods(login_methods)
+                .build(),
             AcpConnection {
                 shutdown: shutdown_tx,
                 task: Some(task),
@@ -276,6 +314,51 @@ impl AcpClient {
             id: response.session_id,
             config_options: response.config_options,
         })
+    }
+
+    /// Creates a session in `cwd` with `options`, so nothing ever runs on
+    /// other settings than the chosen ones. When they need a sign-in, signs
+    /// in and starts over once; no session exists while that waits.
+    pub async fn start_session(
+        &self,
+        cwd: &Path,
+        options: &BTreeMap<&'static str, String>,
+    ) -> Result<SessionStart, StartError> {
+        match self.try_start_session(cwd, options).await {
+            Err(StartError::Configure(BackendError::AuthRequired(method))) => {
+                let signed_in = self.sign_in(&method).await.signed_in();
+                signed_in.map_err(StartError::Configure)?;
+                self.try_start_session(cwd, options).await
+            }
+            started => started,
+        }
+    }
+
+    /// Creates a session in `cwd` and applies `options`; one that could not
+    /// take them all is deleted again.
+    async fn try_start_session(
+        &self,
+        cwd: &Path,
+        options: &BTreeMap<&'static str, String>,
+    ) -> Result<SessionStart, StartError> {
+        let mut start =
+            self.new_session(cwd).await.map_err(StartError::Create)?;
+        for (config_id, value) in options {
+            match self.set_config_option(&start.id, config_id, value).await {
+                Ok(applied) => start.config_options = applied,
+                Err(error) => {
+                    if let Err(kept) = self.delete_session(&start.id).await {
+                        tracing::warn!(
+                            "failed to delete unused session {}: {}",
+                            start.id,
+                            kept
+                        );
+                    }
+                    return Err(StartError::Configure(error));
+                }
+            }
+        }
+        Ok(start)
     }
 
     /// Attaches to a session and replays its whole retained transcript as updates.
@@ -682,6 +765,20 @@ impl AcpClient {
         &self,
     ) -> Result<Vec<wire::SessionConfigOption>, BackendError> {
         self.typed(AcpExtensionMethod::DefaultConfig, &serde_json::json!({}))
+            .await
+    }
+
+    /// The sign-ins the agent offers; empty without a provider that has one.
+    pub fn login_methods(&self) -> &[LoginMethod] {
+        &self.login_methods
+    }
+
+    /// Whether each login method's credential is usable; the check may wait
+    /// on the network.
+    pub async fn auth_status(
+        &self,
+    ) -> Result<Vec<ProviderSignIn>, BackendError> {
+        self.typed(AcpExtensionMethod::AuthStatus, &serde_json::json!({}))
             .await
     }
 

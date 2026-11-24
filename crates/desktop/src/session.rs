@@ -14,7 +14,8 @@ use gpui_kit::{
 use typed_builder::TypedBuilder;
 
 use crate::backend::{
-    AcpClient, AgentRequest, BackendEvent, SessionId, SessionStart,
+    AcpClient, AgentRequest, BackendEvent, RequestId, SessionId, SessionStart,
+    SignInPrompt,
 };
 use crate::catalog::SessionSummary;
 use crate::projection::{ProjectionChange, RunState, SessionProjection};
@@ -269,6 +270,10 @@ pub enum RegistryEvent {
     Released(SessionId),
     /// A session's title or run state settled, so the session catalog is stale.
     SessionChanged(SessionId),
+    /// A sign-in wants its device code entered.
+    SignIn(RequestId, SignInPrompt),
+    /// The agent withdrew a request, whoever it was shown by.
+    RequestWithdrawn(RequestId),
     /// A live notice for the user, such as a failed extension handler.
     Notice {
         /// Short headline.
@@ -463,7 +468,12 @@ impl SessionRegistry {
                         _ => self.decline(&request),
                     }
                 }
+                // A sign-in belongs to the connection, not to a session.
+                BackendEvent::SignIn(id, prompt) => {
+                    cx.emit(RegistryEvent::SignIn(id, prompt));
+                }
                 BackendEvent::RequestCancelled(request_id) => {
+                    cx.emit(RegistryEvent::RequestWithdrawn(request_id));
                     for (id, handle) in &self.handles {
                         let removed = handle.update(cx, |handle, _| {
                             handle

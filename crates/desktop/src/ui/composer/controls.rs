@@ -43,6 +43,19 @@ fn chip_tone(theme: &Theme, disabled: bool, selected: bool) -> Hsla {
     }
 }
 
+impl BackendError {
+    /// What to tell the user when changing an option failed; nothing when
+    /// they gave up the sign-in it needed.
+    pub(in crate::ui) fn switch_notice(&self) -> Option<String> {
+        let notice = match self {
+            BackendError::Cancelled => return None,
+            BackendError::SignInFailed => rust_i18n::t!("SignIn.failed"),
+            _ => rust_i18n::t!("Controls.switch_failed"),
+        };
+        Some(notice.into_owned())
+    }
+}
+
 impl SessionView {
     /// Options of the attached session, or for a draft, the options a new
     /// session starts with, showing the choices made in the draft.
@@ -87,7 +100,8 @@ impl SessionView {
         self.config_busy = true;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = client.set_config_option(&id, config_id, &value).await;
+            let result =
+                client.set_config_signing_in(&id, config_id, &value).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.config_busy = false;
                 match result {
@@ -96,22 +110,18 @@ impl SessionView {
                         cx.notify();
                     }),
                     Err(error) => {
-                        tracing::warn!(
-                            "failed to set {} of session {}: {}",
-                            config_id,
-                            id,
-                            error
-                        );
-                        let message = match error {
-                            BackendError::AuthRequired(_) => {
-                                rust_i18n::t!("Controls.needs_login")
-                            }
-                            _ => rust_i18n::t!("Controls.switch_failed"),
-                        };
-                        window.push_notification(
-                            Notification::error(message.into_owned()),
-                            cx,
-                        );
+                        if let Some(notice) = error.switch_notice() {
+                            tracing::warn!(
+                                "failed to set {} of session {}: {}",
+                                config_id,
+                                id,
+                                error
+                            );
+                            window.push_notification(
+                                Notification::error(notice),
+                                cx,
+                            );
+                        }
                     }
                 }
                 cx.notify();

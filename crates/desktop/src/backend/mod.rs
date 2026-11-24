@@ -7,6 +7,7 @@
 mod client;
 mod error;
 mod requests;
+mod sign_in;
 
 use std::sync::Arc;
 
@@ -17,8 +18,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::channel::oneshot;
 
 pub use client::{AcpClient, AcpConnection};
-pub use error::BackendError;
+pub use error::{BackendError, StartError};
 pub use requests::{AgentRequest, RequestId};
+pub use sign_in::{SignIn, SignInOutcome, SignInPrompt};
 
 /// ACP session identifier used throughout the desktop client.
 pub type SessionId = wire::SessionId;
@@ -30,6 +32,8 @@ pub enum BackendEvent {
     Update(Box<wire::UpdateSessionNotification>),
     /// The agent asks the user something and waits for the answer.
     Request(Box<AgentRequest>),
+    /// A sign-in wants its device code entered; it has no session.
+    SignIn(RequestId, SignInPrompt),
     /// The agent withdrew a request: it was answered elsewhere or its run ended.
     RequestCancelled(RequestId),
     /// The ACP connection ended; carries the error when it ended with one.

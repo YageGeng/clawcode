@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use config::{LlmModel, LlmProvider, ProviderType};
 use protocol::{
     DeviceCodeSink, LoginMethod, ModelInputModalities, ModelInputModality,
-    ModelProfile,
+    ModelProfile, SignInStatus,
 };
 use rig_core::providers::auth::{AuthContext, AuthError};
 use rig_core::{
@@ -433,6 +433,14 @@ impl ConfiguredModel {
         match &self.auth {
             Some(auth) => Arc::clone(auth).check(self.http.clone()).await,
             None => Ok(()),
+        }
+    }
+
+    /// Reports whether this provider's credential is usable, without ever prompting.
+    pub async fn sign_in_status(&self) -> SignInStatus {
+        match &self.auth {
+            Some(auth) => Arc::clone(auth).status(self.http.clone()).await,
+            None => SignInStatus::SignedIn,
         }
     }
 

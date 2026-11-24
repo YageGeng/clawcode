@@ -25,7 +25,7 @@ use protocol::{QueueId, QueueKind, QueuedMessage};
 use super::attachments::Outgoing;
 use super::{Composer, ComposerEvent};
 use crate::actions::{COMPOSER_CONTEXT, StopRun};
-use crate::backend::BackendError;
+use crate::backend::{BackendError, SignInOutcome};
 use crate::projection::{CompactionStatus, RetryState, RunState};
 use crate::ui::session::{SessionTarget, SessionView, SessionViewEvent};
 
@@ -145,12 +145,18 @@ impl SessionView {
                 .background_executor()
                 .spawn(async move { encoding.into_blocks() })
                 .await;
+            let mut sign_in = None;
             let failed = match client.prompt(&id, blocks).await {
                 Ok(()) => return,
                 // A removed queued prompt, or one withdrawn when its run was
                 // stopped, comes back as cancelled: the user's own choice, so
                 // the text returns silently (WebUI parity), not as a failure.
                 Err(BackendError::Cancelled) => false,
+                // Nothing was sent; once signed in the user sends it again.
+                Err(BackendError::AuthRequired(method)) => {
+                    sign_in = Some(method);
+                    false
+                }
                 Err(error) => {
                     tracing::warn!(
                         "failed to send a message to session {}: {}",
@@ -176,6 +182,18 @@ impl SessionView {
                     );
                 }
             });
+            if let Some(method) = sign_in
+                && client.sign_in(&method).await == SignInOutcome::Failed
+            {
+                let _ = composer.update_in(cx, |_, window, cx| {
+                    window.push_notification(
+                        Notification::error(
+                            rust_i18n::t!("SignIn.failed").into_owned(),
+                        ),
+                        cx,
+                    );
+                });
+            }
         })
         .detach();
     }
@@ -496,7 +514,9 @@ impl SessionView {
                 .rounded_full()
                 .icon(IconName::ArrowUp)
                 .tooltip(rust_i18n::t!("Composer.send").into_owned())
-                .disabled(needs_workspace)
+                // A draft's first message may wait on a sign-in.
+                .loading(self.creating)
+                .disabled(needs_workspace || self.creating)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.submit(window, cx)
                 }))

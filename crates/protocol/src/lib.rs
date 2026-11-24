@@ -185,7 +185,9 @@ pub use workspace::{
     WorkspaceRootParameters, file_path, git_path,
 };
 
-pub use login::{DeviceCode, DeviceCodeSink, LoginMethod};
+pub use login::{
+    DeviceCode, DeviceCodeSink, LoginMethod, ProviderSignIn, SignInStatus,
+};
 pub use trace::{RUN_ID_FIELD, TRACE_ID_FIELD};
 
 pub mod llm;
