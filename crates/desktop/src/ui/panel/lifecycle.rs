@@ -156,6 +156,10 @@ impl AppView {
                 let painter = self.file_icon_painter(cx);
                 files.update(cx, |files, _| files.set_painter(painter));
             }
+            Some(PanelView::Subagent(session)) => {
+                let painter = self.file_icon_painter(cx);
+                session.update(cx, |view, cx| view.set_painter(painter, cx));
+            }
             // The tab shows the base and Git availability the shell last read.
             Some(PanelView::Changes(changes)) => {
                 let summary =

@@ -82,7 +82,13 @@ impl AppView {
                 this.persist(cx);
             },
         );
-        self._subscriptions.extend([appearance, bounds, resize]);
+        // The focused element can go away, like the composer of a deleted
+        // session; the shell then keeps its shortcuts reachable.
+        let focus = cx.on_focus_lost(window, |this, window, cx| {
+            window.focus(&this.focus_handle, cx);
+        });
+        self._subscriptions
+            .extend([appearance, bounds, resize, focus]);
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             // Quitting stops the backend first; the window closes once that is done.

@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use agent_client_protocol::v2::schema as wire;
+use typed_builder::TypedBuilder;
 
 use crate::projection::{
     MessageOrigin, ModelUsage, Role, RowKey, RunState, SessionProjection,
@@ -65,6 +66,12 @@ pub enum LayoutRow {
         /// Whether the run's tools are shown below the summary.
         expanded: bool,
     },
+    /// The change card of a turn whose last reply shows no row of its own:
+    /// it only thought and folded into the run summary, or only called tools.
+    TurnChanges {
+        /// The reply the card belongs to.
+        anchor: wire::MessageId,
+    },
     /// A finished run's token usage, below its last reply.
     Usage {
         /// Key of the reply it follows.
@@ -89,11 +96,13 @@ impl LayoutRow {
         }
     }
 
-    /// Stable element id: the row key, `run:{anchor}` for a summary, or `usage:{anchor}`.
+    /// Stable element id: the row key, `run:{anchor}` for a summary,
+    /// `changes:{anchor}` for a change card, or `usage:{anchor}`.
     pub fn element_id(&self) -> String {
         match self {
             LayoutRow::Row { key, .. } => key.to_string(),
             LayoutRow::RunSummary { anchor, .. } => format!("run:{anchor}"),
+            LayoutRow::TurnChanges { anchor } => format!("changes:{anchor}"),
             LayoutRow::Usage { anchor, .. } => format!("usage:{anchor}"),
         }
     }
@@ -115,16 +124,30 @@ pub struct TranscriptLayout {
 }
 
 /// Folds one projection into layout rows, one run segment at a time.
+#[derive(TypedBuilder)]
 struct LayoutBuilder<'a> {
     projection: &'a SessionProjection,
     expanded_runs: &'a HashSet<RowKey>,
+    /// Replies carrying a turn's change card.
+    cards: &'a HashSet<wire::MessageId>,
+    /// The rows laid out so far.
+    #[builder(default)]
     rows: Vec<LayoutRow>,
+}
+
+/// The rows from one user prompt to the next.
+#[derive(Default)]
+struct Segment<'a> {
+    /// Visible rows with their projection indexes.
+    rows: Vec<(usize, &'a TranscriptRow)>,
+    /// Replies with a change card, shown or not, in transcript order.
+    cards: Vec<wire::MessageId>,
 }
 
 impl<'a> LayoutBuilder<'a> {
     /// Splits visible rows into segments that each start at a user prompt.
-    fn segments(&self) -> Vec<Vec<(usize, &'a TranscriptRow)>> {
-        let mut segments: Vec<Vec<(usize, &TranscriptRow)>> = Vec::new();
+    fn segments(&self) -> Vec<Segment<'a>> {
+        let mut segments: Vec<Segment<'a>> = Vec::new();
         for index in 0..self.projection.len() {
             let Some(row) = self.projection.row(index) else {
                 continue;
@@ -142,6 +165,11 @@ impl<'a> LayoutBuilder<'a> {
                                 Arc::clone(&message.message_id.0),
                             )))
                             .is_some();
+                    if self.cards.contains(&message.message_id)
+                        && let Some(segment) = segments.last_mut()
+                    {
+                        segment.cards.push(message.message_id.clone());
+                    }
                     if !message.is_visible() || shown_by_tool {
                         continue;
                     }
@@ -155,10 +183,10 @@ impl<'a> LayoutBuilder<'a> {
                 | TranscriptRow::Error(_) => false,
             };
             if starts_run || segments.is_empty() {
-                segments.push(Vec::new());
+                segments.push(Segment::default());
             }
             if let Some(segment) = segments.last_mut() {
-                segment.push((index, row));
+                segment.rows.push((index, row));
             }
         }
         segments
@@ -194,11 +222,10 @@ impl<'a> LayoutBuilder<'a> {
     }
 
     /// Appends one segment, folding its tools when the run is finished.
-    fn push_segment(
-        &mut self,
-        segment: &[(usize, &TranscriptRow)],
-        finished: bool,
-    ) {
+    fn push_segment(&mut self, segment: &Segment<'_>, finished: bool) {
+        let cards = &segment.cards;
+        let segment = segment.rows.as_slice();
+        let start = self.rows.len();
         let Some(anchor) = segment.first().map(|(_, row)| row.key()) else {
             return;
         };
@@ -278,6 +305,25 @@ impl<'a> LayoutBuilder<'a> {
             });
         }
         self.close_group(&mut group_start);
+        // A reply's own row draws its card; the others get a row for it.
+        let rowless: Vec<_> = cards
+            .iter()
+            .filter(|id| {
+                !self.rows.iter().skip(start).any(|row| {
+                    matches!(
+                        row,
+                        LayoutRow::Row { key: RowKey::Message(shown), .. }
+                            if shown == *id
+                    )
+                })
+            })
+            .cloned()
+            .collect();
+        self.rows.extend(
+            rowless
+                .into_iter()
+                .map(|anchor| LayoutRow::TurnChanges { anchor }),
+        );
         if finished
             && let Some((position, anchor)) = last_reply
             && let Some(usage) = Self::run_usage(segment)
@@ -334,16 +380,18 @@ impl<'a> LayoutBuilder<'a> {
 }
 
 impl TranscriptLayout {
-    /// Builds the layout: skips empty messages, folds finished runs, groups tools.
+    /// Builds the layout: skips empty messages, folds finished runs, groups
+    /// tools, and gives a row to each card in `cards` whose reply has none.
     pub fn build(
         projection: &SessionProjection,
         expanded_runs: &HashSet<RowKey>,
+        cards: &HashSet<wire::MessageId>,
     ) -> Self {
-        let mut builder = LayoutBuilder {
-            projection,
-            expanded_runs,
-            rows: Vec::new(),
-        };
+        let mut builder = LayoutBuilder::builder()
+            .projection(projection)
+            .expanded_runs(expanded_runs)
+            .cards(cards)
+            .build();
         let segments = builder.segments();
         let idle = projection.run_state() == RunState::Idle;
         // Steering and mid-run follow-ups start new segments inside the same
@@ -352,7 +400,7 @@ impl TranscriptLayout {
         for (position, segment) in segments.iter().enumerate() {
             let last_live = position + 1 == segments.len() && !idle;
             let in_run = run_started.is_some_and(|started| {
-                LayoutBuilder::anchor_ms(segment)
+                LayoutBuilder::anchor_ms(&segment.rows)
                     .is_some_and(|anchor| anchor >= started)
             });
             builder.push_segment(segment, !(last_live || in_run));

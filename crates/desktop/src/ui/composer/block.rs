@@ -406,8 +406,9 @@ impl SessionView {
                     }),
                     _,
                 ) => {
-                    let seconds =
-                        due_ms.saturating_sub(crate::now_ms()).div_ceil(1000);
+                    let seconds = due_ms
+                        .saturating_sub(crate::utils::now_ms())
+                        .div_ceil(1000);
                     (
                         rust_i18n::t!(
                             "Status.retry_waiting",

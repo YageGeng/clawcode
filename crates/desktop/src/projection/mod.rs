@@ -280,6 +280,10 @@ impl SessionProjection {
         &self,
         runs: &'a [Arc<protocol::RunCheckpoint>],
     ) -> Vec<ShownRun<'a>> {
+        // Most sessions record no run; do not read their transcript for it.
+        if runs.is_empty() {
+            return Vec::new();
+        }
         // Each reply's turn number and question, in one pass.
         let mut turns: HashMap<&str, (usize, &str)> = HashMap::new();
         let mut ordinal = 0;
@@ -1022,7 +1026,7 @@ impl SessionProjection {
                     // A run begins at the update's own time, or now when it has none.
                     self.run_started_ms = Self::product(running.meta.as_ref())
                         .timestamp_ms
-                        .or_else(|| Some(crate::now_ms()));
+                        .or_else(|| Some(crate::utils::now_ms()));
                 }
                 RunState::Running
             }

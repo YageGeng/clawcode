@@ -4,6 +4,7 @@ use gpui_kit::{Context, Window};
 
 use crate::state::LayoutState;
 use crate::ui::AppView;
+use crate::utils::shell_width;
 
 /// Narrowest main card beside the panel before the panel becomes a sheet, in px at 16px rem.
 const MIN_MAIN_WIDTH: f32 = 480.0;
@@ -28,7 +29,7 @@ impl AppView {
             return PanelPresentation::Hidden;
         }
         let scale = f32::from(window.rem_size()) / 16.0;
-        let main = f32::from(window.viewport_size().width)
+        let main = shell_width(window)
             - self.session_card_width()
             - self.panel_width(window)
             - CARD_GAPS * scale;
@@ -51,14 +52,16 @@ impl AppView {
 
     /// The panel's width, capped so the main card keeps its minimum beside it.
     pub(in crate::ui) fn panel_width(&self, window: &Window) -> f32 {
+        self.state.layout.panel_width().min(self.panel_room(window))
+    }
+
+    /// The widest the panel may be beside a main card at its minimum.
+    pub(in crate::ui) fn panel_room(&self, window: &Window) -> f32 {
         let scale = f32::from(window.rem_size()) / 16.0;
-        let room = f32::from(window.viewport_size().width)
+        let room = shell_width(window)
             - self.session_card_width()
             - (MIN_MAIN_WIDTH + CARD_GAPS) * scale;
-        self.state
-            .layout
-            .panel_width()
-            .min(room.max(LayoutState::MIN_PANEL_WIDTH))
+        room.max(LayoutState::MIN_PANEL_WIDTH)
     }
 
     /// Moves focus into the sheet when the panel becomes one (also by

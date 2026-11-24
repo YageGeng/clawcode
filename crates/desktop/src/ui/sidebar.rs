@@ -198,7 +198,7 @@ impl SessionSummary {
     pub(super) fn display_title(&self) -> SharedString {
         // Tabs and sidebar rows are one line high; agent-set titles may not be.
         match self.title.as_deref() {
-            Some(title) => super::format::single_line(title).into_owned(),
+            Some(title) => crate::utils::single_line(title).into_owned(),
             None => rust_i18n::t!("Sidebar.untitled").into_owned(),
         }
         .into()
@@ -277,7 +277,7 @@ impl AppView {
 
     /// Decides what the sidebar lists from the workspaces, the catalog, and the search query.
     pub fn sidebar_model(&self, cx: &App) -> SidebarModel {
-        let now_ms = crate::now_ms();
+        let now_ms = crate::utils::now_ms();
         // An open subagent has no row; its nearest listed ancestor stands for it.
         let active = match self.active_entry() {
             Some(TabEntry::Session(id)) => {

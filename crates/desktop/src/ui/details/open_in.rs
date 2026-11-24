@@ -8,6 +8,7 @@ use gpui_kit::Context;
 
 use crate::state::OpenIn;
 use crate::ui::AppView;
+use crate::utils::is_executable;
 
 /// Editor commands looked for on `PATH`, in the order they are offered.
 const EDITORS: [&str; 5] = ["zed", "code", "cursor", "codium", "subl"];
@@ -44,15 +45,6 @@ impl EditorCatalog {
     pub fn contains(&self, name: &str) -> bool {
         self.editors.iter().any(|editor| editor == name)
     }
-}
-
-/// Whether `path` is a regular file someone may execute.
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    std::fs::metadata(path).is_ok_and(|metadata| {
-        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-    })
 }
 
 impl OpenIn {

@@ -18,14 +18,5 @@ pub mod theme;
 pub mod trajectory;
 pub mod transcript;
 pub mod ui;
+pub mod utils;
 pub mod workspace;
-
-/// The current Unix time in milliseconds; `0` when the clock reads before the
-/// epoch, `u64::MAX` past the year 584 million.
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
-}

@@ -36,6 +36,7 @@ use crate::projection::{
 use crate::session::{AttachPhase, SessionHandle};
 use crate::transcript::{LayoutRow, TranscriptLayout};
 use crate::ui::composer::Composer;
+use crate::ui::file_icon::FileIconPainter;
 use crate::ui::panel::RecordView;
 use crate::ui::trajectory::{TrajectoryEvent, TrajectoryView};
 
@@ -235,6 +236,9 @@ pub struct SessionView {
     /// Turn change cards shown with their files.
     #[builder(default)]
     pub(super) open_turn_changes: HashSet<protocol::RunId>,
+    /// Picks the icons of the files in turn change cards.
+    #[builder(default)]
+    pub(super) painter: FileIconPainter,
     /// Which messages carry a Fork action or a turn's change card.
     #[builder(default)]
     pub(super) marks: message_actions::MessageMarks,
@@ -291,6 +295,18 @@ impl SessionView {
                 }
                 _ => None,
             })
+    }
+
+    /// Takes the icon theme the shell uses now.
+    pub(in crate::ui) fn set_painter(
+        &mut self,
+        painter: FileIconPainter,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.painter.same_theme(&painter) {
+            self.painter = painter;
+            cx.notify();
+        }
     }
 
     /// Limits message actions to copy, for a subagent shown in the panel.
@@ -485,6 +501,8 @@ impl SessionView {
         self.view_mode = ViewMode::Chat;
         self.scroller
             .update(cx, |scroller, cx| scroller.reset(0, cx));
+        // The layout gives some cards a row, so marks come before it.
+        self.refresh_marks(cx);
         if let SessionTarget::Session(handle) = &self.target {
             let handle = handle.clone();
             self._subscriptions = vec![
@@ -492,16 +510,21 @@ impl SessionView {
                     &handle,
                     window,
                     |this, _, change: &ProjectionChange, window, cx| {
-                        // Inserted rows always land in the splice, so only
-                        // updated rows can need a re-measure in place.
-                        this.sync(&change.updated, change.structural, cx);
-                        // Streamed text moves no turn boundary or run.
+                        // Streamed text moves no turn boundary or run. The
+                        // layout gives some cards a row, so marks come first.
                         if change.structural
                             || change.run_state
                             || change.checkpoints
                         {
                             this.refresh_marks(cx);
                         }
+                        // Inserted rows always land in the splice, so only
+                        // updated rows can need a re-measure in place.
+                        this.sync(
+                            &change.updated,
+                            change.structural || change.checkpoints,
+                            cx,
+                        );
                         // A withdrawn elicitation takes its open form with it.
                         if change.controls {
                             this.close_withdrawn_form(window, cx);
@@ -523,7 +546,6 @@ impl SessionView {
             self.sync(&HashSet::new(), true, cx);
             self.push_commands(cx);
         }
-        self.refresh_marks(cx);
         self.load_draft_config(cx);
         cx.notify();
     }
@@ -597,6 +619,7 @@ impl SessionView {
             let next = TranscriptLayout::build(
                 handle.read(cx).projection(),
                 &self.expanded_runs,
+                &self.marks.card_replies(),
             );
             let diff = self.layout.diff(&next, updated);
             self.layout = next;

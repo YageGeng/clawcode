@@ -32,6 +32,7 @@ use crate::catalog::SessionSummary;
 use crate::state::{DesktopState, DetailsItem, OpenIn, PanelTabKey};
 use crate::ui::panel::PanelPresentation;
 use crate::ui::{AppView, TabEntry};
+use crate::utils::shell_width;
 
 /// The card's width in rems: 280px at the default 16px.
 const CARD_REMS: f32 = 17.5;
@@ -259,10 +260,7 @@ impl AppView {
             0.0
         };
         // The main card's own `sm` gaps on both sides.
-        let main = f32::from(window.viewport_size().width)
-            - sidebar
-            - panel
-            - 16.0 * scale;
+        let main = shell_width(window) - sidebar - panel - 16.0 * scale;
         main >= (TRANSCRIPT_WIDTH + 16.0) * scale
             + CARD_REMS * f32::from(window.rem_size())
     }

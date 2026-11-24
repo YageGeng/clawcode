@@ -7,7 +7,8 @@ use desktop::projection::{RowKey, RunState, SessionProjection, ToolCategory};
 use desktop::transcript::{
     GroupPosition, LayoutDiff, LayoutRow, RunSummary, TranscriptLayout,
 };
-use desktop::ui::{Elapsed, single_line};
+use desktop::ui::Elapsed;
+use desktop::utils::single_line;
 use serde_json::{Value, json};
 
 /// Product metadata with a sequence and timestamp.
@@ -70,7 +71,7 @@ fn msg(id: &str) -> RowKey {
 
 /// Builds a layout with nothing expanded.
 fn layout(projection: &SessionProjection) -> TranscriptLayout {
-    TranscriptLayout::build(projection, &HashSet::new())
+    TranscriptLayout::build(projection, &HashSet::new(), &HashSet::new())
 }
 
 /// Group positions of every row.
@@ -78,7 +79,9 @@ fn groups(layout: &TranscriptLayout) -> Vec<Option<GroupPosition>> {
     (0..layout.len())
         .filter_map(|ix| match layout.row(ix)? {
             LayoutRow::Row { group, .. } => Some(*group),
-            LayoutRow::RunSummary { .. } | LayoutRow::Usage { .. } => None,
+            LayoutRow::RunSummary { .. }
+            | LayoutRow::TurnChanges { .. }
+            | LayoutRow::Usage { .. } => None,
         })
         .collect()
 }
@@ -149,7 +152,7 @@ fn running_run_stays_expanded() {
 fn expanded_anchor_unfolds_a_finished_run() {
     let p = standard_run("idle");
     let expanded = HashSet::from([msg("u1")]);
-    let l = TranscriptLayout::build(&p, &expanded);
+    let l = TranscriptLayout::build(&p, &expanded, &HashSet::new());
     // The summary stays above the unfolded tools so the run can be folded again.
     assert_eq!(l.len(), 6);
     assert!(matches!(
@@ -485,7 +488,11 @@ fn a_folded_run_takes_its_thought_only_steps_along() {
     assert_eq!(shown, vec![msg("u1"), msg("m1")]);
 
     // Unfolded, each thought stays beside the tools it led to.
-    let open = TranscriptLayout::build(&p, &HashSet::from([msg("u1")]));
+    let open = TranscriptLayout::build(
+        &p,
+        &HashSet::from([msg("u1")]),
+        &HashSet::new(),
+    );
     let shown: Vec<_> = (0..open.len())
         .filter_map(|ix| match open.row(ix)? {
             LayoutRow::Row { key, .. } => Some(key.clone()),
@@ -521,4 +528,105 @@ fn a_run_of_thought_only_steps_keeps_its_usage() {
 
     assert_eq!(usage_rows(&l), [(msg("t1"), Some(10))]);
     assert!(matches!(l.row(l.len() - 1), Some(LayoutRow::Usage { .. })));
+}
+
+/// Element ids of a layout whose message `id` carries a turn's change card.
+fn with_card(
+    projection: &SessionProjection,
+    expanded: &HashSet<RowKey>,
+    id: &str,
+) -> Vec<String> {
+    let cards = HashSet::from([wire::MessageId::from(id.to_string())]);
+    let layout = TranscriptLayout::build(projection, expanded, &cards);
+    (0..layout.len())
+        .filter_map(|ix| Some(layout.row(ix)?.element_id()))
+        .collect()
+}
+
+/// A cancelled run may end on a step that only thought; folding it into the
+/// run summary keeps its change card (M4b spec §6.1).
+#[test]
+fn a_folded_anchor_keeps_its_change_card() {
+    let mut p = SessionProjection::default();
+    user(&mut p, "u1", 1, 0);
+    tool(&mut p, "a", "edit", 2, 1_000);
+    thought(&mut p, "t1", 3, 2_000);
+    state(&mut p, "idle");
+
+    assert_eq!(
+        with_card(&p, &HashSet::new(), "t1"),
+        ["message:u1", "run:message:u1", "changes:t1"]
+    );
+    // Unfolded, the thought's own row draws the card.
+    assert_eq!(
+        with_card(&p, &HashSet::from([msg("u1")]), "t1"),
+        ["message:u1", "run:message:u1", "tool:a", "message:t1"]
+    );
+}
+
+/// A run cancelled inside a tool ends on a message holding only the call,
+/// which shows no row of its own; its change card closes the turn.
+#[test]
+fn a_hidden_anchor_keeps_its_change_card() {
+    let mut p = SessionProjection::default();
+    user(&mut p, "u1", 1, 0);
+    assistant(&mut p, "a1", 2, 500);
+    apply(
+        &mut p,
+        json!({ "sessionUpdate": "agent_message", "messageId": "a2",
+            "content": [], "_meta": meta(3, 1_000) }),
+    );
+    tool(&mut p, "a", "edit", 4, 1_500);
+    user(&mut p, "u2", 5, 3_000);
+    assistant(&mut p, "b1", 6, 4_000);
+    state(&mut p, "idle");
+
+    assert_eq!(
+        with_card(&p, &HashSet::new(), "a2"),
+        [
+            "message:u1",
+            "message:a1",
+            "run:message:u1",
+            "changes:a2",
+            "message:u2",
+            "message:b1",
+        ]
+    );
+}
+
+/// A reply drawn as a row carries its own card, so none is added.
+#[test]
+fn a_shown_anchor_adds_no_card_row() {
+    let p = standard_run("idle");
+    let cards = HashSet::from([wire::MessageId::from("m1".to_string())]);
+    let carded = TranscriptLayout::build(&p, &HashSet::new(), &cards);
+
+    assert_eq!(carded.len(), layout(&p).len());
+}
+
+/// Cards without a row of their own keep the transcript's order, whether
+/// their reply folded away or never showed.
+#[test]
+fn rowless_cards_keep_transcript_order() {
+    let mut p = SessionProjection::default();
+    user(&mut p, "u1", 1, 0);
+    tool(&mut p, "a", "edit", 2, 1_000);
+    thought(&mut p, "t1", 3, 2_000);
+    apply(
+        &mut p,
+        json!({ "sessionUpdate": "agent_message", "messageId": "a2",
+            "content": [], "_meta": meta(4, 3_000) }),
+    );
+    state(&mut p, "idle");
+    let cards = ["a2", "t1"].map(|id| wire::MessageId::from(id.to_string()));
+
+    let l = TranscriptLayout::build(&p, &HashSet::new(), &cards.into());
+
+    let ids: Vec<_> = (0..l.len())
+        .filter_map(|ix| Some(l.row(ix)?.element_id()))
+        .collect();
+    assert_eq!(
+        ids,
+        ["message:u1", "run:message:u1", "changes:t1", "changes:a2"]
+    );
 }

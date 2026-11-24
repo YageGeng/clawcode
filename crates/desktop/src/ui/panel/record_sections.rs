@@ -23,6 +23,7 @@ use protocol::{
 use super::record::{PromptMode, RecordSection, RecordView};
 use crate::trajectory::{RecordText as _, TrajectoryModel};
 use crate::ui::{ContentState, Elapsed, TokenCount};
+use crate::utils::{fenced, pretty};
 
 /// The request and its output, whichever of the two is selected.
 pub(super) struct RequestPair<'a> {
@@ -926,22 +927,4 @@ fn prompt_diff(old: &RequestContent, new: &RequestContent) -> String {
         .context_radius(3)
         .header("a/system_prompt", "b/system_prompt")
         .to_string()
-}
-
-/// `text` as a Markdown code block in `language`, fenced with more
-/// backticks than any run inside it so the text cannot close the block.
-fn fenced(text: &str, language: &str) -> String {
-    let mut longest = 0;
-    let mut run = 0;
-    for ch in text.chars() {
-        run = if ch == '`' { run + 1 } else { 0 };
-        longest = longest.max(run);
-    }
-    let fence = "`".repeat(longest.max(2) + 1);
-    format!("{fence}{language}\n{text}\n{fence}")
-}
-
-/// Pretty JSON of `value`.
-fn pretty(value: &impl serde::Serialize) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
 }

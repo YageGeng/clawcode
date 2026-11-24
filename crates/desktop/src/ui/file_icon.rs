@@ -22,7 +22,8 @@ pub type FileIconCache =
     Rc<RefCell<HashMap<(&'static str, Flavor), Arc<Image>>>>;
 
 /// Paints file and folder icons; cheap to clone into a row-rendering closure.
-#[derive(Clone)]
+/// The default one draws the Lucide icons.
+#[derive(Clone, Default)]
 pub struct FileIconPainter {
     /// Catppuccin flavor to draw in; `None` draws the Lucide icons.
     flavor: Option<Flavor>,
@@ -37,6 +38,11 @@ impl FileIconPainter {
             flavor: theme.flavor(),
             cache,
         }
+    }
+
+    /// Whether `other` draws the same icons.
+    pub fn same_theme(&self, other: &Self) -> bool {
+        self.flavor == other.flavor
     }
 
     /// The icon of a file named `name`.

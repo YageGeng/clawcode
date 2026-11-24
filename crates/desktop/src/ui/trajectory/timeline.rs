@@ -22,10 +22,11 @@ use super::table::Hue;
 use super::{TimelineVisible, TrajectoryView};
 use crate::trajectory::timeline::{
     Bar, DurationMode, Lane, TICKS_TOP_REMS, TIMELINE_REMS, TimelineLayout,
-    Viewport, whole,
+    Viewport,
 };
 use crate::trajectory::{InFlight, TimeInterval};
 use crate::ui::Elapsed;
+use crate::utils::whole;
 
 /// How long the pointer rests on a bar before its details float up.
 const HOVER_DELAY: Duration = Duration::from_millis(500);
@@ -652,7 +653,7 @@ impl TrajectoryView {
         let layout = Rc::new(TimelineLayout::new(
             self.model.records(),
             &self.in_flight,
-            crate::now_ms(),
+            crate::utils::now_ms(),
             self.timeline.mode,
         ));
         self.timeline.layout_cache = Some((key, Rc::clone(&layout)));

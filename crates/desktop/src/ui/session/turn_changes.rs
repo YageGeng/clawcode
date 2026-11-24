@@ -16,7 +16,7 @@ use gpui_kit::{
 use agent_client_protocol::v2::schema as wire;
 
 use super::{SessionView, SessionViewEvent};
-use crate::ui::LineCounts;
+use crate::ui::{ChangedFileRow, LineCounts};
 
 impl SessionView {
     /// The card under a turn's last reply listing the files its run changed
@@ -125,11 +125,7 @@ impl SessionView {
                     h_flex()
                         .pl(indent)
                         .gap_1p5()
-                        .child(
-                            Icon::new(IconName::Folder)
-                                .small()
-                                .text_color(theme.muted_foreground),
-                        )
+                        .child(self.painter.folder(&node.name, true))
                         .child(Label::new(node.name.clone()).text_sm())
                         .into_any_element(),
                 );
@@ -147,29 +143,20 @@ impl SessionView {
             let run_id = run.run_id.clone();
             let path = change.path.clone();
             rows.push(
-                h_flex()
+                div()
                     .id(SharedString::from(format!(
                         "turn-file:{}:{index}",
                         run.run_id
                     )))
                     .pl(indent)
-                    .gap_1p5()
                     .rounded(theme.radius)
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.accent))
-                    .child(
-                        Icon::new(IconName::File)
-                            .small()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(Label::new(node.name.clone()).text_sm()),
-                    )
-                    .child(LineCounts::of(change))
+                    .child(ChangedFileRow::new(
+                        &self.painter,
+                        node.name.clone().into(),
+                        change,
+                    ))
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         cx.emit(SessionViewEvent::OpenChanges {
                             run: run_id.clone(),

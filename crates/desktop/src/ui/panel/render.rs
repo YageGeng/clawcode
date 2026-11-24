@@ -53,7 +53,7 @@ impl PanelTabKey {
                 rust_i18n::t!("Panel.files").into_owned(),
             ),
             PanelTabKey::File { path } => {
-                let (_, name) = super::split_path(path);
+                let (_, name) = crate::utils::split_path(path);
                 (painter.file(name), name.to_string())
             }
             PanelTabKey::Subagent { session } => (

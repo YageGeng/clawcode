@@ -29,7 +29,8 @@ use crate::projection::{
     ToolRow, ToolStatus, TranscriptRow,
 };
 use crate::transcript::{GroupPosition, LayoutRow, RunSummary, RunUsage};
-use crate::ui::format::{Elapsed, TokenCount, single_line};
+use crate::ui::format::{Elapsed, TokenCount};
+use crate::utils::single_line;
 
 /// What a summary card shows: its pill and the Markdown it expands to.
 #[derive(typed_builder::TypedBuilder)]
@@ -117,6 +118,12 @@ impl SessionView {
                     None => return div().into_any_element(),
                 }
             }
+            LayoutRow::TurnChanges { anchor } => (
+                div()
+                    .children(self.render_turn_changes(anchor, cx))
+                    .into_any_element(),
+                false,
+            ),
             LayoutRow::Usage { usage, .. } => {
                 (self.render_usage(usage, cx), false)
             }
@@ -518,7 +525,7 @@ impl SessionView {
             ToolStatus::Running => status
                 .child(Spinner::new().xsmall())
                 .when_some(tool.timestamp_ms, |this, started| {
-                    let now = crate::now_ms();
+                    let now = crate::utils::now_ms();
                     this.child(
                         Label::new(
                             Elapsed(now.saturating_sub(started)).label(),

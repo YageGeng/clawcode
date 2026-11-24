@@ -246,7 +246,7 @@ fn now_ms_reads_the_wall_clock() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after the epoch")
         .as_millis();
-    let now = u128::from(desktop::now_ms());
+    let now = u128::from(desktop::utils::now_ms());
     assert!(now.abs_diff(expected) < 60_000, "{now} vs {expected}");
 }
 

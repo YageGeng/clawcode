@@ -8,6 +8,7 @@ use protocol::{TrajectoryRecord, TrajectoryRecordKind};
 use typed_builder::TypedBuilder;
 
 use super::{InFlight, TimeInterval};
+use crate::utils::whole;
 
 /// Sub-rows of the tool lane; later overlapping calls merge into the last.
 const TOOL_ROWS: u8 = 3;
@@ -20,13 +21,6 @@ const HIT_SLOP: f32 = 2.0;
 
 /// The narrowest view, as a share of the domain.
 const MIN_ZOOM_SHARE: f64 = 1e-4;
-
-/// A non-negative axis value as a whole number, saturating; float to
-/// integer casts saturate in Rust, and the value is clamped at zero first.
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-pub fn whole(value: f64) -> u64 {
-    value.max(0.0) as u64
-}
 
 /// How time maps to the horizontal axis.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -72,7 +72,7 @@ impl AppView {
     pub(super) fn panel_mut(&mut self) -> Option<&mut PanelState> {
         let key = self.panel_owner()?.key();
         let panel = self.state.panels.entry(key).or_default();
-        panel.last_used_ms = crate::now_ms();
+        panel.last_used_ms = crate::utils::now_ms();
         Some(panel)
     }
 

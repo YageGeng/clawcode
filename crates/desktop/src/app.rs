@@ -10,6 +10,7 @@ use gpui_kit::{
 use crate::assets::AppAssets;
 use crate::state::DesktopState;
 use crate::ui::AppView;
+use crate::utils::restore_inner_size;
 
 /// Smallest window that keeps the sidebar and card usable.
 const MIN_WINDOW: (f32, f32) = (960.0, 640.0);
@@ -58,6 +59,7 @@ pub fn run() {
             let options = WindowOptions {
                 window_min_size: Some(size(px(MIN_WINDOW.0), px(MIN_WINDOW.1))),
                 window_bounds: Some(WindowBounds::centered(
+                    None,
                     size(px(width), px(height)),
                     cx,
                 )),
@@ -69,6 +71,7 @@ pub fn run() {
             };
             let opened =
                 gpui_kit::open_window(options, cx, move |window, cx| {
+                    restore_inner_size(size(px(width), px(height)), window);
                     state.appearance.apply(window.appearance(), cx);
                     cx.new(|cx| AppView::new(state, state_path, window, cx))
                 });

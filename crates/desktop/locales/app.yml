@@ -73,6 +73,9 @@ Changes:
   file_too_large:
     en: This file is too large to show in full; the counts include every change.
     zh-CN: 文件过大，无法完整显示；行数包含全部改动
+  file_too_large_uncounted:
+    en: This file is too large to show in full.
+    zh-CN: 文件过大，无法完整显示
   binary:
     en: Binary file
     zh-CN: 二进制文件

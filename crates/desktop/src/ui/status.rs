@@ -1,9 +1,8 @@
 //! Session status glyph: shape and color together, so status never relies on color alone.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::label::Label;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::{
     App, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
     rems,
@@ -88,49 +87,5 @@ impl SessionStatus {
             SessionStatus::Failed => rust_i18n::t!("Status.failed"),
         }
         .into_owned()
-    }
-}
-
-/// A change's line counts: the added lines in green, the removed ones in
-/// red, as the Changes tab and the turn change cards show them.
-#[derive(IntoElement)]
-pub struct LineCounts {
-    added: u64,
-    removed: u64,
-}
-
-impl LineCounts {
-    /// The counts of one change.
-    pub fn new(added: u64, removed: u64) -> Self {
-        Self { added, removed }
-    }
-
-    /// The counts of one changed file; files without counts, such as
-    /// binary ones, show zeros.
-    pub fn of(change: &protocol::WorkspaceChange) -> Self {
-        Self::new(
-            change.insertions.unwrap_or_default(),
-            change.deletions.unwrap_or_default(),
-        )
-    }
-}
-
-impl RenderOnce for LineCounts {
-    /// `+added −removed` in extra small text, each in its color.
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.theme();
-        h_flex()
-            .flex_none()
-            .gap_1()
-            .child(
-                Label::new(format!("+{}", self.added))
-                    .text_xs()
-                    .text_color(theme.success),
-            )
-            .child(
-                Label::new(format!("−{}", self.removed))
-                    .text_xs()
-                    .text_color(theme.danger),
-            )
     }
 }

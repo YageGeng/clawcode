@@ -354,9 +354,9 @@ impl TrajectoryView {
             // once the content overflows. A ledger that fits has nothing to keep.
             let content = handle.max_offset().y + handle.bounds().size.height;
             let height = content / lines.len().max(1) as f32;
-            let first = usize::try_from(crate::trajectory::timeline::whole(
-                f64::from(-handle.offset().y / height),
-            ))
+            let first = usize::try_from(crate::utils::whole(f64::from(
+                -handle.offset().y / height,
+            )))
             .unwrap_or(0);
             // The first record in view: "load earlier" and Run titles stay
             // at the top as rows come in above them, so they cannot anchor.

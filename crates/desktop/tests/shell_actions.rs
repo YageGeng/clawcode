@@ -314,3 +314,54 @@ fn deleted_workspace_row_turns_missing(cx: &mut TestAppContext) {
     live.view.update(cx, |view, cx| view.refresh_catalog(cx));
     live.until(cx, "missing", |window| shows(window, "Folder not found"));
 }
+
+/// Deleting the session that held the focus leaves the shell's shortcuts
+/// working: the dialog hands focus back to a composer that is gone.
+#[gpui_kit::test]
+fn deleting_the_focused_session_keeps_shortcuts_working(
+    cx: &mut TestAppContext,
+) {
+    let mut backend = ScriptedBackend::start();
+    let id = backend.new_session();
+    let (handle, view, _dir) = connected(cx, &mut backend);
+    eventually(cx, "session listed", |cx| {
+        view.read(cx).sidebar_model(cx).groups.len() == 2
+    });
+    view.update(cx, |view, cx| view.open_session(&id, cx));
+    eventually(cx, "session attached", |cx| {
+        view.read(cx).session_handle(&id, cx).is_some_and(|handle| {
+            handle.read(cx).phase() == &desktop::session::AttachPhase::Attached
+        })
+    });
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        // The composer holds the focus when the dialog opens.
+        window.press("ctrl-l", cx);
+        window.render_frame(cx);
+        view.update(cx, |view, cx| view.delete_session(&id, window, cx));
+    })
+    .expect("window");
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        click_label(window, "Delete", cx);
+        window.render_frame(cx);
+    })
+    .expect("window");
+    eventually(cx, "row removed", |cx| {
+        view.read(cx).sidebar_model(cx).groups.len() == 1
+    });
+    // The dialog restores the focus it took once its exit transition ends.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-n", cx);
+    })
+    .expect("window");
+    cx.run_until_parked();
+
+    cx.update(|cx| assert_eq!(view.read(cx).tabs().len(), 1));
+}

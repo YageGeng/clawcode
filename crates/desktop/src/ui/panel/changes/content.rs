@@ -6,12 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::Entity;
-use gpui_kit::Hsla;
-use gpui_kit::component::Theme;
 use gpui_kit::component::diff::{DiffFile, DiffParseOptions, DiffState};
-use protocol::{
-    WorkspaceChange, WorkspaceChangeKind, WorkspaceChanges, WorkspaceDiff,
-};
+use protocol::{WorkspaceChange, WorkspaceChanges, WorkspaceDiff};
 use typed_builder::TypedBuilder;
 
 use super::super::ViewerState;
@@ -38,21 +34,6 @@ pub type HeaderInfo = Rc<HashMap<String, (WorkspaceChange, FileNote)>>;
 
 /// The tree's files by path: their place in the list and their change.
 pub type TreeFiles = Rc<HashMap<String, (usize, WorkspaceChange)>>;
-
-/// The theme color of a change's status; the tree colors the file's name
-/// and status letter with it (M3 plan Global Constraints).
-pub fn kind_color(kind: WorkspaceChangeKind, theme: &Theme) -> Hsla {
-    match kind {
-        WorkspaceChangeKind::Added | WorkspaceChangeKind::Untracked => {
-            theme.success
-        }
-        WorkspaceChangeKind::Deleted | WorkspaceChangeKind::Conflicted => {
-            theme.danger
-        }
-        WorkspaceChangeKind::Modified => theme.warning,
-        WorkspaceChangeKind::Renamed => theme.info,
-    }
-}
 
 /// What one scope shows: its files, their patches so far, and the diff.
 #[derive(TypedBuilder)]

@@ -91,7 +91,9 @@ impl InFlight {
             .map(|tool| Self::Tool {
                 call_id: tool.tool_call_id.to_string(),
                 name: tool.name.clone().unwrap_or_else(|| tool.title.clone()),
-                started_at_ms: tool.timestamp_ms.unwrap_or_else(crate::now_ms),
+                started_at_ms: tool
+                    .timestamp_ms
+                    .unwrap_or_else(crate::utils::now_ms),
             })
             .collect();
         if !tools.is_empty() {
@@ -99,7 +101,7 @@ impl InFlight {
         }
         let started_at_ms = last_ended_ms
             .max(projection.run_started_ms())
-            .unwrap_or_else(crate::now_ms);
+            .unwrap_or_else(crate::utils::now_ms);
         vec![Self::Request { started_at_ms }]
     }
 

@@ -36,6 +36,13 @@ pub struct MessageMarks {
         HashMap<wire::MessageId, Arc<protocol::RunCheckpoint>>,
 }
 
+impl MessageMarks {
+    /// The replies carrying a turn's change card.
+    pub(super) fn card_replies(&self) -> HashSet<wire::MessageId> {
+        self.turn_changes.keys().cloned().collect()
+    }
+}
+
 impl From<&SessionHandle> for MessageMarks {
     /// The marks of a session's transcript and its runs.
     fn from(handle: &SessionHandle) -> Self {

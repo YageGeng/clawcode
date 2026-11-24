@@ -27,8 +27,3 @@ pub use lifecycle::{PanelHost, PanelView};
 pub use record::{PromptMode, RecordSection, RecordView};
 pub use state::PanelOwner;
 pub use viewer::{ViewerSource, ViewerState};
-
-/// Splits a root-relative path into its directory (empty at the root) and file name.
-pub(super) fn split_path(path: &str) -> (&str, &str) {
-    path.rsplit_once('/').unwrap_or(("", path))
-}

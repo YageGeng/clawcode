@@ -40,20 +40,15 @@ use crate::backend::{AcpClient, BackendError};
 use crate::file::ChangeNode;
 use crate::projection::ProjectionChange;
 use crate::session::SessionHandle;
-use crate::ui::LineCounts;
 use crate::ui::file_icon::FileIconPainter;
-use content::{FileNote, ScopeContent, TreeFiles, kind_color};
+use crate::ui::{ChangedFileRow, LineCounts};
+use crate::utils::shorten;
+use content::{FileNote, ScopeContent, TreeFiles};
 
+/// Room a diff file header keeps for its chevron and padding, in rems.
+const HEADER_INSET_REMS: f32 = 3.;
 /// Width the file tree starts at, in rems; it is resizable.
 const TREE_REMS: f32 = 12.0;
-
-/// `text` cut to `limit` characters, with an ellipsis when cut.
-fn shorten(text: &str, limit: usize) -> String {
-    match text.char_indices().nth(limit) {
-        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or(text)),
-        None => text.to_owned(),
-    }
-}
 
 /// What the Changes tab compares: the work tree against Git, or the
 /// snapshots around one run of a session (M4b spec §6.2).
@@ -410,6 +405,10 @@ impl ChangesView {
         }
         self._session_changes = session.as_ref().map(|session| {
             cx.subscribe(session, |this, _, change: &ProjectionChange, cx| {
+                // Replayed rows settle which runs the transcript shows.
+                if change.structural || change.checkpoints {
+                    this.leave_hidden_run(cx);
+                }
                 if change.checkpoints {
                     // A shown run may have been read again.
                     if matches!(this.scope, ChangesScope::Run { .. }) {
@@ -421,6 +420,32 @@ impl ChangesView {
         });
         self.session = session;
         cx.notify();
+    }
+
+    /// Goes back to the diff base when the shown run left the transcript, as
+    /// a branch switch makes it (M4b spec §5.3): the turn picker no longer
+    /// offers it. While a replay refills the transcript the run stays.
+    fn leave_hidden_run(&mut self, cx: &mut Context<'_, Self>) {
+        let ChangesScope::Run { run, .. } = &self.scope else {
+            return;
+        };
+        let Some(session) = self.session.as_ref().map(|s| s.read(cx)) else {
+            return;
+        };
+        if session.replaying() {
+            return;
+        }
+        let listed = session
+            .checkpoints()
+            .iter()
+            .find(|checkpoint| checkpoint.run_id == *run);
+        let shown = listed.is_some_and(|run| {
+            let runs = std::slice::from_ref(run);
+            !session.projection().shown_runs(runs).is_empty()
+        });
+        if !shown {
+            self.set_scope(ChangesScope::default(), cx);
+        }
     }
 
     /// Shows one scope's file list: placeholders for files without a patch
@@ -750,7 +775,6 @@ impl ChangesView {
     /// status color with its added and removed lines; a click loads it and
     /// scrolls the diff to it.
     fn render_tree(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let theme = cx.theme().clone();
         let files = Rc::clone(&self.tree_files);
         let painter = self.painter.clone();
         let view = cx.entity().downgrade();
@@ -774,39 +798,14 @@ impl ChangesView {
                         .child(Label::new(item.label.clone()).text_sm()),
                 );
             };
-            let color = kind_color(file.kind, &theme);
-            let letter = file.kind.letter().to_string();
             let view = view.clone();
             ListItem::new(SharedString::from(format!("changed-file-{index}")))
                 .py_0p5()
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .pl(indent)
-                        .text_sm()
-                        .child(painter.file(&item.label))
-                        .child(
-                            div().flex_1().min_w_0().truncate().child(
-                                Label::new(item.label.clone())
-                                    .text_sm()
-                                    .text_color(color),
-                            ),
-                        )
-                        .child(
-                            h_flex()
-                                .flex_none()
-                                .gap_1()
-                                .font_family(theme.mono_font_family.clone())
-                                .child(LineCounts::of(file))
-                                // The letter says the status in text, too.
-                                .child(
-                                    Label::new(letter)
-                                        .text_xs()
-                                        .font_semibold()
-                                        .text_color(color),
-                                ),
-                        ),
-                )
+                .child(div().pl(indent).child(ChangedFileRow::new(
+                    &painter,
+                    item.label.clone(),
+                    file,
+                )))
                 .on_click(move |_, _, cx| {
                     let _ =
                         view.update(cx, |this, cx| this.reveal_file(&path, cx));
@@ -846,6 +845,7 @@ impl ChangesView {
     fn render_diff(
         &self,
         diff: &Entity<DiffState>,
+        window: &Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let headers = self
@@ -856,6 +856,12 @@ impl ChangesView {
         let seen = Rc::clone(&self.seen);
         let view = cx.entity().downgrade();
         let weight = crate::theme::FontWeights::get(cx).code;
+        // The patches take the split's last pane; nothing is measured before
+        // the first frame.
+        let pane = self.split.read(cx).sizes().last().copied();
+        let width = pane
+            .map(|pane| pane - window.rem_size() * HEADER_INSET_REMS)
+            .filter(|width| *width > px(0.));
         div()
             .id("changes-diff")
             .test_support()
@@ -868,17 +874,24 @@ impl ChangesView {
                     .render_header(move |file, _, cx| {
                         let path = file.path().to_string();
                         seen.saw(&path, &view, cx);
-                        Self::render_file_header(file, headers.get(&path), cx)
+                        Self::render_file_header(
+                            file,
+                            headers.get(&path),
+                            width,
+                            cx,
+                        )
                     }),
             )
             .into_any_element()
     }
 
     /// One file's header: its path (old → new for a rename), counts, and a
-    /// note while its patch is missing, cut, or binary.
+    /// note while its patch is missing, cut, or binary. Rows are as wide as
+    /// the longest line, so `width` keeps the header inside the pane.
     fn render_file_header(
         file: &DiffFile,
         info: Option<&(WorkspaceChange, FileNote)>,
+        width: Option<Pixels>,
         cx: &App,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -889,9 +902,15 @@ impl ChangesView {
                 }
                 _ => file.path().clone(),
             };
-        let note = info.and_then(|(_, note)| match note {
+        let note = info.and_then(|(change, note)| match note {
             FileNote::Loading => Some(rust_i18n::t!("Changes.loading_file")),
-            FileNote::TooLarge => Some(rust_i18n::t!("Changes.file_too_large")),
+            // Only a counted file's numbers can cover what is cut off.
+            FileNote::TooLarge if change.insertions.is_some() => {
+                Some(rust_i18n::t!("Changes.file_too_large"))
+            }
+            FileNote::TooLarge => {
+                Some(rust_i18n::t!("Changes.file_too_large_uncounted"))
+            }
             FileNote::Binary => Some(rust_i18n::t!("Changes.binary")),
             FileNote::Failed(error) => {
                 Some(std::borrow::Cow::Owned(error.clone()))
@@ -910,13 +929,12 @@ impl ChangesView {
                     .font_medium()
                     .child(name),
             )
-            .when_some(info, |this, (change, _)| {
-                this.child(LineCounts::of(change))
-            });
+            .children(info.and_then(|(change, _)| LineCounts::of(change)));
         // The note goes under the path, so a narrow panel still shows it.
         v_flex()
             .w_full()
             .min_w_0()
+            .when_some(width, |this, width| this.max_w(width))
             .child(line)
             .when_some(note, |this, note| {
                 this.child(
@@ -961,8 +979,9 @@ impl Render for ChangesView {
                     Some((content.diff.clone()?, content.truncated))
                 });
         let warning = cx.theme().warning;
-        let ready = ready
-            .map(|(diff, truncated)| (self.render_diff(&diff, cx), truncated));
+        let ready = ready.map(|(diff, truncated)| {
+            (self.render_diff(&diff, window, cx), truncated)
+        });
         let tree =
             (self.tree_open && ready.is_some()).then(|| self.render_tree(cx));
         div()
@@ -982,6 +1001,7 @@ impl Render for ChangesView {
                         resizable_panel()
                             .size(window.rem_size() * TREE_REMS)
                             .size_range(px(160.)..Pixels::MAX)
+                            .fixed()
                             .child(tree),
                     );
                 }

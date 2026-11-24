@@ -1,5 +1,6 @@
 //! The workspace shell: chrome (title bar, sidebar) holding two inset cards, the rail and the content card.
 
+mod changed_file;
 mod composer;
 mod details;
 mod file_icon;
@@ -29,13 +30,14 @@ use gpui_kit::{
 };
 use typed_builder::TypedBuilder;
 
+pub use changed_file::{ChangedFileRow, LineCounts};
 pub use composer::attachments::{
     AttachmentError, AttachmentSet, ImageAttachment, Outgoing,
 };
 pub use composer::command_palette::filter_commands;
 pub use composer::{Composer, ComposerEvent};
 pub use details::{DetailsDensity, EditorCatalog};
-pub use format::{Elapsed, TokenCount, single_line};
+pub use format::{Elapsed, TokenCount};
 pub use interactions::elicitation_form::{
     ElicitationForm, FieldError, FieldKind, FieldValue, FormField, Unrenderable,
 };
@@ -51,7 +53,7 @@ pub use sidebar::{
     GroupKind, RECENT_SESSIONS, SESSIONS_PER_WORKSPACE, SessionRow,
     SidebarGroupModel, SidebarModel, SidebarRow, SidebarState, WorkspaceRow,
 };
-pub use status::{LineCounts, StatusDot, StatusIcon};
+pub use status::{StatusDot, StatusIcon};
 pub use trajectory::{
     ContentState, LoadState, TrajectoryEvent, TrajectoryView,
 };

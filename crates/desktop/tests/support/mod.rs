@@ -325,6 +325,10 @@ fn scripted_kernel(
             .clock(clock)
             .id_generator(Arc::new(NanoidIdGenerator))
             .state(state)
+            // Outside Git this takes no snapshots.
+            .checkpoints(Some(Arc::new(
+                acp::workspace::checkpoint::GitCheckpoints::default(),
+            )))
             // Keeps nothing back, so even a one-turn session can be compacted.
             .compaction_policy(
                 protocol::CompactionPolicy::builder()

@@ -3,8 +3,13 @@
 
 mod support;
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use desktop::backend::SessionId;
+use desktop::branch::MessageAuthor;
+use desktop::projection::ProjectionChange;
 use desktop::state::{DesktopState, PanelTabKey};
 use desktop::ui::{PanelPresentation, SessionViewEvent, TabEntry};
 use gpui_kit::test::TestWindowExt as _;
@@ -537,10 +542,7 @@ fn a_diff_cut_at_the_size_limit_renders_with_a_note(cx: &mut TestAppContext) {
         .expect("large file");
     live.window(cx, |window, cx| window.press("ctrl-shift-g", cx));
     live.until(cx, "truncated note", |window| {
-        shows(
-            window,
-            "This file is too large to show in full; the counts include every change.",
-        )
+        shows(window, "This file is too large to show in full.")
     });
     live.window(cx, |window, _| {
         assert!(window.try_find("changed-file-0").is_some())
@@ -839,4 +841,156 @@ fn a_folded_changes_folder_stays_folded_on_refresh(cx: &mut TestAppContext) {
         });
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+/// Runs the scripted `edit`, then shows that run in the Changes tab beside an
+/// unrelated change to `a.rs`, which only the Git scopes list.
+fn showing_a_turn(live: &Live, cx: &mut TestAppContext) -> SessionId {
+    std::fs::write(root(live).join("a.rs"), "dirty\n").expect("edit");
+    live.add_workspace(cx, &root(live));
+    let id = live.open_new_session(cx);
+    live.run(cx, &id, vec!["edit".into()]);
+    eventually(cx, "run recorded", |cx| {
+        live.session(&id, cx)
+            .is_some_and(|handle| !handle.read(cx).checkpoints().is_empty())
+    });
+    let run = cx.update(|cx| {
+        let handle = live.session(&id, cx).expect("attached session");
+        let run = handle.read(cx).checkpoints().first().expect("recorded run");
+        run.run_id.to_string()
+    });
+    click(live, cx, &format!("turn-changes:{run}"));
+    live.until(cx, "the turn's file", |window| {
+        window.try_find("changed-file-0").is_some()
+    });
+    live.window(cx, |window, _| {
+        assert!(
+            row_texts(window, "changed-file-0")
+                .contains(&"notes.txt".to_string())
+        );
+        assert!(window.try_find("changed-file-1").is_none());
+    });
+    id
+}
+
+/// Moves the session to the branch ending before its message `text`, then
+/// replays the transcript, as sending an edited question does.
+fn branch_before(
+    live: &Live,
+    cx: &mut TestAppContext,
+    id: &SessionId,
+    text: &str,
+) {
+    let message = live.user_message(cx, id, text);
+    let client = live.backend.client.clone();
+    live.backend
+        .block_on(async {
+            let entry = client
+                .message_entry(id, &message.0, MessageAuthor::User)
+                .await?;
+            client.branch(id, Some(&entry.entry_id)).await
+        })
+        .expect("branch");
+    let replay = cx.update(|cx| {
+        let handle = live.session(id, cx).expect("attached session");
+        handle.update(cx, |handle, cx| {
+            handle.replay(live.backend.client.clone(), cx)
+        })
+    });
+    replay.detach();
+}
+
+/// A turn left behind by a branch switch is no longer offered, so the tab
+/// goes back to the diff base instead of showing it on (M4b spec §5.3).
+#[gpui_kit::test]
+fn branching_away_from_the_shown_turn_returns_to_the_base(
+    cx: &mut TestAppContext,
+) {
+    let live = live_in_git_repo(cx);
+    let id = showing_a_turn(&live, cx);
+
+    branch_before(&live, cx, &id, "edit");
+
+    // a.rs is listed by the Git scopes only.
+    live.until(cx, "base scope", |window| {
+        window.try_find("changed-file-1").is_some()
+    });
+}
+
+/// A branch switch replays the whole transcript; a turn that is still on the
+/// new branch stays shown through it.
+#[gpui_kit::test]
+fn branching_after_the_shown_turn_keeps_it(cx: &mut TestAppContext) {
+    let live = live_in_git_repo(cx);
+    let id = showing_a_turn(&live, cx);
+    live.run(cx, &id, vec!["hello".into()]);
+
+    // Rows may arrive in several batches; stand in for one that lands while
+    // the shown turn's own rows are still on the way.
+    let partial = Rc::new(Cell::new(0));
+    let _watch = cx.update(|cx| {
+        let handle = live.session(&id, cx).expect("attached session");
+        let partial = Rc::clone(&partial);
+        cx.observe(&handle, move |handle, cx| {
+            handle.update(cx, |handle, cx| {
+                if handle.replaying() && handle.projection().is_empty() {
+                    partial.set(partial.get() + 1);
+                    cx.emit(
+                        ProjectionChange::builder().structural(true).build(),
+                    );
+                }
+            })
+        })
+    });
+
+    branch_before(&live, cx, &id, "hello");
+    eventually(cx, "branch replayed", |cx| {
+        live.session(&id, cx).is_some_and(|handle| {
+            let handle = handle.read(cx);
+            // The transcript also looks complete before the replay clears it.
+            partial.get() > 0
+                && !handle.replaying()
+                && !handle.projection().is_empty()
+        })
+    });
+
+    assert!(
+        partial.get() > 0,
+        "the replay passed through an empty state"
+    );
+    live.window(cx, |window, _| {
+        assert!(window.try_find("changed-file-1").is_none());
+        assert!(window.try_find("changed-file-0").is_some());
+    });
+}
+
+/// The panel keeps its width while there is room, and gives way before the
+/// main card falls below its minimum.
+#[gpui_kit::test]
+fn a_wide_panel_gives_way_to_the_main_card(cx: &mut TestAppContext) {
+    let mut state = DesktopState::default();
+    state.layout.panel_width = 700.;
+    let live = with_session(live(cx, state), cx);
+    cx.simulate_window_resize(live.handle, size(px(1600.), px(900.)));
+    live.window(cx, |window, cx| window.press("ctrl-shift-e", cx));
+    let widths = |live: &Live, cx: &mut TestAppContext, width: f32| {
+        cx.simulate_window_resize(live.handle, size(px(width), px(900.)));
+        // The split settles over a few frames.
+        for _ in 0..3 {
+            live.window(cx, |_, _| {});
+        }
+        live.window(cx, |window, _| {
+            let panel = window.find("right-panel").bounds();
+            assert_eq!(panel.right(), px(width) - px(8.));
+            let main = window.find("content-card").bounds().size.width;
+            (f32::from(main), f32::from(panel.size.width))
+        })
+    };
+
+    let (_, wide) = widths(&live, cx, 1600.);
+    assert!(wide > 680., "kept its width: {wide}");
+    let (main, narrow) = widths(&live, cx, 1250.);
+    assert!(main >= 480., "main card squeezed to {main}");
+    assert!(narrow < wide, "the panel gave way: {narrow}");
+    assert_eq!(widths(&live, cx, 1600.).1, wide, "and took its room back");
 }

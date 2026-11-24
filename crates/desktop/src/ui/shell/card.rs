@@ -11,7 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, AppContext as _, ClickEvent, Context, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _,
     TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px, rems,
 };
@@ -119,6 +119,7 @@ impl AppView {
                         px(LayoutState::MIN_SIDEBAR_WIDTH)
                             ..px(LayoutState::MAX_SIDEBAR_WIDTH),
                     )
+                    .fixed()
                     .visible(layout.sidebar_open)
                     .child(self.render_session_card(window, cx)),
             )
@@ -140,7 +141,13 @@ impl AppView {
             } else {
                 resizable_panel()
                     .size(px(self.panel_width(window)))
-                    .size_range(px(LayoutState::MIN_PANEL_WIDTH)..Pixels::MAX)
+                    // A fixed panel does not give way by itself when the
+                    // window narrows; the range keeps the main card's room.
+                    .size_range(
+                        px(LayoutState::MIN_PANEL_WIDTH)
+                            ..px(self.panel_room(window)),
+                    )
+                    .fixed()
             };
             split = split.child(column.child(panel));
         }
@@ -373,7 +380,7 @@ impl AppView {
         let Some(started) = started else {
             return status.label();
         };
-        let now = crate::now_ms();
+        let now = crate::utils::now_ms();
         rust_i18n::t!(
             "Status.running_for",
             elapsed = Elapsed(now.saturating_sub(started)).label().as_ref()

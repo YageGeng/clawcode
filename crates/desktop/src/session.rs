@@ -55,6 +55,10 @@ pub struct SessionHandle {
     /// Set when the tab closed during a run; the session closes once idle.
     #[builder(default)]
     close_when_idle: bool,
+    /// Whether history is replaying into a cleared projection, whose rows
+    /// are incomplete until the server marks its end.
+    #[builder(default)]
+    replaying: bool,
     /// The runs that changed the workspace, as last read (M4b spec §6.1).
     #[builder(default)]
     checkpoints: Vec<Arc<protocol::RunCheckpoint>>,
@@ -84,6 +88,12 @@ impl SessionHandle {
     /// Attach progress.
     pub fn phase(&self) -> &AttachPhase {
         &self.phase
+    }
+
+    /// Whether the transcript is still being replayed, so a row missing from
+    /// it may yet arrive.
+    pub fn replaying(&self) -> bool {
+        self.replaying
     }
 
     /// The runs that changed the workspace, oldest first, as last read.
@@ -181,6 +191,7 @@ impl SessionHandle {
                 target
                     .update(cx, |handle, cx| {
                         handle.projection.clear();
+                        handle.replaying = true;
                         let state = if running {
                             RunState::Running
                         } else {
@@ -231,6 +242,7 @@ impl SessionHandle {
                 // The handle may be gone if the tab closed meanwhile.
                 let _ = target.update(cx, |handle, cx| {
                     handle.phase = AttachPhase::Failed(error.to_string());
+                    handle.replaying = false;
                     cx.notify();
                 });
             }
@@ -395,19 +407,24 @@ impl SessionRegistry {
                     };
                     let change = handle.update(cx, |handle, _| {
                         // The server marks the end of replayed history: the transcript is complete.
-                        let attached = matches!(
+                        let replayed = matches!(
                             notification.update,
                             wire::SessionUpdate::ReplayComplete(_)
-                        ) && handle.phase
-                            == AttachPhase::Attaching;
+                        );
+                        let attached =
+                            replayed && handle.phase == AttachPhase::Attaching;
                         if attached {
                             handle.phase = AttachPhase::Attached;
                             tracing::info!("attached session {}", handle.id);
                         }
-                        (
-                            attached,
-                            handle.projection.apply(&notification.update),
-                        )
+                        let mut change =
+                            handle.projection.apply(&notification.update);
+                        // Rows that had to wait for the whole transcript can
+                        // be judged now.
+                        if replayed && std::mem::take(&mut handle.replaying) {
+                            change.structural = true;
+                        }
+                        (attached, change)
                     });
                     let (attached, change) = change;
                     // The transcript is complete: the runs it shows can be matched now.

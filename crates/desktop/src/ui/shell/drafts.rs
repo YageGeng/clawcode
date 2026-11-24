@@ -214,7 +214,7 @@ impl AppView {
         tracing::info!("created session {} in {}", id, cwd.display());
         let handle =
             registry.update(cx, |registry, cx| registry.adopt(start, cwd, cx));
-        let now = crate::now_ms();
+        let now = crate::utils::now_ms();
         self.host.catalog.upsert(
             SessionSummary::builder()
                 .session_id(id.clone())

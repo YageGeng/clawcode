@@ -90,22 +90,6 @@ impl RunSummary {
     }
 }
 
-/// One display line of text that may span several: the first non-empty line,
-/// trimmed, followed by ` …` when more non-empty text comes after it.
-///
-/// Rows of fixed height (tool targets, user-run commands, titles) would
-/// otherwise lay out the extra lines and clip them.
-pub fn single_line(text: &str) -> std::borrow::Cow<'_, str> {
-    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    match (lines.next(), lines.next()) {
-        (None, _) => std::borrow::Cow::Borrowed(""),
-        (Some(first), None) => std::borrow::Cow::Borrowed(first),
-        (Some(first), Some(_)) => {
-            std::borrow::Cow::Owned(format!("{first} \u{2026}"))
-        }
-    }
-}
-
 impl RelativeAge {
     /// Short localized label such as `3d` or `3 天`.
     pub fn label(self) -> SharedString {

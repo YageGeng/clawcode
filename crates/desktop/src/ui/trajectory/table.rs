@@ -166,13 +166,14 @@ impl LedgerLine {
     /// The time column now: work still in flight counts up to this moment.
     fn duration_now(&self) -> SharedString {
         match &self.row {
-            LedgerRow::InFlight(work) => {
-                Elapsed(crate::now_ms().saturating_sub(work.started_at_ms()))
-                    .precise()
-            }
+            LedgerRow::InFlight(work) => Elapsed(
+                crate::utils::now_ms().saturating_sub(work.started_at_ms()),
+            )
+            .precise(),
             _ => match self.running_since {
                 Some(since) => {
-                    Elapsed(crate::now_ms().saturating_sub(since)).precise()
+                    Elapsed(crate::utils::now_ms().saturating_sub(since))
+                        .precise()
                 }
                 None => self.duration.clone(),
             },

@@ -141,7 +141,7 @@ agent-client-protocol = "5"
 agent-client-protocol-http = { version = "5", default-features = false }
 
 # gui
-gpui-kit = "0.10"
+gpui-kit = "0.11"
 rust-i18n = "4"
 sys-locale = "0.3"
 
